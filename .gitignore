@@ -1,0 +1,15 @@
+# YGOPro Core 核心引擎
+ocgcore.dll
+libocgcore.so
+cards.cdb
+
+# 模型与训练日志 (太大，不要传)
+models/
+runs/
+__pycache__/
+.vscode/
+MDPro3-master-Tools-YGO Classes-ocgcore/
+script/
+
+# 卡组文件 
+decks/
