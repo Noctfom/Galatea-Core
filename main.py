@@ -132,6 +132,7 @@ def main():
     duel_parser.add_argument('-n', '--num', type=int, default=100, help='对战局数')
     duel_parser.add_argument('--device', type=str, default='cpu', help='推理设备')
     duel_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
+    duel_parser.add_argument('--thought_freq', type=int, default=0, help='每隔几局保存一次AI心声 (0为不保存)')
     # === 新增模型参数 ===
     duel_parser.add_argument("--d_model", type=int, default=256, help="Model dimension")
     duel_parser.add_argument("--n_heads", type=int, default=4, help="Attention heads")
@@ -188,7 +189,8 @@ def main():
             'd_model': args.d_model,
             'n_heads': args.n_heads,
             'n_layers': args.n_layers,
-            'vocab_size': 20000 # 这个通常不变，不需要传参
+            'vocab_size': 20000, # 这个通常不变，不需要传参
+            'thought_freq': args.thought_freq  # [新增] 把参数传给竞技场
         }
 
         arena = ModelArena(

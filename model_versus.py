@@ -7,16 +7,24 @@ import time
 import random
 import torch
 import struct
+import torch.nn.functional as F
+
 import rule_bot
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
 import deck_utils
+from thought_logger import AIThoughtLogger
 
 class ModelArena:
     # 增加 config 参数
     def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None):
         self.deck_dir = deck_dir
+
+        self.thought_freq = self.net_config.get('thought_freq', 0)
+        # 初始化记录器
+        p0_name = os.path.basename(model_p0_path) if model_p0_path else "P0_AI"
+        self.logger = AIThoughtLogger(player_name=p0_name)
         
         # 处理设备参数
         if device == 'auto' or device is None:
@@ -57,7 +65,7 @@ class ModelArena:
 
         self.env = GalateaEnv()
 
-    def run_duel(self):
+    def run_duel(self, game_idx=1):
         """
         返回: (winner_index, reason_code)
         reason_code: 
@@ -107,6 +115,10 @@ class ModelArena:
                 # msg格式通常是 [5, winner, reason]
                 winner = msg[1:][0]
                 reason = msg[1:][1] if len(msg[1:]) > 1 else 0
+                # [新增] 比赛结束，保存这局的日记
+                if self.logger.is_active:
+                    saved_path = self.logger.save(winner, game_idx)
+                    print(f"\n🧠 [AI 读心] 第 {game_idx} 局的心声已保存至 {saved_path}")
                 return winner, reason, ai_fallback_count # 补齐 3 个返回值
 
             # --- Retry 处理 ---
@@ -153,6 +165,18 @@ class ModelArena:
                             # 👑 [竞技场核心] 绝对贪婪策略：不掷骰子，永远选打分最高的操作！
                             action_idx = torch.argmax(logits, dim=-1)
                             
+                        # 🌟 [新增] 截获 AI 的胜率打分并记录
+                        if is_p0_turn and self.logger.is_active:
+                            # 用 Softmax 把原始的 logits 分数转换为 0~1 的概率
+                            probs = F.softmax(logits.squeeze(0), dim=-1)
+                            self.logger.log_decision(
+                                turn=brain.turn,
+                                phase_id=brain.phase,
+                                snapshot=snap,
+                                probs=probs,
+                                chosen_index=action_idx.item()
+                            )
+
                         # 4. 取出动作
                         sel_idx = action_idx.item()
                         if sel_idx < len(snap.valid_actions):
@@ -248,8 +272,13 @@ class ModelArena:
             'StepsOut': 0
         }
         
-        for i in range(n_games):
-            w, r, fallback_cnt = self.run_duel()
+        for i in range(n_games,n_games=10):
+            # [新增] 如果开启了记录，并且到达了指定的间隔局数，唤醒 Logger
+            if self.thought_freq > 0 and (i + 1) % self.thought_freq == 0:
+                self.logger.start_recording()
+
+            # [修改] 把局数 i+1 传进去
+            w, r, fallback_cnt = self.run_duel(game_idx=i+1)
 
             total_ai_fallbacks += fallback_cnt
             
