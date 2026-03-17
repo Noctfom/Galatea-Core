@@ -40,7 +40,7 @@ MINIBATCH_SIZE = 128    # Mini-batch: 梯度下降时的切片大小
 CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.01     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
-MAX_EPISODE_STEPS = 500 # 单局最大步数，防止死循环
+MAX_EPISODE_STEPS = 800 # 单局最大步数，防止死循环
 
 class MemoryDataset(Dataset):
     def __init__(self, data):
@@ -49,6 +49,16 @@ class MemoryDataset(Dataset):
         return len(self.data)
     def __getitem__(self, idx):
         return self.data[idx]
+    
+def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, result_q):
+    """用于原生 Process 的安全包装器，防止 DLL 崩溃导致主进程死锁"""
+    try:
+        from worker import worker_process
+        res = worker_process(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q)
+        result_q.put((worker_id, res))
+    except Exception as e:
+        print(f"Worker {worker_id} 发生异常退出: {e}")
+        result_q.put((worker_id, None))
 
 def collate_fn(batch):
     obs_list = [item['obs'] for item in batch]
@@ -204,112 +214,99 @@ class PPOTrainer:
 
     def collect_rollouts(self):
         """
-        多进程采集核心逻辑
+        [终极重构] 原生多进程架构，彻底击碎 Manager Socket 瓶颈
         """
         print(f"📥 [Iter {self.iteration}] 唤醒 {self.num_workers} 个工人 | 目标: {self.update_timesteps} 步")
         t0 = time.time()
 
-        # --- [新增] 异步推断服务器初始化 ---
+        # --- 1. 使用原生 Queue 替代缓慢的 Manager Queue ---
         if self.async_infer:
-            m = mp.Manager() # Windows 下跨进程传队列必须用 Manager
-            req_q = m.Queue()
-            resp_qs = [m.Queue() for _ in range(self.num_workers)]
-            stop_event = m.Event()
+            req_q = mp.Queue()
+            resp_qs = [mp.Queue() for _ in range(self.num_workers)]
+            stop_event = mp.Event()
             
-            # 启动后台发牌员线程
             infer_thread = threading.Thread(target=self.inference_server, args=(req_q, resp_qs, stop_event))
             infer_thread.start()
         else:
             req_q, resp_qs, stop_event = None, None, None
         
-        # --- [黑科技 1] 权重共享机制 ---
-        # 原理：在 Windows Spawn 模式下，普通传参会导致权重被复制 N 份。
-        # 使用 share_memory_() 可以让所有子进程只读同一块物理内存，显着降低 RAM 占用。
         raw_weights = self.agent.net.state_dict()
         cpu_weights = {}
         for k, v in raw_weights.items():
-            # 1. 剥离 compile 前缀
             clean_k = k.replace("_orig_mod.", "")
-            # 2. 转到 CPU
             cpu_tensor = v.cpu()
-            # 3. 关键：开启共享内存 (如果显存够大，这一步能省几 GB 内存)
-            cpu_tensor.share_memory_() 
+            cpu_tensor.share_memory_() # 开启真正的物理共享内存
             cpu_weights[clean_k] = cpu_tensor
         
-        # 2. 分配任务
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
         
-        # 3. 启动进程池
-        pool = mp.Pool(processes=self.num_workers)
-        results = []
+        # --- 2. 弃用 Pool，使用原生 Process 启动 ---
+        result_q = mp.Queue()
+        processes = []
         
         for i in range(self.num_workers):
-            res = pool.apply_async(worker_process, args=(
+            p = mp.Process(target=worker_wrapper, args=(
                 i, 
                 self.net_config, 
-                cpu_weights if not self.async_infer else None, # 🔴 Async 模式下不再传权重！省内存！
+                cpu_weights if not self.async_infer else None, 
                 self.deck_dir, 
                 steps_per_worker,
-                self.worker_device if not self.async_infer else 'cpu', # Async 模式下 Worker 纯吃 CPU
-                req_q,                          # 新增参数
-                resp_qs[i] if self.async_infer else None  # 新增参数
+                self.worker_device if not self.async_infer else 'cpu',
+                req_q,
+                resp_qs[i] if self.async_infer else None,
+                result_q
             ))
-            results.append(res)
+            p.start()
+            processes.append(p)
             
-        pool.close()
-        
-        # 等待所有工人完成
-        # 注意: apply_async 是非阻塞的，这里会阻塞等待结果
         print(f"   ... cpu全核满载中 ...")
-        pool.join()
-
-        # --- [新增] 关闭异步服务器 ---
-        if self.async_infer:
-            stop_event.set()
-            infer_thread.join()
         
-        # 4. 汇总数据
-        # [修改] 快速汇总
-        # 我们现在收到的是 list of batch_dicts
+        # --- 3. 收集数据 (带超时防死锁保护) ---
         batch_dicts = []
         total_steps = 0
         total_rewards = []
         total_lens = []
         
-        for res in results:
+        # 等待所有人交作业
+        for _ in range(self.num_workers):
             try:
-                data, r, l = res.get()
-                
-                # 🛑 [修复] 增加类型检查，防止旧版 worker 数据混入
-                if data is not None:
-                    if isinstance(data, dict): # 必须是字典
+                # 阻塞等待，加入超时机制，防止某个进程 C++ 引擎暴毙导致无限死等
+                w_id, res = result_q.get(timeout=300) 
+                if res is not None:
+                    data, r, l = res
+                    if data is not None and isinstance(data, dict):
                         batch_dicts.append(data)
                         total_steps += len(data['action'])
                         if r != 0: total_rewards.append(r)
                         if l != 0: total_lens.append(l)
-                    else:
-                        print(f"⚠️ Worker Error: 返回了错误的数据类型 {type(data)}，已丢弃。请检查 worker.py!")
-            except Exception as e:
-                print(f"⚠️ Worker Error: {e}")
+            except queue.Empty:
+                print("⚠️ 警告: 收集数据超时 (部分 Worker 的 C++ 引擎可能已崩溃)")
+
+        for p in processes:
+            # 优雅终止：如果进程还在，强制咔嚓掉，防止内存泄漏
+            p.join(timeout=2)
+            if p.is_alive():
+                p.terminate()
+
+        if self.async_infer:
+            stop_event.set()
+            infer_thread.join()
         
-        # 如果没有收集到数据
         if not batch_dicts:
             return None
         
-        # [核心优化] 极速拼接 (O(N_workers) vs O(N_steps))
-        # 只需要 concat 16 次，而不是 stack 30000 次
         print(f"⚡ 正在合并 {len(batch_dicts)} 个数据块...")
         
+        # --- 4. 修复 KeyError：彻底移除 valid_actions ---
         merged_memory = {
             'obs': {},
             'action': torch.cat([b['action'] for b in batch_dicts]),
             'log_prob': torch.cat([b['log_prob'] for b in batch_dicts]),
             'return': torch.cat([b['return'] for b in batch_dicts]),
-            'advantage': torch.cat([b['advantage'] for b in batch_dicts]),
-            'valid_actions': sum([b['valid_actions'] for b in batch_dicts], []) # list 相加就是通过 extend
+            'advantage': torch.cat([b['advantage'] for b in batch_dicts])
+            # (这里完美去除了导致报错的 valid_actions)
         }
         
-        # 合并 Obs
         first_obs = batch_dicts[0]['obs']
         for k in first_obs.keys():
             merged_memory['obs'][k] = torch.cat([b['obs'][k] for b in batch_dicts])
@@ -322,13 +319,13 @@ class PPOTrainer:
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
         self.writer.add_scalar('Rollout/Average_Steps', avg_len, self.iteration)
         self.writer.add_scalar('Rollout/Total_Samples', total_steps, self.iteration)
-        # Log...
         self.global_step += total_steps
-        return merged_memory # 直接返回大字典，不再返回 list
+        
+        return merged_memory
     
     def inference_server(self, req_q, resp_qs, stop_event):
         """
-        [终极架构] 异步推断服务器：把零散请求打包送进 GPU
+        [封包极速版] 接收压平的 Tensor，在 GPU 显存内进行光速切片
         """
         print("🚀 [Server] 异步推断服务器已启动，等待 Worker 请求...")
         self.agent.net.eval()
@@ -336,10 +333,8 @@ class PPOTrainer:
         while not stop_event.is_set():
             requests = []
             try:
-                # 阻塞等待第一个请求，最多等 0.05 秒
                 req = req_q.get(timeout=0.05)
                 requests.append(req)
-                # 贪婪模式：只要队列里还有，最多再拿 num_workers - 1 个，拼成一个大 Batch
                 while len(requests) < self.num_workers:
                     req = req_q.get_nowait()
                     requests.append(req)
@@ -349,92 +344,86 @@ class PPOTrainer:
             if not requests:
                 continue
                 
-            # --- 1. 组装 Batch ---
-            batch_obs = {}
-            first_obs = requests[0][1] # req[0]是worker_id, req[1]是obs字典
-            for k in first_obs.keys():
-                # 把大家的 tensor 拼在一起送上 GPU
-                batch_obs[k] = torch.cat([r[1][k] for r in requests], dim=0).to(self.device, non_blocking=True)
-                
-            valid_actions_list = [r[2] for r in requests] # req[2]是合法动作列表
+            # --- 1. 组装压平的 Batch ---
             worker_ids = [r[0] for r in requests]
+            # 👇 [击毙幽灵 1] 将 Worker 发来的 numpy 数组转回 Tensor
+            packed_batch = torch.stack([torch.from_numpy(r[1]) for r in requests]).to(self.device, non_blocking=True) # [B, 6035]
             
-            # --- 2. 批量推理 (GPU 秒杀时刻) ---
+            # --- 2. 在 GPU 上光速切片解包 (保持不变) ---
+            batch_obs = {
+                'global': packed_batch[:, :15],
+                'card_idx': packed_batch[:, 15:115].to(torch.long),
+                'card_race': packed_batch[:, 115:215].to(torch.long),
+                'card_attr': packed_batch[:, 215:315].to(torch.long),
+                'card_feats': packed_batch[:, 315:5615].view(-1, 100, 53),
+                'padding_mask': packed_batch[:, 5615:5715].to(torch.bool),
+                'act_card_idx': packed_batch[:, 5715:5795].to(torch.long),
+                'act_type': packed_batch[:, 5795:5875].to(torch.long),
+                'act_desc': packed_batch[:, 5875:5955].to(torch.long),
+                'act_mask': packed_batch[:, 5955:6035].to(torch.bool)
+            }
+            
             with torch.amp.autocast('cuda', dtype=self.amp_dtype):
                 with torch.no_grad():
-                    actions, log_probs, _, values = self.agent.get_action_and_value_from_tensor(batch_obs, valid_actions_list)
+                    actions, log_probs, _, values = self.agent.get_action_and_value_from_tensor(batch_obs, None)
             
-            # --- 3. 拆分结果寄回 ---
+            # --- 4. 组装回传封包 ---
+            packed_returns = torch.stack([actions.to(torch.float32), log_probs, values.squeeze(-1)], dim=1).cpu()
+            
             for i, wid in enumerate(worker_ids):
-                # 必须 .cpu()，让数据回到普通内存
-                resp_qs[wid].put({
-                    'action': actions[i].cpu(),
-                    'log_prob': log_probs[i].cpu(),
-                    'value': values[i].cpu()
-                })
+                # 👇 [击毙幽灵 1] 转为 numpy 数组发回给 Worker
+                resp_qs[wid].put(packed_returns[i].numpy())
 
     def update_policy(self, memory):
         """
-        [Action Head 适配版] 移除外部 Mask，完全信任网络输出
+        [安全防爆版] 将数据留在 CPU，每次只切片 mini_batch 送进 GPU
         """
         if memory is None: return
         print("🔥 Training PPO (Action Head Mode)...")
         
-        # 1. 搬运到 GPU (保持不变)
-        gpu_obs = {}
-        for k, v in memory['obs'].items():
-            t = v.to(self.device, non_blocking=True)
-            if t.is_floating_point():
-                gpu_obs[k] = t.to(dtype=torch.float32)
-            elif 'mask' in k: 
-                gpu_obs[k] = t.to(dtype=torch.bool)
-            else:
-                gpu_obs[k] = t.to(dtype=torch.long)
-
-        gpu_actions = memory['action'].to(self.device, non_blocking=True)
-        gpu_log_probs = memory['log_prob'].to(self.device, dtype=torch.float32, non_blocking=True)
-        gpu_returns = memory['return'].to(self.device, dtype=torch.float32, non_blocking=True)
-        gpu_advantages = memory['advantage'].to(self.device, dtype=torch.float32, non_blocking=True)
+        # 数据先全留在 CPU 内存里
+        cpu_obs = memory['obs']
+        cpu_actions = memory['action']
+        cpu_log_probs = memory['log_prob']
+        cpu_returns = memory['return']
+        cpu_advantages = memory['advantage']
         
-        batch_size = gpu_actions.shape[0]
+        batch_size = cpu_actions.shape[0]
 
-        # ❌ [删除] 旧的 Mask 生成逻辑 (real_seq_len, cpu_full_mask...) 全部删掉
-        # 因为 GalateaNet 现在内部已经处理了 act_mask
-
-        # 2. 训练循环
         for _ in range(EPOCHS):
-            indices = torch.randperm(batch_size, device=self.device)
+            indices = torch.randperm(batch_size)
             
+            # 每次只循环处理 mini_batch (比如 1024 个)
             for start in range(0, batch_size, self.mini_batch_size):
                 end = start + self.mini_batch_size
                 mb_idx = indices[start:end]
                 
-                mb_obs = {k: v[mb_idx] for k, v in gpu_obs.items()}
-                # ❌ [删除] mb_mask = gpu_full_mask[mb_idx]
+                # 只有切出来的这 1024 个数据，才 .to(self.device) 上 GPU！
+                mb_obs = {}
+                for k, v in cpu_obs.items():
+                    t = v[mb_idx].to(self.device, non_blocking=True)
+                    if t.is_floating_point(): mb_obs[k] = t.to(dtype=torch.float32)
+                    elif 'mask' in k: mb_obs[k] = t.to(dtype=torch.bool)
+                    else: mb_obs[k] = t.to(dtype=torch.long)
                 
-                mb_actions = gpu_actions[mb_idx]
-                mb_old_log_probs = gpu_log_probs[mb_idx]
-                mb_returns = gpu_returns[mb_idx]
-                mb_advs = gpu_advantages[mb_idx]
+                mb_actions = cpu_actions[mb_idx].to(self.device, non_blocking=True)
+                mb_old_log_probs = cpu_log_probs[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
+                mb_returns = cpu_returns[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
+                mb_advs = cpu_advantages[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
                 
                 if len(mb_advs) > 1:
                     mb_advs = (mb_advs - mb_advs.mean()) / (mb_advs.std() + 1e-8)
 
+                # --- 网络前向传播与反向传播 (完全保持原样) ---
                 with torch.amp.autocast('cuda', dtype=self.amp_dtype):
                     logits, values = self.agent.net(mb_obs)
                     values = values.squeeze(1)
-                    
-                    # ✅ [直接使用] 网络输出的 logits 已经包含了 -1e9 的 mask
-                    # masked_logits = logits + mb_mask  <-- 这一行删掉
-                    
-                    dist = torch.distributions.Categorical(logits=logits) # 直接用 logits
+                    dist = torch.distributions.Categorical(logits=logits)
                     new_log_probs = dist.log_prob(mb_actions)
                     entropy = dist.entropy()
-                    
                     ratio = torch.exp(new_log_probs - mb_old_log_probs)
                     surr1 = ratio * mb_advs
                     surr2 = torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * mb_advs
-                    
                     loss = -torch.min(surr1, surr2).mean() + \
                            VALUE_LOSS_COEF * 0.5 * ((values - mb_returns) ** 2).mean() + \
                            ENTROPY_COEF * -entropy.mean()
@@ -443,10 +432,9 @@ class PPOTrainer:
                     self.optimizer.zero_grad()
                     continue
 
-                # 每 20 个 mini_batch 记录一次
                 if self.train_step % 20 == 0:
                     self.writer.add_scalar('Train/Loss', loss.item(), self.train_step)
-                self.train_step += 1 # <--- [新增] 每次梯度下降让画图步数 +1
+                self.train_step += 1
 
                 self.optimizer.zero_grad()
                 self.scaler.scale(loss).backward()

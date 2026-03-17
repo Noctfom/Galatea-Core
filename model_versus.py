@@ -21,33 +21,31 @@ class ModelArena:
     def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None):
         self.deck_dir = deck_dir
 
-        self.thought_freq = self.net_config.get('thought_freq', 0)
-        # 初始化记录器
-        p0_name = os.path.basename(model_p0_path) if model_p0_path else "P0_AI"
-        self.logger = AIThoughtLogger(player_name=p0_name)
-        
-        # 处理设备参数
+        # 1. 先处理设备
         if device == 'auto' or device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
             
-        # 默认配置 (保底用)
+        # 2. 再配置网络参数
         default_config = {
             'd_model': 256,
             'n_heads': 4,
             'n_layers': 2,
             'vocab_size': 20000
         }
-        # 如果传入了 config 就用传入的，否则用默认
         self.net_config = config if config else default_config
+        
+        # 3. 这时候再去取 thought_freq 就绝对安全了！
+        self.thought_freq = self.net_config.get('thought_freq', 0)
+        
+        # 4. 初始化记录器
+        p0_name = os.path.basename(model_p0_path) if model_p0_path else "P0_AI"
+        self.logger = AIThoughtLogger(player_name=p0_name)
         
         print(f"⚙️ [Arena] 模型配置: {self.net_config}")
         
         # P0
-        # 传递 config 给 GalateaNet
-        # 注意：这里假设 AiBot 内部初始化 GalateaNet 时接收 config
-        # 如果 AiBot.__init__ 还没改，记得去 ai_bot.py 里把 self.net = GalateaNet(config) 改好
         self.p0_bot = AiBot(device=self.device, net_config=self.net_config) 
         self.p0_bot.load_model(model_p0_path)
         self.p0_bot.net.eval()
@@ -272,12 +270,12 @@ class ModelArena:
             'StepsOut': 0
         }
         
-        for i in range(n_games,n_games=10):
+        # 修复了致命的语法错误：只需要 range(n_games) 即可
+        for i in range(n_games):
             # [新增] 如果开启了记录，并且到达了指定的间隔局数，唤醒 Logger
             if self.thought_freq > 0 and (i + 1) % self.thought_freq == 0:
                 self.logger.start_recording()
 
-            # [修改] 把局数 i+1 传进去
             w, r, fallback_cnt = self.run_duel(game_idx=i+1)
 
             total_ai_fallbacks += fallback_cnt
@@ -298,19 +296,14 @@ class ModelArena:
             elif w == 1: p1_wins += 1
             else: draws += 1
             
-            # 格式化输出
+            # 删除了冗余的双重打印逻辑，只保留带 Fallback 信息的最完美输出格式
             score_str = f"Score: {p0_wins}-{p1_wins}"
-            if is_abnormal:
-                print(f"⚠️ Game {i+1}: Aborted ({reason_str}) | {score_str}")
-            else:
-                # 正常局只在最后或者每10局打印一次，避免刷屏，或者像你之前一样用 \r
-                print(f"   Game {i+1}: Winner P{w} ({reason_str}) | {score_str}", end="\r")
-
-            # 打印时带上 Fallback 信息
             fallback_info = f" | ⚠️ AI Fallbacks: {fallback_cnt}" if fallback_cnt > 0 else ""
+            
             if is_abnormal:
                 print(f"⚠️ Game {i+1}: Aborted ({reason_str}) | {score_str}{fallback_info}")
             else:
+                # 正常局使用 \r 覆盖打印，保持控制台整洁
                 print(f"   Game {i+1}: Winner P{w} ({reason_str}) | {score_str}{fallback_info}", end="\r")
         
         print(f"\n\n🏆 最终比分: AI(P0) {p0_wins} : {p1_wins} RuleBot(P1)")

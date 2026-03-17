@@ -25,7 +25,19 @@ class AIThoughtLogger:
         
         for i, act in enumerate(snapshot.valid_actions):
             # 翻译动作描述
-            desc = act.desc_str if act.desc_str else f"Type={act.action_type}"
+            # YGOPro IDLE 动作翻译字典
+            action_dict = {
+                0: "通常召唤", 1: "特殊召唤", 2: "改变表示形式",
+                3: "盖放怪兽", 4: "盖放魔陷", 5: "发动效果",
+                6: "进入战斗阶段", 7: "结束回合", 8: "洗牌"
+            }
+            
+            if act.desc_str:
+                desc = act.desc_str
+            else:
+                # 尝试翻译 action_type
+                translated = action_dict.get(act.action_type, f"Type={act.action_type}")
+                desc = translated
             target_info = ""
             if act.target_entity_idx >= 0 and act.target_entity_idx < len(snapshot.entities):
                 t_card = snapshot.entities[act.target_entity_idx]

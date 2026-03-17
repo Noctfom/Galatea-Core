@@ -22,7 +22,7 @@ DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 13
 # GAE 参数 (和 Trainer 保持一致)
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
-MAX_EPISODE_STEPS = 500
+MAX_EPISODE_STEPS = 800
 
 def worker_process(worker_id, net_config, weights, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None):
     """
@@ -158,18 +158,40 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                             player = snap.global_data.to_play
                             tensor_dict = agent.encoder.encode(snap, player_id=player)
                             
+                            # 🛡️ [终极防爆] 在源头直接将动作索引截断至 99，确保推理和训练全链路安全！
+                            tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 99)
+                            
                             # 🟢 [终极架构分流]
                             if req_q is not None and resp_q is not None:
                                 # 模式 A：异步排队模式
-                                # 1. 寄出包裹 (CPU Tensor)
-                                infer_dict = {k: v.cpu() for k, v in tensor_dict.items()}
-                                req_q.put((worker_id, infer_dict, snap.valid_actions))
+                                # --- 1. [黑科技封包] 将所有 Tensor 压平成 1 个 1D Tensor ---
+                                v_g = tensor_dict['global'].view(-1)
+                                v_i = tensor_dict['card_idx'].to(torch.float32).view(-1)
+                                v_r = tensor_dict['card_race'].to(torch.float32).view(-1)
+                                v_a = tensor_dict['card_attr'].to(torch.float32).view(-1)
+                                v_f = tensor_dict['card_feats'].view(-1)
+                                v_m = tensor_dict['padding_mask'].to(torch.float32).view(-1)
                                 
-                                # 2. 阻塞等待回信
-                                res = resp_q.get()
-                                action_idx = res['action']
-                                log_prob = res['log_prob']
-                                value = res['value']
+                                # 👇 [击毙幽灵 2：限速器] 强制限制索引最大为 99，防止 GPU 越界崩溃！
+                                v_act_idx = tensor_dict['act_card_idx'].to(torch.float32).view(-1)
+                                v_act_type = tensor_dict['act_type'].to(torch.float32).view(-1)
+                                v_act_desc = tensor_dict['act_desc'].to(torch.float32).view(-1)
+                                v_act_mask = tensor_dict['act_mask'].to(torch.float32).view(-1)
+                                
+                                packed_req = torch.cat([v_g, v_i, v_r, v_a, v_f, v_m, v_act_idx, v_act_type, v_act_desc, v_act_mask]).cpu()
+                                
+                                # 👇 [击毙幽灵 1：Numpy 装甲] 转为 numpy 数组发送，彻底绕过 Windows 内存泄漏！
+                                req_q.put((worker_id, packed_req.numpy()))
+                                
+                                # --- 2. [光速解包] ---
+                                # 👇 [击毙幽灵 1：Numpy 解除] 收到 numpy 数组后还原为 Tensor
+                                packed_res = torch.from_numpy(resp_q.get())
+                                action_idx = packed_res[0].to(torch.long)
+                                log_prob = packed_res[1]
+                                value = packed_res[2]
+                                
+                                # 后续存入 game_buffer 还需要字典，所以这里保留转换
+                                infer_dict = {k: v.cpu() for k, v in tensor_dict.items()}
                             else:
                                 # 模式 B：同步本地模式 (兼容旧版回退)
                                 with torch.no_grad():
@@ -212,12 +234,13 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                             
                             # 🟢 2. 强制卸载：不管刚才在哪算的，存下来时必须 .cpu() 搬回系统内存
                             # 这样即使 16 个进程用 GPU，也不会导致 GPU 显存溢出 (OOM)
+                            # ✅ 替换为:
                             game_buffer[player].append({
                                 'obs': {k: v.cpu() for k, v in infer_dict.items()},
                                 'action': action_idx.cpu(),
                                 'log_prob': log_prob.cpu(),
-                                'value': value.cpu(),
-                                'valid_actions': snap.valid_actions
+                                'value': value.cpu()
+                                # 删掉了 'valid_actions': snap.valid_actions
                             })
                             
                             ep_steps += 1
@@ -288,15 +311,15 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                     last_gae_lam = 0
                     next_value = 0 
 
-                    # [修改点 1] 初始化列式存储容器 (如果你还没定义的话)
+                    # [修改点 1] 初始化列式存储容器
                     if 'columns' not in locals():
                         columns = {
-                            'obs': {}, # 需要进一步按 key 拆分
+                            'obs': {}, 
                             'action': [],
                             'log_prob': [],
                             'return': [],
-                            'advantage': [],
-                            'valid_actions': []
+                            'advantage': []
+                            # 删除了 valid_actions
                         }
                     
                     for t in reversed(range(len(traj))):
@@ -310,7 +333,6 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                         # 1. 处理 Obs
                         for k, v in traj[t]['obs'].items():
                             if k not in columns['obs']: columns['obs'][k] = []
-                            # 智能压缩
                             if v.is_floating_point():
                                 columns['obs'][k].append(v.half())
                             else:
@@ -325,8 +347,8 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                         columns['return'].append(torch.tensor(ret_val, dtype=torch.float16))
                         columns['advantage'].append(torch.tensor(advantages[t], dtype=torch.float16))
                         
-                        columns['valid_actions'].append(traj[t]['valid_actions'])
-                        collected_steps += 1
+                        # 删除了 columns['valid_actions'].append...
+                        # 删除了 collected_steps += 1 (解决双重计数 Bug！)
 
         # 🛑 [修复] 使用 smart_concat 替代 stack
         if 'columns' not in locals() or len(columns['action']) == 0:
@@ -334,7 +356,6 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
 
         def smart_concat(tensor_list):
             if not tensor_list: return torch.tensor([])
-            # 标量用 stack，向量用 cat
             if tensor_list[0].ndim == 0:
                 return torch.stack(tensor_list)
             return torch.cat(tensor_list, dim=0)
@@ -344,8 +365,8 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
             'action': smart_concat(columns['action']),
             'log_prob': smart_concat(columns['log_prob']),
             'return': smart_concat(columns['return']),
-            'advantage': smart_concat(columns['advantage']),
-            'valid_actions': columns['valid_actions']
+            'advantage': smart_concat(columns['advantage'])
+            # 删除了 'valid_actions': columns['valid_actions']
         }
         
         avg_rew = np.mean(episode_rewards) if episode_rewards else 0.0

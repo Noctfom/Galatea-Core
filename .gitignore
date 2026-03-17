@@ -10,6 +10,7 @@ __pycache__/
 .vscode/
 MDPro3-master-Tools-YGO Classes-ocgcore/
 script/
+ai_thoughts/
 
 # 卡组文件 
 decks/

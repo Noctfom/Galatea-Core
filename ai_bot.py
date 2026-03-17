@@ -91,17 +91,14 @@ class AiBot:
             # Logits 现在直接就是 [1, 80] 的动作分数
             logits, value = self.net(gpu_dict) 
             
-            # 截取实际有效长度 (防止选到 Padding 区域)
-            valid_len = len(snap.valid_actions)
-            # 只看前 valid_len 个分数
-            valid_logits = logits[0, :valid_len]
-            
-            # 简单的 Argmax 选分最高的
-            sel_idx = torch.argmax(valid_logits).item()
+            # 🌟 [终极清理] 既然网络已经内置了 act_mask 并把无效槽位变成了 -1e9
+            # 我们根本不需要手动切片，直接无脑 Argmax，它绝对不可能选到 Padding！
+            sel_idx = torch.argmax(logits[0]).item()
 
         if sel_idx < len(snap.valid_actions):
             chosen = snap.valid_actions[sel_idx]
         else:
+            # 兜底：理论上不会走到这里，除非所有动作都被 mask 了
             chosen = random.choice(snap.valid_actions)
 
         resp = self._pack_response(chosen, msg_type, msg_args)
