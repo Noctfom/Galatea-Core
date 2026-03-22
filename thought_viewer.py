@@ -16,7 +16,19 @@ def view_thoughts(file_path):
     console.print(Panel(f"🧠 AI 决策思维回放\n模型: [cyan]{data['model_name']}[/] | 赢家: P{data['winner']}", border_style="magenta"))
     
     for step_idx, decision in enumerate(data["decisions"]):
+        # 打印当前状态栏
+        state = decision.get("state", {})
+        p0_lp = state.get('p0_lp', 8000)
+        p1_lp = state.get('p1_lp', 8000)
+        
         console.print(f"\n[bold yellow]👉 决策点 {step_idx + 1} | Turn {decision['turn']} - {decision['phase']}[/]")
+        
+        # 战况播报版
+        status_text = (
+            f"👑 [cyan]AI (P0)[/]  LP: [red]{p0_lp}[/] | 手牌: {state.get('p0_hand', 0)} | 怪兽: {state.get('p0_mzone', 0)}  🆚  "
+            f"🤖 [magenta]对手 (P1)[/] LP: [red]{p1_lp}[/] | 手牌: {state.get('p1_hand', 0)} | 怪兽: {state.get('p1_mzone', 0)}"
+        )
+        console.print(Panel(status_text, border_style="blue"))
         
         table = Table(box=None, header_style="bold green")
         table.add_column("最终决定", justify="center", width=10)
@@ -33,7 +45,7 @@ def view_thoughts(file_path):
             else:
                 mark = ""
                 desc = opt["desc"]
-                if opt['confidence'] < 0.05: # 极低概率的选项涂暗
+                if opt['confidence'] < 0.05: 
                     conf_str = f"[dim]{conf_str}[/]"
                     desc = f"[dim]{desc}[/]"
             

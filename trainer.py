@@ -259,7 +259,7 @@ class PPOTrainer:
             p.start()
             processes.append(p)
             
-        print(f"   ... cpu全核满载中 ...")
+        print(f"   ... cpu运算中 ...")
         
         # --- 3. 收集数据 (带超时防死锁保护) ---
         batch_dicts = []

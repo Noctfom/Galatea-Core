@@ -214,14 +214,20 @@ class GalateaEnv:
             if res == 0: return None 
         return None
 
-    # galatea_env.py 修改 send_action 方法
+
     def send_action(self, response):
         if isinstance(response, int):
             # 简单交互用整数
             self.lib.set_responsei(self.pduel, ctypes.c_uint32(response))
         elif isinstance(response, (bytes, bytearray)):
-            # 复杂交互用 Buffer (如选位置)
-            # 确保 set_responseb 已在 _setup_lib 中定义
-            # self.lib.set_responseb.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            buf = (ctypes.c_byte * len(response)).from_buffer_copy(response)
+            # 1. 强转 bytes，并且绝对截断到最多 64 字节，防止引擎数组越界
+            resp_bytes = bytes(response)[:64]
+            
+            # 2. 用 0x00 补齐到足足 64 字节，清理 C++ 读取时的内存垃圾
+            safe_bytes = resp_bytes.ljust(64, b'\x00')
+            
+            # 3. 🌟 终极护盾：直接通过内存拷贝创建 C 数组！
+            # 彻底绕开 create_string_buffer 的末尾 \x00 长度检查！
+            buf = (ctypes.c_byte * 64).from_buffer_copy(safe_bytes)
+            
             self.lib.set_responseb(self.pduel, ctypes.cast(buf, ctypes.c_void_p))

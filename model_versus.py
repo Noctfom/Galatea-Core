@@ -16,6 +16,7 @@ from ai_bot import AiBot
 import deck_utils
 from thought_logger import AIThoughtLogger
 
+
 class ModelArena:
     # 增加 config 参数
     def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None):
@@ -87,6 +88,13 @@ class ModelArena:
         last_decision_value = None
 
         ai_fallback_count = 0
+
+        last_valid_hash = ""
+        action_history = []
+
+        # 🌟 [新增] 合法死锁断路器
+        loop_tracker = {}
+        banned_actions_for_state = {}
         
         state_change_msgs = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
         interaction_msgs = {10, 11, 15, 16, 18, 19, 20, 22, 26, 130, 131, 132, 133}
@@ -108,13 +116,28 @@ class ModelArena:
             msg = msg_queue.pop(0)
             msg_type = msg[0]
             brain.update(msg_type, msg[1:])
+
+            # 🌟 [新增] 阶段切换时，场面刷新，清空拉黑记录
+            if msg_type in [40, 41]:
+                loop_tracker.clear()
+                banned_actions_for_state.clear()
             
             if msg_type == 5: # 胜利 MSG_WIN
                 # msg格式通常是 [5, winner, reason]
                 winner = msg[1:][0]
                 reason = msg[1:][1] if len(msg[1:]) > 1 else 0
+                # 🚨 [黑匣子] 抓取异常胜利代码
+                if reason not in [0, 1, 2, 3, 4]:
+                    print(f"\n🚨 [黑匣子触发] 捕获异常 WIN_REASON: {reason} | 赢家: P{winner}")
+                    print(f"   -> 崩溃前的最近 5 次底层动作记录: {action_history}")
+                    print(f"   -> 原始封包 MSG 字节内容: {msg}")
+                    # 如果有记录器，保留它以供事后尸检
+                    if self.logger.is_active:
+                        path = self.logger.save(winner, game_idx)
+                        print(f"   -> 尸检报告已保存至: {path}")
+
                 # [新增] 比赛结束，保存这局的日记
-                if self.logger.is_active:
+                elif self.logger.is_active:
                     saved_path = self.logger.save(winner, game_idx)
                     print(f"\n🧠 [AI 读心] 第 {game_idx} 局的心声已保存至 {saved_path}")
                 return winner, reason, ai_fallback_count # 补齐 3 个返回值
@@ -125,16 +148,19 @@ class ModelArena:
                 if last_decision_value is not None:
                     current_step_ignore_list.append(last_decision_value)
 
-                # [新增] 如果是 AI 刚刚操作完导致的 Retry，记一笔
-                # 我们怎么知道是 AI？看 consecutive_retries == 1 且上一步是 AI 决策
                 if consecutive_retries == 1:
-                     # 简单粗暴统计：只要发生 Retry 就算一次不稳定
-                     # 因为 RuleBot 理论上不应该 Retry
                      ai_fallback_count += 1
                 
-                # 连续 20 次非法操作 -> 判定为 AI 死锁
+                # 💥 [关键同步] 引入 run_self_play.py 的 Jitter 扰动机制！
+                # 当 AI 和 RuleBot 都陷入死锁时，强制注入噪音打破僵局！
+                if consecutive_retries > 6:
+                    current_step_ignore_list.append(b'\xFF\xFF\xFF')
+                    current_step_ignore_list.append(b'\x00\x00\x00')
+                    current_step_ignore_list.append(1)
+                    current_step_ignore_list.append(4)
+                
                 if consecutive_retries > 20:
-                    return -1, -1, ai_fallback_count # <--- 返回 count
+                    return -1, -1, ai_fallback_count
                 continue
 
             # --- 决策 ---
@@ -152,16 +178,39 @@ class ModelArena:
                         # 1. 提取当前状态快照
                         snap = brain.get_snapshot()
                         player = snap.global_data.to_play
+
+                        current_hash = "|".join([f"{a.action_type}_{a.index}" for a in snap.valid_actions])
+                        if current_hash != last_valid_hash:
+                            last_valid_hash = current_hash
+                            current_step_ignore_list.clear() # 场面推进了，清空黑名单
+                            action_history.clear()
                         
                         # 2. 调用 V3 编码器生成 53 维字典，并挂载到设备 (GPU/CPU)
                         tensor_dict = active_bot.encoder.encode(snap, player_id=player)
+                        tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 99)
                         infer_dict = {k: v.to(self.device) for k, v in tensor_dict.items()}
                         
                         # 3. 神经网络前向传播
                         with torch.no_grad():
                             logits, _ = active_bot.net(infer_dict)
-                            # 👑 [竞技场核心] 绝对贪婪策略：不掷骰子，永远选打分最高的操作！
+                            
+                            # 🛡️ [断路器生效] 强制将已拉黑的动作得分降为极小值 (-1e9)
+                            for bad_idx in banned_actions_for_state[current_hash]:
+                                if bad_idx < logits.shape[-1]:
+                                    logits[0, bad_idx] = -1e9
+                                    
+                            # 👑 [竞技场核心] 绝对贪婪策略
                             action_idx = torch.argmax(logits, dim=-1)
+                            
+                        # 🌟 [新增] 记录动作频率，侦测死循环
+                        sel_idx = action_idx.item()
+                        loop_key = f"{current_hash}_{sel_idx}"
+                        loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
+                        
+                        # 事不过三，超过 3 次同样的动作，立刻拉黑！
+                        if loop_tracker[loop_key] >= 3:
+                            banned_actions_for_state[current_hash].add(sel_idx)
+                            print(f"\n   ⚡ [断路器] 侦测到合法死循环！屏蔽该状态下动作索引: {sel_idx}")
                             
                         # 🌟 [新增] 截获 AI 的胜率打分并记录
                         if is_p0_turn and self.logger.is_active:
@@ -182,58 +231,57 @@ class ModelArena:
                         else:
                             chosen = random.choice(snap.valid_actions)
                             
-                        # 5. 翻译动作为 YGOPro 底层 Bytes
-                        resp = b''
+                        # 5. 翻译动作为 YGOPro 底层指令
+                        resp = None
                         
                         if msg_type == 15:
                             val = chosen.index
-                            if val == -1: # AI 决定 Cancel
+                            if val == -1: 
                                 resp = struct.pack('<i', -1)
                             else:
-                                # msg[3] 就是真正的 Min (第0个是Type, 第1个是P, 第2个是Cancelable)
                                 min_c = msg[3] if len(msg) >= 4 else 1
                                 count = max(1, min_c)
-                                
                                 available_indices = [a.index for a in snap.valid_actions if a.index != -1 and a.index != val]
                                 selected = [val] + available_indices[:count-1]
                                 
-                                resp_buf = bytearray([len(selected)]) # 第一位必须是 Count！
-                                for i in selected: resp_buf.append(i) # 后面跟着索引
-                                resp = bytes(resp_buf)
+                                if len(selected) < min_c:
+                                    resp = None # AI 凑不够卡，直接让 RuleBot 兜底
+                                else:
+                                    resp_buf = bytearray([len(selected)])
+                                    for i in selected: resp_buf.append(i)
+                                    resp = bytes(resp_buf)
                                 
-                        elif msg_type in [10, 11, 16]:
-                            resp = active_bot._pack_response(chosen, msg_type=msg_type)
-                        else:
+                        # 🌟 核心修复：10, 11, 16 彻底抛弃 bytes 转换，直接传原生整数！
+                        elif msg_type in [10, 11]:
+                            resp = int((chosen.index << 16) | chosen.action_type)
+                        elif msg_type == 16:
+                            resp = int(chosen.index)
+                        elif msg_type in [12, 13, 14]:
+                            resp = int(chosen.index)
+                            
+                        # 19 和 区域选择 依然保留 bytes，galatea_env 会帮我们安全补全 64 字节
+                        elif msg_type == 19:
                             val = chosen.index
-                            if msg_type in [18, 24]:
-                                zone_id = val
-                                p = 0; l = 0x04; s = 0
-                                if zone_id & 16: p = 1
-                                if zone_id & 8:  l = 0x08
-                                s = zone_id & 0x7
-                                # 直接用 msg[1] 读取 PlayerID
-                                req_p = msg[1] if len(msg) > 1 else 0
-                                raw_p = req_p if p == 0 else (1 - req_p)
-                                final_p = 1 if raw_p == 1 else 0
-                                resp = bytes([final_p, l, s])
-                            else:
-                                resp = bytes([val])
-                                
-                        if resp:
+                            resp = bytes([val])
+                        elif msg_type in [18, 24]:
+                            zone_id = chosen.index
+                            p = 0; l = 0x04; s = 0
+                            if zone_id & 16: p = 1
+                            if zone_id & 8:  l = 0x08
+                            s = zone_id & 0x7
+                            req_p = msg[1] if len(msg) > 1 else 0
+                            raw_p = req_p if p == 0 else (1 - req_p)
+                            final_p = 1 if raw_p == 1 else 0
+                            resp = bytes([final_p, l, s])
+                            
+                        if resp is not None:
                             last_decision_value = resp
+                                
                     except Exception as e:
-                        # 如果出现未适配的异常，无缝切给 RuleBot
-                        # print(f"[Arena Warning] AI 推理回退: {e}")
                         resp = None
 
                 # RuleBot 兜底
                 if resp is None:
-                    # 🌟 [关键修复] 如果刚刚是 AI 翻车了(导致了第1次Retry)，
-                    # 我们必须清空 Ignore List！防止 AI 的错误格式误伤 RuleBot，
-                    # 导致 RuleBot 被禁止选择正确的逻辑选项！
-                    if consecutive_retries == 1:
-                        current_step_ignore_list.clear()
-
                     clean_ignore = []
                     for val in current_step_ignore_list:
                         clean_ignore.append(val)
@@ -248,6 +296,10 @@ class ModelArena:
                 self.env.send_action(resp)
                 msg_queue = []
                 steps += 1
+        
+        # [防漏电] 如果因为超时或死锁非正常退出，强制关闭录像机
+        if self.logger.is_active:
+            self.logger.is_active = False
         
         return -1, -2, ai_fallback_count # 超时
 
@@ -291,6 +343,9 @@ class ModelArena:
             elif r == -1: reason_str = "❌ AI Deadlock"; is_abnormal = True; reasons['Deadlock'] += 1
             elif r == -2: reason_str = "⌛ Steps Limit"; is_abnormal = True; reasons['StepsOut'] += 1
             elif r == -3: reason_str = "⚠️ Init Fail"; is_abnormal = True
+            else: # 👇 [新增] 把未知的数字打印出来！
+                reason_str = f"Special({r})"
+                reasons[reason_str] = reasons.get(reason_str, 0) + 1
             
             if w == 0: p0_wins += 1
             elif w == 1: p1_wins += 1

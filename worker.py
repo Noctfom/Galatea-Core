@@ -113,29 +113,27 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                     break
                 
                 # ===========================
-                # [关键逻辑] Retry & 记忆消除
+                # [关键逻辑] Retry 处理
                 # ===========================
                 if msg_type == 1: 
                     consecutive_retries += 1
                     
-                    # 🗑️ [Purge] 记忆消除
+                    # 💥 [RL 惩罚] 不删除记忆，而是把刚才那步的 Value 强制拉低
                     snap = brain.get_snapshot()
                     player = snap.global_data.to_play
                     if game_buffer[player]:
-                        game_buffer[player].pop()
-                        ep_steps -= 1
-                        collected_steps -= 1 # 总计数回退
+                        # 给最后一步施加惩罚
+                        game_buffer[player][-1]['value'] -= 0.01 
                     
                     if last_decision_value is not None:
                         current_step_ignore_list.append(last_decision_value)
                     
                     if consecutive_retries > 20: break
                     
-                    # 🔄 [Retry] 自动回放
                     if last_interaction_msg is not None:
                         msg = last_interaction_msg
                         msg_type = msg[0]
-                    else: continue 
+                    else: continue
 
                 # 状态重置
                 if msg_type in STATE_CHANGE_MSGS:

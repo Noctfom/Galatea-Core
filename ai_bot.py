@@ -112,11 +112,9 @@ class AiBot:
         # 10: Battle, 11: Idle (召唤/发动), 16: Chain
         if msg_type in [10, 11, 16]:
             if msg_type == 16:
-                # 连锁只需返回 index
-                return int(action.index).to_bytes(4, byteorder='little')
+                # 🌟 核心修复：必须加上 signed=True，否则 AI 选 -1 会直接抛出异常！
+                return int(action.index).to_bytes(4, byteorder='little', signed=True)
             
-            # Idle/Battle 需要 (Index << 16) | Command
-            # 即使 action.action_type 是 0 (Summon)，这里也会正确打包
             val = (action.index << 16) | action.action_type
             return int(val).to_bytes(4, byteorder='little')
         

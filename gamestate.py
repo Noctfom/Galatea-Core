@@ -18,7 +18,7 @@ class MessageParser:
         0:-1, 1: 0, 2: 6, 3: 0, 4: 0, 5: 2, 
         
         # --- 交互类 ---
-        10: -1, 11: -1, 12: 12, 13: 5, 14: -1, 15: -1, 16: -1, 
+        10: -1, 11: -1, 12: 13, 13: 5, 14: -1, 15: -1, 16: -1, 
         18: 6,  # PLACE (1+1+4) [已验证]
         19: 6, 20: -1, 22: -1, 23: -1, 
         24: 6,  # DISFIELD (同18) [已验证]
@@ -26,18 +26,18 @@ class MessageParser:
         
         # --- 确认/展示类 ---
         30: -1, 31: -1, 32: 1, 33: 1, 34: -1, 
-        36: -1, 37: 0, 38: 7, 
+        36: -1, 37: 0, 38: 6, 
         
         # --- 流程/数值 ---
         40: 1, 41: 2, 
         
         # --- 动作类 ---
-        50: 16, 53: 9, 54: 8, 55: 16, 56: 5, 
+        50: 16, 53: 9, 54: 8, 55: 16, 56: 4, 
         
         # --- 召唤/连锁 ---
         60: 8, 
         61: 0, 63: 0, 65: 0, # SUMMONED [已验证 0字节]
-        62: 8, 64: 13, 
+        62: 8, 64: 8, 
         
         70: 16, 
         71: 1, 72: 1, 73: 1, # CHAINED [已验证 1字节]
@@ -48,13 +48,13 @@ class MessageParser:
         83: -1, # BECOME_TARGET [已验证 变长]
         
         # --- 伤害/数值 ---
-        90: 9, 91: 5, 92: 5, 93: 5, 94: 5, 
+        90: -1, 91: 5, 92: 5, 93: 8, 94: 5, 
         96: 8, 97: 8, # CARD_TARGET [已验证 4+4]
         100: 5, # PAY_LPCOST [已验证 1+4]
         101: 7, 102: 7, # COUNTER [已验证 2+1+1+1+2]
         
         # --- 战斗 ---
-        110: 8, 111: 8, 112: 0, 113: 0, 114: 0, 
+        110: 8, 111: 26, 112: 0, 113: 0, 114: 0, 
         
         # --- 杂项 ---
         130: -1, 131: -1, 132: 1, 133: 1,
@@ -186,20 +186,28 @@ class MessageParser:
                 b = stream.read(1); count = struct.unpack('B', b)[0]
                 stream.read(count * 4); length += count * 4
 
-            # 130: TOSS_COIN (P1+Count1 + Results)
-            elif msg_type == 130:
-                stream.read(2); length += 2
-                stream.seek(start_pos + 1)
-                b = stream.read(1)
+            # 90: DRAW (Player + Count + Code*Count)
+            elif msg_type == 90:
+                stream.read(1) # Player
+                length += 1
+                b = stream.read(1); length += 1
                 count = struct.unpack('B', b)[0]
-                stream.read(count); length += count # 1 byte per result
+                stream.read(count * 4); length += count * 4
 
-            # [修正] 142/143: ANNOUNCE_CARD/NUMBER 是变长消息 (Header 2 + Body N*4)
-            # Player(1) + Count(1) + Options(Count * 4)
+            # 130/131: TOSS_COIN/DICE (Player + Count + Results * 1)
+            elif msg_type in [130, 131]:
+                stream.read(1) # Player
+                length += 1
+                b = stream.read(1); length += 1
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 1); length += count * 1
+
+            # 142/143: ANNOUNCE_CARD/NUMBER (Player + Count + Options * 4)
             elif msg_type in [142, 143]:
-                stream.read(2); length += 2
-                stream.seek(start_pos + 1)
-                b = stream.read(1); count = struct.unpack('B', b)[0]
+                stream.read(1) # Player
+                length += 1
+                b = stream.read(1); length += 1
+                count = struct.unpack('B', b)[0]
                 stream.read(count * 4); length += count * 4
 
             # 163/164: STRING MESSAGES (Len 2 + String + Null 1)
@@ -238,7 +246,7 @@ class MessageParser:
         stream = io.BytesIO(data)
         data_len = len(data)
         
-        # 1. 严格白名单 (移除 0 和 90)
+        # 1. 严格白名单 (移除 0 以外的无效消息，防止错位后解析出垃圾数据导致 AI 误判)
         VALID_MSGS = {
             1, 2, 3, 4, 5, 
             10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 
@@ -248,6 +256,7 @@ class MessageParser:
             60, 61, 62, 63, 64, 65,
             70, 71, 72, 73, 74, 75, 76, 
             83, 
+            90,
             91, 92, 93, 94, 96, 97, 
             100, 101, 102, 
             110, 111, 112, 113, 114, 
@@ -258,7 +267,6 @@ class MessageParser:
         
         # 强制移除干扰项
         if 0 in VALID_MSGS: VALID_MSGS.remove(0)
-        if 90 in VALID_MSGS: VALID_MSGS.remove(90)
 
         # 2. 指纹锚点 (Fingerprint Anchors)
         # 格式: {锚点Type: [可能的下一个Type列表]}

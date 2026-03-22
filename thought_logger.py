@@ -18,48 +18,65 @@ class AIThoughtLogger:
         self.is_active = True
         
     def log_decision(self, turn, phase_id, snapshot, probs, chosen_index):
-        """记录单步决策"""
+        """记录单步决策 (包含场面状态)"""
         if not self.is_active: return
         
-        step_log = {"turn": turn, "phase": Phases.get_str(phase_id), "options": []}
-        
-        for i, act in enumerate(snapshot.valid_actions):
-            # 翻译动作描述
-            # YGOPro IDLE 动作翻译字典
+        try:
+            # 🌟 核心修复 3：将 controller 改为真实的属性名 owner！
+            p0_hand = sum(1 for c in snapshot.entities if getattr(c, 'owner', 0) == 0 and getattr(c, 'location', 0) == 0x02)
+            p0_mzone = sum(1 for c in snapshot.entities if getattr(c, 'owner', 0) == 0 and getattr(c, 'location', 0) == 0x04)
+            p1_hand = sum(1 for c in snapshot.entities if getattr(c, 'owner', 1) == 1 and getattr(c, 'location', 0) == 0x02)
+            p1_mzone = sum(1 for c in snapshot.entities if getattr(c, 'owner', 1) == 1 and getattr(c, 'location', 0) == 0x04)
+
+            step_log = {
+                "turn": turn, 
+                "phase": Phases.get_str(phase_id),
+                "state": {
+                    "p0_lp": getattr(snapshot.global_data, 'my_lp', 8000),
+                    "p1_lp": getattr(snapshot.global_data, 'op_lp', 8000),
+                    "p0_hand": p0_hand, "p0_mzone": p0_mzone,
+                    "p1_hand": p1_hand, "p1_mzone": p1_mzone
+                },
+                "options": []
+            }
+            
             action_dict = {
                 0: "通常召唤", 1: "特殊召唤", 2: "改变表示形式",
                 3: "盖放怪兽", 4: "盖放魔陷", 5: "发动效果",
-                6: "进入战斗阶段", 7: "结束回合", 8: "洗牌"
+                6: "进入战斗阶段", 7: "结束回合", 8: "洗牌",
+                15: "选择卡片/目标", 16: "选择位置/区域"
             }
             
-            if act.desc_str:
-                desc = act.desc_str
-            else:
-                # 尝试翻译 action_type
-                translated = action_dict.get(act.action_type, f"Type={act.action_type}")
-                desc = translated
-            target_info = ""
-            if act.target_entity_idx >= 0 and act.target_entity_idx < len(snapshot.entities):
-                t_card = snapshot.entities[act.target_entity_idx]
-                target_info = f" -> [{card_db.get_card_name(t_card.code)}]"
-            
-            # 提取概率值 (安全转换 tensor 为 float)
-            prob_val = float(probs[i].item()) if hasattr(probs[i], 'item') else float(probs[i])
-            
-            step_log["options"].append({
-                "index": i,
-                "desc": f"{desc}{target_info}",
-                "confidence": prob_val,
-                "is_chosen": (i == chosen_index)
-            })
-            
-        # 按信心值从高到低排序，一目了然
-        step_log["options"].sort(key=lambda x: x["confidence"], reverse=True)
-        self.thoughts.append(step_log)
-        
+            for i, act in enumerate(snapshot.valid_actions):
+                desc = act.desc_str if act.desc_str else action_dict.get(act.action_type, f"Type={act.action_type}")
+
+                target_info = ""
+                if act.target_entity_idx >= 0 and act.target_entity_idx < len(snapshot.entities):
+                    t_card = snapshot.entities[act.target_entity_idx]
+                    code = getattr(t_card, 'code', 0)
+                    name = card_db.get_card_name(code) if code != 0 else "盖卡/未知"
+                    target_info = f" -> [{name}]"
+                
+                prob_val = float(probs[i].item()) if hasattr(probs[i], 'item') else float(probs[i])
+                
+                step_log["options"].append({
+                    "index": i,
+                    "desc": f"{desc}{target_info}",
+                    "confidence": prob_val,
+                    "is_chosen": (i == chosen_index)
+                })
+                
+            step_log["options"].sort(key=lambda x: x["confidence"], reverse=True)
+            self.thoughts.append(step_log)
+        except Exception as e:
+            print(f"\n[Logger Error] 心声记录器抛出异常: {e}")
+
     def save(self, winner_id, game_idx):
         """保存为 JSON"""
-        if not self.is_active or not self.thoughts: return None
+        if not self.is_active: return None
+        self.is_active = False 
+        
+        if not self.thoughts: return None
         
         os.makedirs("./ai_thoughts", exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -72,5 +89,4 @@ class AIThoughtLogger:
                 "decisions": self.thoughts
             }, f, ensure_ascii=False, indent=4)
             
-        self.is_active = False # 保存完自动关闭，等待下一次唤醒
         return filepath

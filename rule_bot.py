@@ -165,10 +165,29 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
 
         elif msg_type == MSG_SELECT_BATTLECMD:
             actions = parse_battle_cmd(payload)
-            if not actions: 
-                decision = (0 << 16) | 3 # 强制结束战斗阶段
+            valid_actions = []
+            
+            # 黑名单过滤
+            for a in actions:
+                if a['cat'] == 1: test_val = (a['idx'] << 16) | 1
+                else: test_val = (0 << 16) | a['cat']
+                if test_val not in ignore_actions:
+                    valid_actions.append(a)
+
+            if not valid_actions: 
+                # 🌟 核心修复：不要硬编码，动态检查引擎到底允许进哪个阶段
+                can_m2 = any(a['cat'] == 2 for a in actions)
+                can_ep = any(a['cat'] == 3 for a in actions)
+                
+                # 优先尝试 M2，再尝试 EP，且避开被拉黑的选项
+                if can_m2 and ((0 << 16) | 2) not in ignore_actions:
+                    decision = (0 << 16) | 2
+                elif can_ep and ((0 << 16) | 3) not in ignore_actions:
+                    decision = (0 << 16) | 3
+                else:
+                    decision = (0 << 16) | 10 # 彻底卡死时的无奈之举，触发外界熔断
             else:
-                choice = random.choice(actions)
+                choice = random.choice(valid_actions)
                 if choice['cat'] == 1: 
                     decision = (choice['idx'] << 16) | 1
                 else:
