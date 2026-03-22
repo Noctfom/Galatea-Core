@@ -13,6 +13,8 @@
 
 Galatea-Core 是一个使用 **Transformer 架构** 和 **PPO (Proximal Policy Optimization)** 强化学习算法训练游戏王决斗AI的完整框架。项目通过与 OCGCore 引擎交互,实现了从零开始的自我博弈训练,能够学习复杂的卡组策略和决策逻辑。
 
+项目使用python完整实现了对c++核心信息的解析(gamestate.py)，实现了ocgcore(c++)到Python代码的转换对接。(燃尽了)
+
 
 ## 🚀 快速开始
 
@@ -32,8 +34,8 @@ pip install tensorboard numpy
 
 ⚠️ 版权与免责声明：本项目不包含任何受版权保护的 YGOPro 核心引擎文件或卡图数据。在运行本项目前，请自行准备相关环境。
 项目运行之前，请确认已经在项目根目录放置了以下两个文件：
-ygocore.dll  --ygo核心引擎，用于游戏环境搭建
-cards.cdb    --卡片数据库
+ocgcore.dll  --ygo核心引擎，用于游戏环境搭建
+cards.cdb    --卡片数据库，用于卡片信息查询
 
 ### 项目结构
 
@@ -49,9 +51,11 @@ Galatea-Core/
 ├── worker.py               # 多进程采集 Worker
 ├── model_versus.py         # 模型竞技场
 ├── rule_bot.py             # 规则脚本 Bot
-├── deck_utils.py           # 卡组工具
-├── ocgcore.dll             # 游戏王核心引擎
-├── cards.cdb               # 卡片数据库
+├── thought_logger.py       # 竞技场录像工具
+├── thought_viewer.py       # 录像播放工具
+├── deck_utils.py           # 卡组导入工具
+├── ocgcore.dll             # ygo核心引擎
+├── cards.cdb               # ygo卡片数据库
 ├── decks/                  # 卡组文件夹 (.ydk)
 ├── models/                 # 模型保存目录
 └── runs/                   # TensorBoard 日志
@@ -70,6 +74,7 @@ decks/
 
 ## 🎓 使用指南
 
+### webui尚在制作中，请先使用命令启动()
 ### 快速开始
 ```bash
 streamlit run webui.py
@@ -93,7 +98,7 @@ python main.py train \
   --dir ./models \
   --batch_size 32768 \
   --mini_batch 1024 \
-  --workers 12 \
+  --workers 8 \
   --steps 5000 \
   --d_model 512 \
   --n_heads 8 \
@@ -109,7 +114,7 @@ python main.py train \
   --resume ./models/galatea_iter_100.pth \
   --batch_size 32768 \
   --mini_batch 1024 \
-  --workers 12 \
+  --workers 8 \
   --steps 5000 \
   --async_infer
 ```
@@ -128,8 +133,7 @@ python main.py duel --p0 ./models/galatea_iter_100.pth --num 100
 python main.py duel \
   --p0 ./models/galatea_iter_100.pth \
   --p1 ./models/galatea_iter_200.pth \
-  --num 100 \
-  --device cuda
+  --num 100 
 ```
 
 ### 3. 自我博弈测试

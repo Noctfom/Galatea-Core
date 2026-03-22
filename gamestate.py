@@ -25,11 +25,12 @@ class MessageParser:
         25: -1, 26: -1, 
         
         # --- 确认/展示类 ---
-        30: -1, 31: -1, 32: 1, 33: 1, 34: -1, 
-        36: -1, 37: 0, 38: 6, 
+        30: -1, 31: -1, 32: 1, 33: -1, 34: -1, 
+        35: 1, # SWAP_GRAVE_DECK
+        36: -1, 37: 0, 38: 6, 39: -1,
         
         # --- 流程/数值 ---
-        40: 1, 41: 2, 
+        40: 1, 41: 2, 42: -1,
         
         # --- 动作类 ---
         50: 16, 53: 9, 54: 8, 55: 16, 56: 4, 
@@ -45,7 +46,7 @@ class MessageParser:
         75: 1, 76: 1, # NEGATED [已验证 1字节]
         
         # --- 对象/指示物 ---
-        83: -1, # BECOME_TARGET [已验证 变长]
+        81: -1, 83: -1, # BECOME_TARGET [已验证 变长]
         
         # --- 伤害/数值 ---
         90: -1, 91: 5, 92: 5, 93: 8, 94: 5, 
@@ -57,13 +58,15 @@ class MessageParser:
         110: 8, 111: 26, 112: 0, 113: 0, 114: 0, 
         
         # --- 杂项 ---
+        120: 8,
         130: -1, 131: -1, 132: 1, 133: 1,
         140: 6, 141: 6, 142: -1, 
         143: -1, # ANNOUNCE_NUMBER [已验证]
         160: 9, 
+        161: -1, 162: -1, 
         163: -1, 164: -1, # AI_NAME / SHOW_HINT [已验证 字符串]
         165: 6, # PLAYER_HINT [已验证 1+1+4]
-        170: 5
+        170: 4
     }
 
     @staticmethod
@@ -162,8 +165,8 @@ class MessageParser:
                 size_b = struct.unpack('B', b)[0]
                 stream.read(size_b * 8); length += size_b * 8
 
-            # 30/31/34: CONFIRM (Header 2, Item 7)
-            elif msg_type in [30, 31, 34]:
+            # 30/31/34/42: CONFIRM (Header 2, Item 7)
+            elif msg_type in [30, 31, 34, 42]:
                 stream.read(2); length += 2
                 stream.seek(start_pos + 1)
                 b = stream.read(1); count = struct.unpack('B', b)[0]
@@ -178,7 +181,23 @@ class MessageParser:
                 # pduel->write_buffer32(...) * ct
                 # pduel->write_buffer32(...) * ct
                 stream.read(count * 8); length += count * 8
+
+            # 33/39: SHUFFLE_HAND / EXTRA (Player + Count + Code * Count)
+            elif msg_type in [33, 39]:
+                stream.read(1) # Player
+                length += 1
+                b = stream.read(1); length += 1
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 4); length += count * 4
             
+            # 81: RANDOM_SELECTED (Player + Count + Item * 4)
+            elif msg_type == 81:
+                stream.read(1) # Player
+                length += 1
+                b = stream.read(1); length += 1
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 4); length += count * 4
+
             # 83: BECOME_TARGET (Header 1, Item 4)
             elif msg_type == 83:
                 stream.read(1); length += 1
@@ -209,6 +228,50 @@ class MessageParser:
                 b = stream.read(1); length += 1
                 count = struct.unpack('B', b)[0]
                 stream.read(count * 4); length += count * 4
+
+            # 161: TAG_SWAP (Player1 + M1 + E1 + P1 + H1 + DeckTop4 + HandList(H*4) + ExtraList(E*4))
+            elif msg_type == 161:
+                stream.read(1); length += 1 # Player
+                b = stream.read(4); length += 4 # 依次读取 main, extra, extra_p, hand 数量
+                _, extra_len, _, hand_len = struct.unpack('BBBB', b)
+                stream.read(4); length += 4 # Deck top
+                
+                # 读取手牌和额外卡组数组
+                stream.read(hand_len * 4); length += hand_len * 4
+                stream.read(extra_len * 4); length += extra_len * 4
+
+            # 162: RELOAD_FIELD (残局初始化神石)
+            elif msg_type == 162:
+                b = stream.read(1); length += 1
+                rule = struct.unpack('B', b)[0]
+                
+                # 大师规则 4/5 有 7 个怪兽区，老规则只有 5 个
+                mzone_size = 7 if rule >= 4 else 5
+                szone_size = 8
+                
+                for _ in range(2): # 遍历 2 个玩家
+                    stream.read(4); length += 4 # LP
+                    
+                    # 怪兽区遍历
+                    for _ in range(mzone_size):
+                        b = stream.read(1); length += 1
+                        if struct.unpack('B', b)[0] != 0:
+                            stream.read(2); length += 2 # pos(1) + xyz_count(1)
+                            
+                    # 魔陷区遍历
+                    for _ in range(szone_size):
+                        b = stream.read(1); length += 1
+                        if struct.unpack('B', b)[0] != 0:
+                            stream.read(1); length += 1 # pos(1)
+                            
+                    # 各种牌堆长度: main, hand, grave, remove, extra, extra_p (6个字节)
+                    stream.read(6); length += 6
+                
+                # 连锁列表
+                b = stream.read(1); length += 1
+                chain_size = struct.unpack('B', b)[0]
+                # 每个 Chain: code(4)+loc(4)+p(1)+l(1)+s(1)+desc(4) = 15 字节
+                stream.read(chain_size * 15); length += chain_size * 15
 
             # 163/164: STRING MESSAGES (Len 2 + String + Null 1)
             elif msg_type in [163, 164]:
@@ -250,16 +313,17 @@ class MessageParser:
         VALID_MSGS = {
             1, 2, 3, 4, 5, 
             10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 
-            30, 31, 32, 33, 34, 36, 37, 38,
-            40, 41, 
+            30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+            40, 41, 42,
             50, 53, 54, 55, 56, 
             60, 61, 62, 63, 64, 65,
             70, 71, 72, 73, 74, 75, 76, 
-            83, 
+            81, 83, 
             90,
             91, 92, 93, 94, 96, 97, 
             100, 101, 102, 
             110, 111, 112, 113, 114, 
+            120,
             130, 131, 132, 133, 
             140, 141, 142, 143, 
             160, 163, 164, 165, 170
@@ -432,7 +496,7 @@ class DuelState:
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
 
             elif msg_type == 94: # LP
-                p, lp = struct.unpack('BI', stream.read(5))
+                p, lp = struct.unpack('<BI', stream.read(5))
                 if p == 0: self.my_lp = lp
                 else: self.op_lp = lp
             

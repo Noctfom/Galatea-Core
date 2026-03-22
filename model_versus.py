@@ -194,8 +194,8 @@ class ModelArena:
                         with torch.no_grad():
                             logits, _ = active_bot.net(infer_dict)
                             
-                            # 🛡️ [断路器生效] 强制将已拉黑的动作得分降为极小值 (-1e9)
-                            for bad_idx in banned_actions_for_state[current_hash]:
+                            # 🛡️ [终极防爆修改] 使用 .get(..., set()) 完美避开 KeyError！
+                            for bad_idx in banned_actions_for_state.get(current_hash, set()):
                                 if bad_idx < logits.shape[-1]:
                                     logits[0, bad_idx] = -1e9
                                     
