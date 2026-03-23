@@ -30,6 +30,7 @@ class GalateaNet(nn.Module):
 
         self.race_embed = nn.Embedding(30, self.d_model, padding_idx=0)
         self.attr_embed = nn.Embedding(10, self.d_model, padding_idx=0)
+        self.setcode_embed = nn.Embedding(4096, self.d_model, padding_idx=0) # 字段词表大小 4096
         
         # C. 全局特征映射 -> d_model
         # feature_encoder.py 中 global_dim = 15
@@ -81,6 +82,8 @@ class GalateaNet(nn.Module):
         # [Batch, Seq] 卡片种族和属性
         card_race = batch_dict['card_race']
         card_attr = batch_dict['card_attr'] 
+        # 取出字段 [B, S, 4]
+        card_setcodes = batch_dict['card_setcodes'] 
         # [Batch, Global]
         global_vec = batch_dict['global']
         # [Batch, Seq] (Bool, 1=Real, 0=Pad)
@@ -95,8 +98,12 @@ class GalateaNet(nn.Module):
         x_race = self.race_embed(card_race)
         x_attr = self.attr_embed(card_attr)
         
+        # 字段特征提取：因为有 4 个字段，我们把它们 Embed 后求和 (或者求平均)
+        # shape 变化: [B, S, 4] -> [B, S, 4, D] -> sum(-2) -> [B, S, D]
+        x_setcode = self.setcode_embed(card_setcodes).sum(dim=-2)
+
         # 终极特征融合 (四大特征加在一起)
-        x = x_code + x_feat + x_race + x_attr
+        x = x_code + x_feat + x_race + x_attr + x_setcode
         
         # --- 2. Transformer Reasoning ---
         # PyTorch Transformer 的 src_key_padding_mask 需要 True 为 Padding (忽略)

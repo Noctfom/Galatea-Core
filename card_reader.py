@@ -56,12 +56,12 @@ class CardReader:
         if not self.cursor: return (0,)*10
         
         try:
-            # datas: id, ot, alias, setcode, type, atk, def, level, race, attribute, category
-            self.cursor.execute("SELECT type, race, attribute, level, atk, def FROM datas WHERE id=?", (code,))
+            # SQL 增加 setcode 的读取
+            self.cursor.execute("SELECT type, race, attribute, level, atk, def, setcode FROM datas WHERE id=?", (code,))
             row = self.cursor.fetchone()
-            if not row: return (0,)*10
+            if not row: return (0,)*11 # 长度变为 11
             
-            raw_type, race, attr, raw_level, atk, defense = row
+            raw_type, race, attr, raw_level, atk, defense, raw_setcode = row
             
             # --- OCG Level 字段解码 ---
             # Level 字段在数据库里是个大杂烩，存储了 Level, Rank, Link, Scales
@@ -92,9 +92,20 @@ class CardReader:
                 # (raw_level >> 16) & 0xFF 是右刻度
                 scale = (raw_level >> 24) & 0xFF
                 
-            stats = (raw_type, race, attr, level, rank, link, link_marker, scale, atk, defense)
+            # 解析 Setcode (用 64 位整数存了最多 4 个 16 位的字段)
+            setcodes = []
+            val = raw_setcode
+            for _ in range(4): # 最多提取 4 个字段
+                if val & 0xFFFF:
+                    setcodes.append(val & 0xFFFF)
+                val >>= 16
+            setcodes = (setcodes + [0]*4)[:4]
+                
+            # 将 setcodes 作为元组加到返回值的最后
+            stats = (raw_type, race, attr, level, rank, link, link_marker, scale, atk, defense, tuple(setcodes))
             self.stats_cache[code] = stats
             return stats
+        
         except:
             return (0,)*10
 

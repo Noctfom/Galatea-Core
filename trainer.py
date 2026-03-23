@@ -347,7 +347,7 @@ class PPOTrainer:
             # --- 1. 组装压平的 Batch ---
             worker_ids = [r[0] for r in requests]
             # 👇 [击毙幽灵 1] 将 Worker 发来的 numpy 数组转回 Tensor
-            packed_batch = torch.stack([torch.from_numpy(r[1]) for r in requests]).to(self.device, non_blocking=True) # [B, 6035]
+            packed_batch = torch.stack([torch.from_numpy(r[1]) for r in requests]).to(self.device, non_blocking=True) # [B, 6435]
             
             # --- 2. 在 GPU 上光速切片解包 (保持不变) ---
             batch_obs = {
@@ -355,12 +355,13 @@ class PPOTrainer:
                 'card_idx': packed_batch[:, 15:115].to(torch.long),
                 'card_race': packed_batch[:, 115:215].to(torch.long),
                 'card_attr': packed_batch[:, 215:315].to(torch.long),
-                'card_feats': packed_batch[:, 315:5615].view(-1, 100, 53),
-                'padding_mask': packed_batch[:, 5615:5715].to(torch.bool),
-                'act_card_idx': packed_batch[:, 5715:5795].to(torch.long),
-                'act_type': packed_batch[:, 5795:5875].to(torch.long),
-                'act_desc': packed_batch[:, 5875:5955].to(torch.long),
-                'act_mask': packed_batch[:, 5955:6035].to(torch.bool)
+                'card_setcodes': packed_batch[:, 315:715].to(torch.long).view(-1, 100, 4), 
+                'card_feats': packed_batch[:, 715:6015].view(-1, 100, 53),
+                'padding_mask': packed_batch[:, 6015:6115].to(torch.bool),
+                'act_card_idx': packed_batch[:, 6115:6195].to(torch.long),
+                'act_type': packed_batch[:, 6195:6275].to(torch.long),
+                'act_desc': packed_batch[:, 6275:6355].to(torch.long),
+                'act_mask': packed_batch[:, 6355:6435].to(torch.bool)
             }
             
             with torch.amp.autocast('cuda', dtype=self.amp_dtype):

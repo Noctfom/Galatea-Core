@@ -97,8 +97,9 @@ class GalateaEncoder:
         
         card_indices = []
         card_feats = []
-        card_races = []  # [新增] 种族
-        card_attrs = []  # [新增] 属性
+        card_races = []  # 种族
+        card_attrs = []  # 属性
+        card_setcodes = [] # 字段列表
         masks = []
         
         for e in snapshot.entities[:MAX_CARDS]:
@@ -132,16 +133,24 @@ class GalateaEncoder:
                 # Hash 种族(不超过30种) 和 属性(不超过10种)
                 r_idx = e.race % 30
                 a_idx = e.attribute % 10
+
+                # 提取并补齐字段到固定的 4 个槽位，哈希映射到 4096 以内
+                sc = list(e.setcodes)
+                sc = (sc + [0]*4)[:4]
+                sc_hashed = [s % 4096 for s in sc]
+
             else:
                 c_idx = UNK_CODE_IDX 
                 feat = [-1.0, e.location / 100.0, e.sequence / 10.0] + [0.0] * 50
                 r_idx = 0
                 a_idx = 0
+                sc_hashed = [0, 0, 0, 0] # 未知卡的字段全为 0
             
             card_indices.append(c_idx)
             card_feats.append(feat)
             card_races.append(r_idx)
             card_attrs.append(a_idx)
+            card_setcodes.append(sc_hashed)
             masks.append(1.0)
 
         # Padding 补齐
@@ -152,6 +161,7 @@ class GalateaEncoder:
             card_attrs.extend([0] * pad_len)
             masks.extend([0.0] * pad_len)
             for _ in range(pad_len):
+                card_setcodes.append([0, 0, 0, 0])
                 card_feats.append([0.0] * 53)
 
         act_dict = self.encode_actions(snapshot.valid_actions, snapshot)
@@ -161,6 +171,7 @@ class GalateaEncoder:
             'card_idx': torch.tensor(card_indices, dtype=torch.long).unsqueeze(0),
             'card_race': torch.tensor(card_races, dtype=torch.long).unsqueeze(0), # [新增]
             'card_attr': torch.tensor(card_attrs, dtype=torch.long).unsqueeze(0), # [新增]
+            'card_setcodes': torch.tensor(card_setcodes, dtype=torch.long).unsqueeze(0), # 🌟 [新增] shape: [1, Seq, 4]
             'card_feats': torch.tensor(card_feats, dtype=torch.float32).unsqueeze(0),
             'padding_mask': torch.tensor(masks, dtype=torch.bool).unsqueeze(0)
         }

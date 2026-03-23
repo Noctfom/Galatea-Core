@@ -167,6 +167,7 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                                 v_i = tensor_dict['card_idx'].to(torch.float32).view(-1)
                                 v_r = tensor_dict['card_race'].to(torch.float32).view(-1)
                                 v_a = tensor_dict['card_attr'].to(torch.float32).view(-1)
+                                v_s = tensor_dict['card_setcodes'].to(torch.float32).view(-1)
                                 v_f = tensor_dict['card_feats'].view(-1)
                                 v_m = tensor_dict['padding_mask'].to(torch.float32).view(-1)
                                 
@@ -176,7 +177,7 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                                 v_act_desc = tensor_dict['act_desc'].to(torch.float32).view(-1)
                                 v_act_mask = tensor_dict['act_mask'].to(torch.float32).view(-1)
                                 
-                                packed_req = torch.cat([v_g, v_i, v_r, v_a, v_f, v_m, v_act_idx, v_act_type, v_act_desc, v_act_mask]).cpu()
+                                packed_req = torch.cat([v_g, v_i, v_r, v_a, v_s, v_f, v_m, v_act_idx, v_act_type, v_act_desc, v_act_mask]).cpu()
                                 
                                 # 👇 [击毙幽灵 1：Numpy 装甲] 转为 numpy 数组发送，彻底绕过 Windows 内存泄漏！
                                 req_q.put((worker_id, packed_req.numpy()))

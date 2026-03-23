@@ -54,6 +54,7 @@ class CardEntity:
     lscale: int = 0       # 灵摆左刻度
     rscale: int = 0       # 灵摆右刻度
     link_marker: int = 0  # 连接箭头 (Bitmask)
+    setcodes: tuple = (0, 0, 0, 0) # 字段集合 (一张卡可能拥有多个字段)
     
     # --- 3. 辅助标记 ---
     is_public: bool = False      # 是否公开可见 (表侧卡=True)

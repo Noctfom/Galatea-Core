@@ -75,228 +75,180 @@ class MessageParser:
         length = 0
         
         try:
-            # 11: IDLECMD (Player + 6*List + BP/EP/Shuf)
+            # 11: IDLECMD
             if msg_type == 11: 
-                stream.read(1) # Player
-                length += 1
+                stream.read(1); length += 1 # P
                 for i in range(6): 
-                    b = stream.read(1)
-                    length += 1
+                    b = stream.read(1); length += 1
                     count = struct.unpack('B', b)[0]
-                    # Cat 5 (Activate) is 11 bytes, others 7
                     item_len = 11 if i == 5 else 7
-                    stream.read(count * item_len)
-                    length += count * item_len
-                stream.read(3)
-                length += 3
+                    stream.read(count * item_len); length += count * item_len
+                stream.read(3); length += 3
 
-            # 10: BATTLECMD (Player + Act(11) + Atk(8) + M2/EP)
+            # 10: BATTLECMD
             elif msg_type == 10:
-                stream.read(1)
-                length += 1
+                stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1
                 c = struct.unpack('B', b)[0]
                 stream.read(c * 11); length += c * 11
                 b = stream.read(1); length += 1
                 c = struct.unpack('B', b)[0]
-                stream.read(c * 8); length += c * 8 # Code4+C1+L1+S1+Dir1 = 8
-                stream.read(2)
-                length += 2
+                stream.read(c * 8); length += c * 8
+                stream.read(2); length += 2
 
-            # 15: SELECT_CARD / 20: SELECT_TRIBUTE (Header 5 + Body N*8)
-            # 源码证实 field::select_card 和 field::select_tribute 均为 8 字节/卡
-            elif msg_type == 15 or msg_type == 20:
-                stream.read(5); length += 5
-                stream.seek(start_pos + 4)
-                b = stream.read(1); size = struct.unpack('B', b)[0]
-                stream.read(size * 8); length += size * 8
-
-            # 16: SELECT_CHAIN (P+Count+Spe+Forced+H1+H2 + List(Flag1+Code4+Loc4+Desc4=13))
-            elif msg_type == 16:
-                stream.read(12); length += 12
-                stream.seek(start_pos + 1)
-                b = stream.read(1)
+            # 14: SELECT_OPTION 
+            elif msg_type == 14:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
                 count = struct.unpack('B', b)[0]
-                stream.read(count * 13); length += count * 13
+                stream.read(count * 4); length += count * 4
 
-            # 18/24: PLACE/DISFIELD (P+Min+Mask4)
-            elif msg_type == 18 or msg_type == 24:
+            # 15/20: SELECT_CARD / TRIBUTE
+            elif msg_type in [15, 20]:
+                stream.read(4); length += 4 # P, Cancel, Min, Max
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 8); length += count * 8
+
+            # 16: SELECT_CHAIN
+            elif msg_type == 16:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(10); length += 10 # Spe, forced, h1, h2
+                
+                # 🌟 [额外修复] 元素之间有 1 个字节的定界符 (共 count-1 个)
+                extra_bytes = max(0, count - 1)
+                stream.read(count * 13 + extra_bytes); length += count * 13 + extra_bytes
+
+            # 18/24: PLACE / DISFIELD
+            elif msg_type in [18, 24]:
                 stream.read(6); length = 6
 
-            # 22: SELECT_COUNTER (新增)
+            # 21: SORT_CHAIN
+            elif msg_type == 21:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 7); length += count * 7
+
+            # 22: SELECT_COUNTER
             elif msg_type == 22:
-                stream.read(6); length += 6 # P+Type(2)+Qty(2)+Size(1)
-                stream.seek(start_pos + 5)
-                b = stream.read(1)
+                stream.read(5); length += 5 # P, type(2), qty(2)
+                b = stream.read(1); length += 1 # Size
                 size = struct.unpack('B', b)[0]
-                # Body: Code(4)+C(1)+L(1)+S(1)+Avail(2) = 9 bytes
                 stream.read(size * 9); length += size * 9
 
-            # 23: SELECT_SUM (Mode1+P1+Acc4+Min1+Max1+Must1+List11+Sel1+List11)
+            # 23: SELECT_SUM 
             elif msg_type == 23:
-                # 🌟 [终极修复] 抛弃容易错位的 seek，直接顺着 C++ 引擎的字节序一路读下去！
-                stream.read(8); length += 8 # 读掉 Mode(1), P(1), Acc(4), Min(1), Max(1)
-                
-                b = stream.read(1); length += 1 # 读 Must_Count (严格在第 8 字节位置)
+                stream.read(8); length += 8 # Header
+                b = stream.read(1); length += 1 # Must_count
                 must_c = struct.unpack('B', b)[0]
                 stream.read(must_c * 11); length += must_c * 11
-                
-                b = stream.read(1); length += 1 # 读 Select_Count
+                b = stream.read(1); length += 1 # Sel_count
                 sel_c = struct.unpack('B', b)[0]
                 stream.read(sel_c * 11); length += sel_c * 11
 
-            # 25: SORT_CARD (P1+Count1 + List7)
+            # 25: SORT_CARD
             elif msg_type == 25:
-                stream.read(2); length += 2
-                stream.seek(start_pos + 1)
-                b = stream.read(1)
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
                 count = struct.unpack('B', b)[0]
                 stream.read(count * 7); length += count * 7
 
-            # 26: SELECT_UNSELECT (Header 6 + ListA(8) + SizeB(1) + ListB(8))
+            # 26: SELECT_UNSELECT
             elif msg_type == 26:
-                # 源码: P(1)+Fin(1)+Can(1)+Min(1)+Max(1) + SizeA(1) = 6 bytes
-                stream.read(6); length += 6
-                stream.seek(start_pos + 5)
-                b = stream.read(1); size_a = struct.unpack('B', b)[0]
+                stream.read(5); length += 5 # Header 5 bytes
+                b = stream.read(1); length += 1 # Size_A
+                size_a = struct.unpack('B', b)[0]
                 stream.read(size_a * 8); length += size_a * 8
-                
-                b = stream.read(1); length += 1 # SizeB
+                b = stream.read(1); length += 1 # Size_B
                 size_b = struct.unpack('B', b)[0]
                 stream.read(size_b * 8); length += size_b * 8
 
-            # 30/31/34/42: CONFIRM (Header 2, Item 7)
-            elif msg_type in [30, 31, 34, 42]:
-                stream.read(2); length += 2
-                stream.seek(start_pos + 1)
-                b = stream.read(1); count = struct.unpack('B', b)[0]
+            # 30/34/42: CONFIRM
+            elif msg_type in [30, 34, 42]:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
                 stream.read(count * 7); length += count * 7
 
-            # 36: SHUFFLE_SET_CARD (Header 2, List1(4), List2(4))
+            # 31: CONFIRM_CARDS
+            elif msg_type == 31:
+                stream.read(1); length += 1 # P
+                # 🌟 [额外修复] 吞掉强制插入的未知幽灵字节
+                stream.read(1); length += 1 
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
+                stream.read(count * 7); length += count * 7
+
+            # 36: SHUFFLE_SET_CARD
             elif msg_type == 36:
-                stream.read(2); length += 2
-                stream.seek(start_pos + 1)
-                b = stream.read(1); count = struct.unpack('B', b)[0]
-                # 源码显示它写了两次循环，每次写一个 int32
-                # pduel->write_buffer32(...) * ct
-                # pduel->write_buffer32(...) * ct
+                stream.read(1); length += 1 # Loc
+                b = stream.read(1); length += 1 # Count
+                count = struct.unpack('B', b)[0]
                 stream.read(count * 8); length += count * 8
 
-            # 33/39: SHUFFLE_HAND / EXTRA (Player + Count + Code * Count)
-            elif msg_type in [33, 39]:
-                stream.read(1) # Player
-                length += 1
-                b = stream.read(1); length += 1
-                count = struct.unpack('B', b)[0]
-                stream.read(count * 4); length += count * 4
-            
-            # 81: RANDOM_SELECTED (Player + Count + Item * 4)
-            elif msg_type == 81:
-                stream.read(1) # Player
-                length += 1
-                b = stream.read(1); length += 1
+            # 33/39/81/90/142/143: 1P + 1Count + Count*4
+            elif msg_type in [33, 39, 81, 90, 142, 143]:
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
                 count = struct.unpack('B', b)[0]
                 stream.read(count * 4); length += count * 4
 
-            # 83: BECOME_TARGET (Header 1, Item 4)
+            # 83: BECOME_TARGET
             elif msg_type == 83:
-                stream.read(1); length += 1
-                stream.seek(start_pos)
-                b = stream.read(1); count = struct.unpack('B', b)[0]
-                stream.read(count * 4); length += count * 4
-
-            # 90: DRAW (Player + Count + Code*Count)
-            elif msg_type == 90:
-                stream.read(1) # Player
-                length += 1
-                b = stream.read(1); length += 1
+                b = stream.read(1); length += 1 # Count (无 P 字节)
                 count = struct.unpack('B', b)[0]
                 stream.read(count * 4); length += count * 4
 
-            # 130/131: TOSS_COIN/DICE (Player + Count + Results * 1)
+            # 130/131: TOSS_COIN/DICE
             elif msg_type in [130, 131]:
-                stream.read(1) # Player
-                length += 1
-                b = stream.read(1); length += 1
+                stream.read(1); length += 1 # P
+                b = stream.read(1); length += 1 # Count
                 count = struct.unpack('B', b)[0]
                 stream.read(count * 1); length += count * 1
 
-            # 142/143: ANNOUNCE_CARD/NUMBER (Player + Count + Options * 4)
-            elif msg_type in [142, 143]:
-                stream.read(1) # Player
-                length += 1
-                b = stream.read(1); length += 1
-                count = struct.unpack('B', b)[0]
-                stream.read(count * 4); length += count * 4
-
-            # 161: TAG_SWAP (Player1 + M1 + E1 + P1 + H1 + DeckTop4 + HandList(H*4) + ExtraList(E*4))
+            # 161: TAG_SWAP
             elif msg_type == 161:
-                stream.read(1); length += 1 # Player
-                b = stream.read(4); length += 4 # 依次读取 main, extra, extra_p, hand 数量
+                stream.read(1); length += 1 # P
+                b = stream.read(4); length += 4 # main, extra, extra_p, hand
                 _, extra_len, _, hand_len = struct.unpack('BBBB', b)
                 stream.read(4); length += 4 # Deck top
-                
-                # 读取手牌和额外卡组数组
                 stream.read(hand_len * 4); length += hand_len * 4
                 stream.read(extra_len * 4); length += extra_len * 4
 
-            # 162: RELOAD_FIELD (残局初始化神石)
+            # 162: RELOAD_FIELD
             elif msg_type == 162:
                 b = stream.read(1); length += 1
                 rule = struct.unpack('B', b)[0]
-                
-                # 大师规则 4/5 有 7 个怪兽区，老规则只有 5 个
                 mzone_size = 7 if rule >= 4 else 5
-                szone_size = 8
-                
-                for _ in range(2): # 遍历 2 个玩家
-                    stream.read(4); length += 4 # LP
-                    
-                    # 怪兽区遍历
+                for _ in range(2):
+                    stream.read(4); length += 4 
                     for _ in range(mzone_size):
                         b = stream.read(1); length += 1
                         if struct.unpack('B', b)[0] != 0:
-                            stream.read(2); length += 2 # pos(1) + xyz_count(1)
-                            
-                    # 魔陷区遍历
-                    for _ in range(szone_size):
+                            stream.read(2); length += 2 
+                    for _ in range(8):
                         b = stream.read(1); length += 1
                         if struct.unpack('B', b)[0] != 0:
-                            stream.read(1); length += 1 # pos(1)
-                            
-                    # 各种牌堆长度: main, hand, grave, remove, extra, extra_p (6个字节)
-                    stream.read(6); length += 6
-                
-                # 连锁列表
+                            stream.read(1); length += 1 
+                    stream.read(6); length += 6 
                 b = stream.read(1); length += 1
                 chain_size = struct.unpack('B', b)[0]
-                # 每个 Chain: code(4)+loc(4)+p(1)+l(1)+s(1)+desc(4) = 15 字节
                 stream.read(chain_size * 15); length += chain_size * 15
 
-            # 163/164: STRING MESSAGES (Len 2 + String + Null 1)
+            # 163/164: STRING MESSAGES
             elif msg_type in [163, 164]:
                 b = stream.read(2); length += 2
                 str_len = struct.unpack('H', b)[0]
                 stream.read(str_len + 1); length += str_len + 1
 
-            # 14: SELECT_OPTION (P1+Count1 + Opts4)
-            elif msg_type == 14:
-                stream.read(2); length += 2
-                stream.seek(start_pos + 1)
-                b = stream.read(1)
-                count = struct.unpack('B', b)[0]
-                stream.read(count * 4); length += count * 4
-
             else:
-                # 遇到未知的 ID，打印出来方便调试，不要默默吞掉
-                # print(f"[Parser Warning] Unknown dynamic msg type: {msg_type}")
                 stream.read()
                 length = stream.tell() - start_pos
 
         except Exception as e:
-            # 🛑 [核心修复] 
-            # 遇到 EOF 或解析错误，必须返回 -1！
-            # 告诉 parse 函数："这包数据不完整，丢弃它，不要硬解！"
             stream.seek(start_pos)
             return -1
             
@@ -309,7 +261,7 @@ class MessageParser:
         stream = io.BytesIO(data)
         data_len = len(data)
         
-        # 1. 严格白名单 (移除 0 以外的无效消息，防止错位后解析出垃圾数据导致 AI 误判)
+        # 1. 严格白名单 (移除 0)
         VALID_MSGS = {
             1, 2, 3, 4, 5, 
             10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 
@@ -329,82 +281,10 @@ class MessageParser:
             160, 163, 164, 165, 170
         }
         
-        # 强制移除干扰项
-        if 0 in VALID_MSGS: VALID_MSGS.remove(0)
-
-        # 2. 指纹锚点 (Fingerprint Anchors)
-        # 格式: {锚点Type: [可能的下一个Type列表]}
-        # 只有满足 "当前=锚点 AND 下一个 IN 列表" 时，才确认同步成功
-        SYNC_PATTERNS = {
-            40: [41, 4, 50, 2, 11], # NewTurn -> NewPhase / Draw / Move / Hint / Idle
-            41: [4, 50, 11, 2, 16], # NewPhase -> Draw / Move / Idle / Hint / Chain
-            4: [50, 2, 41, 11],     # Draw -> Move / Hint / Phase / Idle
-            1: [40, 2, 11, 4],      # Retry -> Turn / Hint / Idle / Draw
-            2: [11, 16, 50, 60, 62],# Hint -> Idle / Chain / Move / Summon
-            50: [50, 2, 11, 4, 41], # Move -> Move / Hint / Idle
-        }
-
-        # [状态] 是否需要开局同步
-        need_sync = (stream.tell() == 0 and data_len > 0 and data[0] == 0x5a)
+        # 🌟 [探针] 记录最近 15 个成功解析的指令，看清乱码源头！
+        recent_msgs = []
 
         while stream.tell() < data_len:
-            # --- [阶段 A] 开局强力同步 ---
-            if need_sync:
-                # 1. 物理跳过 5A 头 (如果符合结构)
-                if stream.tell() == 0 and data_len >= 3 and data[0] == 0x5a and data[1] == 0x00:
-                    count = data[2]
-                    skip_len = 3 + (count * 4)
-                    if skip_len < data_len:
-                        stream.seek(skip_len)
-                
-                found = False
-                while stream.tell() < data_len - 1: # 留 1 字节给 peek
-                    check_pos = stream.tell()
-                    b = stream.read(1)
-                    if not b: break
-                    candidate = struct.unpack('B', b)[0]
-                    
-                    # 检查指纹
-                    if candidate in SYNC_PATTERNS:
-                        # 预读下一个消息的 Type (需要跳过当前消息的 Payload)
-                        # 这很难，因为我们还不知道当前是不是真的消息
-                        # 所以我们退而求其次：
-                        # 如果 candidate 是 40 (NewTurn, 0 Payload) 或 41 (NewPhase, 2 Payload)
-                        # 我们容易验证。
-                        
-                        # 简化版指纹：只验证无 Payload 或短 Payload 的消息
-                        next_type = -1
-                        try:
-                            # 假设它是真的，计算长度
-                            test_len = MessageParser.MSG_LEN.get(candidate, -1)
-                            if test_len == -1: # 变长消息很难预测，跳过验证
-                                # 除非是 Type 1 (Retry, 0 len)
-                                if candidate == 1: test_len = 0
-                                else: continue 
-                            
-                            # 偷看下一个 Type
-                            peek_offset = check_pos + 1 + test_len
-                            if peek_offset < data_len:
-                                stream.seek(peek_offset)
-                                next_b = stream.read(1)
-                                if next_b:
-                                    next_type = struct.unpack('B', next_b)[0]
-                                    
-                                    # 核心判定：下一个 Type 是否在白名单里？
-                                    if next_type in VALID_MSGS:
-                                        # print(f"✅ [Parser] 指纹匹配: {candidate} -> {next_type} at {check_pos}")
-                                        stream.seek(check_pos)
-                                        found = True
-                                        need_sync = False
-                                        break
-                        except: pass
-                        finally:
-                            stream.seek(check_pos + 1) # 回到扫描位置继续
-                
-                if not found:
-                    break # 没找到，丢弃包
-            
-            # --- [阶段 B] 正常解析 ---
             start_pos = stream.tell()
             b = stream.read(1)
             if not b: break
@@ -412,44 +292,54 @@ class MessageParser:
 
             # [异常拦截]
             if msg_type not in VALID_MSGS:
-                # 触发重新同步 (复用上面的逻辑，或者简单向后找锚点)
-                # print(f"⚠️ [Parser] 错位: {hex(msg_type)}，尝试恢复...")
-                need_sync = True # 简单粗暴：切回同步模式
-                # 回退指针，让同步逻辑处理
-                stream.seek(start_pos)
-                continue
+                print(f"\n👻 [Parser] 抓到幽灵: {msg_type} (Hex: {hex(msg_type)})!")
+                print(f"🔍 坠机前15个指令: {recent_msgs}")
+                
+                # 🌟 终极杀手锏：打印整个数据包的十六进制字节流
+                hex_dump = " ".join([f"{b:02X}" for b in data])
+                print(f"📦 完整数据包Hex (总长度 {data_len}):\n{hex_dump}")
+                
+                # 计算当前出错在第几个字节
+                error_pos = stream.tell() - 1
+                print(f"📍 错位发生位置: 字节 {error_pos}")
+                break
 
             # [虚假胜利拦截]
             if msg_type == 5:
                 if stream.tell() < data_len:
                     wb = stream.read(1)
                     winner = struct.unpack('B', wb)[0]
+                    
+                    reason = 0
+                    if stream.tell() < data_len:
+                        rb = stream.read(1)
+                        reason = struct.unpack('B', rb)[0]
+                        
                     stream.seek(start_pos + 1)
-                    if winner > 2: # 假胜利
-                        need_sync = True
-                        stream.seek(start_pos)
-                        continue
+                    
+                    if winner > 2 or reason > 0x30: 
+                        print(f"\n🛡️ [Parser] 拦截到残存胜利! \n🔍 坠机前15个指令: {recent_msgs}")
+                        break 
 
             # 计算长度
             length = MessageParser.MSG_LEN.get(msg_type, -1)
             
             if length == -1:
-                # 注意：calculate_dynamic_length 必须能处理 stream 指针
-                # 传入 stream 时，指针在 Payload 开头
                 try:
                     length = MessageParser.calculate_dynamic_length(msg_type, stream)
-                except:
-                    # 计算长度失败（比如数据不足），切回同步
-                    need_sync = True
-                    stream.seek(start_pos + 1)
-                    continue
+                except Exception as e:
+                    print(f"\n👻 [Parser] 变长解析崩溃 (msg: {msg_type})! \n🔍 坠机前15个指令: {recent_msgs}")
+                    break
             
             if length >= 0:
-                if stream.tell() + length > data_len: break # 数据截断
-                # 注意：如果 calculate_dynamic_length 已经读了流，这里要小心
-                # 假设 calculate_dynamic_length 恢复了指针到 Payload 开头
+                if stream.tell() + length > data_len: break 
                 payload = stream.read(length)
                 msgs.append(bytes([msg_type]) + payload)
+                
+                # 🌟 [探针记录] 保留 15 个
+                recent_msgs.append(msg_type)
+                if len(recent_msgs) > 15:
+                    recent_msgs.pop(0)
             else:
                 break
                 
@@ -494,6 +384,29 @@ class DuelState:
             elif msg_type == 53: # POS_CHANGE
                 code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
+
+            elif msg_type == 90: # DRAW (抽卡)
+                # 🌟 [录像修复 B] 记录抽卡到手牌！
+                p = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('B', stream.read(1))[0]
+                for _ in range(count):
+                    raw_code = struct.unpack('<I', stream.read(4))[0]
+                    code = raw_code & 0x7FFFFFFF
+                    seq = 0
+                    while seq in self.field_map[p][Zone.HAND]: seq += 1
+                    self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p}
+
+            elif msg_type in [91, 92, 94]: # 伤害 / 回复 / LP直接更新
+                # 🌟 [录像修复 A] 加上 '<' 强制对齐，并监听 91 和 92！
+                p, val = struct.unpack('<BI', stream.read(5))
+                if p == 0:
+                    if msg_type == 91: self.my_lp = max(0, self.my_lp - val)
+                    elif msg_type == 92: self.my_lp += val
+                    else: self.my_lp = val
+                else:
+                    if msg_type == 91: self.op_lp = max(0, self.op_lp - val)
+                    elif msg_type == 92: self.op_lp += val
+                    else: self.op_lp = val
 
             elif msg_type == 94: # LP
                 p, lp = struct.unpack('<BI', stream.read(5))
@@ -577,24 +490,21 @@ class DuelState:
                 if ep: self.current_valid_actions.append(GameAction(action_type=7, index=0, desc_str="To EP"))
 
             # 2. MSG_SELECT_CHAIN (16)
-            # 结构: P + Count + ...
             elif msg_type == 16:
                 stream.read(1) # P
                 count = struct.unpack('B', stream.read(1))[0]
                 stream.read(10) # Spe, Forced, H1, H2
                 
                 for i in range(count):
-                    # Flag(1)+Code(4)+Loc(4)+Desc(4) = 13
-                    # 我们需要 Loc 来做 Pointer Network (指向哪张卡)
                     stream.read(1) # Flag
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     desc = struct.unpack('<I', stream.read(4))[0]
                     
-                    # 尝试找到这张卡在 entities 中的下标 (Pointer)
-                    # 注意：get_snapshot 还没调，所以暂时没有 entities 列表
-                    # 我们先存 Loc 数据，在 get_snapshot 时再匹配
-                    # 这里把 Loc 暂时存在 target_entity_idx 里，稍后转换
+                    # 🌟 [额外修复] 吞掉元素之间的 1 字节定界符
+                    if i < count - 1:
+                        stream.read(1)
+                    
                     self.current_valid_actions.append(
                         GameAction(action_type=16, index=i, target_entity_idx=loc_val, desc_id=desc)
                     )
@@ -797,6 +707,7 @@ class DuelState:
                     rscale = stats[5]
                     base_atk = stats[8]
                     base_def = stats[9]
+                    setcodes = stats[10] # 接收字段集合
                     
                     link_marker = 0
                     # TYPE_LINK 的掩码是 0x4000000
@@ -810,12 +721,13 @@ class DuelState:
                         type_mask=type_mask, race=race, attribute=attr, level=level,
                         base_atk=base_atk, base_def=base_def,
                         lscale=lscale, rscale=rscale, link_marker=link_marker, # 传入新参数
+                        setcodes=setcodes, # 写入实体
                         is_public=(pos & 0x1 or pos & 0x4)
                     ))
                     idx_counter += 1
 
         # --- [核心步骤] 匹配 Action 指针 ---
-        # 这里的魔法是：把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"
+        # 把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"
         final_actions = []
         for act in self.current_valid_actions:
             # 深拷贝一下，因为要修改

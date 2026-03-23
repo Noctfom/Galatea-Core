@@ -81,10 +81,10 @@ except RuntimeError:
 #  tensorboard --logdir=runs    查看训练过程
 
 #  训练示例命令:
-#  python main.py train --dir ./models --batch_size 32768 --mini_batch 1024 --workers 12 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile
+#  python main.py train --dir ./models --batch_size 32768 --mini_batch 1024 --workers 8 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile
 
 #  （例）从第 100 轮存档继续，目标是练到第 5000 轮
-#  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 32768 --mini_batch 1024 --workers 12 --steps 5000 --async_infer --no_compile
+#  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 32768 --mini_batch 1024 --workers 8 --steps 5000 --async_infer --no_compile
 
 #  测试示例命令(每隔 5 局保存一次心声):
 #  python main.py duel --p0 ./models/galatea_iter_100.pth --thought_freq 5 --num 100
