@@ -86,7 +86,7 @@ class AiBot:
         tensor_dict = self.encoder.encode(snap, player_id=snap.global_data.to_play)
         
         with torch.no_grad():
-            gpu_dict = {k: v.unsqueeze(0).to(self.device) for k, v in tensor_dict.items()}
+            gpu_dict = {k: v.to(self.device) for k, v in tensor_dict.items()}
             
             # Logits 现在直接就是 [1, 80] 的动作分数
             logits, value = self.net(gpu_dict) 

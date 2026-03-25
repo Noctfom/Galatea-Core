@@ -38,7 +38,7 @@ UPDATE_TIMESTEPS = 2048 # Batch Size: 攒多少经验升一级
 EPOCHS = 4              # PPO Update Epochs:同一批数据反复榨取几次
 MINIBATCH_SIZE = 128    # Mini-batch: 梯度下降时的切片大小
 CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
-ENTROPY_COEF = 0.01     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
+ENTROPY_COEF = 0.02     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
 MAX_EPISODE_STEPS = 800 # 单局最大步数，防止死循环
 
@@ -114,10 +114,15 @@ class PPOTrainer:
             else:
                 print("ℹ️ [Auto] 不支持 BF16: 回退至 Float16")
 
+        # 探针：看看实例化模型前，显卡到底还有多少空余显存
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            print(f"🖥️ 探针报告 -> 当前显卡可用显存: {free / 1024**3:.2f} GB / {total / 1024**3:.2f} GB")
+
         # 初始化 AI
         self.agent = AiBot(device=self.device, net_config=self.net_config)
         # [新增] 内存布局优化
-        self.agent.net = self.agent.net.to(memory_format=torch.channels_last)
+        #self.agent.net = self.agent.net.to(memory_format=torch.channels_last)
         self.agent.net.train()
 
         # [新增] 编译优化
@@ -344,32 +349,33 @@ class PPOTrainer:
             if not requests:
                 continue
                 
-            # --- 1. 组装压平的 Batch ---
+            # --- 1. 光速解包并恢复张量 ---
             worker_ids = [r[0] for r in requests]
-            # 👇 [击毙幽灵 1] 将 Worker 发来的 numpy 数组转回 Tensor
-            packed_batch = torch.stack([torch.from_numpy(r[1]) for r in requests]).to(self.device, non_blocking=True) # [B, 6435]
-            
-            # --- 2. 在 GPU 上光速切片解包 (保持不变) ---
-            batch_obs = {
-                'global': packed_batch[:, :15],
-                'card_idx': packed_batch[:, 15:115].to(torch.long),
-                'card_race': packed_batch[:, 115:215].to(torch.long),
-                'card_attr': packed_batch[:, 215:315].to(torch.long),
-                'card_setcodes': packed_batch[:, 315:715].to(torch.long).view(-1, 100, 4), 
-                'card_feats': packed_batch[:, 715:6015].view(-1, 100, 53),
-                'padding_mask': packed_batch[:, 6015:6115].to(torch.bool),
-                'act_card_idx': packed_batch[:, 6115:6195].to(torch.long),
-                'act_type': packed_batch[:, 6195:6275].to(torch.long),
-                'act_desc': packed_batch[:, 6275:6355].to(torch.long),
-                'act_mask': packed_batch[:, 6355:6435].to(torch.bool)
-            }
+            batch_obs = {}
+            for k in requests[0][1].keys():
+                #把 np.stack 换成 np.concatenate，并且指定 axis=0
+                stacked = np.concatenate([r[1][k] for r in requests], axis=0)
+                
+                # 按原样恢复成 PyTorch 认识的类型
+                if stacked.dtype == np.bool_:
+                    tensor = torch.from_numpy(stacked).to(torch.bool)
+                elif stacked.dtype == np.float16:
+                    tensor = torch.from_numpy(stacked).to(torch.float32) # 网络计算需要 fp32
+                else:
+                    tensor = torch.from_numpy(stacked).to(torch.long)
+                    
+                batch_obs[k] = tensor.to(self.device, non_blocking=True)
             
             with torch.amp.autocast('cuda', dtype=self.amp_dtype):
                 with torch.no_grad():
                     actions, log_probs, _, values = self.agent.get_action_and_value_from_tensor(batch_obs, None)
             
             # --- 4. 组装回传封包 ---
-            packed_returns = torch.stack([actions.to(torch.float32), log_probs, values.squeeze(-1)], dim=1).cpu()
+            packed_returns = torch.stack([
+                actions.to(torch.float32), 
+                log_probs.to(torch.float32), 
+                values.squeeze(-1).to(torch.float32)
+            ], dim=1).cpu()
             
             for i, wid in enumerate(worker_ids):
                 # 👇 [击毙幽灵 1] 转为 numpy 数组发回给 Worker

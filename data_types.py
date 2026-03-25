@@ -86,3 +86,9 @@ class GameSnapshot:
     # [新增] 当前所有合法的动作列表
     # 如果为空，说明当前不需要/不能操作 (或者在处理效果中)
     valid_actions: List[GameAction] = field(default_factory=list)
+
+    # [新增] 上帝视角：AI 当前剩余的主卡组和额外卡组卡密列表
+    p0_deck_codes: List[int] = field(default_factory=list)
+    p0_extra_codes: List[int] = field(default_factory=list)
+    p1_deck_codes: List[int] = field(default_factory=list)
+    p1_extra_codes: List[int] = field(default_factory=list)

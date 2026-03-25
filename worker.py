@@ -62,7 +62,11 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                 
             if not raw_data: continue
             
-            brain = DuelState()
+            # [上帝视角] 直接读取 Deck 对象的属性
+            p0_m, p0_e = d1.main, d1.extra
+            p1_m, p1_e = d2.main, d2.extra
+            
+            brain = DuelState(p0_m, p0_e, p1_m, p1_e)
             try:
                 msg_queue = MessageParser.parse(raw_data)
             except: continue
@@ -159,28 +163,20 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                             # 🛡️ [终极防爆] 在源头直接将动作索引截断至 99，确保推理和训练全链路安全！
                             tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 99)
                             
-                            # 🟢 [终极架构分流]
                             if req_q is not None and resp_q is not None:
-                                # 模式 A：异步排队模式
-                                # --- 1. [黑科技封包] 将所有 Tensor 压平成 1 个 1D Tensor ---
-                                v_g = tensor_dict['global'].view(-1)
-                                v_i = tensor_dict['card_idx'].to(torch.float32).view(-1)
-                                v_r = tensor_dict['card_race'].to(torch.float32).view(-1)
-                                v_a = tensor_dict['card_attr'].to(torch.float32).view(-1)
-                                v_s = tensor_dict['card_setcodes'].to(torch.float32).view(-1)
-                                v_f = tensor_dict['card_feats'].view(-1)
-                                v_m = tensor_dict['padding_mask'].to(torch.float32).view(-1)
-                                
-                                # 👇 [击毙幽灵 2：限速器] 强制限制索引最大为 99，防止 GPU 越界崩溃！
-                                v_act_idx = tensor_dict['act_card_idx'].to(torch.float32).view(-1)
-                                v_act_type = tensor_dict['act_type'].to(torch.float32).view(-1)
-                                v_act_desc = tensor_dict['act_desc'].to(torch.float32).view(-1)
-                                v_act_mask = tensor_dict['act_mask'].to(torch.float32).view(-1)
-                                
-                                packed_req = torch.cat([v_g, v_i, v_r, v_a, v_s, v_f, v_m, v_act_idx, v_act_type, v_act_desc, v_act_mask]).cpu()
-                                
-                                # 👇 [击毙幽灵 1：Numpy 装甲] 转为 numpy 数组发送，彻底绕过 Windows 内存泄漏！
-                                req_q.put((worker_id, packed_req.numpy()))
+                                # 🌟 [防爆降维：强类型 Numpy 字典]
+                                # 彻底消灭 1D 拼接带来的 float32 内存膨胀！
+                                numpy_dict = {}
+                                for k, v in tensor_dict.items():
+                                    if 'req' in k or 'mask' in k:
+                                        numpy_dict[k] = v.numpy().astype(np.bool_) # 压缩 4 倍内存！
+                                    elif 'feats' in k or 'num' in k or 'global' in k:
+                                        numpy_dict[k] = v.numpy().astype(np.float16) # 半精度浮点
+                                    else:
+                                        # 改成 int32，防止未来词表扩容时 Hash ID 变成负数
+                                        numpy_dict[k] = v.numpy().astype(np.int32)
+                                        
+                                req_q.put((worker_id, numpy_dict))
                                 
                                 # --- 2. [光速解包] ---
                                 # 👇 [击毙幽灵 1：Numpy 解除] 收到 numpy 数组后还原为 Tensor
@@ -332,7 +328,10 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                         # 1. 处理 Obs
                         for k, v in traj[t]['obs'].items():
                             if k not in columns['obs']: columns['obs'][k] = []
-                            if v.is_floating_point():
+                            # [内存保护] 绝对保留布尔值，防止膨胀
+                            if v.dtype == torch.bool:
+                                columns['obs'][k].append(v)
+                            elif v.is_floating_point():
                                 columns['obs'][k].append(v.half())
                             else:
                                 columns['obs'][k].append(v.to(dtype=torch.int32))

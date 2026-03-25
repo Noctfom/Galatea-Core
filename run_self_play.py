@@ -88,8 +88,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
         # print(f"🕵️ [开局侦探] Raw Data Hex: {raw_data[:20].hex(' ')}...") # 可选调试
         msg_queue = MessageParser.parse(raw_data)
         
-        brain_0 = DuelState()
-        brain_1 = DuelState()
+        brain_0 = DuelState(deck1.main, deck1.extra, deck2.main, deck2.extra)
+        brain_1 = DuelState(deck1.main, deck1.extra, deck2.main, deck2.extra)
 
         encoder = GalateaEncoder()
         

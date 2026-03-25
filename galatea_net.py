@@ -1,185 +1,173 @@
 # ==================================================================================
 #  Galatea Network Architecture (Transformer-based)
-#  Project Galatea V2.1 - The Brain
+#  Project Galatea V2.2 - The Semantic Brain
 # ==================================================================================
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from feature_encoder import GalateaEncoder as FeatureEncoder
 
 class GalateaNet(nn.Module):
     def __init__(self, config):
-        """
-        初始化神经网络
-        :param config: 配置字典，包含 d_model, n_heads 等参数
-        """
         super().__init__()
-        self.d_model = config.get('d_model', 256)
-        self.n_heads = config.get('n_heads', 4)
-        self.n_layers = config.get('n_layers', 2)
-        self.vocab_size = config.get('vocab_size', 20000) # 卡片种类数
+        self.d_model = config.get('d_model', 512)
+        self.n_heads = config.get('n_heads', 8)
+        self.n_layers = config.get('n_layers', 6)
+        self.vocab_size = config.get('vocab_size', 20000) 
         
-        # --- 1. Embedding Layers (感知层) ---
-        # A. 卡片 ID 编码 (0=Padding, 1=Unknown, 2...=Real)
+        # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
-        
-        # B. 数值特征映射 (Owner, Loc, Atk, Def...) -> d_model
-        # feature_encoder.py 中 card_feat_dim = 53
         self.feat_proj = nn.Linear(53, self.d_model)
-
         self.race_embed = nn.Embedding(30, self.d_model, padding_idx=0)
         self.attr_embed = nn.Embedding(10, self.d_model, padding_idx=0)
-        self.setcode_embed = nn.Embedding(4096, self.d_model, padding_idx=0) # 字段词表大小 4096
+        self.setcode_embed = nn.Embedding(4096, self.d_model, padding_idx=0) 
         
-        # C. 全局特征映射 -> d_model
-        # feature_encoder.py 中 global_dim = 15
         self.global_proj = nn.Linear(15, self.d_model)
 
-        # --- 2. Transformer Encoder (推理层) ---
+        # ==========================================================
+        # 🌟 2. 语义解析皮层 (Semantic Knowledge Modules)
+        # ==========================================================
+        self.d_sem = 128 # 语义特征在融合前所在的子空间维度
+        
+        # A. 主动作与 Hash (词表 4000，足以容纳目前 3415 个特殊效果)
+        self.sem_cat_embed = nn.Embedding(4000, self.d_sem, padding_idx=0)
+        # B. 发动条件与限制 (128维多热向量直接映射)
+        self.sem_req_proj = nn.Linear(128, self.d_sem)
+        # C. 关联字段 (与基础 setcode 隔离，专用于效果对象)
+        self.sem_setcode_embed = nn.Embedding(4096, self.d_sem, padding_idx=0)
+        # D. 魔法数字参数 (4个脱敏数字的提取)
+        self.sem_num_proj = nn.Linear(4, self.d_sem)
+
+        self.final_slot_norm = nn.LayerNorm(self.d_model)
+        
+        # E. 最终融合成 d_model 宽度的降维打击转换器
+        self.sem_fusion_proj = nn.Sequential(
+            nn.Linear(self.d_sem, self.d_model),
+            nn.LayerNorm(self.d_model),
+            nn.ReLU()
+        )
+        # ==========================================================
+
+        # --- 3. Transformer Encoder (逻辑推演引擎) ---
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.d_model, 
-            nhead=self.n_heads, 
-            dim_feedforward=self.d_model * 4, 
-            batch_first=True, 
-            dropout=0.1
+            d_model=self.d_model, nhead=self.n_heads, 
+            dim_feedforward=self.d_model * 4, batch_first=True, dropout=0.1
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.n_layers)
 
-        # --- 3. 动作感知层 (Action Head 新增) ---
-        # 动作类型的 Embedding (比如 攻击=1, 发动=5...)
-        self.act_type_embed = nn.Embedding(256, self.d_model) # 假设类型ID不超过256
-        # 描述文字的 Embedding
-        self.desc_embed = nn.Embedding(1024, self.d_model) # Hash 后的 Desc ID
+        # --- 4. Action Head (动作评估中枢) ---
+        self.act_type_embed = nn.Embedding(256, self.d_model) 
+        self.desc_embed = nn.Embedding(1024, self.d_model) 
 
-        # 最终打分网络: 输入是融合后的向量，输出 1 个分数
         self.policy_head = nn.Sequential(
-            nn.Linear(self.d_model, 128),
+            nn.Linear(self.d_model, 256),
             nn.ReLU(),
-            nn.Linear(128, 1) # Logit
+            nn.Linear(256, 1) 
         )
 
-        # 价值网络 (保留)
         self.value_head = nn.Sequential(
-            nn.Linear(self.d_model, 128),
+            nn.Linear(self.d_model, 256),
             nn.ReLU(),
-            nn.Linear(128, 1),
+            nn.Linear(256, 1),
             nn.Tanh()
         )
 
-    def forward(self, batch_dict):
-        """
-        前向传播
-        :param batch_dict: feature_encoder 输出的字典
-        :return: 
-            logits: (Batch, SeqLen) 每张卡被选中的概率 Logit
-            value: (Batch, 1) 当前局面评分
-        """
-        # [Batch, Seq]
-        card_idx = batch_dict['card_idx'] 
-        # [Batch, Seq, Feat]
-        card_feats = batch_dict['card_feats']
-        # [Batch, Seq] 卡片种族和属性
-        card_race = batch_dict['card_race']
-        card_attr = batch_dict['card_attr'] 
-        # 取出字段 [B, S, 4]
-        card_setcodes = batch_dict['card_setcodes'] 
-        # [Batch, Global]
-        global_vec = batch_dict['global']
-        # [Batch, Seq] (Bool, 1=Real, 0=Pad)
-        padding_mask = batch_dict['padding_mask'] 
+    def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr):
+        cat_v = self.sem_cat_embed(sem_cat).sum(dim=-2)
+        req_v = self.sem_req_proj(sem_req.to(torch.float32))
+        sc_v = self.sem_setcode_embed(sem_sc).sum(dim=-2)
+        num_v = self.sem_num_proj(sem_num)
         
-        # --- 1. Embedding ---
-        # 将 ID 转换为向量
-        x_code = self.card_embed(card_idx) # (B, S, D)
-        # 将数值特征投影为向量
-        x_feat = self.feat_proj(card_feats) # (B, S, D)
-        # 激活种族和属性潜能
-        x_race = self.race_embed(card_race)
-        x_attr = self.attr_embed(card_attr)
+        # 1. 基础语义聚合 (128维)
+        sem_base = cat_v + req_v + sc_v + num_v # [B, S, 槽数, 128]
         
-        # 字段特征提取：因为有 4 个字段，我们把它们 Embed 后求和 (或者求平均)
-        # shape 变化: [B, S, 4] -> [B, S, 4, D] -> sum(-2) -> [B, S, D]
-        x_setcode = self.setcode_embed(card_setcodes).sum(dim=-2)
+        # 2. 升维到 512 维，准备与物理特征接轨
+        sem_base_512 = self.sem_fusion_proj(sem_base) # [B, S, 槽数, 512]
+        
+        # 3. 提取物理共鸣特征 (已经是 512 维了！)
+        ref_v = self.card_embed(sem_ref).sum(dim=-2)
+        race_v = self.race_embed(sem_race).sum(dim=-2)
+        attr_v = self.attr_embed(sem_attr).sum(dim=-2)
+        
+        # 4. 512维空间的终极融合
+        slot_v = sem_base_512 + ref_v + race_v + attr_v
+        
+        # 将所有效果槽叠加
+        card_sem_v = slot_v.sum(dim=-2) 
+        return self.final_slot_norm(card_sem_v)
 
-        # 终极特征融合 (四大特征加在一起)
-        x = x_code + x_feat + x_race + x_attr + x_setcode
+    def forward(self, batch_dict):
+        # 物理基础感知
+        x_code = self.card_embed(batch_dict['card_idx'])
+        x_feat = self.feat_proj(batch_dict['card_feats'])
+        x_race = self.race_embed(batch_dict['card_race'])
+        x_attr = self.attr_embed(batch_dict['card_attr'])
+        x_setcode = self.setcode_embed(batch_dict['card_setcodes']).sum(dim=-2)
+
+        # 🌟 接入语义大脑！
+        if 'sem_category' in batch_dict:
+            x_sem = self.process_semantics(
+                batch_dict['sem_category'], batch_dict['sem_req'], 
+                batch_dict['sem_setcode'], batch_dict['sem_number'],
+                batch_dict['sem_ref'], batch_dict['sem_race'], batch_dict['sem_attr'] # 🌟 补上这行！
+            )
+        else:
+            x_sem = 0
+
+        # 全息物理与语义的大一统！
+        x = x_code + x_feat + x_race + x_attr + x_setcode + x_sem
         
-        # --- 2. Transformer Reasoning ---
-        # PyTorch Transformer 的 src_key_padding_mask 需要 True 为 Padding (忽略)
-        # 我们的 mask 是 1=Valid, 0=Padding，所以要取反 (~mask)
-        # 注意：padding_mask 是 BoolTensor，需确保 device 一致
-        src_mask = ~padding_mask 
-        
-        # (B, S, D) -> 经过 Transformer 后的每张卡的深层语义向量
+        # --- Transformer 局势推演 ---
+        src_mask = ~batch_dict['padding_mask'] 
         memory = self.transformer(x, src_key_padding_mask=src_mask)
         
-        # --- 3. Feature Aggregation (Global + Local) ---
-        # 将全局特征投影
-        g_embed = self.global_proj(global_vec).unsqueeze(1) # (B, 1, D)
-        
-        # 对场上所有卡做 Max Pooling，提取“最强的特征” (例如场上攻最高的怪)
-        # 必须把 Padding 的位置 Mask 掉，防止取出 0
+        # --- 全局局面掌控 ---
+        g_embed = self.global_proj(batch_dict['global']).unsqueeze(1) 
         masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -1e9)
-        pooled = torch.max(masked_memory, dim=1)[0].unsqueeze(1) # (B, 1, D)
+        pooled = torch.max(masked_memory, dim=1)[0].unsqueeze(1) 
         
-        # 融合 Global + Pooled Local
-        # v_input: (B, 1, D)
-        v_input = g_embed + pooled
-        
-        # --- 4. Value Prediction ---
-        value = self.value_head(v_input.squeeze(1)) # (B, 1)
+        # --- 🌟 上帝视角的语义化 ---
+        if 'deck_idx' in batch_dict:
+            e_d_code = self.card_embed(batch_dict['deck_idx'])
+            e_d_race = self.race_embed(batch_dict['deck_race'])
+            e_d_attr = self.attr_embed(batch_dict['deck_attr'])
+            e_d_setcode = self.setcode_embed(batch_dict['deck_setcodes']).sum(dim=-2)
+            
+            if 'd_sem_category' in batch_dict:
+                d_sem = self.process_semantics(
+                    batch_dict['d_sem_category'], batch_dict['d_sem_req'],
+                    batch_dict['d_sem_setcode'], batch_dict['d_sem_number'],
+                    batch_dict['d_sem_ref'], batch_dict['d_sem_race'], batch_dict['d_sem_attr'] # 🌟 补上这行！
+                )
+            else:
+                d_sem = 0
+                
+            x_deck = e_d_code + e_d_race + e_d_attr + e_d_setcode + d_sem # 连卡组都知道自己有什么效果了！
+            
+            d_mask_f = batch_dict['deck_mask'].float().unsqueeze(-1)
+            x_deck_sum = (x_deck * d_mask_f).sum(dim=1)
+            d_count = d_mask_f.sum(dim=1).clamp(min=1e-5) 
+            deck_pooled = (x_deck_sum / d_count).unsqueeze(1) 
+        else:
+            deck_pooled = 0
+            
+        # 大一统评分底蕴
+        v_input = g_embed + pooled + deck_pooled
+        value = self.value_head(v_input.squeeze(1)) 
 
-        # === [NEW] Action Head (动作打分) ===
-        # 1. 获取动作数据
-        act_card_idx = batch_dict['act_card_idx'] # [B, 80]
-        act_type = batch_dict['act_type']         # [B, 80]
-        act_desc = batch_dict['act_desc']         # [B, 80]
-        act_mask = batch_dict['act_mask']         # [B, 80]
-
-        # 2. "抓取" 目标卡片的特征
-        # 我们知道动作指向了第几张卡 (act_card_idx)
-        # 我们要从 memory (卡片特征库) 里把那张卡的向量拿出来
-        # memory: [B, 100, D], act_card_idx: [B, 80]
+        # === Action Head (因果决策) ===
+        act_card_idx = batch_dict['act_card_idx'] 
+        act_mask = batch_dict['act_mask']         
         
-        batch_size, max_acts = act_card_idx.shape
-        # 扩展索引维度以匹配 gather 的要求: [B, 80, D]
         idx_expanded = act_card_idx.unsqueeze(-1).expand(-1, -1, self.d_model)
-        
-        # Gather: 这一步实现了 "绑定"
-        target_card_vecs = torch.gather(memory, 1, idx_expanded) # [B, 80, D]
+        target_card_vecs = torch.gather(memory, 1, idx_expanded) 
 
-        # 3. 获取动作自身的特征
-        type_vecs = self.act_type_embed(act_type) # [B, 80, D]
-        desc_vecs = self.desc_embed(act_desc)     # [B, 80, D]
+        type_vecs = self.act_type_embed(batch_dict['act_type']) 
+        desc_vecs = self.desc_embed(batch_dict['act_desc'])     
 
-        # 4. 特征融合：卡片 + 类型 + 描述
-        # 现在的 action_vec 包含了 "是对青眼白龙(Target) 做出的 攻击(Type)" 这一完整信息
+        # “对此卡，做此动作” 结合 “整体战局底蕴”
         action_vecs = target_card_vecs + type_vecs + desc_vecs + v_input
 
-        # 5. 打分
-        logits = self.policy_head(action_vecs).squeeze(-1) # [B, 80]
-
-        # 6. Mask 掉无效的动作槽位 (Padding)
+        logits = self.policy_head(action_vecs).squeeze(-1) 
         logits = logits.masked_fill(~act_mask, -1e9)
 
         return logits, value
-
-if __name__ == "__main__":
-    # 简单的冒烟测试 (Smoke Test)
-    print("🚀 测试 GalateaNet...")
-    config = {'vocab_size': 20000, 'd_model': 256}
-    net = GalateaNet(config)
-    
-    # 伪造输入数据 (Batch=2, Seq=100)
-    fake_batch = {
-        'card_idx': torch.randint(0, 20000, (2, 100)),
-        'card_feats': torch.randn(2, 100, 7),
-        'global': torch.randn(2, 15),
-        'padding_mask': torch.ones(2, 100).bool() # 全部有效
-    }
-    
-    logits, val = net(fake_batch)
-    print(f"✅ Logits Shape: {logits.shape} (Expected: [2, 100])")
-    print(f"✅ Value Shape: {val.shape} (Expected: [2, 1])")
-    print("🎉 网络结构验证通过！")

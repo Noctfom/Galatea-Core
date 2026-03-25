@@ -64,7 +64,7 @@ except RuntimeError:
 # 6. mini_batch (默认 512) -> [训练批量/GPU更新大小]
 #    - 含义: 每次模型更新时使用的样本数量。
 #    - 类比: AI 在每次学习时看的经验数量。
-#    - 调整建议: 越大更新越快，但可能不稳定。通常设为 512 或 1024。
+#    - 调整建议: 越大更新越快，占用显存更大，但可能不稳定。通常设为 512 或 1024。
 # 7. workers (默认 4) -> [采集进程数/数据工人数量]针对 CPU 多线程采集
 #    - 含义: 同时运行的环境采集进程数量。
 #    - 类比: AI 有几个"实习生"在帮它收集对局经验。
@@ -76,15 +76,15 @@ except RuntimeError:
 # 9. async_infer (默认 False) -> [异步推断/独立推理服务器]
 #    - 含义: 是否启用独立的推断服务器来处理模型推理请求。
 #    - 类比: AI 是否有一个专门的"顾问"在负责分析局面，实习生们只负责收集数据。
-#    - 调整建议: 启用后可以大幅节省采集进程的显存占用，并且在GPU环境下能显著提升采集速度。建议有条件的用户启用。
+#    - 调整建议: 启用后可以大幅节省采集进程的显存占用，并且在GPU环境下能显著提升采集速度。建议启用。
 
 #  tensorboard --logdir=runs    查看训练过程
 
 #  训练示例命令:
-#  python main.py train --dir ./models --batch_size 32768 --mini_batch 1024 --workers 8 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile
+#  python main.py train --dir ./models --batch_size 32768 --mini_batch 512 --workers 8 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile
 
 #  （例）从第 100 轮存档继续，目标是练到第 5000 轮
-#  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 32768 --mini_batch 1024 --workers 8 --steps 5000 --async_infer --no_compile
+#  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 32768 --mini_batch 512 --workers 8 --steps 5000 --async_infer --no_compile
 
 #  测试示例命令(每隔 5 局保存一次心声):
 #  python main.py duel --p0 ./models/galatea_iter_100.pth --thought_freq 5 --num 100

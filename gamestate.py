@@ -350,8 +350,25 @@ class MessageParser:
 # ==================================================================================
 
 class DuelState:
-    def __init__(self):
-        self.reset()
+    # [新增参数] 传入初始的主卡组和额外卡组
+    def __init__(self, p0_main=None, p0_extra=None, p1_main=None, p1_extra=None):
+        self.entities = {}
+        self.current_valid_actions = []
+        self.turn_player = 0
+        
+        # 🌟 初始化双边记牌器
+        self.p0_deck = list(p0_main) if p0_main else []
+        self.p0_extra = list(p0_extra) if p0_extra else []
+        self.p1_deck = list(p1_main) if p1_main else []
+        self.p1_extra = list(p1_extra) if p1_extra else []
+        
+        # 初始化基础状态
+        self.turn = 0
+        self.phase = 0
+        self.my_lp = 8000
+        self.op_lp = 8000
+        self.active_player = 0
+        self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
 
     def reset(self):
         self.turn = 0
@@ -381,6 +398,26 @@ class DuelState:
                 if new_c in [0, 1] and new_l != 0:
                     self.field_map[new_c][new_l][new_s] = {'code': code, 'pos': new_pos, 'owner': new_c}
 
+                # 🌟 [上帝视角记牌器] 跟踪卡片进出卡组/额外
+                # 剥离可能存在的异画/密码掩码，还原真实卡密
+                pure_code = code & 0x7FFFFFFF
+                if pure_code != 0:
+                    # --- 主卡组变动 ---
+                    if old_l == Zone.DECK and new_l != Zone.DECK:
+                        target_deck = self.p0_deck if old_c == 0 else self.p1_deck
+                        if pure_code in target_deck: target_deck.remove(pure_code)
+                    elif new_l == Zone.DECK and old_l != Zone.DECK:
+                        target_deck = self.p0_deck if new_c == 0 else self.p1_deck
+                        target_deck.append(pure_code)
+                    
+                    # --- 额外卡组变动 ---
+                    if old_l == Zone.EXTRA and new_l != Zone.EXTRA:
+                        target_extra = self.p0_extra if old_c == 0 else self.p1_extra
+                        if pure_code in target_extra: target_extra.remove(pure_code)
+                    elif new_l == Zone.EXTRA and old_l != Zone.EXTRA:
+                        target_extra = self.p0_extra if new_c == 0 else self.p1_extra
+                        target_extra.append(pure_code)
+
             elif msg_type == 53: # POS_CHANGE
                 code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
@@ -395,6 +432,12 @@ class DuelState:
                     seq = 0
                     while seq in self.field_map[p][Zone.HAND]: seq += 1
                     self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p}
+                    
+                    # 🌟 [上帝视角记牌器] 抽卡等同于离开主卡组
+                    pure_code = code & 0x7FFFFFFF
+                    target_deck = self.p0_deck if p == 0 else self.p1_deck
+                    if pure_code in target_deck:
+                        target_deck.remove(pure_code)
 
             elif msg_type in [91, 92, 94]: # 伤害 / 回复 / LP直接更新
                 # 🌟 [录像修复 A] 加上 '<' 强制对齐，并监听 91 和 92！
@@ -748,5 +791,10 @@ class DuelState:
         return GameSnapshot(
             global_data=global_feat,
             entities=entities,
-            valid_actions=final_actions # [NEW] 填充动作列表
+            valid_actions=final_actions,
+            # 装载记牌器的拷贝，防止引用污染
+            p0_deck_codes=self.p0_deck.copy(),
+            p0_extra_codes=self.p0_extra.copy(),
+            p1_deck_codes=self.p1_deck.copy(), 
+            p1_extra_codes=self.p1_extra.copy() # 追加
         )
