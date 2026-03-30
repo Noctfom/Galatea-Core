@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import os
 import random
+import struct
 # 引入桥接后的 FeatureEncoder
 try:
     from feature_encoder import GalateaEncoder as FeatureEncoder
@@ -112,7 +113,7 @@ class AiBot:
         # 10: Battle, 11: Idle (召唤/发动), 16: Chain
         if msg_type in [10, 11, 16]:
             if msg_type == 16:
-                # 🌟 核心修复：必须加上 signed=True，否则 AI 选 -1 会直接抛出异常！
+                # 核心修复：必须加上 signed=True，否则 AI 选 -1 会直接抛出异常！
                 return int(action.index).to_bytes(4, byteorder='little', signed=True)
             
             val = (action.index << 16) | action.action_type
@@ -124,6 +125,19 @@ class AiBot:
                 return int(-1).to_bytes(4, byteorder='little', signed=True)
             return bytes([1, action.index])
         
+        # =================================================================
+        # [阶段一追加] 宣言消息的精确打包 (严格遵照 C++ 源码)
+        # =================================================================
+        elif msg_type in [140, 141]:
+            # 140/141: 返回掩码位
+            return struct.pack('<I', action.desc_id)
+        elif msg_type == 142:
+            # 142: 返回真实卡密
+            return struct.pack('<I', action.desc_id)
+        elif msg_type == 143:
+            # 143: 必须返回数组索引！(陷阱)
+            return struct.pack('<I', action.index)
+
         # 3. 其他单字节交互 (位置选择等)
         else:
             val = action.index

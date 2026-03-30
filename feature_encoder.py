@@ -6,7 +6,7 @@ import torch
 import numpy as np
 from data_types import GameSnapshot
 from game_constants import Zone
-from semantic_kb import SemanticKnowledgeBase  # 🌟 导入语义库
+from semantic_kb import SemanticKnowledgeBase  # 导入语义库
 
 # --- 配置参数 ---
 MAX_CARDS = 100          
@@ -24,7 +24,7 @@ class GalateaEncoder:
         self.global_dim = 15
         self.card_feat_dim = 7
         
-        # 🌟 单例模式：防止每开一局卡顿，所有环境共享一个缓存！
+        # 单例模式：防止每开一局卡顿，所有环境共享一个缓存！
         global _GLOBAL_SEM_KB
         if _GLOBAL_SEM_KB is None:
             _GLOBAL_SEM_KB = SemanticKnowledgeBase('knowledge_base.json')
@@ -35,26 +35,49 @@ class GalateaEncoder:
         return (code % (self.vocab_size - self.reserved_ids)) + self.reserved_ids
     
     def encode_actions(self, valid_actions, snapshot):
+        MAX_MATERIALS = 5 # 最多融合同调 5 张素材
         act_card_idxs, act_types, act_descs, masks = [], [], [], []
+        act_races, act_attrs, act_codes = [], [], [] 
+
         for act in valid_actions[:MAX_ACTIONS]:
-            t_idx = act.target_entity_idx if act.target_entity_idx >= 0 else 0
-            act_card_idxs.append(t_idx)
+            # 数组化目标特征（支持多张卡）
+            if hasattr(act, 'macro_targets') and act.macro_targets:
+                t_idxs = [t for t in act.macro_targets if t >= 0][:MAX_MATERIALS]
+                t_idxs.extend([0] * (MAX_MATERIALS - len(t_idxs))) # 不足5张补0
+            else:
+                t_idx = act.target_entity_idx if act.target_entity_idx >= 0 else 0
+                t_idxs = [t_idx] + [0] * (MAX_MATERIALS - 1)
+                
+            act_card_idxs.append(t_idxs) # 加入长度为 5 的列表
+            
             act_types.append(act.action_type)
             act_descs.append(act.desc_id % 1024)
             masks.append(True)
             
+            r_val, a_val, c_val = 0, 0, 0
+            if act.action_type == 140: r_val = (act.desc_id.bit_length() - 1) % 30
+            elif act.action_type == 141: a_val = (act.desc_id.bit_length() - 1) % 10
+            elif act.action_type == 142: c_val = self._hash_code(act.desc_id)
+                
+            act_races.append(r_val); act_attrs.append(a_val); act_codes.append(c_val)
+            
         pad_len = MAX_ACTIONS - len(act_card_idxs)
         if pad_len > 0:
-            act_card_idxs.extend([0] * pad_len)
+            act_card_idxs.extend([[0]*MAX_MATERIALS] * pad_len) # 补二维
             act_types.extend([0] * pad_len)
             act_descs.extend([0] * pad_len)
             masks.extend([False] * pad_len)
+            act_races.extend([0] * pad_len); act_attrs.extend([0] * pad_len); act_codes.extend([0] * pad_len)
             
         return {
+            # 输出形状变为 [1, 80, 5]
             'act_card_idx': torch.tensor(act_card_idxs, dtype=torch.long).unsqueeze(0),
             'act_type': torch.tensor(act_types, dtype=torch.long).unsqueeze(0),
             'act_desc': torch.tensor(act_descs, dtype=torch.long).unsqueeze(0),
-            'act_mask': torch.tensor(masks, dtype=torch.bool).unsqueeze(0)
+            'act_mask': torch.tensor(masks, dtype=torch.bool).unsqueeze(0),
+            'act_race': torch.tensor(act_races, dtype=torch.long).unsqueeze(0),
+            'act_attr': torch.tensor(act_attrs, dtype=torch.long).unsqueeze(0),
+            'act_code': torch.tensor(act_codes, dtype=torch.long).unsqueeze(0)
         }
 
     def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:
@@ -72,7 +95,7 @@ class GalateaEncoder:
         
         card_indices, card_feats, card_races, card_attrs, card_setcodes, masks = [], [], [], [], [], []
         
-        # 🌟 场上实体的语义特征容器
+        # 场上实体的语义特征容器
         sem_cats, sem_reqs, sem_scs, sem_nums = [], [], [], []
         sem_refs, sem_races, sem_attrs = [], [], []
         
@@ -101,7 +124,7 @@ class GalateaEncoder:
                 raw_sc = e.setcodes if isinstance(e.setcodes, (list, tuple)) else [e.setcodes]
                 sc_hashed = [(s % 4096) for s in (list(raw_sc) + [0]*4)[:4]]
                 
-                # 🌟 查询语义库
+                # 查询语义库
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(e.code)
             else:
                 c_idx, r_idx, a_idx, sc_hashed = UNK_CODE_IDX, 0, 0, [0, 0, 0, 0]
@@ -138,7 +161,7 @@ class GalateaEncoder:
         my_deck = (snapshot.p0_deck_codes + snapshot.p0_extra_codes) if player_id == 0 else (snapshot.p1_deck_codes + snapshot.p1_extra_codes)
 
         deck_idx, deck_race, deck_attr, deck_setcodes, deck_masks = [], [], [], [], []
-        # 🌟 卡组实体的语义特征容器
+        # 卡组实体的语义特征容器
         d_sem_cats, d_sem_reqs, d_sem_scs, d_sem_nums = [], [], [], []
         d_sem_refs, d_sem_races, d_sem_attrs = [], [], []
 
@@ -157,7 +180,7 @@ class GalateaEncoder:
             deck_idx.append(self._hash_code(code))
             deck_masks.append(True)
             
-            # 🌟 给卡组里的卡也装上语义 (带大一统特征)
+            # 给卡组里的卡也装上语义 (带大一统特征)
             dc_out, dr_out, ds_out, dn_out, dref_out, drace_out, dattr_out = self.sem_kb.get_card_semantics(code)
             d_sem_cats.append(dc_out); d_sem_reqs.append(dr_out)
             d_sem_scs.append(ds_out); d_sem_nums.append(dn_out)
@@ -195,7 +218,7 @@ class GalateaEncoder:
             'card_feats': torch.tensor(card_feats, dtype=torch.float32).unsqueeze(0),
             'padding_mask': torch.tensor(masks, dtype=torch.bool).unsqueeze(0),
             
-            # 🌟 挂载场上实体的语义张量 [Batch, 100, 4, ...]
+            # 挂载场上实体的语义张量 [Batch, 100, 4, ...]
             'sem_category': torch.from_numpy(np.array(sem_cats)).unsqueeze(0),
             'sem_req': torch.from_numpy(np.array(sem_reqs)).unsqueeze(0),
             'sem_setcode': torch.from_numpy(np.array(sem_scs)).unsqueeze(0),
@@ -210,7 +233,7 @@ class GalateaEncoder:
             'deck_setcodes': torch.tensor(deck_setcodes, dtype=torch.long).unsqueeze(0),
             'deck_mask': torch.tensor(deck_masks, dtype=torch.bool).unsqueeze(0),
             
-            # 🌟 挂载上帝视角的语义张量 [Batch, 75, 4, ...]
+            # 挂载上帝视角的语义张量 [Batch, 75, 4, ...]
             'd_sem_category': torch.from_numpy(np.array(d_sem_cats)).unsqueeze(0),
             'd_sem_req': torch.from_numpy(np.array(d_sem_reqs)).unsqueeze(0),
             'd_sem_setcode': torch.from_numpy(np.array(d_sem_scs)).unsqueeze(0),

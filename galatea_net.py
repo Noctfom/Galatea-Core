@@ -57,9 +57,12 @@ class GalateaNet(nn.Module):
         # --- 4. Action Head (动作评估中枢) ---
         self.act_type_embed = nn.Embedding(256, self.d_model) 
         self.desc_embed = nn.Embedding(1024, self.d_model) 
+        
+        self.intent_proj = nn.Linear(self.d_model, self.d_model)
+        self.option_proj = nn.Linear(self.d_model, self.d_model)
 
         self.policy_head = nn.Sequential(
-            nn.Linear(self.d_model, 256),
+            nn.Linear(self.d_model * 2, 256), # 双塔拼接，维度翻倍
             nn.ReLU(),
             nn.Linear(256, 1) 
         )
@@ -72,7 +75,7 @@ class GalateaNet(nn.Module):
         )
 
     def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr):
-        # 🌟 核心修复：将 int16 (Short) 强转为 long()，满足 PyTorch Embedding 的要求！
+        # 核心修复：将 int16 (Short) 强转为 long()，满足 PyTorch Embedding 的要求
         cat_v = self.sem_cat_embed(sem_cat.long()).sum(dim=-2)
         req_v = self.sem_req_proj(sem_req.to(torch.float32))
         sc_v = self.sem_setcode_embed(sem_sc.long()).sum(dim=-2)
@@ -106,7 +109,7 @@ class GalateaNet(nn.Module):
         x_attr = self.attr_embed(batch_dict['card_attr'])
         x_setcode = self.setcode_embed(batch_dict['card_setcodes']).sum(dim=-2)
 
-        # 🌟 接入语义大脑！
+        # 接入语义大脑！
         if 'sem_category' in batch_dict:
             x_sem = self.process_semantics(
                 batch_dict['sem_category'], batch_dict['sem_req'], 
@@ -128,7 +131,7 @@ class GalateaNet(nn.Module):
         masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -1e9)
         pooled = torch.max(masked_memory, dim=1)[0].unsqueeze(1) 
         
-        # --- 🌟 上帝视角的语义化 ---
+        # --- 上帝视角的语义化 ---
         if 'deck_idx' in batch_dict:
             e_d_code = self.card_embed(batch_dict['deck_idx'])
             e_d_race = self.race_embed(batch_dict['deck_race'])
@@ -158,19 +161,36 @@ class GalateaNet(nn.Module):
         value = self.value_head(v_input.squeeze(1)) 
 
         # === Action Head (因果决策) ===
-        act_card_idx = batch_dict['act_card_idx'] 
-        act_mask = batch_dict['act_mask']         
+        act_card_idx = batch_dict['act_card_idx'] # 新形状: [B, 80, 5]
+        act_mask = batch_dict['act_mask']         # 形状: [B, 80]
         
-        idx_expanded = act_card_idx.unsqueeze(-1).expand(-1, -1, self.d_model)
-        target_card_vecs = torch.gather(memory, 1, idx_expanded) 
+        # 把 5 张卡的 512维特征全部扫出来
+        idx_expanded = act_card_idx.unsqueeze(-1).expand(-1, -1, -1, self.d_model) # [B, 80, 5, 512]
+        memory_expanded = memory.unsqueeze(1).expand(-1, act_card_idx.shape[1], -1, -1) # [B, 80, 100, 512]
+        gathered_vecs = torch.gather(memory_expanded, 2, idx_expanded) # [B, 80, 5, 512]
+        
+        # 降维聚合 (Sum Pooling)：不管几张卡，全部融合成1个组合底蕴
+        target_card_vecs = gathered_vecs.sum(dim=2) # 压扁为 [B, 80, 512]
 
         type_vecs = self.act_type_embed(batch_dict['act_type']) 
         desc_vecs = self.desc_embed(batch_dict['act_desc'])     
+        
+        act_race_vecs = self.race_embed(batch_dict['act_race'])
+        act_attr_vecs = self.attr_embed(batch_dict['act_attr'])
+        act_code_vecs = self.card_embed(batch_dict['act_code'])
 
-        # “对此卡，做此动作” 结合 “整体战局底蕴”
-        action_vecs = target_card_vecs + type_vecs + desc_vecs + v_input
-
-        logits = self.policy_head(action_vecs).squeeze(-1) 
+        # 终极双塔匹配机制 (Dual-Tower Matching)
+        # 1. 意图塔 (Intent)：全局底蕴决定了ai想干什么
+        intent_vec = self.intent_proj(v_input) 
+        intent_vec = intent_vec.expand(-1, act_mask.shape[1], -1) 
+        
+        # 2. 选项塔 (Option)：把目标卡片、类型、隐藏语义全部融合
+        raw_option = target_card_vecs + type_vecs + desc_vecs + act_race_vecs + act_attr_vecs + act_code_vecs
+        option_vec = self.option_proj(raw_option)
+        
+        # 3. 交汇：意图与选项碰撞
+        combined_vecs = torch.cat([intent_vec, option_vec], dim=-1)
+        logits = self.policy_head(combined_vecs).squeeze(-1) 
         logits = logits.masked_fill(~act_mask, -1e9)
 
         return logits, value

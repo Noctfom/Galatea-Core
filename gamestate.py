@@ -117,7 +117,7 @@ class MessageParser:
                 count = struct.unpack('B', b)[0]
                 stream.read(10); length += 10 # Spe, forced, h1, h2
                 
-                # 🌟 [额外修复] 元素之间有 1 个字节的定界符 (共 count-1 个)
+                # [额外修复] 元素之间有 1 个字节的定界符 (共 count-1 个)
                 extra_bytes = max(0, count - 1)
                 stream.read(count * 13 + extra_bytes); length += count * 13 + extra_bytes
 
@@ -176,7 +176,7 @@ class MessageParser:
             # 31: CONFIRM_CARDS
             elif msg_type == 31:
                 stream.read(1); length += 1 # P
-                # 🌟 [额外修复] 吞掉强制插入的未知幽灵字节
+                # [额外修复] 吞掉强制插入的未知幽灵字节
                 stream.read(1); length += 1 
                 b = stream.read(1); length += 1 # Count
                 count = struct.unpack('B', b)[0]
@@ -282,7 +282,7 @@ class MessageParser:
             160, 163, 164, 165, 170
         }
         
-        # 🌟 [探针] 记录最近 15 个成功解析的指令，看清乱码源头！
+        # [探针] 记录最近 15 个成功解析的指令，看清乱码源头
         recent_msgs = []
 
         while stream.tell() < data_len:
@@ -337,7 +337,7 @@ class MessageParser:
                 payload = stream.read(length)
                 msgs.append(bytes([msg_type]) + payload)
                 
-                # 🌟 [探针记录] 保留 15 个
+                # [探针记录] 保留 15 个
                 recent_msgs.append(msg_type)
                 if len(recent_msgs) > 15:
                     recent_msgs.pop(0)
@@ -357,7 +357,7 @@ class DuelState:
         self.current_valid_actions = []
         self.turn_player = 0
         
-        # 🌟 初始化双边记牌器
+        # 初始化双边记牌器
         self.p0_deck = list(p0_main) if p0_main else []
         self.p0_extra = list(p0_extra) if p0_extra else []
         self.p1_deck = list(p1_main) if p1_main else []
@@ -393,13 +393,13 @@ class DuelState:
                 code, old_raw, new_raw, reason = struct.unpack('<IIII', stream.read(16))
                 old_c, old_l, old_s, _ = LocationInfo.decode(old_raw)
                 new_c, new_l, new_s, new_pos = LocationInfo.decode(new_raw)
-                # 🛡️ [防弹衣] 防止 new_c = 39 导致的 KeyError
+                # [防弹衣] 防止 new_c = 39 导致的 KeyError
                 if old_c in [0, 1] and old_l != 0 and old_s in self.field_map[old_c][old_l]:
                     del self.field_map[old_c][old_l][old_s]
                 if new_c in [0, 1] and new_l != 0:
                     self.field_map[new_c][new_l][new_s] = {'code': code, 'pos': new_pos, 'owner': new_c}
 
-                # 🌟 [上帝视角记牌器] 跟踪卡片进出卡组/额外
+                # [上帝视角记牌器] 跟踪卡片进出卡组/额外
                 # 剥离可能存在的异画/密码掩码，还原真实卡密
                 pure_code = code & 0x7FFFFFFF
                 if pure_code != 0:
@@ -424,7 +424,7 @@ class DuelState:
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
 
             elif msg_type == 90: # DRAW (抽卡)
-                # 🌟 [录像修复 B] 记录抽卡到手牌！
+                #  [录像修复 B] 记录抽卡到手牌！
                 p = struct.unpack('B', stream.read(1))[0]
                 count = struct.unpack('B', stream.read(1))[0]
                 for _ in range(count):
@@ -434,14 +434,14 @@ class DuelState:
                     while seq in self.field_map[p][Zone.HAND]: seq += 1
                     self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p}
                     
-                    # 🌟 [上帝视角记牌器] 抽卡等同于离开主卡组
+                    # [上帝视角记牌器] 抽卡等同于离开主卡组
                     pure_code = code & 0x7FFFFFFF
                     target_deck = self.p0_deck if p == 0 else self.p1_deck
                     if pure_code in target_deck:
                         target_deck.remove(pure_code)
 
             elif msg_type in [91, 92, 94]: # 伤害 / 回复 / LP直接更新
-                # 🌟 [录像修复 A] 加上 '<' 强制对齐，并监听 91 和 92！
+                # [录像修复 A] 加上 '<' 强制对齐，并监听 91 和 92！
                 p, val = struct.unpack('<BI', stream.read(5))
                 if p == 0:
                     if msg_type == 91: self.my_lp = max(0, self.my_lp - val)
@@ -597,7 +597,7 @@ class DuelState:
                     # 编码位置 -> Entity ID
                     loc_raw = LocationInfo.encode(c, l, s, 0)
                     
-                    # 🟢 [修正] action_type 必须是 0 (C++ t=0)
+                    # [修正] action_type 必须是 0 (C++ t=0)
                     self.current_valid_actions.append(
                         GameAction(action_type=0, index=i, target_entity_idx=loc_raw, desc_id=desc)
                     )
@@ -618,7 +618,7 @@ class DuelState:
                     # 编码位置 -> Entity ID
                     loc_raw = LocationInfo.encode(c, l, s, 0)
                     
-                    # 🟢 [修正] action_type 必须是 1 (C++ t=1)
+                    # [修正] action_type 必须是 1 (C++ t=1)
                     desc_str = "Direct Attack" if direct else f"Attack {code}"
                     self.current_valid_actions.append(
                         GameAction(action_type=1, index=i, target_entity_idx=loc_raw, desc_str=desc_str)
@@ -628,7 +628,7 @@ class DuelState:
                 m2 = struct.unpack('B', stream.read(1))[0]
                 ep = struct.unpack('B', stream.read(1))[0]
                 
-                # 🟢 [修正] M2=2, EP=3 (C++ t=2, t=3)
+                # [修正] M2=2, EP=3 (C++ t=2, t=3)
                 if m2: self.current_valid_actions.append(GameAction(action_type=2, index=0, desc_str="To M2"))
                 if ep: self.current_valid_actions.append(GameAction(action_type=3, index=0, desc_str="To EP"))
 
@@ -643,7 +643,7 @@ class DuelState:
                 s = struct.unpack('B', stream.read(1))[0]
                 desc = struct.unpack('<I', stream.read(4))[0]
                 
-                # 🟢 关键：绑定卡片位置！让 AI 知道是哪张卡在问
+                # 关键：绑定卡片位置,让 AI 知道是哪张卡在问
                 loc_raw = LocationInfo.encode(c, l, s, 0)
                 
                 # Index 1=Yes, 0=No
@@ -691,6 +691,29 @@ class DuelState:
                         # 这是一个可用的格子
                         # 我们把 i 作为 index 传给 AI，翻译时再转回 locations
                         self.current_valid_actions.append(GameAction(action_type=18, index=i, desc_str=f"Zone {i}"))
+
+            # =================================================================
+            # [阶段一追加] 9. 宣言类消息解析
+            # =================================================================
+            elif msg_type in [140, 141, 142, 143]:
+                stream.read(1) # P
+                count = struct.unpack('B', stream.read(1))[0]
+                
+                # 种族 (140) / 属性 (141)
+                if msg_type in [140, 141]:
+                    mask = struct.unpack('<I', stream.read(4))[0]
+                    for i in range(32):
+                        bit = 1 << i
+                        if mask & bit:
+                            self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=bit, desc_str=f"Announce Bit {i}"))
+                
+                # 卡名 (142) / 数字 (143)
+                else:
+                    for i in range(count):
+                        val = struct.unpack('<I', stream.read(4))[0]
+                        # 142 的 desc_id 是卡密，143 的 desc_id 是具体数字
+                        self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=val, desc_str=f"Announce Val {val}"))
+
 
         except Exception as e:
             print(f"❌ [gamestate][Parser Error] Failed to parse msg_type {msg_type}")
@@ -787,6 +810,17 @@ class DuelState:
                     new_act.target_entity_idx = -1 # 没找到实体
             else:
                 new_act.target_entity_idx = -1
+
+            #  宏动作多重靶点映射
+            if hasattr(act, 'macro_targets') and act.macro_targets:
+                setattr(new_act, 'macro_targets', [])
+                setattr(new_act, 'decision_bytes', act.decision_bytes) # 转移预计算包
+                for m_loc in act.macro_targets:
+                    c, l, s, _ = LocationInfo.decode(m_loc)
+                    if (c, l, s) in loc_to_idx_map:
+                        new_act.macro_targets.append(loc_to_idx_map[(c, l, s)])
+                    else:
+                        new_act.macro_targets.append(-1)
             
             final_actions.append(new_act)
 

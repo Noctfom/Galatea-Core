@@ -8,6 +8,7 @@ import struct
 import io
 import random
 import itertools
+from game_constants import LocationInfo
 
 # --- 消息类型常量 ---
 MSG_SELECT_BATTLECMD = 10
@@ -727,3 +728,121 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
     # ---------------------------------------------------------
     
     return decision
+
+
+def get_macro_options(msg_type, msg_payload):
+    """
+    [AI 参谋部] 后台穷举合法素材组合，打包成“套餐”供 AI 挑选
+    返回格式: [{'bytes': b'\x01...', 'locs': [loc_raw1, loc_raw2]}, ...]
+    """
+    stream = io.BytesIO(msg_payload)
+    options = []
+    
+    try:
+        # 1. 普通选卡 / 祭品 (Link, Xyz, 融合)
+        if msg_type in [MSG_SELECT_CARD, MSG_SELECT_TRIBUTE]:
+            stream.read(1) # P
+            cancelable = struct.unpack('B', stream.read(1))[0]
+            min_c = struct.unpack('B', stream.read(1))[0]
+            max_c = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('B', stream.read(1))[0]
+            
+            cards = []
+            for i in range(count):
+                struct.unpack('<I', stream.read(4))[0] # Code
+                c = struct.unpack('B', stream.read(1))[0]
+                l = struct.unpack('B', stream.read(1))[0]
+                s = struct.unpack('B', stream.read(1))[0]
+                stream.read(1) # Skip desc
+                loc_raw = LocationInfo.encode(c, l, s, 0)
+                cards.append((i, loc_raw))
+            
+            real_max = min(max_c, count)
+            real_min = min(min_c, count)
+            if real_min > real_max: real_min = real_max
+            
+            all_combos = []
+            for r in range(real_min, real_max + 1):
+                all_combos.extend(list(itertools.combinations(cards, r)))
+            
+            # 限制套餐数量防爆炸
+            if len(all_combos) > 20: all_combos = random.sample(all_combos, 20)
+            
+            for combo in all_combos:
+                resp_buf = bytearray([len(combo)])
+                locs = []
+                for idx, loc in combo:
+                    resp_buf.append(idx)
+                    locs.append(loc)
+                options.append({'bytes': bytes(resp_buf), 'locs': locs})
+            if cancelable:
+                options.append({'bytes': struct.pack('<i', -1), 'locs': []})
+                
+        # 2. 星级凑数求和 (同调, 仪式)
+        elif msg_type == MSG_SELECT_SUM:
+            mode = struct.unpack('B', stream.read(1))[0]
+            stream.read(1) # P
+            total_acc = struct.unpack('<I', stream.read(4))[0]
+            min_c = struct.unpack('B', stream.read(1))[0]
+            max_c = struct.unpack('B', stream.read(1))[0]
+            must_count = struct.unpack('B', stream.read(1))[0]
+            
+            must_sum = 0
+            must_locs = []
+            for _ in range(must_count):
+                stream.read(4) # Code
+                c = struct.unpack('B', stream.read(1))[0]
+                l = struct.unpack('B', stream.read(1))[0]
+                s = struct.unpack('B', stream.read(1))[0]
+                must_locs.append(LocationInfo.encode(c, l, s, 0))
+                v = struct.unpack('<I', stream.read(4))[0]
+                must_sum += (v & 0xffff)
+            
+            target_val = total_acc - must_sum
+            count = struct.unpack('B', stream.read(1))[0]
+            
+            candidates = []
+            for i in range(count):
+                stream.read(4)
+                c = struct.unpack('B', stream.read(1))[0]
+                l = struct.unpack('B', stream.read(1))[0]
+                s = struct.unpack('B', stream.read(1))[0]
+                val = struct.unpack('<I', stream.read(4))[0]
+                candidates.append({'index': i, 'val': val, 'loc': LocationInfo.encode(c, l, s, 0)})
+            
+            valid_solutions = []
+            real_max = max_c if max_c > 0 else count
+            
+            def backtrack(start, k, current_sum, path, min_v):
+                if k >= min_c:
+                    if mode == 0 and current_sum == target_val: valid_solutions.append(list(path))
+                    elif mode == 1 and current_sum >= target_val and (current_sum - min_v) < target_val: valid_solutions.append(list(path))
+                if k == real_max or start == count: return
+                for i in range(start, count):
+                    cd = candidates[i]
+                    v1 = cd['val'] & 0xffff
+                    v2 = cd['val'] >> 16
+                    path.append(cd)
+                    n_min1 = min(min_v, v1) if min_v != -1 else v1
+                    backtrack(i + 1, k + 1, current_sum + v1, path, n_min1)
+                    if v2 > 0 and v2 != v1:
+                        n_min2 = min(min_v, v2) if min_v != -1 else v2
+                        backtrack(i + 1, k + 1, current_sum + v2, path, n_min2)
+                    path.pop()
+            
+            backtrack(0, 0, 0, [], -1)
+            if len(valid_solutions) > 20: valid_solutions = random.sample(valid_solutions, 20)
+                
+            for sol in valid_solutions:
+                resp_buf = bytearray([must_count + len(sol)])
+                for _ in range(must_count): resp_buf.append(0)
+                locs = list(must_locs)
+                for cd in sol:
+                    resp_buf.append(cd['index'])
+                    locs.append(cd['loc'])
+                options.append({'bytes': bytes(resp_buf), 'locs': locs})
+                
+    except Exception as e:
+        print(f"⚠️ [参谋部] get_macro_options 解析错误: {e}")
+        
+    return options

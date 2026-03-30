@@ -187,6 +187,21 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     
                     # --- AI 尝试接管 ---
                     if msg_type in AI_MANAGED_MSGS and brain.current_valid_actions and consecutive_retries == 0:
+                        
+                        # 向参谋部索要套餐，拦截并覆盖单选题
+                        if msg_type in [15, 20, 23]:
+                            macro_options = rule_bot.get_macro_options(msg_type, msg[1:])
+                            if macro_options:
+                                from data_types import GameAction
+                                brain.current_valid_actions = []
+                                for i, opt in enumerate(macro_options):
+                                    # 创建虚拟的“宏动作”
+                                    act = GameAction(action_type=msg_type, index=i, desc_str=f"Macro {i}")
+                                    # Python 动态绑定属性
+                                    setattr(act, 'macro_targets', opt['locs']) 
+                                    setattr(act, 'decision_bytes', opt['bytes'])
+                                    brain.current_valid_actions.append(act)
+                        
                         try:
                             snap = brain.get_snapshot()
                             player = snap.global_data.to_play
@@ -241,7 +256,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             
                             # --- 动作翻译 ---
                             resp = b''
-                            if msg_type in [10, 11, 15, 16]:
+                            
+                            # 拦截代打：如果是包含预计算字节的套餐，直接越过打包器发送！
+                            if hasattr(chosen, 'decision_bytes'):
+                                resp = chosen.decision_bytes
+                            elif msg_type in [10, 11, 15, 16]:
                                 resp = agent._pack_response(chosen, msg_type=msg_type)
                             else:
                                 val = chosen.index
