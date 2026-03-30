@@ -15,3 +15,8 @@ crash_report.txt
 
 # 卡组文件 
 decks/
+
+# Galatea 临时异步通讯文件 (硬盘 Drop Box)
+tmp_rollout_*.pt
+tmp_weights_*.pt
+tmp_rollout_*.pt.tmp

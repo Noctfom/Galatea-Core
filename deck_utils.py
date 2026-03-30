@@ -40,7 +40,9 @@ def load_deck(base_dir, deck_name):
                 code = int(line)
                 if current_section == 'main': d.main.append(code)
                 elif current_section == 'extra': d.extra.append(code)
-            except: pass
+            except Exception as e:
+                print(f"[Deck]⚠️ 解析卡组 {deck_name} 时遇到非整数行: '{line}' (错误: {e})")
+                continue
             
     return d
 

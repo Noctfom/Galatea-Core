@@ -91,8 +91,8 @@ class AiBot:
             # Logits 现在直接就是 [1, 80] 的动作分数
             logits, value = self.net(gpu_dict) 
             
-            # 🌟 [终极清理] 既然网络已经内置了 act_mask 并把无效槽位变成了 -1e9
-            # 我们根本不需要手动切片，直接无脑 Argmax，它绝对不可能选到 Padding！
+            # 网络已经内置了 act_mask 并把无效槽位变成了 -1e9
+            # 不需要手动切片，直接 Argmax，不可能选到 Padding
             sel_idx = torch.argmax(logits[0]).item()
 
         if sel_idx < len(snap.valid_actions):

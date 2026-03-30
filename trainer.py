@@ -14,6 +14,8 @@ import random
 import gc
 import threading
 import queue
+import glob
+
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
@@ -118,6 +120,14 @@ class PPOTrainer:
         if torch.cuda.is_available():
             free, total = torch.cuda.mem_get_info()
             print(f"🖥️ 探针报告 -> 当前显卡可用显存: {free / 1024**3:.2f} GB / {total / 1024**3:.2f} GB")
+        
+        # 清理上一次意外中断留下的临时文件
+        print("🧹 正在清理上一次训练遗留的临时通讯文件...")
+        # 🌟 修复：加上 .pt* 就能同时匹配 .pt 和 .pt.tmp
+        for f in glob.glob("tmp_rollout_*.pt*") + glob.glob("tmp_weights_*.pt*"):
+            try: os.remove(f)
+            except Exception as e: 
+                print(f"[trainer]⚠️ 无法删除临时文件 {f}: {e}")
 
         # 初始化 AI
         self.agent = AiBot(device=self.device, net_config=self.net_config)
@@ -142,7 +152,13 @@ class PPOTrainer:
         
         self.global_step = 0
         self.iteration = 0
-        self.train_step = 0 # <--- [新增] 专门给 Train/Loss 画图用的步数器
+        self.train_step = 0
+        
+        # [静态内存池] 预先设定最大容量，彻底消灭内存碎片
+        self.buffer_allocated = False
+        self.merged_memory = None
+        # 容量 = 目标步数 + 容错余量
+        self.max_buffer_steps = self.update_timesteps + (self.num_workers * 1000)
 
         # [新增] 初始化 TensorBoard 记录器
         # log_dir 可以按时间戳命名，方便区分不同次训练
@@ -166,7 +182,7 @@ class PPOTrainer:
         """
         print(f"📥 正在从 {path} 恢复训练...")
         try:
-            checkpoint = torch.load(path, map_location=self.device)
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
             
             # 1. 架构配置检查与重建
             if 'net_config' in checkpoint:
@@ -185,7 +201,8 @@ class PPOTrainer:
                     if self.enable_compile and self.device.type == 'cuda':
                          try: 
                              self.agent.net = torch.compile(self.agent.net, mode='reduce-overhead')
-                         except: pass
+                         except Exception as e:
+                             print(f"[trainer]⚠️ 编译跳过: {e}")
                     
                     self.agent.net.train()
                     # 重建优化器 (因为网络参数对象变了)
@@ -213,120 +230,194 @@ class PPOTrainer:
             self.iteration = checkpoint.get('iteration', 0)
             self.global_step = checkpoint.get('global_step', 0)
             print(f"✅ 恢复成功! Iter: {self.iteration}")
+            # [优化 3] 恢复 train_step，衔接曲线
+            # 假设每个 Iteration 大约更新 (32000 / 128) * 4 = 1000 次
+            self.train_step = self.iteration * (self.update_timesteps // self.mini_batch_size) * EPOCHS
 
         except Exception as e:
             print(f"❌ 恢复失败: {e}")
 
     def collect_rollouts(self):
-        """
-        [终极重构] 原生多进程架构，彻底击碎 Manager Socket 瓶颈
-        """
         print(f"📥 [Iter {self.iteration}] 唤醒 {self.num_workers} 个工人 | 目标: {self.update_timesteps} 步")
         t0 = time.time()
 
-        # --- 1. 使用原生 Queue 替代缓慢的 Manager Queue ---
-        if self.async_infer:
-            req_q = mp.Queue()
-            resp_qs = [mp.Queue() for _ in range(self.num_workers)]
-            stop_event = mp.Event()
-            
-            infer_thread = threading.Thread(target=self.inference_server, args=(req_q, resp_qs, stop_event))
-            infer_thread.start()
-        else:
-            req_q, resp_qs, stop_event = None, None, None
-        
         raw_weights = self.agent.net.state_dict()
-        cpu_weights = {}
-        for k, v in raw_weights.items():
-            clean_k = k.replace("_orig_mod.", "")
-            cpu_tensor = v.cpu()
-            cpu_tensor.share_memory_() # 开启真正的物理共享内存
-            cpu_weights[clean_k] = cpu_tensor
+        cpu_weights = {k.replace("_orig_mod.", ""): v.cpu() for k, v in raw_weights.items()}
+        
+        # 将权重写进硬盘，禁止通过多进程参数传递 Tensor
+        weight_file = f"tmp_weights_iter_{self.iteration}.pt"
+        torch.save(cpu_weights, weight_file)
         
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
         
-        # --- 2. 弃用 Pool，使用原生 Process 启动 ---
-        result_q = mp.Queue()
+        # 每一轮动态创建专属队列和推断服务器
+        if self.async_infer:
+            req_q = mp.Queue(maxsize=self.num_workers * 2)
+            resp_qs = [mp.Queue(maxsize=2) for _ in range(self.num_workers)]
+            stop_event = threading.Event()
+            infer_thread = threading.Thread(
+                target=self.inference_server, 
+                args=(req_q, resp_qs, stop_event),
+                daemon=True
+            )
+            infer_thread.start()
+        else:
+            req_q = None
+            resp_qs = [None] * self.num_workers
+
+        # 🚀 启动工人
         processes = []
-        
         for i in range(self.num_workers):
-            p = mp.Process(target=worker_wrapper, args=(
+            # 根据配置，决定是否把通讯管道发给工人
+            
+            p = mp.Process(target=worker_process, args=(
                 i, 
+                self.iteration,
                 self.net_config, 
-                cpu_weights if not self.async_infer else None, 
+                weight_file,         
                 self.deck_dir, 
                 steps_per_worker,
-                self.worker_device if not self.async_infer else 'cpu',
-                req_q,
-                resp_qs[i] if self.async_infer else None,
-                result_q
+                self.worker_device,
+                req_q, resp_qs[i]        # 恢复队列传参
             ))
+            p.daemon = True
             p.start()
             processes.append(p)
             
-        print(f"   ... cpu运算中 ...")
+        print(f"   ... {'异步 GPU Server' if self.async_infer else '纯本地 CPU'} 运算中 ...")
         
-        # --- 3. 收集数据 (带超时防死锁保护) ---
-        batch_dicts = []
-        total_steps = 0
-        total_rewards = []
-        total_lens = []
-        
-        # 等待所有人交作业
-        for _ in range(self.num_workers):
-            try:
-                # 阻塞等待，加入超时机制，防止某个进程 C++ 引擎暴毙导致无限死等
-                w_id, res = result_q.get(timeout=300) 
-                if res is not None:
-                    data, r, l = res
-                    if data is not None and isinstance(data, dict):
-                        batch_dicts.append(data)
-                        total_steps += len(data['action'])
-                        if r != 0: total_rewards.append(r)
-                        if l != 0: total_lens.append(l)
-            except queue.Empty:
-                print("⚠️ 警告: 收集数据超时 (部分 Worker 的 C++ 引擎可能已崩溃)")
-
+        # 等待工人自然死亡
         for p in processes:
-            # 优雅终止：如果进程还在，强制咔嚓掉，防止内存泄漏
-            p.join(timeout=2)
+            p.join(timeout=300)
             if p.is_alive():
-                p.terminate()
-
+                print(f"⚠️ 侦测到 Worker 卡死在 C++ 引擎中，执行物理超度...")
+                p.terminate() 
+                p.join() # 🌟 必须收尸
+            try: p.close() # 🌟 强制释放 Windows 进程句柄
+            except: print(f"⚠️ 无法关闭 Worker 进程 (可能已被系统回收)，请检查系统资源管理器确认是否有残留的 Python 进程")
+                
+        #[核心修复]：彻底销毁队列，防止 Windows 句柄和后台线程泄露
         if self.async_infer:
             stop_event.set()
-            infer_thread.join()
-        
-        if not batch_dicts:
+            # 1. 抽干残留数据，防止管道堵塞导致无法关闭
+            while not req_q.empty():
+                try: req_q.get_nowait()
+                except: break
+            
+            # 2. 物理关闭底层管道并强杀后台喂食线程
+            req_q.cancel_join_thread() # 取消等待，直接强杀
+            req_q.close()
+            
+            for q in resp_qs:
+                if q is not None:
+                    q.cancel_join_thread() # 取消等待，直接强杀
+                    q.close()
+            
+            infer_thread.join(timeout=2)
+            del req_q
+            del resp_qs
+            import gc; gc.collect()
+
+        # 把权重文件删掉
+        try: os.remove(weight_file)
+        except Exception as e: 
+            print(f"[trainer]⚠️ 无法删除权重文件 {weight_file}: {e}")
+
+        # 3. 直接去硬盘收割
+        file_list = []
+        for i in range(self.num_workers):
+            tmp_file = f"tmp_rollout_iter_{self.iteration}_worker_{i}.pt"
+            if os.path.exists(tmp_file):
+                file_list.append(tmp_file)
+
+        if not file_list:
+            print("❌ 所有 Worker 均未能产出数据！")
             return None
         
-        print(f"⚡ 正在合并 {len(batch_dicts)} 个数据块...")
+        print(f"⚡ 正在合并 {len(file_list)} 个数据块...")
         
-        # --- 4. 修复 KeyError：彻底移除 valid_actions ---
-        merged_memory = {
-            'obs': {},
-            'action': torch.cat([b['action'] for b in batch_dicts]),
-            'log_prob': torch.cat([b['log_prob'] for b in batch_dicts]),
-            'return': torch.cat([b['return'] for b in batch_dicts]),
-            'advantage': torch.cat([b['advantage'] for b in batch_dicts])
-            # (这里完美去除了导致报错的 valid_actions)
-        }
-        
-        first_obs = batch_dicts[0]['obs']
-        for k in first_obs.keys():
-            merged_memory['obs'][k] = torch.cat([b['obs'][k] for b in batch_dicts])
+        total_steps = 0
+        file_steps = []
+        total_rewards = []
+        total_lens = []
+
+        # 步骤 A：测算总面积并提取评估数据
+        for f in file_list:
+            data = torch.load(f, map_location='cpu', weights_only=False)
+            s = data['action'].shape[0]
+            file_steps.append(s)
+            total_steps += s
+            
+            # 提取存放在文件里的奖励数据
+            r = data.get('avg_rew', np.array([0.0]))[0]
+            l = data.get('avg_len', np.array([0.0]))[0]
+            if r != 0: total_rewards.append(r)
+            if l != 0: total_lens.append(l)
+            
+            del data
+            import gc; gc.collect()
+            
+        # 步骤 B：预分配连续内存 (仅首次执行，彻底消灭内存碎片)
+        if not self.buffer_allocated:
+            print(f"📦 [内存管理] 首次初始化主进程静态内存池 (容量: {self.max_buffer_steps} 步)...")
+            self.merged_memory = {'obs': {}}
+            first_data = torch.load(file_list[0], map_location='cpu', weights_only=False)
+            
+            self.merged_memory['action'] = torch.empty(self.max_buffer_steps, dtype=first_data['action'].dtype)
+            self.merged_memory['log_prob'] = torch.empty(self.max_buffer_steps, dtype=first_data['log_prob'].dtype)
+            self.merged_memory['return'] = torch.empty(self.max_buffer_steps, dtype=first_data['return'].dtype)
+            self.merged_memory['advantage'] = torch.empty(self.max_buffer_steps, dtype=first_data['advantage'].dtype)
+            
+            for k, v in first_data['obs'].items():
+                shape = list(v.shape)
+                shape[0] = self.max_buffer_steps
+                self.merged_memory['obs'][k] = torch.empty(*shape, dtype=v.dtype)
+                
+            self.buffer_allocated = True
+            del first_data
+            import gc; gc.collect()
+
+        # 步骤 C：流式注入并阅后即焚
+        cursor = 0
+        for i, f in enumerate(file_list):
+            try:
+                data = torch.load(f, map_location='cpu', weights_only=False)
+                s = file_steps[i]
+                
+                # 防御性截断，防止溢出缓冲池
+                if cursor + s > self.max_buffer_steps:
+                    print(f"⚠️ 警告: 采集步数({cursor+s})超过缓冲容量({self.max_buffer_steps})，自动截断！")
+                    s = self.max_buffer_steps - cursor
+                    if s <= 0: break
+                
+                self.merged_memory['action'][cursor:cursor+s] = data['action'][:s]
+                self.merged_memory['log_prob'][cursor:cursor+s] = data['log_prob'][:s]
+                self.merged_memory['return'][cursor:cursor+s] = data['return'][:s]
+                self.merged_memory['advantage'][cursor:cursor+s] = data['advantage'][:s]
+                
+                for k in self.merged_memory['obs'].keys():
+                    self.merged_memory['obs'][k][cursor:cursor+s] = data['obs'][k][:s]
+                    
+                cursor += s
+                del data
+                import gc; gc.collect()
+            except Exception as e:
+                print(f"❌ 读取文件 {f} 失败: {e}") # 拒绝静默报错
+            
+            try: os.remove(f)
+            except Exception as e: 
+                print(f"[trainer]⚠️ 清理残余文件 {f} 失败: {e}")
 
         t_cost = time.time() - t0
         avg_rew = np.mean(total_rewards) if total_rewards else 0.0
         avg_len = np.mean(total_lens) if total_lens else 0.0
-        print(f"✅ 采集完成! 耗时: {t_cost:.1f}s | 样本: {total_steps} | Avg Reward: {avg_rew:.2f}")
+        print(f"✅ 采集完成! 耗时: {t_cost:.1f}s | 样本: {cursor} | Avg Reward: {avg_rew:.2f}")
         
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
-        self.writer.add_scalar('Rollout/Average_Steps', avg_len, self.iteration)
-        self.writer.add_scalar('Rollout/Total_Samples', total_steps, self.iteration)
-        self.global_step += total_steps
+        self.writer.add_scalar('Rollout/Average_Length', avg_len, self.iteration)
+        self.global_step += cursor
         
-        return merged_memory
+        return cursor # 核心改动：不再返回内存大字典，而是返回有效步数！
     
     def inference_server(self, req_q, resp_qs, stop_event):
         """
@@ -371,29 +462,34 @@ class PPOTrainer:
                     actions, log_probs, _, values = self.agent.get_action_and_value_from_tensor(batch_obs, None)
             
             # --- 4. 组装回传封包 ---
+            # 新增 .detach()，彻底斩断与 GPU 计算图的最后一点阴阳联系
             packed_returns = torch.stack([
                 actions.to(torch.float32), 
                 log_probs.to(torch.float32), 
                 values.squeeze(-1).to(torch.float32)
-            ], dim=1).cpu()
+            ], dim=1).detach().cpu()
             
             for i, wid in enumerate(worker_ids):
                 # 👇 [击毙幽灵 1] 转为 numpy 数组发回给 Worker
                 resp_qs[wid].put(packed_returns[i].numpy())
 
-    def update_policy(self, memory):
+    def update_policy(self, total_steps):
         """
         [安全防爆版] 将数据留在 CPU，每次只切片 mini_batch 送进 GPU
         """
-        if memory is None: return
+        if total_steps == 0: return
         print("🔥 Training PPO (Action Head Mode)...")
         
-        # 数据先全留在 CPU 内存里
-        cpu_obs = memory['obs']
-        cpu_actions = memory['action']
-        cpu_log_probs = memory['log_prob']
-        cpu_returns = memory['return']
-        cpu_advantages = memory['advantage']
+        # 直接从静态缓冲池中切出有效数据
+        cpu_obs = self.merged_memory['obs']
+        cpu_actions = self.merged_memory['action'][:total_steps]
+        cpu_log_probs = self.merged_memory['log_prob'][:total_steps]
+        cpu_returns = self.merged_memory['return'][:total_steps]
+        cpu_advantages = self.merged_memory['advantage'][:total_steps]
+
+        # [优化 1] 全局优势归一化，稳定训练方向
+        if len(cpu_advantages) > 1:
+            cpu_advantages = (cpu_advantages - cpu_advantages.mean()) / (cpu_advantages.std() + 1e-8)
         
         batch_size = cpu_actions.shape[0]
 
@@ -418,8 +514,6 @@ class PPOTrainer:
                 mb_returns = cpu_returns[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
                 mb_advs = cpu_advantages[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
                 
-                if len(mb_advs) > 1:
-                    mb_advs = (mb_advs - mb_advs.mean()) / (mb_advs.std() + 1e-8)
 
                 # --- 网络前向传播与反向传播 (完全保持原样) ---
                 with torch.amp.autocast('cuda', dtype=self.amp_dtype):
@@ -431,16 +525,23 @@ class PPOTrainer:
                     ratio = torch.exp(new_log_probs - mb_old_log_probs)
                     surr1 = ratio * mb_advs
                     surr2 = torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * mb_advs
-                    loss = -torch.min(surr1, surr2).mean() + \
-                           VALUE_LOSS_COEF * 0.5 * ((values - mb_returns) ** 2).mean() + \
-                           ENTROPY_COEF * -entropy.mean()
+                    
+                    # 拆解 Loss，方便我们在图表里监控
+                    policy_loss = -torch.min(surr1, surr2).mean()
+                    value_loss = 0.5 * ((values - mb_returns) ** 2).mean()
+                    entropy_loss = -entropy.mean()
+                    
+                    loss = policy_loss + VALUE_LOSS_COEF * value_loss + ENTROPY_COEF * entropy_loss
 
                 if torch.isnan(loss) or torch.isinf(loss):
                     self.optimizer.zero_grad()
                     continue
 
                 if self.train_step % 20 == 0:
-                    self.writer.add_scalar('Train/Loss', loss.item(), self.train_step)
+                    self.writer.add_scalar('Train/Total_Loss', loss.item(), self.train_step)
+                    self.writer.add_scalar('Train/Policy_Loss', policy_loss.item(), self.train_step) # 策略偏移
+                    self.writer.add_scalar('Train/Value_Loss', value_loss.item(), self.train_step)   # 价值预测准确度
+                    self.writer.add_scalar('Train/Entropy', entropy.mean().item(), self.train_step)  # 🌟 探索欲 (如果急剧降到0，说明AI变傻钻牛角尖了)
                 self.train_step += 1
 
                 self.optimizer.zero_grad()
@@ -463,21 +564,29 @@ class PPOTrainer:
             self.iteration += 1
             iter_start = time.time()
             
-            # 1. 采集
-            memory = self.collect_rollouts()
+            # 1. 采集 (现在返回的是总步数)
+            total_steps = self.collect_rollouts()
             
-            # 2. 优化
-            # [修正] memory 是字典，len(memory) 是键的数量(6)，会导致永远跳过训练！
-            # 我们应该检查数据的行数 (action 的长度)
-            if memory is not None and memory['action'].shape[0] >= self.mini_batch_size:
-                self.update_policy(memory)
+            # 2. 优化 (只有当样本足够时才更新)
+            if total_steps is not None and total_steps >= self.mini_batch_size:
+                self.update_policy(total_steps)
+                # 单轮训练结束，清理主进程15GB 的静态内存池
+                print("🧹 [内存调度] 训练完成，摧毁主进程内存池...")
+                if self.merged_memory is not None:
+                    self.merged_memory.clear()
+                    del self.merged_memory
                 
-                # 显式清理内存
-                del memory
+                self.merged_memory = None
+                self.buffer_allocated = False  # 让下一轮 collect_rollouts 重新申请
+                
+                # 强制呼叫系统底层的垃圾车
+                import gc
                 gc.collect()
-                if torch.cuda.is_available(): torch.cuda.empty_cache()
+                if torch.cuda.is_available(): 
+                    torch.cuda.empty_cache()
+
             else:
-                print(f"⚠️ 样本不足 ({memory['action'].shape[0] if memory else 0} < {self.mini_batch_size})，跳过本轮训练")
+                print(f"⚠️ 样本不足 ({total_steps if total_steps else 0} < {self.mini_batch_size})，跳过本轮训练")
             
             # 3. 保存 (打包保存)
             if self.iteration % 10 == 0:

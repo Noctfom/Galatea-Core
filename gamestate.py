@@ -249,6 +249,7 @@ class MessageParser:
                 length = stream.tell() - start_pos
 
         except Exception as e:
+            print(f"calculate_dynamic_length解析失败: {e}")
             stream.seek(start_pos)
             return -1
             
@@ -318,7 +319,7 @@ class MessageParser:
                     stream.seek(start_pos + 1)
                     
                     if winner > 2 or reason > 0x30: 
-                        print(f"\n🛡️ [Parser] 拦截到残存胜利! \n🔍 坠机前15个指令: {recent_msgs}")
+                        print(f"\n🛡️ [gamestate][Parser] 拦截到残存胜利! \n🔍 坠机前15个指令: {recent_msgs}")
                         break 
 
             # 计算长度
@@ -328,7 +329,7 @@ class MessageParser:
                 try:
                     length = MessageParser.calculate_dynamic_length(msg_type, stream)
                 except Exception as e:
-                    print(f"\n👻 [Parser] 变长解析崩溃 (msg: {msg_type})! \n🔍 坠机前15个指令: {recent_msgs}")
+                    print(f"\n👻 [gamestate][Parser] 变长解析崩溃 (msg: {msg_type})! \n🔍 坠机前15个指令: {recent_msgs}")
                     break
             
             if length >= 0:
@@ -470,7 +471,9 @@ class DuelState:
                 self.current_valid_actions = []
 
         except Exception as e:
-            pass
+            print(f"⚠️ [GameState] update消息解析失败: {e}")
+            # 抛出异常，击毙这局烂尾游戏
+            raise RuntimeError(f"GameState 解析错位，拒绝产生幻觉: {e}")
 
     def _parse_valid_actions(self, msg_type, stream):
         """
@@ -689,12 +692,11 @@ class DuelState:
                         # 我们把 i 作为 index 传给 AI，翻译时再转回 locations
                         self.current_valid_actions.append(GameAction(action_type=18, index=i, desc_str=f"Zone {i}"))
 
-        except Exception:
-            '''
-            print(f"❌ [Parser Error] Failed to parse msg_type {msg_type}")
+        except Exception as e:
+            print(f"❌ [gamestate][Parser Error] Failed to parse msg_type {msg_type}")
             traceback.print_exc() # <--- 关键！打印完整堆栈
             print(f"📦 Payload (Hex): {stream.getvalue().hex()}") # 打印原始数据
-            '''
+            
             pass
 
     def get_snapshot(self) -> GameSnapshot:

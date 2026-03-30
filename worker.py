@@ -1,3 +1,10 @@
+# ==================================================================================
+#  Worker Process for Galatea RL Training
+#  每个 Worker 都是一个独立的 YGOPro 环境 + 独立的 AI (CPU模式)
+#  负责与环境交互，收集经验，并通过队列与 Trainer 进行通信
+# ==================================================================================
+
+
 import torch
 import numpy as np
 import time
@@ -24,24 +31,34 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 MAX_EPISODE_STEPS = 800
 
-def worker_process(worker_id, net_config, weights, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None):
-    """
-    工作进程：独立的 YGOPro 环境 + 独立的 AI (CPU模式)
-    """
-    # 🔴 [新增] 必须加这两行！限制 PyTorch 只能用单核
-    # 防止 16 个进程每个都试图占用所有 CPU 核心导致死锁或卡顿
+
+def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None):
+    # =========================================================================
+    #  [防卡死] 禁用 Windows 崩溃弹窗
+    # 告诉操作系统：如果 OCGCore 发生致命写越界(Segfault)，直接静默杀死进程，不要弹窗也不要生成错误报告，以免训练被打断
+    import os
+    if os.name == 'nt':
+        import ctypes
+        # SEM_FAILCRITICALERRORS (0x0001) | SEM_NOGPFAULTERRORBOX (0x0002) | SEM_NOOPENFILEERRORBOX (0x8000)
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+    # =========================================================================
+    
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     try:
-        # 1. 初始化 AI (加载 Trainer 传来的权重)
         agent = AiBot(device=device, net_config=net_config)
-        if weights is not None:
+        #  从硬盘读取权重，斩断 Windows IPC 共享内存污染
+        if weight_file and isinstance(weight_file, str) and os.path.exists(weight_file):
+            weights = torch.load(weight_file, map_location=device, weights_only=False)
             agent.net.load_state_dict(weights, strict=False)
             agent.net.eval()
         
         env = GalateaEnv()
-        memory = []
         collected_steps = 0
+        episode_rewards = []
+        episode_lens = []
+        
+        consecutive_ai_fails = 0 # 死亡熔断计数器
         
         # 统计数据
         episode_rewards = []
@@ -58,7 +75,9 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                     continue 
                 d1_name, d1, d2_name, d2 = res
                 raw_data = env.reset(d1, d2)
-            except: continue
+            except Exception as e: 
+                print(f"⚠️ [Worker {worker_id}] 环境Reset异常 (已记录并跳过): {e}")
+                continue
                 
             if not raw_data: continue
             
@@ -69,7 +88,9 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
             brain = DuelState(p0_m, p0_e, p1_m, p1_e)
             try:
                 msg_queue = MessageParser.parse(raw_data)
-            except: continue
+            except Exception as e:
+                print(f"⚠️ [Worker {worker_id}] 初始消息解析异常 (已记录并跳过): {e}")
+                continue
 
             # 局内状态
             game_buffer = {0: [], 1: []}
@@ -93,14 +114,21 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                 if not msg_queue:
                     try:
                         raw_data = env.step()
-                    except OSError: break # Access Violation 保护
-                    except Exception: break
+                    except OSError as e: 
+                        print(f"⚠️ [Worker {worker_id}] OCGCore 引擎底层崩溃: {e}")
+                        break 
+                    except Exception as e: 
+                        print(f"⚠️ [Worker {worker_id}] 环境 Step 发生未知错误: {e}")
+                        import traceback; traceback.print_exc()
+                        break
                     
                     if not raw_data: break
                     
                     try:
                         msg_queue = MessageParser.parse(raw_data)
-                    except: break
+                    except Exception as e: 
+                        print(f"⚠️ [Worker {worker_id}] 消息解析失败 (静默退出): {e}")
+                        break
                     
                     last_act_time = time.time()
                     continue
@@ -109,7 +137,7 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                 msg_type = msg[0]
                 brain.update(msg_type, msg[1:])
                 
-                # 🟢 修改后 (增加读取 reason)
+                # 增加读取 reason
                 if msg_type == 5: # Win
                     if len(msg[1:]) > 0: winner = msg[1:][0]
                     # 读取获胜原因: 0=投降, 1=LP归零, 2=卡组抽干(Deck Out), 3=超时
@@ -122,7 +150,7 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                 if msg_type == 1: 
                     consecutive_retries += 1
                     
-                    # 💥 [RL 惩罚] 不删除记忆，而是把刚才那步的 Value 强制拉低
+                    # 不删除记忆，而是把刚才那步的 Value 强制拉低
                     snap = brain.get_snapshot()
                     player = snap.global_data.to_play
                     if game_buffer[player]:
@@ -132,7 +160,11 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                     if last_decision_value is not None:
                         current_step_ignore_list.append(last_decision_value)
                     
-                    if consecutive_retries > 20: break
+                    if consecutive_retries > 40: 
+                        # AI疯狂瞎按：直接判输，结束对局并惩罚
+                        winner = 1 - player
+                        win_reason = 0
+                        break
                     
                     if last_interaction_msg is not None:
                         msg = last_interaction_msg
@@ -160,41 +192,46 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                             player = snap.global_data.to_play
                             tensor_dict = agent.encoder.encode(snap, player_id=player)
                             
-                            # 🛡️ [终极防爆] 在源头直接将动作索引截断至 99，确保推理和训练全链路安全！
+                            # 防止嵌入层越界崩溃，设定索引上限（根据训练时的 vocab_size）
                             tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 99)
+                            tensor_dict['act_type'] = torch.clamp(tensor_dict['act_type'], 0, 255)
+                            tensor_dict['act_desc'] = torch.clamp(tensor_dict['act_desc'], 0, 1023)
                             
+                            # 是否异步模式分流
                             if req_q is not None and resp_q is not None:
-                                # 🌟 [防爆降维：强类型 Numpy 字典]
-                                # 彻底消灭 1D 拼接带来的 float32 内存膨胀！
+                                # --- 模式 A: 真正的异步 Server 推理 ---
+                                import queue
                                 numpy_dict = {}
                                 for k, v in tensor_dict.items():
-                                    if 'req' in k or 'mask' in k:
-                                        numpy_dict[k] = v.numpy().astype(np.bool_) # 压缩 4 倍内存！
-                                    elif 'feats' in k or 'num' in k or 'global' in k:
-                                        numpy_dict[k] = v.numpy().astype(np.float16) # 半精度浮点
-                                    else:
-                                        # 改成 int32，防止未来词表扩容时 Hash ID 变成负数
-                                        numpy_dict[k] = v.numpy().astype(np.int32)
-                                        
+                                    arr = v.cpu().numpy()
+                                    # 极致压缩防止 Windows 管道爆炸
+                                    if arr.dtype == np.float32: arr = arr.astype(np.float16)
+                                    elif arr.dtype == np.bool_: pass 
+                                    else: arr = arr.astype(np.int16) 
+                                    numpy_dict[k] = arr
+                                    
                                 req_q.put((worker_id, numpy_dict))
                                 
-                                # --- 2. [光速解包] ---
-                                # 👇 [击毙幽灵 1：Numpy 解除] 收到 numpy 数组后还原为 Tensor
-                                packed_res = torch.from_numpy(resp_q.get())
+                                try:
+                                    res_array = resp_q.get(timeout=15.0)
+                                except queue.Empty:
+                                    raise RuntimeError("推断服务器无响应，触发超时熔断机制")
+                                    
+                                packed_res = torch.from_numpy(res_array)
                                 action_idx = packed_res[0].to(torch.long)
                                 log_prob = packed_res[1]
                                 value = packed_res[2]
-                                
-                                # 后续存入 game_buffer 还需要字典，所以这里保留转换
                                 infer_dict = {k: v.cpu() for k, v in tensor_dict.items()}
                             else:
-                                # 模式 B：同步本地模式 (兼容旧版回退)
+                                # --- 模式 B: 纯本地推理 ---
                                 with torch.no_grad():
                                     infer_dict = {k: v.to(device) for k, v in tensor_dict.items()}
                                     action_idx, log_prob, _, value = agent.get_action_and_value_from_tensor(infer_dict, snap.valid_actions)
-                                action_idx = action_idx.cpu()
-                                log_prob = log_prob.cpu()
-                                value = value.cpu()
+                                # 新增 .detach()，确保放入字典的张量干干净净
+                                action_idx = action_idx.detach().cpu()
+                                log_prob = log_prob.detach().cpu()
+                                value = value.detach().cpu()
+                                infer_dict = {k: v.detach().cpu() for k, v in tensor_dict.items()}
                                 
                             sel_idx = action_idx.item()
                             if sel_idx < len(snap.valid_actions):
@@ -227,9 +264,8 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                             last_decision_value = resp 
                             msg_queue = [] 
                             
-                            # 🟢 2. 强制卸载：不管刚才在哪算的，存下来时必须 .cpu() 搬回系统内存
+                            # 2. 强制卸载，存下来时必须 .cpu() 搬回系统内存
                             # 这样即使 16 个进程用 GPU，也不会导致 GPU 显存溢出 (OOM)
-                            # ✅ 替换为:
                             game_buffer[player].append({
                                 'obs': {k: v.cpu() for k, v in infer_dict.items()},
                                 'action': action_idx.cpu(),
@@ -242,7 +278,19 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                             collected_steps += 1
                             ai_handled = True
                             last_act_time = time.time()
-                        except Exception: 
+                        except OSError as e:
+                            #  C++ DLL 底层内存越界
+                            # 绝对不能让 RuleBot 接管，否则会引发无限死循环 DDOS 攻击主进程
+                            print(f"💀 [Worker {worker_id}] C++引擎致命越界，强行终止本局以防死锁！({e})")
+                            winner = 1 - player  # 惩罚导致崩溃的 AI
+                            win_reason = 0
+                            return
+                            
+                        except Exception as e: 
+                            # 纯 Python 逻辑报错，允许 RuleBot 兜底
+                            print(f"\n❌ [Worker {worker_id}] AI 逻辑计算崩溃: {e}")
+                            import traceback
+                            traceback.print_exc()
                             ai_handled = False
 
                     # --- RuleBot 兜底 ---
@@ -259,15 +307,36 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                                         clean_ignore_list.append(struct.unpack('<I', val[:4])[0])
                                     elif len(val) >= 1:
                                         clean_ignore_list.append(val[0])
-                            except: pass
+                            except Exception as e: 
+                                print(f"⚠️ [Worker {worker_id}] ignore_list解析异常: {e}")
 
                         resp = rule_bot.get_rule_decision(p, msg_type, msg, brain, ignore_actions=clean_ignore_list)
                         last_decision_value = resp 
                         msg_queue = [] 
-                        env.send_action(resp)
+                        try:
+                            env.send_action(resp)
+                        except OSError as e:
+                            # 如果 RuleBot 发送后引擎崩溃，同样强行打断循环
+                            print(f"💀 [Worker {worker_id}] RuleBot 踩雷导致引擎崩溃，强行终止本局！({e})")
+                            winner = 1 - player
+                            win_reason = 0
+                            return
+                        except Exception as e:
+                            print(f"⚠️ [Worker {worker_id}] RuleBot 发送动作异常: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            continue
 
             # --- 结算与 GAE ---
             if winner != -1 or ep_steps >= MAX_EPISODE_STEPS:
+                if ep_steps == 0:
+                    consecutive_ai_fails += 1
+                    if consecutive_ai_fails >= 3:
+                        print(f"💀 [Worker {worker_id}] AI 连续 3 局无法行动，触发物理自毁防止死锁！")
+                        return
+                else:
+                    consecutive_ai_fails = 0
+                    episode_lens.append(ep_steps)
                 episode_lens.append(ep_steps)
                 for p in [0, 1]:
                     traj = game_buffer[p]
@@ -306,16 +375,20 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                     last_gae_lam = 0
                     next_value = 0 
 
-                    # [修改点 1] 初始化列式存储容器
+                    # ==========================================
+                    # 终极内存防爆：预分配连续内存，告别 list 与 torch.cat
+                    # ==========================================
                     if 'columns' not in locals():
+                        # 预先分配足够的空间 (目标步数 + 最大单局步数容错)
+                        max_len = target_steps + MAX_EPISODE_STEPS + 100
                         columns = {
                             'obs': {}, 
-                            'action': [],
-                            'log_prob': [],
-                            'return': [],
-                            'advantage': []
-                            # 删除了 valid_actions
+                            'action': torch.zeros(max_len, dtype=torch.long),
+                            'log_prob': torch.zeros(max_len, dtype=torch.float16),
+                            'return': torch.zeros(max_len, dtype=torch.float16),
+                            'advantage': torch.zeros(max_len, dtype=torch.float16)
                         }
+                        ptr = 0 # 内存写入指针
                     
                     for t in reversed(range(len(traj))):
                         delta = rewards[t] + GAMMA * next_value - traj[t]['value'].item()
@@ -323,55 +396,60 @@ def worker_process(worker_id, net_config, weights, deck_dir, target_steps, devic
                         advantages.insert(0, last_gae_lam)
                         next_value = traj[t]['value'].item()
                     
-                    # 打包发回 Trainer (列式存储)
+                    # 🌟 动态初始化 obs 的预分配空间
+                    if not columns['obs'] and len(traj) > 0:
+                        for k, v in traj[0]['obs'].items():
+                            columns['obs'][k] = torch.zeros((max_len,) + v.shape[1:], dtype=v.dtype)
+                    
+                    # 🌟 极限内存优化：流式填入数据，并立刻弹出销毁历史记录
                     for t in range(len(traj)):
-                        # 1. 处理 Obs
-                        for k, v in traj[t]['obs'].items():
-                            if k not in columns['obs']: columns['obs'][k] = []
-                            # [内存保护] 绝对保留布尔值，防止膨胀
-                            if v.dtype == torch.bool:
-                                columns['obs'][k].append(v)
-                            elif v.is_floating_point():
-                                columns['obs'][k].append(v.half())
-                            else:
-                                columns['obs'][k].append(v.to(dtype=torch.int32))
+                        obs_dict = traj[t].pop('obs') # 👈 弹出并销毁，边填边释放历史数据，杜绝双重占用！
+                        for k, v in obs_dict.items():
+                            columns['obs'][k][ptr] = v[0]
+                        del obs_dict
                         
-                        # 2. 其他数据
-                        columns['action'].append(traj[t]['action'])
-                        columns['log_prob'].append(traj[t]['log_prob'].half())
+                        columns['action'][ptr] = traj[t]['action']
+                        columns['log_prob'][ptr] = traj[t]['log_prob'].half()
                         
-                        # Return/Advantage 转 Tensor 并压缩
                         ret_val = advantages[t] + traj[t]['value'].item()
-                        columns['return'].append(torch.tensor(ret_val, dtype=torch.float16))
-                        columns['advantage'].append(torch.tensor(advantages[t], dtype=torch.float16))
+                        columns['return'][ptr] = ret_val
+                        columns['advantage'][ptr] = advantages[t]
                         
-                        # 删除了 columns['valid_actions'].append...
-                        # 删除了 collected_steps += 1 (解决双重计数 Bug！)
+                        ptr += 1
 
-        # 🛑 [修复] 使用 smart_concat 替代 stack
-        if 'columns' not in locals() or len(columns['action']) == 0:
-            return None, 0.0, 0.0
+        # 死锁保护
+        tmp_file = f"tmp_rollout_iter_{iteration}_worker_{worker_id}.pt"
+        if 'columns' not in locals() or ptr == 0:
+            return # 👈 改动：如果没数据直接返回，不生成空文件，主进程会自动忽略
 
-        def smart_concat(tensor_list):
-            if not tensor_list: return torch.tensor([])
-            if tensor_list[0].ndim == 0:
-                return torch.stack(tensor_list)
-            return torch.cat(tensor_list, dim=0)
-
+        # 🌟 关键：使用纯净 Tensor 切片并 Clone，绝不触发 Pickle 内存翻倍！
         batch_data = {
-            'obs': {k: smart_concat(v_list) for k, v_list in columns['obs'].items()},
-            'action': smart_concat(columns['action']),
-            'log_prob': smart_concat(columns['log_prob']),
-            'return': smart_concat(columns['return']),
-            'advantage': smart_concat(columns['advantage'])
-            # 删除了 'valid_actions': columns['valid_actions']
+            'obs': {k: v[:ptr].clone() for k, v in columns['obs'].items()},
+            'action': columns['action'][:ptr].clone(),
+            'log_prob': columns['log_prob'][:ptr].clone(),
+            'return': columns['return'][:ptr].clone(),
+            'advantage': columns['advantage'][:ptr].clone()
         }
+        
+        # 释放巨大的预分配内存池
+        del columns
+        import gc; gc.collect()
         
         avg_rew = np.mean(episode_rewards) if episode_rewards else 0.0
         avg_len = np.mean(episode_lens) if episode_lens else 0.0
+        batch_data['avg_rew'] = np.array([avg_rew], dtype=np.float32)
+        batch_data['avg_len'] = np.array([avg_len], dtype=np.float32)
         
-        return batch_data, avg_rew, avg_len
+        # 🌟 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局！
+        tmp_write_file = tmp_file + ".tmp"
+        torch.save(batch_data, tmp_write_file)
+        os.replace(tmp_write_file, tmp_file) 
+        
+        return
 
     except Exception as e:
-        print(f"Worker {worker_id} Died: {e}")
-        return None, 0.0, 0.0 # [修正] 必须返回 None，Trainer 才能正确识别并忽略
+        # 打印具体的异常名称，MemoryError 不再隐形
+        print(f"Worker {worker_id} Died: [{type(e).__name__}] {e}")
+        import traceback
+        traceback.print_exc()
+        return

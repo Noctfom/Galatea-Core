@@ -1,6 +1,6 @@
 # ==================================================================================
 #  Galatea Network Architecture (Transformer-based)
-#  Project Galatea V2.2 - The Semantic Brain
+#  Project Galatea V3.0 - The Semantic Brain
 # ==================================================================================
 
 import torch
@@ -72,10 +72,13 @@ class GalateaNet(nn.Module):
         )
 
     def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr):
-        cat_v = self.sem_cat_embed(sem_cat).sum(dim=-2)
+        # 🌟 核心修复：将 int16 (Short) 强转为 long()，满足 PyTorch Embedding 的要求！
+        cat_v = self.sem_cat_embed(sem_cat.long()).sum(dim=-2)
         req_v = self.sem_req_proj(sem_req.to(torch.float32))
-        sc_v = self.sem_setcode_embed(sem_sc).sum(dim=-2)
-        num_v = self.sem_num_proj(sem_num)
+        sc_v = self.sem_setcode_embed(sem_sc.long()).sum(dim=-2)
+        
+        # 将 float16 转为 float32 满足 Linear 的要求
+        num_v = self.sem_num_proj(sem_num.to(torch.float32))
         
         # 1. 基础语义聚合 (128维)
         sem_base = cat_v + req_v + sc_v + num_v # [B, S, 槽数, 128]
@@ -84,9 +87,9 @@ class GalateaNet(nn.Module):
         sem_base_512 = self.sem_fusion_proj(sem_base) # [B, S, 槽数, 512]
         
         # 3. 提取物理共鸣特征 (已经是 512 维了！)
-        ref_v = self.card_embed(sem_ref).sum(dim=-2)
-        race_v = self.race_embed(sem_race).sum(dim=-2)
-        attr_v = self.attr_embed(sem_attr).sum(dim=-2)
+        ref_v = self.card_embed(sem_ref.long()).sum(dim=-2)
+        race_v = self.race_embed(sem_race.long()).sum(dim=-2)
+        attr_v = self.attr_embed(sem_attr.long()).sum(dim=-2)
         
         # 4. 512维空间的终极融合
         slot_v = sem_base_512 + ref_v + race_v + attr_v

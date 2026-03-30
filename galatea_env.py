@@ -50,7 +50,8 @@ class GalateaEnv:
         # Windows DLL 加载优化
         if os.name == 'nt':
             try: os.add_dll_directory(os.path.dirname(self.dll_path))
-            except: pass
+            except Exception as e: 
+                print(f"[galatea_env]⚠️ 无法添加 DLL 目录: {e}")
         
         self.lib = ctypes.cdll.LoadLibrary(self.dll_path)
         self.cdb = sqlite3.connect(self.cdb_path)
@@ -160,7 +161,12 @@ class GalateaEnv:
             data.level = row[7] & 0xFF; data.race = row[8]; data.attribute = row[9]
             data.lscale = (row[7] >> 24) & 0xFF; data.rscale = (row[7] >> 16) & 0xFF
             return 1 
-        except: return 0
+        
+        except Exception as e:
+            # 打印底层卡片读取错误，定位引发 C++ 崩溃的罪魁祸首
+            print(f"\n🚨 [底层致命错误] Python 无法读取卡片数据 (Code: {code}): {e}")
+            import traceback; traceback.print_exc()
+            return 0
 
     def _on_message(self, pduel, msg_type): 
         # MDPro3 可能会通过 msg_type=1 发送 lua 错误信息

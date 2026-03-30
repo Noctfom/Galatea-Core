@@ -302,21 +302,23 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             decision = struct.pack('<I', result_mask)
 
         # =================================================================
-        # [终极修正] 11. 卡片/数字宣言 (列表选择)
+        # [终极修正] 11. 卡片/数字宣言 (拆分：C++ 源码揭示的陷阱！)
         # =================================================================
-        elif msg_type in [MSG_ANNOUNCE_CARD, MSG_ANNOUNCE_NUMBER]:
-            stream.read(1) # Player
-            count = struct.unpack('B', stream.read(1))[0] # 选项数量
-            
-            options = []
-            for _ in range(count):
-                options.append(struct.unpack('<I', stream.read(4))[0])
-            
-            # 这里的规则通常是选 1 个 (如宣言一个卡名)
-            # 源码: int32_t code = returns.ivalue[0];
+        elif msg_type == MSG_ANNOUNCE_CARD: # 142: 必须返回真实卡密
+            stream.read(1)
+            count = struct.unpack('B', stream.read(1))[0]
+            options = [struct.unpack('<I', stream.read(4))[0] for _ in range(count)]
             if options:
-                choice = random.choice(options)
-                decision = struct.pack('<I', choice)
+                decision = struct.pack('<I', random.choice(options))
+            else:
+                decision = struct.pack('<I', 0)
+                
+        elif msg_type == MSG_ANNOUNCE_NUMBER: # 143: 必须返回索引！
+            stream.read(1)
+            count = struct.unpack('B', stream.read(1))[0]
+            for _ in range(count): stream.read(4) # 选项具体数值跳过
+            if count > 0:
+                decision = struct.pack('<I', random.randint(0, count - 1)) # 返回索引
             else:
                 decision = struct.pack('<I', 0)
 
@@ -448,7 +450,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                         decision = struct.pack('<i', -1)
                     else:
                         decision = struct.pack('<i', 0)
-                except Exception:
+                except Exception as e:
+                    print(f"⚠️ [RuleBot] 处理 MSG_SELECT_UNSELECT_CARD 时发生异常: {e}")
                     # 解析中途失败（如数据包截断），默认选0
                     decision = struct.pack('<i', 0)
 
@@ -539,6 +542,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                             
                 return decision
             except Exception as e:
+                print(f"⚠️ [RuleBot] 处理 MSG_SELECT_SUM 时发生异常: {e}")
                 return bytes([0])
 
         # ==================== 6. 排序与位置 (MSG_SORT_CARD) ====================
@@ -708,12 +712,13 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             decision = bytes(resp_buf)
             
     except Exception as e:
-        # 万一解析崩了，返回 0 或空字节作为最后的倔强
-        print(f"[RuleBot] Parsing Error for Msg {msg_type}: {e}")
-        decision = 0
+        # 万一解析崩了，也要保证返回合法格式，避免 Bot 卡死
+        print(f"[RuleBot] 解析出现错误 {msg_type}: {e}")
+        decision = -1
 
     if decision is None:
-        decision = 0
+        print(f"[RuleBot] 未处理的消息类型: {msg_type}")
+        decision = -1
 
     # ---------------------------------------------------------
     # [数据记录点]

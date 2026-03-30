@@ -1,5 +1,5 @@
 '''
-游戏常量定义模块 (V2.2 最终完备版)
+游戏常量定义模块 (V3.0 最终完备版)
 包含 Zone, Position, Phases, CardType, LocationInfo
 '''
 
