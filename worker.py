@@ -23,7 +23,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules
 # 状态与消息定义
 STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
 INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
-AI_MANAGED_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 24]
+AI_MANAGED_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25]
 DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133, 140, 141, 142, 143]
 
 # GAE 参数 (和 Trainer 保持一致)
@@ -189,16 +189,15 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     if msg_type in AI_MANAGED_MSGS and brain.current_valid_actions and consecutive_retries == 0:
                         
                         # 向参谋部索要套餐，拦截并覆盖单选题
-                        if msg_type in [15, 20, 23]:
+                        if msg_type in [15, 18, 20, 23, 24, 25]:
                             macro_options = rule_bot.get_macro_options(msg_type, msg[1:])
                             if macro_options:
                                 from data_types import GameAction
                                 brain.current_valid_actions = []
                                 for i, opt in enumerate(macro_options):
-                                    # 创建虚拟的“宏动作”
                                     act = GameAction(action_type=msg_type, index=i, desc_str=f"Macro {i}")
-                                    # Python 动态绑定属性
-                                    setattr(act, 'macro_targets', opt['locs']) 
+                                    if 'locs' in opt: setattr(act, 'macro_targets', opt['locs'])
+                                    if 'places' in opt: setattr(act, 'macro_places', opt['places']) # 🌟 绑定格子坐标
                                     setattr(act, 'decision_bytes', opt['bytes'])
                                     brain.current_valid_actions.append(act)
                         
@@ -283,14 +282,22 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             last_decision_value = resp 
                             msg_queue = [] 
                             
-                            # 2. 强制卸载，存下来时必须 .cpu() 搬回系统内存
-                            # 这样即使 16 个进程用 GPU，也不会导致 GPU 显存溢出 (OOM)
+                            # 内存脱水压缩：把 64位长整型全部压成 16位短整型
+                            compressed_obs = {}
+                            for k, v in infer_dict.items():
+                                cpu_v = v.cpu()
+                                if cpu_v.dtype in [torch.long, torch.int64, torch.int32]:
+                                    compressed_obs[k] = cpu_v.to(torch.int16)
+                                elif cpu_v.dtype == torch.float32:
+                                    compressed_obs[k] = cpu_v.to(torch.float16)
+                                else:
+                                    compressed_obs[k] = cpu_v
+                                    
                             game_buffer[player].append({
-                                'obs': {k: v.cpu() for k, v in infer_dict.items()},
-                                'action': action_idx.cpu(),
-                                'log_prob': log_prob.cpu(),
-                                'value': value.cpu()
-                                # 删掉了 'valid_actions': snap.valid_actions
+                                'obs': compressed_obs,
+                                'action': action_idx.cpu().to(torch.int16),
+                                'log_prob': log_prob.cpu().to(torch.float16),
+                                'value': value.cpu().to(torch.float16)
                             })
                             
                             ep_steps += 1

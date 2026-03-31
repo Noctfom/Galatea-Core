@@ -77,6 +77,11 @@ class GameAction:
 
     desc_id: int = 0      # 效果ID，用于区分同一张卡的不同效果
 
+    # [合法化] 宏动作专属属性 (默认为 None，兼容单卡逻辑)
+    macro_targets: list = None
+    macro_places: list = None
+    decision_bytes: bytes = b''
+
 @dataclass
 class GameSnapshot:
     """单一决策帧的完整快照"""
@@ -92,3 +97,5 @@ class GameSnapshot:
     p0_extra_codes: List[int] = field(default_factory=list)
     p1_deck_codes: List[int] = field(default_factory=list)
     p1_extra_codes: List[int] = field(default_factory=list)
+
+    chain_stack: List[dict] = field(default_factory=list)

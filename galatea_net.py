@@ -57,6 +57,7 @@ class GalateaNet(nn.Module):
         # --- 4. Action Head (动作评估中枢) ---
         self.act_type_embed = nn.Embedding(256, self.d_model) 
         self.desc_embed = nn.Embedding(1024, self.d_model) 
+        self.place_embed = nn.Embedding(32, self.d_model, padding_idx=0)
         
         self.intent_proj = nn.Linear(self.d_model, self.d_model)
         self.option_proj = nn.Linear(self.d_model, self.d_model)
@@ -156,8 +157,24 @@ class GalateaNet(nn.Module):
         else:
             deck_pooled = 0
             
+        # 连锁雷达：嗅探正在发动的效果！
+        if 'c_sem_category' in batch_dict:
+            c_sem = self.process_semantics(
+                batch_dict['c_sem_category'], batch_dict['c_sem_req'],
+                batch_dict['c_sem_setcode'], batch_dict['c_sem_number'],
+                batch_dict['c_sem_ref'], batch_dict['c_sem_race'], batch_dict['c_sem_attr']
+            ) # [B, 5, 512]
+            
+            # 使用 mask 求平均
+            c_mask_f = batch_dict['c_mask'].float().unsqueeze(-1)
+            c_sem_sum = (c_sem * c_mask_f).sum(dim=1)
+            c_count = c_mask_f.sum(dim=1).clamp(min=1e-5)
+            chain_pooled = (c_sem_sum / c_count).unsqueeze(1) # [B, 1, 512]
+        else:
+            chain_pooled = 0
+
         # 大一统评分底蕴
-        v_input = g_embed + pooled + deck_pooled
+        v_input = g_embed + pooled + deck_pooled + chain_pooled
         value = self.value_head(v_input.squeeze(1)) 
 
         # === Action Head (因果决策) ===
@@ -169,8 +186,14 @@ class GalateaNet(nn.Module):
         memory_expanded = memory.unsqueeze(1).expand(-1, act_card_idx.shape[1], -1, -1) # [B, 80, 100, 512]
         gathered_vecs = torch.gather(memory_expanded, 2, idx_expanded) # [B, 80, 5, 512]
         
-        # 降维聚合 (Sum Pooling)：不管几张卡，全部融合成1个组合底蕴
-        target_card_vecs = gathered_vecs.sum(dim=2) # 压扁为 [B, 80, 512]
+
+        is_sort = (batch_dict['act_type'] == 25).unsqueeze(-1).unsqueeze(-1).float() # [B, 80, 1, 1]
+        # 创建衰减权重阵：1.0, 0.8, 0.6, 0.4, 0.2
+        weights = torch.tensor([1.0, 0.8, 0.6, 0.4, 0.2], device=gathered_vecs.device).view(1, 1, 5, 1)
+        # 巧妙融合：如果是 25，应用权重；如果不是，全部按 1.0 (等价于 Sum Pooling)
+        w = is_sort * weights + (1.0 - is_sort) * 1.0
+        
+        target_card_vecs = (gathered_vecs * w).sum(dim=2) # [B, 80, 512]
 
         type_vecs = self.act_type_embed(batch_dict['act_type']) 
         desc_vecs = self.desc_embed(batch_dict['act_desc'])     
@@ -179,13 +202,16 @@ class GalateaNet(nn.Module):
         act_attr_vecs = self.attr_embed(batch_dict['act_attr'])
         act_code_vecs = self.card_embed(batch_dict['act_code'])
 
+        place_vecs_raw = self.place_embed(batch_dict['act_place']) # [B, 80, 5, 512]
+        place_vecs = place_vecs_raw.sum(dim=2)                     # [B, 80, 512]
+
         # 终极双塔匹配机制 (Dual-Tower Matching)
         # 1. 意图塔 (Intent)：全局底蕴决定了ai想干什么
         intent_vec = self.intent_proj(v_input) 
         intent_vec = intent_vec.expand(-1, act_mask.shape[1], -1) 
         
         # 2. 选项塔 (Option)：把目标卡片、类型、隐藏语义全部融合
-        raw_option = target_card_vecs + type_vecs + desc_vecs + act_race_vecs + act_attr_vecs + act_code_vecs
+        raw_option = target_card_vecs + type_vecs + desc_vecs + act_race_vecs + act_attr_vecs + act_code_vecs + place_vecs
         option_vec = self.option_proj(raw_option)
         
         # 3. 交汇：意图与选项碰撞

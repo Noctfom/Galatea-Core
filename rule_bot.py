@@ -841,6 +841,57 @@ def get_macro_options(msg_type, msg_payload):
                     resp_buf.append(cd['index'])
                     locs.append(cd['loc'])
                 options.append({'bytes': bytes(resp_buf), 'locs': locs})
+
+        elif msg_type == 25: # MSG_SORT_CARD
+            stream.read(1) # P
+            count = struct.unpack('B', stream.read(1))[0]
+            cards = []
+            for i in range(count):
+                stream.read(4) # Code
+                c = struct.unpack('B', stream.read(1))[0]
+                l = struct.unpack('B', stream.read(1))[0]
+                s = struct.unpack('B', stream.read(1))[0]
+                cards.append((i, LocationInfo.encode(c, l, s, 0)))
+                
+            # 利用 Python 自带工具瞬间求出所有排列组合
+            valid_solutions = list(itertools.permutations(cards))
+            # 限制最多 20 种排列，防止 5 张卡以上导致组合爆炸 (5! = 120)
+            if len(valid_solutions) > 20: valid_solutions = random.sample(valid_solutions, 20)
+            
+            for sol in valid_solutions:
+                resp_buf = bytearray()
+                locs = []
+                for idx, loc in sol:
+                    resp_buf.append(idx)   # 原选项索引
+                    locs.append(loc)       # 映射用绝对位置
+                options.append({'bytes': bytes(resp_buf), 'locs': locs})
+
+        elif msg_type in [18, 24]: # MSG_SELECT_PLACE / DISFIELD
+            stream.read(1) # P
+            count = struct.unpack('B', stream.read(1))[0]
+            mask = struct.unpack('<I', stream.read(4))[0]
+            
+            avail_zones = []
+            for i in range(32):
+                if not (mask & (1 << i)): # 0 代表可用
+                    # 严格按照 C++ 源码的反向解码
+                    p = 1 if i >= 16 else 0
+                    l = 0x08 if (i % 16) >= 8 else 0x04
+                    s = i % 8
+                    avail_zones.append((i, p, l, s)) # i 是绝对坐标给 AI 看，p/l/s 给引擎
+            
+            # 组合选点 (比如扰乱王选 3 个)
+            all_combos = list(itertools.combinations(avail_zones, count))
+            if len(all_combos) > 20: all_combos = random.sample(all_combos, 20)
+            
+            for combo in all_combos:
+                resp_buf = bytearray()
+                places = []
+                for i, p, l, s in combo:
+                    resp_buf.extend([p, l, s]) # 引擎要求每个选点 3 字节！
+                    places.append(i) # 记录绝对坐标(0~31)供 AI 的神经网络认路
+                # 注意：这里我们用 'places' 键，区分于卡片的 'locs'
+                options.append({'bytes': bytes(resp_buf), 'places': places})
                 
     except Exception as e:
         print(f"⚠️ [参谋部] get_macro_options 解析错误: {e}")

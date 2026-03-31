@@ -371,6 +371,8 @@ class DuelState:
         self.active_player = 0
         self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
 
+        self.chain_stack = []
+
     def reset(self):
         self.turn = 0
         self.phase = 0
@@ -382,6 +384,8 @@ class DuelState:
         # [新增] 当前挂起的合法动作列表
         # 每次收到交互消息 (IDLE, CHAIN, CARD...) 时更新
         self.current_valid_actions = [] 
+
+        self.chain_stack = []
 
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
@@ -422,6 +426,21 @@ class DuelState:
             elif msg_type == 53: # POS_CHANGE
                 code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
+
+            elif msg_type == 70: # 🌟 MSG_CHAINING (严格匹配 C++ 的 16 字节)
+                code = struct.unpack('<I', stream.read(4))[0]
+                info_loc = struct.unpack('<I', stream.read(4))[0] # 卡片当前位置
+                tc = struct.unpack('B', stream.read(1))[0]      # 触发控制者
+                tl = struct.unpack('B', stream.read(1))[0]      # 触发区域
+                ts = struct.unpack('B', stream.read(1))[0]      # 触发编号
+                desc = struct.unpack('<I', stream.read(4))[0]   # 效果描述
+                ct = struct.unpack('B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
+                
+                # 压入堆栈记事本
+                self.chain_stack.append({'code': code, 'c': tc, 'l': tl, 's': ts, 'desc': desc})
+                
+            elif msg_type == 74: # 🌟 MSG_CHAIN_END (C++ 发送 0 字节，直接清空堆栈)
+                self.chain_stack.clear()
 
             elif msg_type == 90: # DRAW (抽卡)
                 #  [录像修复 B] 记录抽卡到手牌！
@@ -682,15 +701,15 @@ class DuelState:
 
             # 8. MSG_SELECT_PLACE (18) / DISFIELD (24) - [攻克难点！]
             elif msg_type in [18, 24]:
-                stream.read(1) # P
-                count = struct.unpack('B', stream.read(1))[0]
+                stream.read(1); count = struct.unpack('B', stream.read(1))[0]
                 mask = struct.unpack('<I', stream.read(4))[0]
-                # 把 mask 解压成具体的格子位置
                 for i in range(32):
                     if not (mask & (1 << i)):
-                        # 这是一个可用的格子
-                        # 我们把 i 作为 index 传给 AI，翻译时再转回 locations
-                        self.current_valid_actions.append(GameAction(action_type=18, index=i, desc_str=f"Zone {i}"))
+                        self.current_valid_actions.append(GameAction(
+                            action_type=msg_type, 
+                            index=i,  # 🌟 修复：直接传 i，千万别传 1<<i
+                            desc_id=i, desc_str=f"Place Grid {i}"
+                        ))
 
             # =================================================================
             # [阶段一追加] 9. 宣言类消息解析
@@ -822,15 +841,22 @@ class DuelState:
                     else:
                         new_act.macro_targets.append(-1)
             
+            elif hasattr(act, 'macro_places') and act.macro_places:
+                setattr(new_act, 'macro_places', act.macro_places)
+                setattr(new_act, 'decision_bytes', act.decision_bytes)
+            
             final_actions.append(new_act)
 
-        return GameSnapshot(
+        # 找到 return GameSnapshot(...) 前面，用一个临时变量接住
+        snap = GameSnapshot(
             global_data=global_feat,
             entities=entities,
             valid_actions=final_actions,
-            # 装载记牌器的拷贝，防止引用污染
             p0_deck_codes=self.p0_deck.copy(),
             p0_extra_codes=self.p0_extra.copy(),
             p1_deck_codes=self.p1_deck.copy(), 
-            p1_extra_codes=self.p1_extra.copy() # 追加
+            p1_extra_codes=self.p1_extra.copy() 
         )
+        # 🌟 动态外挂连锁堆栈
+        snap.chain_stack = self.chain_stack.copy()
+        return snap
