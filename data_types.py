@@ -59,6 +59,10 @@ class CardEntity:
     # --- 3. 辅助标记 ---
     is_public: bool = False      # 是否公开可见 (表侧卡=True)
 
+    counter_count: int = 0       # 指示物数量
+    overlay_count: int = 0       # 叠放的超量素材数量
+    is_equipped: bool = False    # 是否有装备卡/取对象羁绊
+
 @dataclass
 class GameAction:
     """
@@ -99,3 +103,4 @@ class GameSnapshot:
     p1_extra_codes: List[int] = field(default_factory=list)
 
     chain_stack: List[dict] = field(default_factory=list)
+    history_stack: List[dict] = field(default_factory=list)

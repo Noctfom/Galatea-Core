@@ -176,7 +176,7 @@ class ModelArena:
                 if active_bot and msg_type in ai_managed_msgs and brain.current_valid_actions and consecutive_retries == 0:
                     try:
                         # 1. 提取当前状态快照
-                        snap = brain.get_snapshot()
+                        snap = brain.get_snapshot(self.env)
                         player = snap.global_data.to_play
 
                         current_hash = "|".join([f"{a.action_type}_{a.index}" for a in snap.valid_actions])

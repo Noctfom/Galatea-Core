@@ -151,7 +151,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     consecutive_retries += 1
                     
                     # 不删除记忆，而是把刚才那步的 Value 强制拉低
-                    snap = brain.get_snapshot()
+                    snap = brain.get_snapshot(env)
                     player = snap.global_data.to_play
                     if game_buffer[player]:
                         # 给最后一步施加惩罚
@@ -202,7 +202,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     brain.current_valid_actions.append(act)
                         
                         try:
-                            snap = brain.get_snapshot()
+                            snap = brain.get_snapshot(env)
                             player = snap.global_data.to_play
                             tensor_dict = agent.encoder.encode(snap, player_id=player)
                             
@@ -240,7 +240,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 # --- 模式 B: 纯本地推理 ---
                                 with torch.no_grad():
                                     infer_dict = {k: v.to(device) for k, v in tensor_dict.items()}
-                                    action_idx, log_prob, _, value = agent.get_action_and_value_from_tensor(infer_dict, snap.valid_actions)
+                                    action_idx, log_prob, _, value, v_input= agent.get_action_and_value_from_tensor(infer_dict, snap.valid_actions)
+                                
                                 # 新增 .detach()，确保放入字典的张量干干净净
                                 action_idx = action_idx.detach().cpu()
                                 log_prob = log_prob.detach().cpu()
@@ -252,7 +253,18 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 chosen = snap.valid_actions[sel_idx]
                             else:
                                 chosen = random.choice(snap.valid_actions)
-                            
+
+                            # 1. 计算内在好奇心奖励 (RND Reward)
+                            rnd_reward = agent.net.rnd(v_input.to(device)).item()
+                            intrinsic_reward = 0.005 * rnd_reward 
+
+                            # 2. 软性时间惩罚 (Soft Enrage)
+                            step_reward = intrinsic_reward 
+                            if chosen.action_type == 7: # 选择进入结束阶段 (To EP)
+                                # 如果回合数大于 10，且这回合有操作空间但 AI 疯狂空过
+                                if brain.turn > 10 and len(snap.valid_actions) > 2:
+                                    step_reward -= 0.001 * (brain.turn - 10)
+
                             # --- 动作翻译 ---
                             resp = b''
                             
@@ -297,7 +309,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 'obs': compressed_obs,
                                 'action': action_idx.cpu().to(torch.int16),
                                 'log_prob': log_prob.cpu().to(torch.float16),
-                                'value': value.cpu().to(torch.float16)
+                                'value': value.cpu().to(torch.float16),
+                                'step_reward': step_reward
                             })
                             
                             ep_steps += 1
@@ -416,8 +429,14 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         }
                         ptr = 0 # 内存写入指针
                     
+                    # 替换为这套融合了步进奖励的新逻辑：
                     for t in reversed(range(len(traj))):
-                        delta = rewards[t] + GAMMA * next_value - traj[t]['value'].item()
+                        # 获取这一步的面包屑奖励
+                        s_rew = traj[t].get('step_reward', 0.0)
+                        # 只有最后一步才加上胜负大奖 (rewards[t] 就是 final_reward)
+                        actual_rew = s_rew + (rewards[t] if t == len(traj) - 1 else 0.0)
+                        
+                        delta = actual_rew + GAMMA * next_value - traj[t]['value'].item()
                         last_gae_lam = delta + GAMMA * GAE_LAMBDA * last_gae_lam
                         advantages.insert(0, last_gae_lam)
                         next_value = traj[t]['value'].item()

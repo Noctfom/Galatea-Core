@@ -154,7 +154,25 @@ def main():
     duel_parser.add_argument("--n_heads", type=int, default=4, help="Attention heads")
     duel_parser.add_argument("--n_layers", type=int, default=2, help="Transformer layers")
 
+    # --- 4. 语义化提取模式 (Parse) ---
+    parse_parser = subparsers.add_parser('parse', help='提取并更新卡片Lua脚本语义知识库')
+    parse_parser.add_argument('--script_dir', type=str, default='./script', help='Lua脚本所在目录')
+    parse_parser.add_argument('--output', type=str, default='knowledge_base.json', help='输出的知识库文件路径')
+    parse_parser.add_argument('--clear', action='store_true', help='清空本地知识库，从头开始重新解析') 
+    
+    parse_parser.add_argument('--sync', action='store_true', help='从主仓库拉取最新知识库作为基座') 
+    parse_parser.add_argument('--remote_url', type=str, 
+                              default='https://raw.githubusercontent.com/Noctfom/astrbot-plugin-duel-galatea/main/knowledge_base.json', 
+                              help='指定其他的 Github Raw URL')
+
+    # --- 5. 爬虫更新模式 (Update - 预留) ---
+    update_parser = subparsers.add_parser('update', help='[预留] 从开源仓库拉取并更新本地卡片库与脚本')
+    update_parser.add_argument('--repo', type=str, default='default', help='目标数据源/仓库标识 (如 koishi, mohu 等)')
+    update_parser.add_argument('--force', action='store_true', help='强制覆盖本地的 cards.cdb 和 script 文件夹')
+
     args = parser.parse_args()
+
+
 
     # --- 检查卡组路径 ---
     if hasattr(args, 'deck_dir'):
@@ -218,6 +236,27 @@ def main():
         )
         arena.run_tournament(n_games=args.num)
         
+    elif args.command == 'parse':
+        print("🧠 启动语义知识库构建模块...")
+        from lua_parser import YGOProLuaParser
+        parser = YGOProLuaParser(script_dir=args.script_dir)
+        
+        # 逻辑判定：如果开启了 --sync，就使用默认的 remote_url，否则传入 None
+        actual_remote_url = args.remote_url if args.sync else None
+        
+        parser.run_batch(output_file=args.output, clear_existing=args.clear, remote_url=actual_remote_url)
+        
+    elif args.command == 'update':
+        print("🌐 启动数据库与脚本同步模块...")
+        print(f"👉 目标数据源: {args.repo}")
+        print("⚠️ 注意: 该爬虫模块正在开发中。未来执行此命令将自动下载并更新 cards.cdb 与 script 文件夹。")
+        if args.force:
+            print("🧨 [强制覆盖模式已开启]")
+            
+        # 预留给未来的爬虫脚本接口
+        # import update_tools
+        # update_tools.sync_from_repo(repo=args.repo, force_overwrite=args.force)
+
     else:
         parser.print_help()
 

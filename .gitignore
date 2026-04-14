@@ -11,6 +11,8 @@ __pycache__/
 MDPro3-master-Tools-YGO Classes-ocgcore/
 script/
 ai_thoughts/
+replays/
+replay_data/
 crash_report.txt
 
 # 卡组文件 

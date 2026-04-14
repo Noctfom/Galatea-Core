@@ -64,7 +64,7 @@ class AiBot:
         # 1. 前向传播
         # logits: [B, MAX_ACTIONS] (已在网络内部Mask，无效动作是 -1e9)
         # value:  [B, 1]
-        logits, value = self.net(obs_dict)
+        logits, value, v_input = self.net(obs_dict)
         
         # 2. 构建分布
         # Categorical 会自动对 logits 做 softmax
@@ -73,15 +73,13 @@ class AiBot:
         
         # 3. 采样
         action = dist.sample()
-        log_prob = dist.log_prob(action)
-        entropy = dist.entropy()
         
         # 返回: action(索引), log_prob, entropy(平均值), value
-        return action, log_prob, entropy.mean(), value
+        return action, dist.log_prob(action), dist.entropy().mean(), value, v_input
 
     def get_decision(self, gamestate, msg_type, msg_args=None):
         self.net.eval()
-        snap = gamestate.get_snapshot()
+        snap = gamestate.get_snapshot(self.env)
         if not snap.valid_actions: return None
 
         tensor_dict = self.encoder.encode(snap, player_id=snap.global_data.to_play)
@@ -149,8 +147,10 @@ class AiBot:
                 if zone_id & 8:  l = 0x08
                 s = zone_id & 0x7
                 
+                # 💡 修复：msg_args[0] 才是玩家 ID！
                 req_p = 0
-                if msg_args and len(msg_args) > 1: req_p = msg_args[1]
+                if msg_args and len(msg_args) > 0: req_p = msg_args[0] 
+                
                 raw_p = req_p if p == 0 else (1 - req_p)
                 final_p = 1 if raw_p == 1 else 0
                 return bytes([final_p, l, s])

@@ -46,21 +46,36 @@ def load_deck(base_dir, deck_name):
             
     return d
 
+
 def get_random_deck_pair(ydk_dir='./decks'):
     """
-    随机选两个卡组
+    随机选两个卡组 (支持子文件夹环境隔离)
     返回: (name1, deck1_obj, name2, deck2_obj)
     """
-    names = list_decks(ydk_dir)
-    if len(names) < 1:
-        print(f"[Deck] No .ydk files found in {ydk_dir}!")
+    if not os.path.exists(ydk_dir):
         return None, None, None, None
+
+    # 1. 寻找所有子文件夹 (代表不同的环境/卡池)
+    subdirs = [os.path.join(ydk_dir, d) for d in os.listdir(ydk_dir) if os.path.isdir(os.path.join(ydk_dir, d))]
     
+    # 如果没有子文件夹，就把根目录当成默认环境
+    if not subdirs:
+        subdirs = [ydk_dir]
+        
+    # 2. 随机选中一个环境 (比如 2024_meta)
+    chosen_env = random.choice(subdirs)
+    
+    # 3. 在该环境下抽取两个卡组
+    names = list_decks(chosen_env)
+    if len(names) < 1:
+        print(f"[Deck] ⚠️ 文件夹 {chosen_env} 下没有找到 .ydk 文件!")
+        return None, None, None, None
+        
     # 随机抽两个名字（允许同名，即镜像对局）
     n1 = random.choice(names)
     n2 = random.choice(names)
     
-    d1 = load_deck(ydk_dir, n1)
-    d2 = load_deck(ydk_dir, n2)
+    d1 = load_deck(chosen_env, n1)
+    d2 = load_deck(chosen_env, n2)
     
     return n1, d1, n2, d2

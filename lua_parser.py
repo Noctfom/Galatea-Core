@@ -17,13 +17,15 @@ class YGOProLuaParser:
         clean_code = re.sub(r'\s+', '', code_block)
         clean_code = re.sub(r'local\w+=', '', clean_code)
         
-        # 2. 🌟 提取真实参数 (按在代码中出现的顺序提取！)
+        # 2. 提取真实参数 (按在代码中出现的顺序提取！)
         extracted_numbers = re.findall(r'\b\d+\b', clean_code)
         extracted_hexes = re.findall(r'0x[0-9a-fA-F]+', clean_code)
+        extracted_constants = re.findall(r'(RACE|ATTRIBUTE|CATEGORY|LOCATION|TYPE|PHASE|POS)_[A-Z_]+', clean_code)
         
         # 3. 魔法数值脱敏 (掩码处理)
         clean_code = re.sub(r'\b\d+\b', '<NUM>', clean_code)
         clean_code = re.sub(r'0x[0-9a-fA-F]+', '<HEX>', clean_code)
+        clean_code = re.sub(r'(RACE|ATTRIBUTE|CATEGORY|LOCATION|TYPE|PHASE|POS)_[A-Z_]+', '<CONST>', clean_code)
         
         # 4. 计算 MD5
         hash_val = hashlib.md5(clean_code.encode('utf-8')).hexdigest()[:8]
@@ -35,7 +37,7 @@ class YGOProLuaParser:
         if not self.hash_registry[tag_name]["sample_code"]:
             self.hash_registry[tag_name]["sample_code"] = clean_code # 存脱敏后的代码，便于你看出它的通用结构
             
-        return tag_name, {"numbers": extracted_numbers, "hexes": extracted_hexes}
+        return tag_name, {"numbers": extracted_numbers, "hexes": extracted_hexes, "constants": extracted_constants}
 
     def parse_file(self, filepath):
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
@@ -53,7 +55,7 @@ class YGOProLuaParser:
         }
         
         # ==========================================
-        # 1. 提取召唤条件 (Procedures) [🌟 修复嵌套括号截断]
+        # 1. 提取召唤条件 (Procedures) [修复嵌套括号截断]
         # ==========================================
         # 把 .*? 改成 .*，利用贪婪匹配直接吃到最外层的右括号
         proc_matches = re.finditer(r'aux\.Add(Fusion|Synchro|Xyz|Link|Ritual|Pendulum)[A-Za-z0-9_]*\((.*)\)', content)
@@ -66,7 +68,7 @@ class YGOProLuaParser:
             })
 
         # ==========================================
-        # 🌟 核心防夺舍屏障：安全提取 initial_effect 作用域
+        # 核心防夺舍屏障：安全提取 initial_effect 作用域
         # ==========================================
         start_idx = content.find('.initial_effect(c)')
         if start_idx == -1: return card_data
@@ -81,7 +83,7 @@ class YGOProLuaParser:
         # ==========================================
         # 2. 提取效果槽位 (Effect Slots)
         # ==========================================
-        # 🌟 必须且只能在 init_body 里找 Effect.CreateEffect(c)
+        # 必须且只能在 init_body 里找 Effect.CreateEffect(c)
         effect_creations = re.finditer(r'local\s+(e\d*)\s*=\s*Effect\.CreateEffect\(c\)', init_body)
         
         slot_idx = 1
@@ -100,7 +102,7 @@ class YGOProLuaParser:
             }
             
             # --- A. 扫描该效果的直接属性配置 ---
-            # 🌟 必须且只能在 init_body 里搜索 e1:SetXXX，杜绝同名变量夺舍！
+            # 必须且只能在 init_body 里搜索 e1:SetXXX，杜绝同名变量夺舍！
             prop_pattern = rf'{e_name}:Set([A-Za-z0-9_]+)\((.*?)\)'
             for p_match in re.finditer(prop_pattern, init_body):
                 prop_name = p_match.group(1)
@@ -119,7 +121,7 @@ class YGOProLuaParser:
                     func_name = func_match.group(1).strip()
                     bound_funcs.append(func_name)
             
-            # 🌟 [史诗级修复] 使用 BFS (广度优先) 队列，确保所有深层嵌套子函数被 100% 提取
+            # 使用 BFS (广度优先) 队列，确保所有深层嵌套子函数被 100% 提取
             funcs_to_process = list(bound_funcs)
             processed_funcs = set()
             func_bodies_text = ""
@@ -130,7 +132,7 @@ class YGOProLuaParser:
                 if func_name in processed_funcs: continue
                 processed_funcs.add(func_name)
                 
-                # 🌟 抛弃正则匹配 end！用寻找下一个 function 声明来划分边界
+                # 抛弃正则匹配 end！用寻找下一个 function 声明来划分边界
                 # 彻底解决 Lua 中 if...end 导致的提前截断问题
                 func_def_str = f"function {func_name}("
                 start_idx = content.find(func_def_str)

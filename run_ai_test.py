@@ -63,7 +63,7 @@ def main():
         # 如果需要决策
         if msg[0] in [11, 16, 15]:
             # 获取快照
-            snap = brain.get_snapshot()
+            snap = brain.get_snapshot(env)
             
             # AI 决策
             # 注意: 这里不管是 P0 还是 P1 都用 AI 决策

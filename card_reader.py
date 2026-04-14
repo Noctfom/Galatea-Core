@@ -47,67 +47,57 @@ class CardReader:
 
     def get_full_stats(self, code):
         """
-        [V17.0] 获取全量静态数据
-        返回: (type, race, attr, level, rank, link, link_marker, scale, atk, def)
+        [V17.0 修复版] 严格对齐 gamestate.py 的索引期望！
+        返回格式必须是 11 元素：
+        0:type, 1:race, 2:attr, 3:level, 4:lscale, 5:rscale, 6:link_marker, 7:rank, 8:atk, 9:def, 10:tuple(setcodes)
         """
-        if code == 0: return (0,)*10
-        if code in self.stats_cache: return self.stats_cache[code]
+        # 绝对安全的兜底返回值
+        safe_fallback = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (0, 0, 0, 0))
         
-        if not self.cursor: return (0,)*10
+        if code == 0: return safe_fallback
+        if code in self.stats_cache: return self.stats_cache[code]
+        if not self.cursor: return safe_fallback
         
         try:
-            # SQL 增加 setcode 的读取
             self.cursor.execute("SELECT type, race, attribute, level, atk, def, setcode FROM datas WHERE id=?", (code,))
             row = self.cursor.fetchone()
-            if not row: return (0,)*11 # 长度变为 11
+            if not row: return safe_fallback
             
             raw_type, race, attr, raw_level, atk, defense, raw_setcode = row
             
-            # --- OCG Level 字段解码 ---
-            # Level 字段在数据库里是个大杂烩，存储了 Level, Rank, Link, Scales
-            # 字节结构: [24-31: Left Scale] [16-23: Right Scale] [0-15: Level/Rank/LinkRating]
+            level = raw_level & 0xFFFF
+            rank = 0; link = 0; link_marker = 0; lscale = 0; rscale = 0
             
-            level = 0
-            rank = 0
-            link = 0
-            link_marker = 0
-            scale = 0
-            
-            # 判断类型
             if raw_type & 0x4000000: # TYPE_LINK
                 link = raw_level & 0xFFFF
-                # Link Marker 实际上存在 def 字段里，或者是 level 的高位？
-                # 修正：在 cards.cdb 中，Link 怪兽的 DEF 字段存储的是 Link Arrows！
                 link_marker = defense 
-                defense = 0 # Link 怪兽没有防御力
+                defense = 0 
             elif raw_type & 0x800000: # TYPE_XYZ
                 rank = raw_level & 0xFFFF
             else:
                 level = raw_level & 0xFFFF
                 
-            # 灵摆刻度 (Pendulum Scale)
             if raw_type & 0x1000000: # TYPE_PENDULUM
-                # Scale 存储在 Level 的高位
-                # (raw_level >> 24) & 0xFF 是左刻度
-                # (raw_level >> 16) & 0xFF 是右刻度
-                scale = (raw_level >> 24) & 0xFF
+                lscale = (raw_level >> 24) & 0xFF
+                rscale = (raw_level >> 16) & 0xFF
                 
-            # 解析 Setcode (用 64 位整数存了最多 4 个 16 位的字段)
             setcodes = []
             val = raw_setcode
-            for _ in range(4): # 最多提取 4 个字段
-                if val & 0xFFFF:
-                    setcodes.append(val & 0xFFFF)
+            for _ in range(4):
+                if val & 0xFFFF: setcodes.append(val & 0xFFFF)
                 val >>= 16
             setcodes = (setcodes + [0]*4)[:4]
                 
-            # 将 setcodes 作为元组加到返回值的最后
-            stats = (raw_type, race, attr, level, rank, link, link_marker, scale, atk, defense, tuple(setcodes))
+            # 🌟 核心：严格按照 gamestate.py 的索引需求组装！
+            # [0]raw_type, [1]race, [2]attr, [3]level, [4]lscale, [5]rscale, 
+            # [6]link_marker, [7]rank, [8]atk, [9]defense, [10]setcodes
+            stats = (raw_type, race, attr, level, lscale, rscale, link_marker, rank, atk, defense, tuple(setcodes))
             self.stats_cache[code] = stats
             return stats
         
-        except:
-            return (0,)*10
+        except Exception as e:
+            print(f"⚠️ get_full_stats 解析异常: {e} (code={code})")
+            return safe_fallback
 
 # 单例
 card_db = CardReader()

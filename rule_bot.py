@@ -81,11 +81,13 @@ def parse_battle_cmd(msg_data):
     stream.read(1) # player
     legal_actions = []
     
-    # Activatable
+    # Activatable (发动效果)
     b = stream.read(1) 
     if b:
         count = struct.unpack('B', b)[0]
-        for i in range(count): stream.read(11) # Skip details
+        for i in range(count): 
+            stream.read(11) # Skip details
+            legal_actions.append({'cat': 0, 'idx': i})
             
     # Attackable
     b = stream.read(1) 
@@ -189,8 +191,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     decision = (0 << 16) | 10 # 彻底卡死时的无奈之举，触发外界熔断
             else:
                 choice = random.choice(valid_actions)
-                if choice['cat'] == 1: 
-                    decision = (choice['idx'] << 16) | 1
+                if choice['cat'] in [0, 1]: 
+                    decision = (choice['idx'] << 16) | choice['cat']
                 else:
                     decision = (0 << 16) | choice['cat']
 
@@ -610,6 +612,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 # 绝境回退：如果全被拉黑，尝试随机选一个合法的（撞大运）
                 if not candidates and valid_locs:
                     candidates = valid_locs
+                    print("⚠️ [RuleBot] MSG_SELECT_PLACE/MSG_SELECT_DISFIELD: 所有选项都被拉黑了，尝试随机选一个合法位置！")
             else:
                 candidates = valid_locs # 多选暂不过滤
 
@@ -766,7 +769,9 @@ def get_macro_options(msg_type, msg_payload):
                 all_combos.extend(list(itertools.combinations(cards, r)))
             
             # 限制套餐数量防爆炸
-            if len(all_combos) > 20: all_combos = random.sample(all_combos, 20)
+            # 强制排序：Python的 sort 对 tuple 会逐个元素对比，保证绝对的确定性
+            all_combos.sort() 
+            if len(all_combos) > 60: all_combos = all_combos[:60]
             
             for combo in all_combos:
                 resp_buf = bytearray([len(combo)])
@@ -831,7 +836,9 @@ def get_macro_options(msg_type, msg_payload):
                     path.pop()
             
             backtrack(0, 0, 0, [], -1)
-            if len(valid_solutions) > 20: valid_solutions = random.sample(valid_solutions, 20)
+            # 这里 path 存的是字典对象，不能直接 sort()，按抽取出来的索引进行排序
+            valid_solutions.sort(key=lambda sol: [x['index'] for x in sol])
+            if len(valid_solutions) > 60: valid_solutions = valid_solutions[:60]
                 
             for sol in valid_solutions:
                 resp_buf = bytearray([must_count + len(sol)])
@@ -855,8 +862,8 @@ def get_macro_options(msg_type, msg_payload):
                 
             # 利用 Python 自带工具瞬间求出所有排列组合
             valid_solutions = list(itertools.permutations(cards))
-            # 限制最多 20 种排列，防止 5 张卡以上导致组合爆炸 (5! = 120)
-            if len(valid_solutions) > 20: valid_solutions = random.sample(valid_solutions, 20)
+            valid_solutions.sort() # tuple 可以直接排
+            if len(valid_solutions) > 60: valid_solutions = valid_solutions[:60]
             
             for sol in valid_solutions:
                 resp_buf = bytearray()
@@ -870,27 +877,37 @@ def get_macro_options(msg_type, msg_payload):
             stream.read(1) # P
             count = struct.unpack('B', stream.read(1))[0]
             mask = struct.unpack('<I', stream.read(4))[0]
+            req_player = msg_payload[0] # 提前往前取一个字节作为请求玩家
+            
+            # 源码特例：如果 count 为 0，[0, 0, 0] 是合法的“跳过”指令
+            if count == 0:
+                options.append({'bytes': bytes([0, 0, 0]), 'places': []})
             
             avail_zones = []
             for i in range(32):
-                if not (mask & (1 << i)): # 0 代表可用
-                    # 严格按照 C++ 源码的反向解码
-                    p = 1 if i >= 16 else 0
-                    l = 0x08 if (i % 16) >= 8 else 0x04
-                    s = i % 8
-                    avail_zones.append((i, p, l, s)) # i 是绝对坐标给 AI 看，p/l/s 给引擎
+                if not (mask & (1 << i)): 
+                    avail_zones.append(i)
             
-            # 组合选点 (比如扰乱王选 3 个)
-            all_combos = list(itertools.combinations(avail_zones, count))
-            if len(all_combos) > 20: all_combos = random.sample(all_combos, 20)
+            # 如果 count = 0，为了防止死锁，我们仍然算 1 个位置以备不时之需
+            calc_count = max(1, count)
+            all_combos = list(itertools.combinations(avail_zones, calc_count))
+            all_combos.sort() # tuple 可以直接排
+            if len(all_combos) > 60: all_combos = all_combos[:60]
             
             for combo in all_combos:
                 resp_buf = bytearray()
                 places = []
-                for i, p, l, s in combo:
-                    resp_buf.extend([p, l, s]) # 引擎要求每个选点 3 字节！
-                    places.append(i) # 记录绝对坐标(0~31)供 AI 的神经网络认路
-                # 注意：这里我们用 'places' 键，区分于卡片的 'locs'
+                for i in combo:
+                    # 完美还原 C++ 要求的 3 字节映射
+                    p_flag = 1 if i >= 16 else 0
+                    l = 0x08 if (i % 16) >= 8 else 0x04
+                    s = i % 8
+                    
+                    raw_p = req_player if p_flag == 0 else (1 - req_player)
+                    final_p = 1 if raw_p == 1 else 0
+                    
+                    resp_buf.extend([final_p, l, s])
+                    places.append(i)
                 options.append({'bytes': bytes(resp_buf), 'places': places})
                 
     except Exception as e:

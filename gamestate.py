@@ -372,6 +372,7 @@ class DuelState:
         self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
 
         self.chain_stack = []
+        self.history_stack = []
 
     def reset(self):
         self.turn = 0
@@ -381,11 +382,12 @@ class DuelState:
         self.active_player = 0
         self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
         
-        # [新增] 当前挂起的合法动作列表
+        # 当前挂起的合法动作列表
         # 每次收到交互消息 (IDLE, CHAIN, CARD...) 时更新
         self.current_valid_actions = [] 
 
         self.chain_stack = []
+        self.history_stack = []
 
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
@@ -393,15 +395,34 @@ class DuelState:
             stream = io.BytesIO(msg_payload)
             
             # --- 状态维护 (与 V2.0 相同) ---
-            if msg_type == 50: # MSG_MOVE
+            if msg_type == 50: # MSG_MOVE (完美兼容超量素材)
                 code, old_raw, new_raw, reason = struct.unpack('<IIII', stream.read(16))
-                old_c, old_l, old_s, _ = LocationInfo.decode(old_raw)
+                old_c, old_l, old_s, old_pos = LocationInfo.decode(old_raw)
                 new_c, new_l, new_s, new_pos = LocationInfo.decode(new_raw)
-                # [防弹衣] 防止 new_c = 39 导致的 KeyError
-                if old_c in [0, 1] and old_l != 0 and old_s in self.field_map[old_c][old_l]:
-                    del self.field_map[old_c][old_l][old_s]
-                if new_c in [0, 1] and new_l != 0:
-                    self.field_map[new_c][new_l][new_s] = {'code': code, 'pos': new_pos, 'owner': new_c}
+                pure_code = code & 0x7FFFFFFF
+
+                # --- 1. 处理脱离旧位置 ---
+                if old_l & 0x80: # 从超量素材区拔除
+                    host_l = old_l & ~0x80
+                    if old_c in [0, 1] and host_l != 0 and old_s in self.field_map[old_c][host_l]:
+                        host = self.field_map[old_c][host_l][old_s]
+                        if 'overlays' in host and len(host['overlays']) > old_pos:
+                            host['overlays'].pop(old_pos) # 拔除指定层的素材
+                elif old_c in [0, 1] and old_l != 0 and old_s in self.field_map[old_c][old_l]:
+                    del self.field_map[old_c][old_l][old_s] # 正常离场
+
+                # --- 2. 处理进入新位置 ---
+                if new_l & 0x80: # 塞入超量素材区 (底下的黑洞)
+                    host_l = new_l & ~0x80
+                    if new_c in [0, 1] and host_l != 0 and new_s in self.field_map[new_c][host_l]:
+                        host = self.field_map[new_c][host_l][new_s]
+                        if 'overlays' not in host: host['overlays'] = []
+                        host['overlays'].insert(new_pos, pure_code) # new_pos 被 C++ 挪用成了素材排序号
+                elif new_c in [0, 1] and new_l != 0:
+                    self.field_map[new_c][new_l][new_s] = {
+                        'code': code, 'pos': new_pos, 'owner': new_c,
+                        'counters': 0, 'overlays': [], 'is_equipped': False # 🌟 附带三大盲区容器
+                    }
 
                 # [上帝视角记牌器] 跟踪卡片进出卡组/额外
                 # 剥离可能存在的异画/密码掩码，还原真实卡密
@@ -427,7 +448,7 @@ class DuelState:
                 code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
 
-            elif msg_type == 70: # 🌟 MSG_CHAINING (严格匹配 C++ 的 16 字节)
+            elif msg_type == 70: # MSG_CHAINING (严格匹配 C++ 的 16 字节)
                 code = struct.unpack('<I', stream.read(4))[0]
                 info_loc = struct.unpack('<I', stream.read(4))[0] # 卡片当前位置
                 tc = struct.unpack('B', stream.read(1))[0]      # 触发控制者
@@ -438,7 +459,12 @@ class DuelState:
                 
                 # 压入堆栈记事本
                 self.chain_stack.append({'code': code, 'c': tc, 'l': tl, 's': ts, 'desc': desc})
-                
+                # 压入历史记事本 (最近发生的在最前面)
+                self.history_stack.insert(0, {'code': code})
+                # 保持记忆容量为 8
+                if len(self.history_stack) > 8:
+                    self.history_stack.pop()
+
             elif msg_type == 74: # 🌟 MSG_CHAIN_END (C++ 发送 0 字节，直接清空堆栈)
                 self.chain_stack.clear()
 
@@ -451,7 +477,7 @@ class DuelState:
                     code = raw_code & 0x7FFFFFFF
                     seq = 0
                     while seq in self.field_map[p][Zone.HAND]: seq += 1
-                    self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p}
+                    self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p, 'counters': 0, 'overlays': [], 'is_equipped': False}
                     
                     # [上帝视角记牌器] 抽卡等同于离开主卡组
                     pure_code = code & 0x7FFFFFFF
@@ -475,18 +501,37 @@ class DuelState:
                 p, lp = struct.unpack('<BI', stream.read(5))
                 if p == 0: self.my_lp = lp
                 else: self.op_lp = lp
+
+            # [新增] 指示物雷达 (101: 加, 102: 减)
+            elif msg_type == 101: 
+                ctype, c, l, s, count = struct.unpack('<HBBBH', stream.read(7))
+                if c in [0,1] and s in self.field_map[c].get(l, {}):
+                    self.field_map[c][l][s]['counters'] = self.field_map[c][l][s].get('counters', 0) + count
+
+            elif msg_type == 102: 
+                ctype, c, l, s, count = struct.unpack('<HBBBH', stream.read(7))
+                if c in [0,1] and s in self.field_map[c].get(l, {}):
+                    self.field_map[c][l][s]['counters'] = max(0, self.field_map[c][l][s].get('counters', 0) - count)
+
+            # [修正] 真正的装备雷达 MSG_EQUIP (93)
+            elif msg_type == 93: 
+                equip_raw = struct.unpack('<I', stream.read(4))[0] # 装备卡的位置
+                tgt_raw = struct.unpack('<I', stream.read(4))[0]   # 被装备怪兽的位置
+                tc, tl, ts, _ = LocationInfo.decode(tgt_raw)
+                if tc in [0,1] and ts in self.field_map[tc].get(tl, {}):
+                    self.field_map[tc][tl][ts]['is_equipped'] = True
             
             elif msg_type == 40: self.turn += 1
             elif msg_type == 41: self.phase = struct.unpack('H', stream.read(2))[0]
 
             # --- [新增] 动作空间解析 (Action Parsing) ---
             # 如果是交互消息，解析出 valid_actions
-            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 24]:
+            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
                 self.active_player = struct.unpack('B', msg_payload[0:1])[0]
                 self._parse_valid_actions(msg_type, stream)
-            else:
-                # 收到其他消息（如状态更新），清空动作列表
-                # 只有在等待用户输入时，这个列表才不为空
+            # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
+            # 否则重演时无法用上一次的选项去验证人类的修正点击
+            elif msg_type != 1: 
                 self.current_valid_actions = []
 
         except Exception as e:
@@ -566,7 +611,7 @@ class DuelState:
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     desc = struct.unpack('<I', stream.read(4))[0]
                     
-                    # 🌟 [额外修复] 吞掉元素之间的 1 字节定界符
+                    # [额外修复] 吞掉元素之间的 1 字节定界符
                     if i < count - 1:
                         stream.read(1)
                     
@@ -739,12 +784,17 @@ class DuelState:
             traceback.print_exc() # <--- 关键！打印完整堆栈
             print(f"📦 Payload (Hex): {stream.getvalue().hex()}") # 打印原始数据
             
-            pass
+            raise RuntimeError(f"Failed to parse valid actions for msg_type {msg_type}: {e}")
 
-    def get_snapshot(self) -> GameSnapshot:
+    def get_snapshot(self, env=None) -> GameSnapshot:
         """
         生成快照 + 填充 Actions
         """
+
+        # 在生成快照前，执行绝对真理覆写
+        if env is not None:
+            self.sync_active_field(env)
+
         def count_zone(p, loc): return len(self.field_map[p].get(loc, {}))
         
         global_feat = GlobalFeature(
@@ -774,11 +824,12 @@ class DuelState:
                     info = card_dict[seq]
                     code = info['code']
                     pos = info['pos']
-                    # 🛡️ [防弹衣] 防止脏数据 code=39 导致的 KeyError
+                    # 🛡️ [防弹衣] 防止脏数据或衍生物(Token)导致崩溃
                     try:
                         stats = card_db.get_full_stats(code)
                     except Exception:
-                        stats = [0]*10
+                        # 修复：必须是 11 个元素，且最后一个是 tuple
+                        stats = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (0, 0, 0, 0)]
                     
                     # 记录位置映射
                     # LocationInfo: C | L<<8 | S<<16 | P<<24
@@ -792,24 +843,38 @@ class DuelState:
                     level = stats[3]
                     lscale = stats[4]
                     rscale = stats[5]
+                    link_marker = stats[6]  # 直接从对齐好的数据库里拿，拒绝二次计算
                     base_atk = stats[8]
                     base_def = stats[9]
                     setcodes = stats[10] # 接收字段集合
-                    
-                    link_marker = 0
-                    # TYPE_LINK 的掩码是 0x4000000
-                    if type_mask & 0x4000000: 
-                        link_marker = base_def # 连接怪兽的 DEF 其实是箭头掩码
-                        base_def = 0           # 连接怪兽没有防御力
+
+                    # 提取引擎给出的实时属性，如果没有拿到，才用数据库基础数值兜底
+                    current_atk = info.get('current_atk', base_atk)
+                    current_def = info.get('current_def', base_def)
+
+                    # [新增] 动态突变属性的接管！
+                    type_mask = info.get('current_type', stats[0])
+                    race = info.get('current_race', stats[1])
+                    attr = info.get('current_attr', stats[2])
+                    level = info.get('current_level', stats[3])
+                    if level == 0: 
+                        level = stats[3]  # 防止超量/Link被 C++ 的 0 星覆写，强制回退取数据库静态星数
+
+                    counters = info.get('counters', 0)
+                    overlays = info.get('overlays', [])
+                    is_equipped = info.get('is_equipped', False)
                     
                     entities.append(CardEntity(
                         code=code, owner=player, location=zone, sequence=seq, position=pos,
-                        current_atk=stats[8], current_def=stats[9],
+                        current_atk=current_atk, current_def=current_def,
                         type_mask=type_mask, race=race, attribute=attr, level=level,
                         base_atk=base_atk, base_def=base_def,
                         lscale=lscale, rscale=rscale, link_marker=link_marker, # 传入新参数
                         setcodes=setcodes, # 写入实体
-                        is_public=(pos & 0x1 or pos & 0x4)
+                        is_public=(pos & 0x1 or pos & 0x4),
+                        counter_count=counters,
+                        overlay_count=len(overlays),
+                        is_equipped=is_equipped
                     ))
                     idx_counter += 1
 
@@ -857,6 +922,32 @@ class DuelState:
             p1_deck_codes=self.p1_deck.copy(), 
             p1_extra_codes=self.p1_extra.copy() 
         )
-        # 🌟 动态外挂连锁堆栈
+        # 动态外挂连锁堆栈
         snap.chain_stack = self.chain_stack.copy()
+        snap.history_stack = self.history_stack.copy()
         return snap
+    
+    def sync_active_field(self, env):
+     """直接从底层 C++ 内存覆写核心区域的状态"""
+     from game_constants import Zone
+     for p in [0, 1]:
+         # 清空原有的不靠谱记录
+         self.field_map[p][Zone.MZONE] = {}
+         self.field_map[p][Zone.SZONE] = {}
+         self.field_map[p][Zone.HAND] = {}
+
+         # 1. 绝对同步怪兽区 
+         for s in range(7):
+             res = env.query_card_state(p, Zone.MZONE, s)
+             if res: self.field_map[p][Zone.MZONE][s] = res # 直接赋值，因为已经是字典了
+
+         # 2. 绝对同步魔陷区 
+         for s in range(8):
+             res = env.query_card_state(p, Zone.SZONE, s)
+             if res: self.field_map[p][Zone.SZONE][s] = res
+
+         # 3. 绝对同步手牌
+         for s in range(30):
+             res = env.query_card_state(p, Zone.HAND, s)
+             if res: self.field_map[p][Zone.HAND][s] = res
+             else: break # 手牌是连续的，遇到空位就结束

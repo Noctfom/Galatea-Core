@@ -517,8 +517,12 @@ class PPOTrainer:
 
                 # --- 网络前向传播与反向传播 (完全保持原样) ---
                 with torch.amp.autocast('cuda', dtype=self.amp_dtype):
-                    logits, values = self.agent.net(mb_obs)
+                    logits, values, v_input = self.agent.net(mb_obs)
                     values = values.squeeze(1)
+
+                    # 计算 RND 预测误差损失，让 Predictor 学习当前状态
+                    rnd_loss = self.agent.net.rnd(v_input).mean()
+
                     dist = torch.distributions.Categorical(logits=logits)
                     new_log_probs = dist.log_prob(mb_actions)
                     entropy = dist.entropy()
@@ -531,7 +535,7 @@ class PPOTrainer:
                     value_loss = 0.5 * ((values - mb_returns) ** 2).mean()
                     entropy_loss = -entropy.mean()
                     
-                    loss = policy_loss + VALUE_LOSS_COEF * value_loss + ENTROPY_COEF * entropy_loss
+                    loss = policy_loss + VALUE_LOSS_COEF * value_loss + ENTROPY_COEF * entropy_loss + rnd_loss
 
                 if torch.isnan(loss) or torch.isinf(loss):
                     self.optimizer.zero_grad()

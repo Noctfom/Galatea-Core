@@ -13,7 +13,7 @@ MAX_CARDS = 100
 VOCAB_SIZE = 20000       
 UNK_CODE_IDX = 1         
 PAD_CODE_IDX = 0         
-MAX_ACTIONS = 80  
+MAX_ACTIONS = 120  
 
 _GLOBAL_SEM_KB = None
 
@@ -55,7 +55,7 @@ class GalateaEncoder:
                 p_vals = act.macro_places[:MAX_MATERIALS]
                 p_vals.extend([0] * (MAX_MATERIALS - len(p_vals)))
             else:
-                p_val = act.desc_id % 32 if act.action_type in [18, 24] else 0
+                p_val = (act.desc_id % 32) + 1 if act.action_type in [18, 24] else 0
                 p_vals = [p_val] + [0] * (MAX_MATERIALS - 1)
             act_places.append(p_vals)
             
@@ -132,7 +132,10 @@ class GalateaEncoder:
                     1.0 if e.owner == player_id else -1.0, e.location / 100.0, e.sequence / 10.0,
                     e.current_atk / 4000.0, e.current_def / 4000.0, e.base_atk / 4000.0, e.base_def / 4000.0,
                     e.level / 12.0, e.lscale / 13.0, e.rscale / 13.0,
-                    e.position / 10.0, 1.0 if e.is_public else 0.0
+                    e.position / 10.0, 1.0 if e.is_public else 0.0,
+                    min(e.overlay_count / 5.0, 1.0),   # 缩放：最多算5个素材
+                    min(e.counter_count / 10.0, 1.0),  # 缩放：最多算10个指示物
+                    1.0 if e.is_equipped else 0.0      # 布尔值
                 ]
                 feat = feat_numeric + [1.0 if (e.type_mask & (1<<i)) else 0.0 for i in range(32)] + [1.0 if (e.link_marker & (1<<i)) else 0.0 for i in range(9)]
                 r_idx, a_idx = e.race % 30, e.attribute % 10
@@ -144,7 +147,7 @@ class GalateaEncoder:
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(e.code)
             else:
                 c_idx, r_idx, a_idx, sc_hashed = UNK_CODE_IDX, 0, 0, [0, 0, 0, 0]
-                feat = [-1.0, e.location / 100.0, e.sequence / 10.0] + [0.0] * 50
+                feat = [-1.0, e.location / 100.0, e.sequence / 10.0] + [0.0] * 53
                 # 未知卡片返回全零语义
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(0)
             
@@ -161,7 +164,7 @@ class GalateaEncoder:
             masks.extend([0.0] * pad_len)
             for _ in range(pad_len):
                 card_setcodes.append([0, 0, 0, 0])
-                card_feats.append([0.0] * 53)
+                card_feats.append([0.0] * 56)
                 sem_cats.append(np.zeros((8, 8), dtype=np.int16))
                 sem_reqs.append(np.zeros((8, 128), dtype=np.bool_))
                 sem_scs.append(np.zeros((8, 4), dtype=np.int16))
@@ -248,6 +251,32 @@ class GalateaEncoder:
                 c_sem_attrs.append(np.zeros((8, 4), dtype=np.int16))
 
         # ==========================================
+        # 2.6 处理动作历史雷达 (MAX_HISTORY = 8)
+        # ==========================================
+        MAX_HISTORY = 8
+        h_sem_cats, h_sem_reqs, h_sem_scs, h_sem_nums, h_sem_refs, h_sem_races, h_sem_attrs = [], [], [], [], [], [], []
+        h_masks = []
+        
+        if hasattr(snapshot, 'history_stack'):
+            for item in snapshot.history_stack[:MAX_HISTORY]:
+                hc_out, hr_out, hs_out, hn_out, href_out, hrace_out, hattr_out = self.sem_kb.get_card_semantics(item['code'])
+                h_sem_cats.append(hc_out); h_sem_reqs.append(hr_out); h_sem_scs.append(hs_out); h_sem_nums.append(hn_out)
+                h_sem_refs.append(href_out); h_sem_races.append(hrace_out); h_sem_attrs.append(hattr_out)
+                h_masks.append(True)
+                
+        h_pad_len = MAX_HISTORY - len(h_masks)
+        if h_pad_len > 0:
+            h_masks.extend([False] * h_pad_len)
+            for _ in range(h_pad_len):
+                h_sem_cats.append(np.zeros((8, 8), dtype=np.int16))
+                h_sem_reqs.append(np.zeros((8, 128), dtype=np.bool_))
+                h_sem_scs.append(np.zeros((8, 4), dtype=np.int16))
+                h_sem_nums.append(np.zeros((8, 4), dtype=np.float16))
+                h_sem_refs.append(np.zeros((8, 4), dtype=np.int32))
+                h_sem_races.append(np.zeros((8, 4), dtype=np.int16))
+                h_sem_attrs.append(np.zeros((8, 4), dtype=np.int16))
+
+        # ==========================================
         # 3. 最终打包
         # ==========================================
         act_dict = self.encode_actions(snapshot.valid_actions, snapshot)
@@ -294,6 +323,15 @@ class GalateaEncoder:
             'c_sem_ref': torch.from_numpy(np.array(c_sem_refs)).unsqueeze(0),
             'c_sem_race': torch.from_numpy(np.array(c_sem_races)).unsqueeze(0),
             'c_sem_attr': torch.from_numpy(np.array(c_sem_attrs)).unsqueeze(0),
+        
+            'h_mask': torch.tensor(h_masks, dtype=torch.bool).unsqueeze(0),
+            'h_sem_category': torch.from_numpy(np.array(h_sem_cats)).unsqueeze(0),
+            'h_sem_req': torch.from_numpy(np.array(h_sem_reqs)).unsqueeze(0),
+            'h_sem_setcode': torch.from_numpy(np.array(h_sem_scs)).unsqueeze(0),
+            'h_sem_number': torch.from_numpy(np.array(h_sem_nums)).unsqueeze(0),
+            'h_sem_ref': torch.from_numpy(np.array(h_sem_refs)).unsqueeze(0),
+            'h_sem_race': torch.from_numpy(np.array(h_sem_races)).unsqueeze(0),
+            'h_sem_attr': torch.from_numpy(np.array(h_sem_attrs)).unsqueeze(0),
         }
         
         base_dict.update(act_dict)

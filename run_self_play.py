@@ -176,7 +176,7 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                 # [新增] --- 动作空间验证探针 ---
                 # 只有当它是纯交互消息时才检查 (Type 11=Idle, 16=Chain, 15=Card)
                 if msg_type in [11, 16, 15]:
-                    snapshot = brain.get_snapshot()
+                    snapshot = brain.get_snapshot(env)
                     actions = snapshot.valid_actions
                     
                     # 打印前3个动作来看看 (防止刷屏)
@@ -259,7 +259,7 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                 if consecutive_retries > 15:
                     print(f"   🛑 [熔断] 连续失败的操作: {last_action_log}")
                     print("   🔍 打印熔断时的全息快照:")
-                    print_snapshot_inspection(brain.get_snapshot(), active_player)
+                    print_snapshot_inspection(brain.get_snapshot(env), active_player)
                     print("   ☠️ 触发死循环保护，强制退出本局")
                     break 
                     
@@ -305,10 +305,10 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                         
                     win_name = name1 if winner == 0 else name2
                     print(f"\n🎉 决斗结束！胜利者: P{winner} 【{win_name}】")
-                    print_snapshot_inspection(brain_0.get_snapshot(), 0)
+                    print_snapshot_inspection(brain_0.get_snapshot(env), 0)
 
                     # ... 在 victory 打印之后，或者任意地方 ...
-                    snapshot = brain_0.get_snapshot()
+                    snapshot = brain_0.get_snapshot(env)
                     tensor_dict = encoder.encode(snapshot, player_id=0)
                     
                     # 打印看看形状对不对

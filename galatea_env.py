@@ -9,6 +9,7 @@ import sqlite3
 import struct
 import time
 import random
+import io
 
 # --- OCGCore 常量 ---
 LOCATION_DECK = 0x01
@@ -67,6 +68,8 @@ class GalateaEnv:
         self.cb_msg_handler = MSG_HANDLER_FUNC(self._on_message)
         
         self._setup_lib()
+
+        self.msg_buf = (ctypes.c_byte * 65536)()
         
         # 注册回调
         self.lib.set_script_reader(self.cb_script_reader)
@@ -89,6 +92,11 @@ class GalateaEnv:
         if hasattr(self.lib, 'get_message'):
             self.lib.get_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_byte)]
             self.lib.get_message.restype = ctypes.c_uint32
+
+        # 注册 query_card 接口
+        if hasattr(self.lib, 'query_card'):
+            self.lib.query_card.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint32, ctypes.POINTER(ctypes.c_byte), ctypes.c_int32]
+            self.lib.query_card.restype = ctypes.c_int32
             
         # 确认使用 set_responsei
         self.lib.set_responsei.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -168,8 +176,77 @@ class GalateaEnv:
             import traceback; traceback.print_exc()
             return 0
 
+    def query_card_state(self, player_id, location, sequence):
+        """
+        向 C++ 内存精确打击，索要包含动态突变的完全体状态！
+        """
+        # Code(0x1) | Pos(0x2) | Type(0x8) | Level(0x10) | Attr(0x40) | Race(0x80)
+        # Atk(0x100) | Def(0x200) | Equip(0x4000) | Overlays(0x10000) | Counters(0x20000)
+        # 叠加结果为: 0x343DA
+        flags = 0x1 | 0x2 | 0x8 | 0x10 | 0x40 | 0x80 | 0x100 | 0x200 | 0x4000 | 0x10000 | 0x20000
+        buf = (ctypes.c_byte * 1024)()
+        
+        length = self.lib.query_card(self.pduel, player_id, location, sequence, flags, buf, 0)
+        
+        if length <= 8: return None
+
+        stream = io.BytesIO(bytearray(buf)[:length])
+        try:
+            data_len = struct.unpack('<I', stream.read(4))[0]
+            actual_flag = struct.unpack('<I', stream.read(4))[0]
+            
+            # 初始化占位符
+            code = p = c = l = s = 0
+            ctype = level = attr = race = 0
+            atk = 0; defense = 0
+            is_equipped = False
+            overlays = []; counters = 0
+
+            # 必须严格按 C++ 写入掩码位由小到大读取
+            if actual_flag & 0x1: code = struct.unpack('<I', stream.read(4))[0]
+            if actual_flag & 0x2: 
+                pos_info = struct.unpack('<I', stream.read(4))[0]
+                c, l, s, p = pos_info & 0xFF, (pos_info >> 8) & 0xFF, (pos_info >> 16) & 0xFF, (pos_info >> 24) & 0xFF
+            
+            # [新增] 动态突变属性解析
+            if actual_flag & 0x8:  ctype = struct.unpack('<I', stream.read(4))[0]
+            if actual_flag & 0x10: level = struct.unpack('<I', stream.read(4))[0]
+            if actual_flag & 0x40: attr = struct.unpack('<I', stream.read(4))[0]
+            if actual_flag & 0x80: race = struct.unpack('<I', stream.read(4))[0]
+            
+            if actual_flag & 0x100: atk = struct.unpack('<i', stream.read(4))[0]
+            if actual_flag & 0x200: defense = struct.unpack('<i', stream.read(4))[0]
+
+            # [新增] 装备卡状态雷达
+            if actual_flag & 0x4000:
+                equip_target = struct.unpack('<I', stream.read(4))[0]
+                is_equipped = (equip_target != 0) # 如果有指向目标，说明它是装备/被装备状态
+
+            if actual_flag & 0x10000: 
+                ov_count = struct.unpack('<I', stream.read(4))[0]
+                overlays = [struct.unpack('<I', stream.read(4))[0] for _ in range(ov_count)]
+
+            if actual_flag & 0x20000: 
+                c_count = struct.unpack('<I', stream.read(4))[0]
+                for _ in range(c_count):
+                    tdata = struct.unpack('<I', stream.read(4))[0]
+                    counters += (tdata >> 16) & 0xFFFF
+
+            return {
+                'code': code & 0x7FFFFFFF,
+                'pos': p, 'owner': c,
+                'current_type': ctype, 'current_level': level,  # 实时
+                'current_attr': attr, 'current_race': race,     # 实时
+                'current_atk': atk, 'current_def': defense,
+                'is_equipped': is_equipped,                     # C++ 直接告诉我们有没有装备
+                'overlays': overlays, 'counters': counters
+            }
+        except Exception as e:
+            print(f"⚠️ query_card 解析异常: {e}")
+            return None
+
     def _on_message(self, pduel, msg_type): 
-        # MDPro3 可能会通过 msg_type=1 发送 lua 错误信息
+        # 可能会通过 msg_type=1 发送 lua 错误信息
         # 如果有需要可以在这里 hook 错误日志
         return 0
 
@@ -178,29 +255,38 @@ class GalateaEnv:
     def dummy_card_reader(self, code, data): return 0
     def dummy_message_handler(self, ptr, msg_type): return 0
 
-    def reset(self, deck0, deck1):
+    # 修改参数，增加 seed=None
+    def reset(self, deck0, deck1, seed=None):
         if self.pduel:
             self.lib.end_duel(self.pduel)
             self.pduel = None
         
-        # 每次重置时不必清空 script_buffers，常用脚本常驻内存更好
-        
-        seed = int(time.time()) & 0xFFFFFFFF
-        self.pduel = self.lib.create_duel(seed)
+        # 修复1：动态处理 Seed
+        if seed is None:
+            duel_seed = int(time.time()) & 0xFFFFFFFF
+            is_replay = False # AI 左右互搏模式
+        else:
+            duel_seed = seed
+            is_replay = True  # 录像放映模式
+            
+        self.pduel = self.lib.create_duel(duel_seed)
         
         self.lib.set_player_info(self.pduel, 0, 8000, 5, 1)
         self.lib.set_player_info(self.pduel, 1, 8000, 5, 1)
         
         def inject_deck(player_id, deck_obj):
-            # 主卡组洗牌
+            # 主卡组加载
             main_cards = deck_obj.main[:]
-            random.shuffle(main_cards) 
+            # 修复2：录像模式下不能在 Python 层洗牌
+            if not is_replay:
+                random.shuffle(main_cards) 
             for code in main_cards:
                 self.lib.new_card(self.pduel, code, player_id, player_id, LOCATION_DECK, 0, 0)
             
             # 额外卡组加载
             extra_cards = deck_obj.extra[:]
-            random.shuffle(extra_cards)
+            if not is_replay:
+                random.shuffle(extra_cards)
             for code in extra_cards:
                 self.lib.new_card(self.pduel, code, player_id, player_id, LOCATION_EXTRA, 0, 0)
 
@@ -211,29 +297,28 @@ class GalateaEnv:
         return self.step()
 
     def step(self):
-        msg_buf = (ctypes.c_byte * 65536)() 
-        for _ in range(1000):
+        for i in range(100000):
             res = self.lib.process(self.pduel)
-            if hasattr(self.lib, 'get_message'):
-                msg_len = self.lib.get_message(self.pduel, ctypes.cast(msg_buf, ctypes.POINTER(ctypes.c_byte)))
-                if msg_len > 0: return bytearray(msg_buf)[:msg_len]
-            if res == 0: return None 
+            
+            msg_len = self.lib.get_message(self.pduel, ctypes.cast(self.msg_buf, ctypes.POINTER(ctypes.c_byte)))
+            if msg_len > 0:
+                return bytearray(self.msg_buf)[:msg_len]
+            
+            if res == 0:
+                return None 
+            
+            # 🌟 [新增] 心跳打印：如果它循环了 5万次还没出结果，强制发声！
+            if i == 50000:
+                print(f"   [底层心跳] C++ 正在疯狂运算中 (当前 res={res})...")
+                
+        print("⚠️ 警告：引擎运算超时（10万次循环未响应）")
         return None
 
 
     def send_action(self, response):
         if isinstance(response, int):
-            # 简单交互用整数
             self.lib.set_responsei(self.pduel, ctypes.c_uint32(response))
         elif isinstance(response, (bytes, bytearray)):
-            # 1. 强转 bytes，并且绝对截断到最多 64 字节，防止引擎数组越界
-            resp_bytes = bytes(response)[:64]
-            
-            # 2. 用 0x00 补齐到足足 64 字节，清理 C++ 读取时的内存垃圾
-            safe_bytes = resp_bytes.ljust(64, b'\x00')
-            
-            # 3. 🌟 终极护盾：直接通过内存拷贝创建 C 数组！
-            # 彻底绕开 create_string_buffer 的末尾 \x00 长度检查！
-            buf = (ctypes.c_byte * 64).from_buffer_copy(safe_bytes)
-            
-            self.lib.set_responseb(self.pduel, ctypes.cast(buf, ctypes.c_void_p))
+            # 绝对安全：截取、填充，并显式转换指针！
+            resp_bytes = bytes(response)[:64].ljust(64, b'\x00')
+            self.lib.set_responseb(self.pduel, ctypes.cast(resp_bytes, ctypes.c_void_p))

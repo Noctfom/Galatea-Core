@@ -6,6 +6,31 @@
 import torch
 import torch.nn as nn
 
+class RNDModule(nn.Module):
+    def __init__(self, input_dim=256, hidden_dim=256): # 根据你的 d_model 调整
+        super().__init__()
+        # Target network (永远冻结，不参与更新)
+        self.target = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        for param in self.target.parameters():
+            param.requires_grad = False
+
+        # Predictor network (努力模仿 Target)
+        self.predictor = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+
+    def forward(self, x):
+        # 计算预测误差 (MSE) 作为内在奖励
+        target_feat = self.target(x)
+        pred_feat = self.predictor(x)
+        return ((target_feat - pred_feat) ** 2).mean(dim=-1)
+
 class GalateaNet(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -16,7 +41,7 @@ class GalateaNet(nn.Module):
         
         # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
-        self.feat_proj = nn.Linear(53, self.d_model)
+        self.feat_proj = nn.Linear(56, self.d_model)
         self.race_embed = nn.Embedding(30, self.d_model, padding_idx=0)
         self.attr_embed = nn.Embedding(10, self.d_model, padding_idx=0)
         self.setcode_embed = nn.Embedding(4096, self.d_model, padding_idx=0) 
@@ -57,7 +82,7 @@ class GalateaNet(nn.Module):
         # --- 4. Action Head (动作评估中枢) ---
         self.act_type_embed = nn.Embedding(256, self.d_model) 
         self.desc_embed = nn.Embedding(1024, self.d_model) 
-        self.place_embed = nn.Embedding(32, self.d_model, padding_idx=0)
+        self.place_embed = nn.Embedding(33, self.d_model, padding_idx=0)
         
         self.intent_proj = nn.Linear(self.d_model, self.d_model)
         self.option_proj = nn.Linear(self.d_model, self.d_model)
@@ -74,6 +99,8 @@ class GalateaNet(nn.Module):
             nn.Linear(256, 1),
             nn.Tanh()
         )
+
+        self.rnd = RNDModule(input_dim=self.d_model)
 
     def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr):
         # 核心修复：将 int16 (Short) 强转为 long()，满足 PyTorch Embedding 的要求
@@ -172,9 +199,24 @@ class GalateaNet(nn.Module):
             chain_pooled = (c_sem_sum / c_count).unsqueeze(1) # [B, 1, 512]
         else:
             chain_pooled = 0
+        
+        # 历史动作雷达：回想过去 8 步的施法记录
+        if 'h_sem_category' in batch_dict:
+            h_sem = self.process_semantics(
+                batch_dict['h_sem_category'], batch_dict['h_sem_req'],
+                batch_dict['h_sem_setcode'], batch_dict['h_sem_number'],
+                batch_dict['h_sem_ref'], batch_dict['h_sem_race'], batch_dict['h_sem_attr']
+            ) # [B, 8, 512]
+            
+            h_mask_f = batch_dict['h_mask'].float().unsqueeze(-1)
+            h_sem_sum = (h_sem * h_mask_f).sum(dim=1)
+            h_count = h_mask_f.sum(dim=1).clamp(min=1e-5)
+            history_pooled = (h_sem_sum / h_count).unsqueeze(1) # [B, 1, 512]
+        else:
+            history_pooled = 0
 
-        # 大一统评分底蕴
-        v_input = g_embed + pooled + deck_pooled + chain_pooled
+        # 大一统评分底蕴：加入历史记忆
+        v_input = g_embed + pooled + deck_pooled + chain_pooled + history_pooled
         value = self.value_head(v_input.squeeze(1)) 
 
         # === Action Head (因果决策) ===
@@ -219,4 +261,4 @@ class GalateaNet(nn.Module):
         logits = self.policy_head(combined_vecs).squeeze(-1) 
         logits = logits.masked_fill(~act_mask, -1e9)
 
-        return logits, value
+        return logits, value, v_input.squeeze(1)
