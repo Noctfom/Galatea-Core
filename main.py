@@ -104,6 +104,12 @@ except RuntimeError:
 # 
 #  回放示例命令:
 #  python thought_viewer.py ./ai_thoughts/xxx.json    
+#
+#  更新示例命令:
+#  python main.py update --core --data
+#
+#  语义化提取示例命令:
+#  python main.py parse
 
 # ==============================================================================
 
@@ -165,10 +171,12 @@ def main():
                               default='https://raw.githubusercontent.com/Noctfom/astrbot-plugin-duel-galatea/main/knowledge_base.json', 
                               help='指定其他的 Github Raw URL')
 
-    # --- 5. 爬虫更新模式 (Update - 预留) ---
-    update_parser = subparsers.add_parser('update', help='[预留] 从开源仓库拉取并更新本地卡片库与脚本')
-    update_parser.add_argument('--repo', type=str, default='default', help='目标数据源/仓库标识 (如 koishi, mohu 等)')
-    update_parser.add_argument('--force', action='store_true', help='强制覆盖本地的 cards.cdb 和 script 文件夹')
+    # --- 5. 更新同步模式 (Update) ---
+    update_parser = subparsers.add_parser('update', help='更新本地代码、卡片数据库(CDB)与脚本库')
+    update_parser.add_argument('--core', action='store_true', help='仅更新 Galatea 核心代码 (从你的Github拉取)')
+    update_parser.add_argument('--data', action='store_true', help='仅更新 cards.cdb 与 script 脚本库 (从萌卡与官方拉取)')
+    update_parser.add_argument('--repo', type=str, default='default', help='指定脚本的来源仓库地址 (默认官方)')
+    update_parser.add_argument('--force', action='store_true', help='覆盖更新：清空本地旧脚本，完全以远程为准')
 
     args = parser.parse_args()
 
@@ -247,15 +255,19 @@ def main():
         parser.run_batch(output_file=args.output, clear_existing=args.clear, remote_url=actual_remote_url)
         
     elif args.command == 'update':
-        print("🌐 启动数据库与脚本同步模块...")
-        print(f"👉 目标数据源: {args.repo}")
-        print("⚠️ 注意: 该爬虫模块正在开发中。未来执行此命令将自动下载并更新 cards.cdb 与 script 文件夹。")
-        if args.force:
-            print("🧨 [强制覆盖模式已开启]")
-            
-        # 预留给未来的爬虫脚本接口
-        # import update_tools
-        # update_tools.sync_from_repo(repo=args.repo, force_overwrite=args.force)
+        print("🌐 启动自动同步更新模块...")
+        import update_tools
+        
+        # 如果什么都没输入 (既没有 --core 也没有 --data)，提示用户
+        if not args.core and not args.data:
+            print("⚠️ 请指定更新目标！使用 '--core' 更新代码，或使用 '--data' 更新卡库和脚本。")
+            print("💡 示例: python main.py update --core --data")
+        else:
+            if args.core:
+                update_tools.update_core_code()
+                
+            if args.data:
+                update_tools.update_data_and_scripts(repo_type=args.repo, force=args.force)
 
     else:
         parser.print_help()

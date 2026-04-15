@@ -1,5 +1,4 @@
 # YGOPro Core 核心引擎
-ocgcore.dll
 libocgcore.so
 cards.cdb
 
@@ -22,3 +21,6 @@ decks/
 tmp_rollout_*.pt
 tmp_weights_*.pt
 tmp_rollout_*.pt.tmp
+
+# --- 允许提交引擎核心 ---
+!ocgcore.dll
