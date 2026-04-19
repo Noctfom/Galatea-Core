@@ -6,9 +6,35 @@
 import torch
 import torch.nn as nn
 
-class RNDModule(nn.Module):
-    def __init__(self, input_dim=256, hidden_dim=256): # 根据你的 d_model 调整
+class RunningMeanStd(nn.Module):
+    # 动态记录输入的均值和方差，用于 RND 归一化
+    def __init__(self, shape=()):
         super().__init__()
+        self.register_buffer("mean", torch.zeros(shape))
+        self.register_buffer("var", torch.ones(shape))
+        self.register_buffer("count", torch.tensor(1e-4))
+
+    def update(self, x):
+        batch_mean = x.mean(dim=0)
+        batch_var = x.var(dim=0, unbiased=False)
+        batch_count = x.shape[0]
+        
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+        
+        self.mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + (delta ** 2) * self.count * batch_count / tot_count
+        self.var = M2 / tot_count
+        self.count = tot_count
+
+class RNDModule(nn.Module):
+    def __init__(self, input_dim=512, hidden_dim=256): 
+        super().__init__()
+        # 挂载滚动统计器
+        self.obs_norm = RunningMeanStd(shape=(input_dim,))
+        
         # Target network (永远冻结，不参与更新)
         self.target = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -26,9 +52,18 @@ class RNDModule(nn.Module):
         )
 
     def forward(self, x):
-        # 计算预测误差 (MSE) 作为内在奖励
-        target_feat = self.target(x)
-        pred_feat = self.predictor(x)
+        # 1. 训练模式下，更新统计信息
+        if self.training:
+            with torch.no_grad():
+                self.obs_norm.update(x)
+                
+        # 2. 归一化输入特征 (防除 0)
+        x_norm = (x - self.obs_norm.mean) / torch.sqrt(self.obs_norm.var + 1e-8)
+        x_norm = torch.clamp(x_norm, -5.0, 5.0) # 截断极端值
+
+        # 3. 计算预测误差 (MSE) 作为内在奖励
+        target_feat = self.target(x_norm)
+        pred_feat = self.predictor(x_norm)
         return ((target_feat - pred_feat) ** 2).mean(dim=-1)
 
 class GalateaNet(nn.Module):
@@ -41,7 +76,7 @@ class GalateaNet(nn.Module):
         
         # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
-        self.feat_proj = nn.Linear(56, self.d_model)
+        self.feat_proj = nn.Linear(58, self.d_model)
         self.race_embed = nn.Embedding(30, self.d_model, padding_idx=0)
         self.attr_embed = nn.Embedding(10, self.d_model, padding_idx=0)
         self.setcode_embed = nn.Embedding(4096, self.d_model, padding_idx=0) 
@@ -101,6 +136,7 @@ class GalateaNet(nn.Module):
         )
 
         self.rnd = RNDModule(input_dim=self.d_model)
+        self.overlay_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
 
     def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr):
         # 核心修复：将 int16 (Short) 强转为 long()，满足 PyTorch Embedding 的要求
@@ -132,6 +168,7 @@ class GalateaNet(nn.Module):
     def forward(self, batch_dict):
         # 物理基础感知
         x_code = self.card_embed(batch_dict['card_idx'])
+        x_overlay = self.overlay_embed(batch_dict['card_overlay_idx'])
         x_feat = self.feat_proj(batch_dict['card_feats'])
         x_race = self.race_embed(batch_dict['card_race'])
         x_attr = self.attr_embed(batch_dict['card_attr'])
@@ -148,7 +185,7 @@ class GalateaNet(nn.Module):
             x_sem = 0
 
         # 全息物理与语义的大一统！
-        x = x_code + x_feat + x_race + x_attr + x_setcode + x_sem
+        x = x_code + x_overlay + x_feat + x_race + x_attr + x_setcode + x_sem
         
         # --- Transformer 局势推演 ---
         src_mask = ~batch_dict['padding_mask'] 

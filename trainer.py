@@ -40,7 +40,7 @@ UPDATE_TIMESTEPS = 2048 # Batch Size: 攒多少经验升一级
 EPOCHS = 4              # PPO Update Epochs:同一批数据反复榨取几次
 MINIBATCH_SIZE = 128    # Mini-batch: 梯度下降时的切片大小
 CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
-ENTROPY_COEF = 0.02     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
+ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
 MAX_EPISODE_STEPS = 800 # 单局最大步数，防止死循环
 
@@ -459,14 +459,18 @@ class PPOTrainer:
             
             with torch.amp.autocast('cuda', dtype=self.amp_dtype):
                 with torch.no_grad():
-                    actions, log_probs, _, values = self.agent.get_action_and_value_from_tensor(batch_obs, None)
+                    # 修复1：加上 v_inputs，接收第5个返回值
+                    actions, log_probs, _, values, v_inputs = self.agent.get_action_and_value_from_tensor(batch_obs, None)
+                    # 修复2：直接在 GPU 服务端计算出 RND 奖励
+                    rnd_rewards = self.agent.net.rnd(v_inputs)
             
             # --- 4. 组装回传封包 ---
             # 新增 .detach()，彻底斩断与 GPU 计算图的最后一点阴阳联系
             packed_returns = torch.stack([
                 actions.to(torch.float32), 
                 log_probs.to(torch.float32), 
-                values.squeeze(-1).to(torch.float32)
+                values.squeeze(-1).to(torch.float32),
+                rnd_rewards.to(torch.float32)
             ], dim=1).detach().cpu()
             
             for i, wid in enumerate(worker_ids):

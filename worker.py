@@ -35,8 +35,7 @@ MAX_EPISODE_STEPS = 800
 def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None):
     # =========================================================================
     #  [防卡死] 禁用 Windows 崩溃弹窗
-    # 告诉操作系统：如果 OCGCore 发生致命写越界(Segfault)，直接静默杀死进程，不要弹窗也不要生成错误报告，以免训练被打断
-    import os
+    # 告诉操作系统：如果 OCGCore 发生致命写越界(Segfault)，直接静默杀死进程，不要弹窗也不要生成错误报告，以免训练被打断导致堆砌死锁
     if os.name == 'nt':
         import ctypes
         # SEM_FAILCRITICALERRORS (0x0001) | SEM_NOGPFAULTERRORBOX (0x0002) | SEM_NOOPENFILEERRORBOX (0x8000)
@@ -45,6 +44,14 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
     
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
+
+    seed = (int(time.time() * 1000) % (2**31)) + (os.getpid() * 100) + worker_id
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     try:
         agent = AiBot(device=device, net_config=net_config)
         #  从硬盘读取权重，斩断 Windows IPC 共享内存污染
@@ -207,7 +214,9 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             tensor_dict = agent.encoder.encode(snap, player_id=player)
                             
                             # 防止嵌入层越界崩溃，设定索引上限（根据训练时的 vocab_size）
-                            tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 99)
+                            # 动态适配，不要写死 99
+                            max_idx = tensor_dict['act_card_idx'].shape[-1] if len(tensor_dict['act_card_idx'].shape) > 2 else 119 # 保底 119
+                            tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 119)
                             tensor_dict['act_type'] = torch.clamp(tensor_dict['act_type'], 0, 255)
                             tensor_dict['act_desc'] = torch.clamp(tensor_dict['act_desc'], 0, 1023)
                             
@@ -235,13 +244,19 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 action_idx = packed_res[0].to(torch.long)
                                 log_prob = packed_res[1]
                                 value = packed_res[2]
+                                rnd_reward = packed_res[3].item()
                                 infer_dict = {k: v.cpu() for k, v in tensor_dict.items()}
                             else:
                                 # --- 模式 B: 纯本地推理 ---
                                 with torch.no_grad():
                                     infer_dict = {k: v.to(device) for k, v in tensor_dict.items()}
                                     action_idx, log_prob, _, value, v_input= agent.get_action_and_value_from_tensor(infer_dict, snap.valid_actions)
-                                
+                                    rnd_reward = agent.net.rnd(v_input.to(device)).item()
+                                    # 修复：对好奇心进行严苛的截断，最大绝对不能超过 0.1
+                                    # 并且随着 turn 的增加（长盘），削弱好奇心，逼迫它去追求胜负真实奖励
+                                    decay_factor = max(0.1, 1.0 - (brain.turn / 20.0))
+                                    intrinsic_reward = min(0.005 * rnd_reward, 0.1) * decay_factor
+
                                 # 新增 .detach()，确保放入字典的张量干干净净
                                 action_idx = action_idx.detach().cpu()
                                 log_prob = log_prob.detach().cpu()
@@ -255,7 +270,6 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 chosen = random.choice(snap.valid_actions)
 
                             # 1. 计算内在好奇心奖励 (RND Reward)
-                            rnd_reward = agent.net.rnd(v_input.to(device)).item()
                             intrinsic_reward = 0.005 * rnd_reward 
 
                             # 2. 软性时间惩罚 (Soft Enrage)
@@ -350,8 +364,58 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 print(f"⚠️ [Worker {worker_id}] ignore_list解析异常: {e}")
 
                         resp = rule_bot.get_rule_decision(p, msg_type, msg, brain, ignore_actions=clean_ignore_list)
-                        last_decision_value = resp 
-                        msg_queue = [] 
+                        
+                        # 去 AI 的合法选项池里，寻找哪一个选项的打包结果等同于 RuleBot 的 resp
+                        matched_action_idx = -1
+                        for idx, act in enumerate(snap.valid_actions):
+                            if hasattr(act, 'decision_bytes') and act.decision_bytes == resp:
+                                matched_action_idx = idx
+                                break
+                            elif msg_type in [10, 11, 15, 16] and agent._pack_response(act, msg_type) == resp:
+                                matched_action_idx = idx
+                                break
+                            elif not hasattr(act, 'decision_bytes') and msg_type not in [10, 11, 15, 16]:
+                                # 简单包的验证
+                                if bytes([act.index]) == resp: matched_action_idx = idx; break
+                        
+                        ## 如果找到了完美匹配的选项
+                        if matched_action_idx != -1:
+                            # 强行让网络计算这个状态，获取其真实的 logits
+                            with torch.no_grad():
+                                infer_dict = {k: v.to(device) for k, v in tensor_dict.items()}
+                                # 不用 get_action，直接调用底层网络拿到全量特征
+                                logits, value, _ = agent.net(infer_dict)
+                                
+                                # 掩码过滤，防止非法动作的概率干扰
+                                mask = infer_dict['act_mask']
+                                logits = logits.masked_fill(~mask, -1e9)
+                                dist = torch.distributions.Categorical(logits=logits)
+                                
+                                # 强制计算 RuleBot 所选动作的真实 log_prob
+                                forced_action = torch.tensor([matched_action_idx], device=device)
+                                log_prob_of_rulebot = dist.log_prob(forced_action)
+
+                            # 防御性压缩 (防止前面 AI 崩溃导致 compressed_obs 未定义)
+                            compressed_obs = {}
+                            for k, v in infer_dict.items():
+                                cpu_v = v.cpu()
+                                if cpu_v.dtype in [torch.long, torch.int64, torch.int32]:
+                                    compressed_obs[k] = cpu_v.to(torch.int16)
+                                elif cpu_v.dtype == torch.float32:
+                                    compressed_obs[k] = cpu_v.to(torch.float16)
+                                else:
+                                    compressed_obs[k] = cpu_v
+                                
+                            game_buffer[player].append({
+                                'obs': compressed_obs,
+                                'action': torch.tensor(matched_action_idx, dtype=torch.int16),
+                                'log_prob': log_prob_of_rulebot.cpu().squeeze().to(torch.float16),
+                                'value': value.cpu().squeeze().to(torch.float16),
+                                'step_reward': 0.0 # Rulebot代打不给好奇心奖励
+                            })
+                            ep_steps += 1
+                            collected_steps += 1
+
                         try:
                             env.send_action(resp)
                         except OSError as e:

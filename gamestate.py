@@ -373,6 +373,8 @@ class DuelState:
 
         self.chain_stack = []
         self.history_stack = []
+        self.known_hand_codes = {0: [], 1: []} 
+        self.recently_confirmed = []
 
     def reset(self):
         self.turn = 0
@@ -388,18 +390,51 @@ class DuelState:
 
         self.chain_stack = []
         self.history_stack = []
+        self.known_hand_codes = {0: [], 1: []} 
+        self.recently_confirmed = []
 
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
         try:
             stream = io.BytesIO(msg_payload)
             
-            # --- 状态维护 (与 V2.0 相同) ---
-            if msg_type == 50: # MSG_MOVE (完美兼容超量素材)
+            # --- 状态维护 ---
+            if msg_type in [30, 31, 42]:
+                stream.read(1) # P
+                if msg_type == 31: stream.read(1) #未知幽灵字节
+                count = struct.unpack('B', stream.read(1))[0]
+                for _ in range(count):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    stream.read(3) # c, l, s
+                    self.recently_confirmed.append(code & 0x7FFFFFFF)
+
+            elif msg_type == 50: # MSG_MOVE (完美兼容超量素材)
                 code, old_raw, new_raw, reason = struct.unpack('<IIII', stream.read(16))
                 old_c, old_l, old_s, old_pos = LocationInfo.decode(old_raw)
                 new_c, new_l, new_s, new_pos = LocationInfo.decode(new_raw)
                 pure_code = code & 0x7FFFFFFF
+
+                # ========================================================
+                # 状态记忆池：只进不出（除非明牌被打出）
+                # ========================================================
+                is_public_move = False
+                if (old_l & 0x7F) == Zone.GRAVE: is_public_move = True
+                elif (old_l & 0x7F) in [Zone.MZONE, Zone.SZONE, Zone.REMOVED] and (old_pos & 0x1 or old_pos & 0x4): is_public_move = True
+                elif pure_code in self.recently_confirmed:
+                    is_public_move = True
+                    self.recently_confirmed.remove(pure_code)
+
+                # 进池：明牌入库 (比如检索)
+                if new_l == Zone.HAND and new_c in [0, 1] and is_public_move and pure_code != 0:
+                    self.known_hand_codes[new_c].append(pure_code)
+
+                # 出池：必须满足是从【手牌】离开，或者从【场上的暗牌/里侧表示】暴露真实身份离开
+                is_from_hidden = (old_l == Zone.HAND) or (old_l in [Zone.MZONE, Zone.SZONE] and not (old_pos & 0x1 or old_pos & 0x4))
+                
+                if pure_code != 0 and old_c in [0, 1] and is_from_hidden:
+                    if pure_code in self.known_hand_codes[old_c]:
+                        self.known_hand_codes[old_c].remove(pure_code)
+                # ========================================================
 
                 # --- 1. 处理脱离旧位置 ---
                 if old_l & 0x80: # 从超量素材区拔除
@@ -421,7 +456,7 @@ class DuelState:
                 elif new_c in [0, 1] and new_l != 0:
                     self.field_map[new_c][new_l][new_s] = {
                         'code': code, 'pos': new_pos, 'owner': new_c,
-                        'counters': 0, 'overlays': [], 'is_equipped': False # 🌟 附带三大盲区容器
+                        'counters': 0, 'overlays': [], 'is_equipped': False # 附带三大盲区容器
                     }
 
                 # [上帝视角记牌器] 跟踪卡片进出卡组/额外
@@ -447,6 +482,10 @@ class DuelState:
             elif msg_type == 53: # POS_CHANGE
                 code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
+                pure_code = code & 0x7FFFFFFF
+                if not (prev & 0x1 or prev & 0x4) and (new_pos & 0x1 or new_pos & 0x4):
+                    if pure_code in self.known_hand_codes[c]:
+                        self.known_hand_codes[c].remove(pure_code)
 
             elif msg_type == 70: # MSG_CHAINING (严格匹配 C++ 的 16 字节)
                 code = struct.unpack('<I', stream.read(4))[0]
@@ -465,7 +504,12 @@ class DuelState:
                 if len(self.history_stack) > 8:
                     self.history_stack.pop()
 
-            elif msg_type == 74: # 🌟 MSG_CHAIN_END (C++ 发送 0 字节，直接清空堆栈)
+                # 出池：如果卡片直接在手牌或盖伏状态发效果（翻开），也会暴露 code
+                pure_code = code & 0x7FFFFFFF
+                if pure_code in self.known_hand_codes[tc]:
+                    self.known_hand_codes[tc].remove(pure_code)
+
+            elif msg_type == 74: # MSG_CHAIN_END (C++ 发送 0 字节，直接清空堆栈)
                 self.chain_stack.clear()
 
             elif msg_type == 90: # DRAW (抽卡)
@@ -755,6 +799,33 @@ class DuelState:
                             index=i,  # 🌟 修复：直接传 i，千万别传 1<<i
                             desc_id=i, desc_str=f"Place Grid {i}"
                         ))
+            
+            # 9. MSG_SELECT_UNSELECT (26)
+            elif msg_type == 26:
+                stream.read(1) # P
+                finishable = struct.unpack('B', stream.read(1))[0]
+                cancelable = struct.unpack('B', stream.read(1))[0]
+                stream.read(2) # min, max
+                
+                # 可选卡片 (Select)
+                count_sel = struct.unpack('B', stream.read(1))[0]
+                for i in range(count_sel):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    loc_val = struct.unpack('<I', stream.read(4))[0]
+                    self.current_valid_actions.append(GameAction(action_type=26, index=i, target_entity_idx=loc_val, desc_str="Select"))
+                
+                # 可取消卡片 (Unselect)
+                count_unsel = struct.unpack('B', stream.read(1))[0]
+                for i in range(count_unsel):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    loc_val = struct.unpack('<I', stream.read(4))[0]
+                    # 给 unselect 的 index 加上偏移量，方便动作翻译时区分
+                    self.current_valid_actions.append(GameAction(action_type=26, index=i + count_sel, target_entity_idx=loc_val, desc_str="Unselect"))
+                
+                if finishable:
+                    self.current_valid_actions.append(GameAction(action_type=26, index=-1, desc_str="Finish"))
+                elif cancelable:
+                    self.current_valid_actions.append(GameAction(action_type=26, index=-1, desc_str="Cancel"))
 
             # =================================================================
             # [阶段一追加] 9. 宣言类消息解析
@@ -863,6 +934,8 @@ class DuelState:
                     counters = info.get('counters', 0)
                     overlays = info.get('overlays', [])
                     is_equipped = info.get('is_equipped', False)
+
+                    top_overlay_code = overlays[0] if len(overlays) > 0 else 0
                     
                     entities.append(CardEntity(
                         code=code, owner=player, location=zone, sequence=seq, position=pos,
@@ -876,6 +949,7 @@ class DuelState:
                         overlay_count=len(overlays),
                         is_equipped=is_equipped
                     ))
+                    entities[-1].top_overlay_code = top_overlay_code
                     idx_counter += 1
 
         # --- [核心步骤] 匹配 Action 指针 ---
@@ -925,6 +999,7 @@ class DuelState:
         # 动态外挂连锁堆栈
         snap.chain_stack = self.chain_stack.copy()
         snap.history_stack = self.history_stack.copy()
+        snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
         return snap
     
     def sync_active_field(self, env):
