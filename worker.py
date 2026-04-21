@@ -10,6 +10,7 @@ import numpy as np
 import time
 import random
 import os
+import gc
 import struct
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
@@ -32,7 +33,7 @@ GAE_LAMBDA = 0.95
 MAX_EPISODE_STEPS = 800
 
 
-def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None):
+def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None, opp_config=None):
     # =========================================================================
     #  [防卡死] 禁用 Windows 崩溃弹窗
     # 告诉操作系统：如果 OCGCore 发生致命写越界(Segfault)，直接静默杀死进程，不要弹窗也不要生成错误报告，以免训练被打断导致堆砌死锁
@@ -60,10 +61,24 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             agent.net.load_state_dict(weights, strict=False)
             agent.net.eval()
         
+        # --- 新增：对手代理 P1 初始化 ---
+        opp_agent = None
+        if opp_config["mode"] == "ai":
+            opp_agent = AiBot(device=device, net_config=net_config)
+            opp_path = opp_config["path"]
+            if opp_path and os.path.exists(opp_path):
+                opp_weights = torch.load(opp_path, map_location=device, weights_only=False)
+                # 处理保存的 checkpoint 字典或纯 state_dict
+                sd = opp_weights['model_state_dict'] if isinstance(opp_weights, dict) and 'model_state_dict' in opp_weights else opp_weights
+                opp_agent.net.load_state_dict(sd, strict=False)
+                opp_agent.net.eval()
+            else:
+                # 如果是自对局且路径是 weight_file，直接共享内存或再次加载
+                opp_agent.net.load_state_dict(agent.net.state_dict())
+                opp_agent.net.eval()
+
         env = GalateaEnv()
         collected_steps = 0
-        episode_rewards = []
-        episode_lens = []
         
         consecutive_ai_fails = 0 # 死亡熔断计数器
         
@@ -71,9 +86,21 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         episode_rewards = []
         episode_lens = []
 
+        stats = {'wins_first': 0, 'games_first': 0, 'wins_second': 0, 'games_second': 0}
+
         # print(f"👷 Worker {worker_id} 启动 | 目标: {target_steps} 步")
 
         while collected_steps < target_steps:
+            # --- 每局开始前随机摇号决定座位 ---
+            train_p_id = random.choice([0, 1]) 
+            opp_p_id = 1 - train_p_id
+            
+            # 记录这局我是打先手还是后手
+            if train_p_id == 0: 
+                stats['games_first'] += 1
+            else: 
+                stats['games_second'] += 1
+
             # --- Reset 环境 ---
             try:
                 res = deck_utils.get_random_deck_pair(ydk_dir=deck_dir)
@@ -162,7 +189,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     player = snap.global_data.to_play
                     if game_buffer[player]:
                         # 给最后一步施加惩罚
-                        game_buffer[player][-1]['value'] -= 0.01 
+                        game_buffer[player][-1]['step_reward'] -= 0.05
                     
                     if last_decision_value is not None:
                         current_step_ignore_list.append(last_decision_value)
@@ -176,7 +203,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     if last_interaction_msg is not None:
                         msg = last_interaction_msg
                         msg_type = msg[0]
-                    else: continue
+                    else: 
+                        continue
 
                 # 状态重置
                 if msg_type in STATE_CHANGE_MSGS:
@@ -191,10 +219,25 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 if msg_type in DECISION_MSGS:
                     last_interaction_msg = msg
                     ai_handled = False
+
+                    # 获取当前行动玩家
+                    snap = brain.get_snapshot(env)
+                    player = snap.global_data.to_play
+                    
+                    # --- 通过身份判断使用哪个脑子 ---
+                    is_training_agent = (player == train_p_id)
+                    current_agent = None
+                    if is_training_agent:
+                        current_agent = agent
+                    elif opp_config["mode"] == "ai":
+                        current_agent = opp_agent
                     
                     # --- AI 尝试接管 ---
-                    if msg_type in AI_MANAGED_MSGS and brain.current_valid_actions and consecutive_retries == 0:
+                    if current_agent and msg_type in AI_MANAGED_MSGS and brain.current_valid_actions and consecutive_retries == 0:
                         
+                        # 使用 current_agent 进行编码和推理
+                        tensor_dict = current_agent.encoder.encode(snap, player_id=player)
+
                         # 向参谋部索要套餐，拦截并覆盖单选题
                         if msg_type in [15, 18, 20, 23, 24, 25]:
                             macro_options = rule_bot.get_macro_options(msg_type, msg[1:])
@@ -221,8 +264,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             tensor_dict['act_desc'] = torch.clamp(tensor_dict['act_desc'], 0, 1023)
                             
                             # 是否异步模式分流
-                            if req_q is not None and resp_q is not None:
-                                # --- 模式 A: 真正的异步 Server 推理 ---
+                            # [核心修复]：混合推理架构
+                            # 只有 P0 才能使用异步推断服务器（因为服务器只有最新权重）。
+                            # P1（历史模型）直接在 Worker 本地进行推理
+                            if req_q is not None and resp_q is not None and is_training_agent:
+                                # --- 模式 A: 真正的异步 Server 推理 (仅限 P0) ---
                                 import queue
                                 numpy_dict = {}
                                 for k, v in tensor_dict.items():
@@ -233,7 +279,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     else: arr = arr.astype(np.int16) 
                                     numpy_dict[k] = arr
                                     
-                                req_q.put((worker_id, numpy_dict))
+                                req_q.put((worker_id, iteration, numpy_dict))
                                 
                                 try:
                                     res_array = resp_q.get(timeout=15.0)
@@ -247,15 +293,18 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 rnd_reward = packed_res[3].item()
                                 infer_dict = {k: v.cpu() for k, v in tensor_dict.items()}
                             else:
-                                # --- 模式 B: 纯本地推理 ---
+                                # --- 模式 B: 纯本地推理 (未开启 Server，或当前是 P1 行动) ---
                                 with torch.no_grad():
                                     infer_dict = {k: v.to(device) for k, v in tensor_dict.items()}
-                                    action_idx, log_prob, _, value, v_input= agent.get_action_and_value_from_tensor(infer_dict, snap.valid_actions)
-                                    rnd_reward = agent.net.rnd(v_input.to(device)).item()
-                                    # 修复：对好奇心进行严苛的截断，最大绝对不能超过 0.1
-                                    # 并且随着 turn 的增加（长盘），削弱好奇心，逼迫它去追求胜负真实奖励
-                                    decay_factor = max(0.1, 1.0 - (brain.turn / 20.0))
-                                    intrinsic_reward = min(0.005 * rnd_reward, 0.1) * decay_factor
+                                    
+                                    # 修复：使用 current_agent，而非定死 agent
+                                    action_idx, log_prob, _, value, v_input = current_agent.get_action_and_value_from_tensor(infer_dict, snap.valid_actions)
+                                    
+                                    if is_training_agent:
+                                        rnd_reward = current_agent.net.rnd(v_input.to(device)).item()
+                                        current_agent.net.update_rnd_stats(v_input.to(device))
+                                    else:
+                                        rnd_reward = 0.0
 
                                 # 新增 .detach()，确保放入字典的张量干干净净
                                 action_idx = action_idx.detach().cpu()
@@ -319,16 +368,18 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 else:
                                     compressed_obs[k] = cpu_v
                                     
-                            game_buffer[player].append({
-                                'obs': compressed_obs,
-                                'action': action_idx.cpu().to(torch.int16),
-                                'log_prob': log_prob.cpu().to(torch.float16),
-                                'value': value.cpu().to(torch.float16),
-                                'step_reward': step_reward
-                            })
+                            # 注意：只有训练代理的数据才需要放入 game_buffer 供学习
+                            if is_training_agent:
+                                game_buffer[player].append({
+                                    'obs': compressed_obs,
+                                    'action': action_idx.cpu().to(torch.int16),
+                                    'log_prob': log_prob.cpu().to(torch.float16),
+                                    'value': value.cpu().to(torch.float16),
+                                    'step_reward': step_reward
+                                })
+                                collected_steps += 1
                             
                             ep_steps += 1
-                            collected_steps += 1
                             ai_handled = True
                             last_act_time = time.time()
                         except OSError as e:
@@ -365,59 +416,12 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
                         resp = rule_bot.get_rule_decision(p, msg_type, msg, brain, ignore_actions=clean_ignore_list)
                         
-                        # 去 AI 的合法选项池里，寻找哪一个选项的打包结果等同于 RuleBot 的 resp
-                        matched_action_idx = -1
-                        for idx, act in enumerate(snap.valid_actions):
-                            if hasattr(act, 'decision_bytes') and act.decision_bytes == resp:
-                                matched_action_idx = idx
-                                break
-                            elif msg_type in [10, 11, 15, 16] and agent._pack_response(act, msg_type) == resp:
-                                matched_action_idx = idx
-                                break
-                            elif not hasattr(act, 'decision_bytes') and msg_type not in [10, 11, 15, 16]:
-                                # 简单包的验证
-                                if bytes([act.index]) == resp: matched_action_idx = idx; break
-                        
-                        ## 如果找到了完美匹配的选项
-                        if matched_action_idx != -1:
-                            # 强行让网络计算这个状态，获取其真实的 logits
-                            with torch.no_grad():
-                                infer_dict = {k: v.to(device) for k, v in tensor_dict.items()}
-                                # 不用 get_action，直接调用底层网络拿到全量特征
-                                logits, value, _ = agent.net(infer_dict)
-                                
-                                # 掩码过滤，防止非法动作的概率干扰
-                                mask = infer_dict['act_mask']
-                                logits = logits.masked_fill(~mask, -1e9)
-                                dist = torch.distributions.Categorical(logits=logits)
-                                
-                                # 强制计算 RuleBot 所选动作的真实 log_prob
-                                forced_action = torch.tensor([matched_action_idx], device=device)
-                                log_prob_of_rulebot = dist.log_prob(forced_action)
-
-                            # 防御性压缩 (防止前面 AI 崩溃导致 compressed_obs 未定义)
-                            compressed_obs = {}
-                            for k, v in infer_dict.items():
-                                cpu_v = v.cpu()
-                                if cpu_v.dtype in [torch.long, torch.int64, torch.int32]:
-                                    compressed_obs[k] = cpu_v.to(torch.int16)
-                                elif cpu_v.dtype == torch.float32:
-                                    compressed_obs[k] = cpu_v.to(torch.float16)
-                                else:
-                                    compressed_obs[k] = cpu_v
-                                
-                            game_buffer[player].append({
-                                'obs': compressed_obs,
-                                'action': torch.tensor(matched_action_idx, dtype=torch.int16),
-                                'log_prob': log_prob_of_rulebot.cpu().squeeze().to(torch.float16),
-                                'value': value.cpu().squeeze().to(torch.float16),
-                                'step_reward': 0.0 # Rulebot代打不给好奇心奖励
-                            })
-                            ep_steps += 1
-                            collected_steps += 1
-
+                        # 修复：不再强制计算 RuleBot 的 log_prob，也不把它放进 game_buffer
+                        # 从 AI 的视角来看，这相当于对手或者系统强制替它走了一步，是环境状态的跃迁。
                         try:
                             env.send_action(resp)
+                            # 我们只增加环境步数，不增加 collected_steps (因为它没有产出有效梯度数据)
+                            ep_steps += 1
                         except OSError as e:
                             # 如果 RuleBot 发送后引擎崩溃，同样强行打断循环
                             print(f"💀 [Worker {worker_id}] RuleBot 踩雷导致引擎崩溃，强行终止本局！({e})")
@@ -440,43 +444,40 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 else:
                     consecutive_ai_fails = 0
                     episode_lens.append(ep_steps)
-                episode_lens.append(ep_steps)
-                for p in [0, 1]:
-                    traj = game_buffer[p]
-                    if not traj: continue
-                    
+
+                # 只处理主训练模型 (train_p_id) 的数据
+                traj = game_buffer[train_p_id]
+                if traj:
                     final_reward = 0.0
                     if winner != -1 and winner <= 1:
-                        if p == winner:
-                            # 获取回合数
-                            turns = brain.turn
+                        if winner == train_p_id:
+                            # 赢了！记录对应的胜率
+                            if train_p_id == 0: stats['wins_first'] += 1
+                            else: stats['wins_second'] += 1
                             
-                            # === 针对性奖励修正 ===
-                            if turns <= 20:
-                                # 20回合内快速胜利：满分奖励
+                            turns = brain.turn
+                            if turns <= 20: 
                                 final_reward = 1.0
-                            else:
-                                # 长盘局 (turns > 20)
-                                if win_reason == 2: 
-                                    # [重罚] 靠抽干卡组赢的长盘 -> 只有 0.05 分
-                                    # 告诉 AI: "虽然你赢了，但这很丢人，下次别这样"
-                                    final_reward = 0.05
-                                else:
-                                    # [轻罚] 靠打死对面赢的长盘 -> 线性衰减，最低 0.5
-                                    # 承认新手互啄打得慢是正常的，鼓励打死对面而不是抽干
-                                    final_reward = max(0.5, 1.0 - (turns - 20) * 0.02)
+                            else: 
+                                final_reward = 0.05 if win_reason == 2 else 1.0
+                        
+                        elif winner == opp_p_id:
+                            final_reward = -1.0 # 输了
                         else:
-                            # 输了还是 -1
-                            final_reward = -1.0
+                            final_reward = 0.0  # 平局
+                    elif winner == -1:
+                        final_reward = -1.0 # 把死锁直接视为惨败
+                    else:
+                        final_reward = 0.0
                     
-                    if p == 0: episode_rewards.append(final_reward)
+                    episode_rewards.append(final_reward)
 
                     rewards = [0] * len(traj)
                     if rewards: rewards[-1] = final_reward
                     
                     advantages = []
                     last_gae_lam = 0
-                    next_value = 0 
+                    next_value = 0
 
                     # ==========================================
                     # 终极内存防爆：预分配连续内存，告别 list 与 torch.cat
@@ -505,14 +506,14 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         advantages.insert(0, last_gae_lam)
                         next_value = traj[t]['value'].item()
                     
-                    # 🌟 动态初始化 obs 的预分配空间
+                    # 动态初始化 obs 的预分配空间
                     if not columns['obs'] and len(traj) > 0:
                         for k, v in traj[0]['obs'].items():
                             columns['obs'][k] = torch.zeros((max_len,) + v.shape[1:], dtype=v.dtype)
                     
-                    # 🌟 极限内存优化：流式填入数据，并立刻弹出销毁历史记录
+                    # 极限内存优化：流式填入数据，并立刻弹出销毁历史记录
                     for t in range(len(traj)):
-                        obs_dict = traj[t].pop('obs') # 👈 弹出并销毁，边填边释放历史数据，杜绝双重占用！
+                        obs_dict = traj[t].pop('obs') # 弹出并销毁，边填边释放历史数据，杜绝双重占用！
                         for k, v in obs_dict.items():
                             columns['obs'][k][ptr] = v[0]
                         del obs_dict
@@ -529,9 +530,9 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         # 死锁保护
         tmp_file = f"tmp_rollout_iter_{iteration}_worker_{worker_id}.pt"
         if 'columns' not in locals() or ptr == 0:
-            return # 👈 改动：如果没数据直接返回，不生成空文件，主进程会自动忽略
+            return # 改动：如果没数据直接返回，不生成空文件，主进程会自动忽略
 
-        # 🌟 关键：使用纯净 Tensor 切片并 Clone，绝不触发 Pickle 内存翻倍！
+        # 关键：使用纯净 Tensor 切片并 Clone，绝不触发 Pickle 内存翻倍！
         batch_data = {
             'obs': {k: v[:ptr].clone() for k, v in columns['obs'].items()},
             'action': columns['action'][:ptr].clone(),
@@ -542,17 +543,32 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         
         # 释放巨大的预分配内存池
         del columns
-        import gc; gc.collect()
+        gc.collect()
         
         avg_rew = np.mean(episode_rewards) if episode_rewards else 0.0
         avg_len = np.mean(episode_lens) if episode_lens else 0.0
         batch_data['avg_rew'] = np.array([avg_rew], dtype=np.float32)
         batch_data['avg_len'] = np.array([avg_len], dtype=np.float32)
+
+        # 把胜率字典打包成 numpy 发回去
+        batch_data['stats_wins_first'] = np.array([stats['wins_first']], dtype=np.int32)
+        batch_data['stats_games_first'] = np.array([stats['games_first']], dtype=np.int32)
+        batch_data['stats_wins_second'] = np.array([stats['wins_second']], dtype=np.int32)
+        batch_data['stats_games_second'] = np.array([stats['games_second']], dtype=np.int32)
         
-        # 🌟 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局！
+        # 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局！
         tmp_write_file = tmp_file + ".tmp"
         torch.save(batch_data, tmp_write_file)
-        os.replace(tmp_write_file, tmp_file) 
+        # 替换原来的 os.replace
+        for _ in range(5):
+            try:
+                os.replace(tmp_write_file, tmp_file)
+                break
+            except PermissionError:
+                time.sleep(0.1)
+            except Exception as e:
+                print(f"❌ [Worker {worker_id}] 文件写入失败: {e}")
+                return
         
         return
 

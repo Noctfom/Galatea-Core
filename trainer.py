@@ -170,7 +170,26 @@ class PPOTrainer:
         # Windows 必须设置
         try:
             mp.set_start_method('spawn', force=True)
-        except RuntimeError: pass
+        except RuntimeError:
+            pass # 已经设置过了就算了
+
+        if self.async_infer:
+            # 只创建一次
+            self.req_q = mp.Queue(maxsize=self.num_workers * 4)
+            self.resp_qs = [mp.Queue(maxsize=4) for _ in range(self.num_workers)]
+            self.server_stop_event = threading.Event()
+            # 增加一个当前轮次的标记，用于过滤过期请求
+            self.current_iter_id = mp.Value('i', 0) 
+            
+            self.infer_thread = threading.Thread(
+                target=self.inference_server, 
+                args=(self.req_q, self.resp_qs, self.server_stop_event, self.current_iter_id),
+                daemon=True
+            )
+            self.infer_thread.start()
+        else:
+            self.req_q = None
+            self.resp_qs = [None] * self.num_workers
 
         # [修改] 恢复训练逻辑简化为调用函数
         if resume_path and os.path.exists(resume_path):
@@ -247,23 +266,36 @@ class PPOTrainer:
         # 将权重写进硬盘，禁止通过多进程参数传递 Tensor
         weight_file = f"tmp_weights_iter_{self.iteration}.pt"
         torch.save(cpu_weights, weight_file)
+
+        # --- 新增：联盟训练对手选择逻辑 ---
+        # 扫描 models 文件夹下的所有历史存档
+        historical_models = glob.glob(os.path.join(self.save_dir, "galatea_iter_*.pth"))
+        
+        worker_opp_configs = []
+        for i in range(self.num_workers):
+            roll = random.random()
+            if roll < 0.15:
+                # 15% 几率：对抗 RuleBot (基准锚点)
+                worker_opp_configs.append({"mode": "rule", "path": None})
+            elif roll < 0.40 and historical_models:
+                # 25% 几率：对抗历史随机模型 (防止策略退化)
+                worker_opp_configs.append({"mode": "ai", "path": random.choice(historical_models)})
+            else:
+                # 60% 几率：自对局 (追求当前最优对抗)
+                worker_opp_configs.append({"mode": "ai", "path": weight_file})
+        # --------------------------------------
         
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
-        
-        # 每一轮动态创建专属队列和推断服务器
+
         if self.async_infer:
-            req_q = mp.Queue(maxsize=self.num_workers * 2)
-            resp_qs = [mp.Queue(maxsize=2) for _ in range(self.num_workers)]
-            stop_event = threading.Event()
-            infer_thread = threading.Thread(
-                target=self.inference_server, 
-                args=(req_q, resp_qs, stop_event),
-                daemon=True
-            )
-            infer_thread.start()
-        else:
-            req_q = None
-            resp_qs = [None] * self.num_workers
+            self.current_iter_id.value = self.iteration  # 更新当前轮次标记，供服务器过滤过期请求
+            for q in self.resp_qs:
+                while not q.empty():
+                    try: 
+                        q.get_nowait()
+                    # 过滤掉过期的响应
+                    except(queue.Empty, EOFError, OSError, ValueError):
+                        pass
 
         # 🚀 启动工人
         processes = []
@@ -278,7 +310,8 @@ class PPOTrainer:
                 self.deck_dir, 
                 steps_per_worker,
                 self.worker_device,
-                req_q, resp_qs[i]        # 恢复队列传参
+                self.req_q, self.resp_qs[i],        # 恢复队列传参
+                worker_opp_configs[i]
             ))
             p.daemon = True
             p.start()
@@ -290,33 +323,13 @@ class PPOTrainer:
         for p in processes:
             p.join(timeout=300)
             if p.is_alive():
-                print(f"⚠️ 侦测到 Worker 卡死在 C++ 引擎中，执行物理超度...")
+                print("⚠️ 侦测到 Worker 卡死在 C++ 引擎中，执行物理超度...")
                 p.terminate() 
                 p.join() # 🌟 必须收尸
-            try: p.close() # 🌟 强制释放 Windows 进程句柄
-            except: print(f"⚠️ 无法关闭 Worker 进程 (可能已被系统回收)，请检查系统资源管理器确认是否有残留的 Python 进程")
-                
-        #[核心修复]：彻底销毁队列，防止 Windows 句柄和后台线程泄露
-        if self.async_infer:
-            stop_event.set()
-            # 1. 抽干残留数据，防止管道堵塞导致无法关闭
-            while not req_q.empty():
-                try: req_q.get_nowait()
-                except: break
-            
-            # 2. 物理关闭底层管道并强杀后台喂食线程
-            req_q.cancel_join_thread() # 取消等待，直接强杀
-            req_q.close()
-            
-            for q in resp_qs:
-                if q is not None:
-                    q.cancel_join_thread() # 取消等待，直接强杀
-                    q.close()
-            
-            infer_thread.join(timeout=2)
-            del req_q
-            del resp_qs
-            import gc; gc.collect()
+            try: 
+                p.close() # 🌟 强制释放 Windows 进程句柄
+            except Exception as e: 
+                print(f"[trainer]⚠️ 无法关闭 Worker 进程 (可能已被系统回收): {e}")
 
         # 把权重文件删掉
         try: os.remove(weight_file)
@@ -336,60 +349,60 @@ class PPOTrainer:
         
         print(f"⚡ 正在合并 {len(file_list)} 个数据块...")
         
-        total_steps = 0
-        file_steps = []
         total_rewards = []
         total_lens = []
 
-        # 步骤 A：测算总面积并提取评估数据
-        for f in file_list:
-            data = torch.load(f, map_location='cpu', weights_only=False)
-            s = data['action'].shape[0]
-            file_steps.append(s)
-            total_steps += s
-            
-            # 提取存放在文件里的奖励数据
-            r = data.get('avg_rew', np.array([0.0]))[0]
-            l = data.get('avg_len', np.array([0.0]))[0]
-            if r != 0: total_rewards.append(r)
-            if l != 0: total_lens.append(l)
-            
-            del data
-            import gc; gc.collect()
-            
-        # 步骤 B：预分配连续内存 (仅首次执行，彻底消灭内存碎片)
-        if not self.buffer_allocated:
-            print(f"📦 [内存管理] 首次初始化主进程静态内存池 (容量: {self.max_buffer_steps} 步)...")
-            self.merged_memory = {'obs': {}}
-            first_data = torch.load(file_list[0], map_location='cpu', weights_only=False)
-            
-            self.merged_memory['action'] = torch.empty(self.max_buffer_steps, dtype=first_data['action'].dtype)
-            self.merged_memory['log_prob'] = torch.empty(self.max_buffer_steps, dtype=first_data['log_prob'].dtype)
-            self.merged_memory['return'] = torch.empty(self.max_buffer_steps, dtype=first_data['return'].dtype)
-            self.merged_memory['advantage'] = torch.empty(self.max_buffer_steps, dtype=first_data['advantage'].dtype)
-            
-            for k, v in first_data['obs'].items():
-                shape = list(v.shape)
-                shape[0] = self.max_buffer_steps
-                self.merged_memory['obs'][k] = torch.empty(*shape, dtype=v.dtype)
-                
-            self.buffer_allocated = True
-            del first_data
-            import gc; gc.collect()
+        ## 新增：统计先后手胜率的全局计数器
+        t_wins_first = 0
+        t_games_first = 0
+        t_wins_second = 0
+        t_games_second = 0
 
-        # 步骤 C：流式注入并阅后即焚
         cursor = 0
+
+        # 核心改动：逐文件加载并直接注入预分配的静态内存池，避免一次性加载全部数据导致内存暴涨
         for i, f in enumerate(file_list):
             try:
+                # 1. 仅将当前 1 个 Worker 的数据加载到物理内存
                 data = torch.load(f, map_location='cpu', weights_only=False)
-                s = file_steps[i]
+                s = data['action'].shape[0]
+
+                # 2. 提取并累加统计信息
+                r = data.get('avg_rew', np.array([0.0]))[0]
+                l = data.get('avg_len', np.array([0.0]))[0]
+                if r != 0: total_rewards.append(r)
+                if l != 0: total_lens.append(l)
                 
-                # 防御性截断，防止溢出缓冲池
+                t_wins_first += data.get('stats_wins_first', np.array([0]))[0]
+                t_games_first += data.get('stats_games_first', np.array([0]))[0]
+                t_wins_second += data.get('stats_wins_second', np.array([0]))[0]
+                t_games_second += data.get('stats_games_second', np.array([0]))[0]
+
+                # 3. 如果是第一个文件，初始化静态内存池
+                if not self.buffer_allocated:
+                    print(f"📦 [内存管理] 首次初始化主进程静态内存池 (容量: {self.max_buffer_steps} 步)...")
+                    self.merged_memory = {'obs': {}}
+                    self.merged_memory['action'] = torch.empty(self.max_buffer_steps, dtype=data['action'].dtype)
+                    self.merged_memory['log_prob'] = torch.empty(self.max_buffer_steps, dtype=data['log_prob'].dtype)
+                    self.merged_memory['return'] = torch.empty(self.max_buffer_steps, dtype=data['return'].dtype)
+                    self.merged_memory['advantage'] = torch.empty(self.max_buffer_steps, dtype=data['advantage'].dtype)
+                    
+                    for k, v in data['obs'].items():
+                        shape = list(v.shape)
+                        shape[0] = self.max_buffer_steps
+                        self.merged_memory['obs'][k] = torch.empty(*shape, dtype=v.dtype)
+                        
+                    self.buffer_allocated = True
+
+                # 4. 防御性截断，防止溢出缓冲池
                 if cursor + s > self.max_buffer_steps:
                     print(f"⚠️ 警告: 采集步数({cursor+s})超过缓冲容量({self.max_buffer_steps})，自动截断！")
                     s = self.max_buffer_steps - cursor
-                    if s <= 0: break
-                
+                    if s <= 0: 
+                        del data
+                        break
+
+                # 5. 零拷贝游标注入
                 self.merged_memory['action'][cursor:cursor+s] = data['action'][:s]
                 self.merged_memory['log_prob'][cursor:cursor+s] = data['log_prob'][:s]
                 self.merged_memory['return'][cursor:cursor+s] = data['return'][:s]
@@ -399,19 +412,30 @@ class PPOTrainer:
                     self.merged_memory['obs'][k][cursor:cursor+s] = data['obs'][k][:s]
                     
                 cursor += s
+                
+                # 6. 阅后即焚：彻底断开引用，强制回收这几百MB内存，并删掉硬盘文件
                 del data
+                try: os.remove(f)
+                except Exception as e: print(f"[trainer]⚠️ 清理残余文件 {f} 失败: {e}")
+
                 import gc; gc.collect()
+                
             except Exception as e:
-                print(f"❌ 读取文件 {f} 失败: {e}") # 拒绝静默报错
-            
-            try: os.remove(f)
-            except Exception as e: 
-                print(f"[trainer]⚠️ 清理残余文件 {f} 失败: {e}")
+                print(f"❌ 读取/合并文件 {f} 失败: {e}") # 拒绝静默报错
 
         t_cost = time.time() - t0
         avg_rew = np.mean(total_rewards) if total_rewards else 0.0
         avg_len = np.mean(total_lens) if total_lens else 0.0
         print(f"✅ 采集完成! 耗时: {t_cost:.1f}s | 样本: {cursor} | Avg Reward: {avg_rew:.2f}")
+        
+        # 新增：计算并写入胜率图表
+        win_rate_first = t_wins_first / max(1, t_games_first)
+        win_rate_second = t_wins_second / max(1, t_games_second)
+        total_win_rate = (t_wins_first + t_wins_second) / max(1, t_games_first + t_games_second)
+
+        self.writer.add_scalar("League/WinRate_Total", total_win_rate, self.iteration)
+        self.writer.add_scalar("League/WinRate_FirstTurn", win_rate_first, self.iteration)
+        self.writer.add_scalar("League/WinRate_SecondTurn", win_rate_second, self.iteration)
         
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
         self.writer.add_scalar('Rollout/Average_Length', avg_len, self.iteration)
@@ -419,7 +443,7 @@ class PPOTrainer:
         
         return cursor # 核心改动：不再返回内存大字典，而是返回有效步数！
     
-    def inference_server(self, req_q, resp_qs, stop_event):
+    def inference_server(self, req_q, resp_qs, stop_event,iter_tracker):
         """
         [封包极速版] 接收压平的 Tensor，在 GPU 显存内进行光速切片
         """
@@ -429,11 +453,26 @@ class PPOTrainer:
         while not stop_event.is_set():
             requests = []
             try:
-                req = req_q.get(timeout=0.05)
-                requests.append(req)
+                # 1. 尝试获取第一个请求
+                item = req_q.get(timeout=0.05)
+                # 解包：现在是 3 个元素
+                wid, msg_iter, numpy_dict = item
+                
+                # 防污染安检：如果请求轮次落后于主线程轮次，直接丢弃
+                if msg_iter >= iter_tracker.value:
+                    requests.append((wid, numpy_dict)) # 安检通过，剥离 iter_id 放入处理列表
+                
+                # 2. 尝试凑齐这批次的其它请求
                 while len(requests) < self.num_workers:
-                    req = req_q.get_nowait()
-                    requests.append(req)
+                    try:
+                        item = req_q.get_nowait()
+                        wid, msg_iter, numpy_dict = item
+                        
+                        # 同样进行防污染安检
+                        if msg_iter >= iter_tracker.value:
+                            requests.append((wid, numpy_dict))
+                    except queue.Empty:
+                        break
             except queue.Empty:
                 pass
             
@@ -463,6 +502,7 @@ class PPOTrainer:
                     actions, log_probs, _, values, v_inputs = self.agent.get_action_and_value_from_tensor(batch_obs, None)
                     # 修复2：直接在 GPU 服务端计算出 RND 奖励
                     rnd_rewards = self.agent.net.rnd(v_inputs)
+                    self.agent.net.update_rnd_stats(v_inputs)
             
             # --- 4. 组装回传封包 ---
             # 新增 .detach()，彻底斩断与 GPU 计算图的最后一点阴阳联系
@@ -508,10 +548,13 @@ class PPOTrainer:
                 # 只有切出来的这 1024 个数据，才 .to(self.device) 上 GPU！
                 mb_obs = {}
                 for k, v in cpu_obs.items():
-                    t = v[mb_idx].to(self.device, non_blocking=True)
-                    if t.is_floating_point(): mb_obs[k] = t.to(dtype=torch.float32)
-                    elif 'mask' in k: mb_obs[k] = t.to(dtype=torch.bool)
-                    else: mb_obs[k] = t.to(dtype=torch.long)
+                    cpu_t = v[mb_idx]
+                    if cpu_t.is_floating_point():
+                        mb_obs[k] = cpu_t.to(device=self.device, dtype=torch.float32, non_blocking=True)
+                    elif 'mask' in k:
+                        mb_obs[k] = cpu_t.to(device=self.device, dtype=torch.bool, non_blocking=True)
+                    else:
+                        mb_obs[k] = cpu_t.to(device=self.device, dtype=torch.long, non_blocking=True)
                 
                 mb_actions = cpu_actions[mb_idx].to(self.device, non_blocking=True)
                 mb_old_log_probs = cpu_log_probs[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
@@ -525,7 +568,7 @@ class PPOTrainer:
                     values = values.squeeze(1)
 
                     # 计算 RND 预测误差损失，让 Predictor 学习当前状态
-                    rnd_loss = self.agent.net.rnd(v_input).mean()
+                    rnd_loss = self.agent.net.rnd(v_input.detach()).mean()
 
                     dist = torch.distributions.Categorical(logits=logits)
                     new_log_probs = dist.log_prob(mb_actions)
@@ -542,7 +585,7 @@ class PPOTrainer:
                     loss = policy_loss + VALUE_LOSS_COEF * value_loss + ENTROPY_COEF * entropy_loss + rnd_loss
 
                 if torch.isnan(loss) or torch.isinf(loss):
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
                     continue
 
                 if self.train_step % 20 == 0:
@@ -552,7 +595,7 @@ class PPOTrainer:
                     self.writer.add_scalar('Train/Entropy', entropy.mean().item(), self.train_step)  # 🌟 探索欲 (如果急剧降到0，说明AI变傻钻牛角尖了)
                 self.train_step += 1
 
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
                 nn.utils.clip_grad_norm_(self.agent.net.parameters(), 0.5)

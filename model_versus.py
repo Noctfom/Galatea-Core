@@ -7,6 +7,7 @@ import time
 import random
 import torch
 import struct
+import traceback
 import torch.nn.functional as F
 
 import rule_bot
@@ -37,7 +38,7 @@ class ModelArena:
         }
         self.net_config = config if config else default_config
         
-        # 3. 这时候再去取 thought_freq 就绝对安全了！
+        # 3. 这时候再去取 thought_freq 就绝对安全了
         self.thought_freq = self.net_config.get('thought_freq', 0)
         
         # 4. 初始化记录器
@@ -187,32 +188,33 @@ class ModelArena:
                         
                         # 2. 调用 V3 编码器生成 53 维字典，并挂载到设备 (GPU/CPU)
                         tensor_dict = active_bot.encoder.encode(snap, player_id=player)
-                        tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 99)
+                        tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 119)
                         infer_dict = {k: v.to(self.device) for k, v in tensor_dict.items()}
                         
                         # 3. 神经网络前向传播
                         with torch.no_grad():
-                            logits, _ = active_bot.net(infer_dict)
+                            logits, _, _ = active_bot.net(infer_dict)
                             
-                            # 🛡️ [终极防爆修改] 使用 .get(..., set()) 完美避开 KeyError！
+                            # 使用 .get(..., set()) 完美避开 KeyError！
                             for bad_idx in banned_actions_for_state.get(current_hash, set()):
                                 if bad_idx < logits.shape[-1]:
-                                    logits[0, bad_idx] = -1e9
+                                    logits[0, bad_idx] = -1e4
                                     
-                            # 👑 [竞技场核心] 绝对贪婪策略
+                            # [竞技场核心] 绝对贪婪策略
                             action_idx = torch.argmax(logits, dim=-1)
                             
-                        # 🌟 [新增] 记录动作频率，侦测死循环
+                        # 记录动作频率，侦测死循环
                         sel_idx = action_idx.item()
                         loop_key = f"{current_hash}_{sel_idx}"
                         loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
-                        
-                        # 事不过三，超过 3 次同样的动作，立刻拉黑！
+                    
+                        # 事不过三，超过 3 次同样的动作，立刻拉黑
                         if loop_tracker[loop_key] >= 3:
-                            banned_actions_for_state[current_hash].add(sel_idx)
-                            print(f"\n   ⚡ [断路器] 侦测到合法死循环！屏蔽该状态下动作索引: {sel_idx}")
+                            # 修复：使用 setdefault，如果没有这个键，就自动创建一个空集合再 add
+                            banned_actions_for_state.setdefault(current_hash, set()).add(sel_idx)
+                            #print(f"\n   ⚡ [断路器] 侦测到合法死循环！屏蔽该状态下动作索引: {sel_idx}")
                             
-                        # 🌟 [新增] 截获 AI 的胜率打分并记录
+                        # 截获 AI 的胜率打分并记录
                         if is_p0_turn and self.logger.is_active:
                             # 用 Softmax 把原始的 logits 分数转换为 0~1 的概率
                             probs = F.softmax(logits.squeeze(0), dim=-1)
@@ -251,7 +253,7 @@ class ModelArena:
                                     for i in selected: resp_buf.append(i)
                                     resp = bytes(resp_buf)
                                 
-                        # 🌟 核心修复：10, 11, 16 彻底抛弃 bytes 转换，直接传原生整数！
+                        # 核心修复：10, 11, 16 彻底抛弃 bytes 转换，直接传原生整数！
                         elif msg_type in [10, 11]:
                             resp = int((chosen.index << 16) | chosen.action_type)
                         elif msg_type == 16:
@@ -278,6 +280,8 @@ class ModelArena:
                             last_decision_value = resp
                                 
                     except Exception as e:
+                        print(f"\n⚠️ [Arena] AI 推理崩溃: {e}")
+                        traceback.print_exc()
                         resp = None
 
                 # RuleBot 兜底

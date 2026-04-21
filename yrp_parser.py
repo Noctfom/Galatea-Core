@@ -1,3 +1,6 @@
+#解析 YRP 录像文件，支持 MDPro3 套壳格式
+#开发暂时搁置......
+
 import struct
 import lzma
 import os
@@ -16,7 +19,7 @@ class YrpParser:
             file_bytes = f.read()
 
         # ==============================================================
-        # 🌟 终极剥壳技术：直接全文扫描 YRP 魔法数字特征码！
+        # 终极剥壳技术：直接全文扫描 YRP 魔法数字特征码
         # YRP1 = 0x31707279 (79 72 70 31), YRP2 = 0x32707279 (79 72 70 32)
         # ==============================================================
         idx = file_bytes.rfind(b'\x79\x72\x70\x31')
@@ -30,8 +33,7 @@ class YrpParser:
         if idx > 0:
             print("✨ 检测到 MDPro3 套壳录像，已暴力切除 3D 外壳！")
         
-        # 🗡️ 极致暴力：直接从特征码切到文件末尾！
-        # 抛弃 TCP 包长度猜测，LZMA 解压器会自动忽略尾部的冗余网络残渣！
+        # 抛弃 TCP 包长度猜测，LZMA 解压器会自动忽略尾部的冗余网络残渣
         yrp_bytes = file_bytes[idx:]
 
         # 1. 动态判断 YRP1 还是 YRP2，确定头部长度
@@ -110,7 +112,7 @@ if __name__ == "__main__":
     replay_dir = "./replays"
     if not os.path.exists(replay_dir): os.makedirs(replay_dir)
     
-    # 🌟 同扫两种格式
+    # 同扫两种格式
     yrp_files = glob.glob(os.path.join(replay_dir, "*.yrp")) + glob.glob(os.path.join(replay_dir, "*.yrp3d"))
     
     if not yrp_files:

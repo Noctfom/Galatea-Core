@@ -319,6 +319,7 @@ class GalateaEnv:
         if isinstance(response, int):
             self.lib.set_responsei(self.pduel, ctypes.c_uint32(response))
         elif isinstance(response, (bytes, bytearray)):
-            # 绝对安全：截取、填充，并显式转换指针！
             resp_bytes = bytes(response)[:64].ljust(64, b'\x00')
-            self.lib.set_responseb(self.pduel, ctypes.cast(resp_bytes, ctypes.c_void_p))
+            # 【关键修复】将它挂载到 self 上，确保它的寿命和环境实例一样长！
+            self._lifeline_response = resp_bytes 
+            self.lib.set_responseb(self.pduel, ctypes.cast(self._lifeline_response, ctypes.c_void_p))

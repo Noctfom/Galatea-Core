@@ -1,5 +1,6 @@
 # ==================================================================================
 #  Galatea AI Bot - 知识提取引擎 (终极防线版)
+#  开发暂时搁置，等待后续重构
 # ==================================================================================
 
 import os
@@ -117,7 +118,7 @@ def match_human_bytes_to_action(human_bytes, valid_actions, msg_type, active_pla
                     if set(human_bytes[1:1+h_count]) == set(db[1:1+d_count]):
                         return idx
                         
-            # C. 位置选择 (18, 24)：坐标语义级无序比对！
+            # C. 位置选择 (18, 24)：坐标语义级无序比对
             elif msg_type in [18, 24]:
                 if len(human_bytes) >= len(db) and len(db) > 0:
                     valid_human = human_bytes[:len(db)]
@@ -344,7 +345,7 @@ def play_replay(yrp_path, output_dir="./replay_data"):
                 retry_count += 1
                 # print(f"   ⚠️ 拦截到 MSG_RETRY (第 {retry_count} 次)") # 如果嫌吵可以注释掉这行
                 
-                # 🌟 把宽容度拉高到 50 次，静静地看着人类手残
+                # 把宽容度拉高到 50 次
                 if retry_count > 50:
                     print(f"   💀 连续错误过多，无法从脱节中恢复！当前指针: {resp_idx}")
                     break

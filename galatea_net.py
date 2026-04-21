@@ -52,16 +52,11 @@ class RNDModule(nn.Module):
         )
 
     def forward(self, x):
-        # 1. 训练模式下，更新统计信息
-        if self.training:
-            with torch.no_grad():
-                self.obs_norm.update(x)
-                
-        # 2. 归一化输入特征 (防除 0)
+        # 归一化输入特征 (防除 0)
         x_norm = (x - self.obs_norm.mean) / torch.sqrt(self.obs_norm.var + 1e-8)
         x_norm = torch.clamp(x_norm, -5.0, 5.0) # 截断极端值
 
-        # 3. 计算预测误差 (MSE) 作为内在奖励
+        # 计算预测误差 (MSE) 作为内在奖励
         target_feat = self.target(x_norm)
         pred_feat = self.predictor(x_norm)
         return ((target_feat - pred_feat) ** 2).mean(dim=-1)
@@ -84,7 +79,7 @@ class GalateaNet(nn.Module):
         self.global_proj = nn.Linear(15, self.d_model)
 
         # ==========================================================
-        # 🌟 2. 语义解析皮层 (Semantic Knowledge Modules)
+        # 2. 语义解析皮层 (Semantic Knowledge Modules)
         # ==========================================================
         self.d_sem = 128 # 语义特征在融合前所在的子空间维度
         
@@ -193,7 +188,7 @@ class GalateaNet(nn.Module):
         
         # --- 全局局面掌控 ---
         g_embed = self.global_proj(batch_dict['global']).unsqueeze(1) 
-        masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -1e9)
+        masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -1e4)
         pooled = torch.max(masked_memory, dim=1)[0].unsqueeze(1) 
         
         # --- 上帝视角的语义化 ---
@@ -260,11 +255,18 @@ class GalateaNet(nn.Module):
         act_card_idx = batch_dict['act_card_idx'] # 新形状: [B, 80, 5]
         act_mask = batch_dict['act_mask']         # 形状: [B, 80]
         
-        # 把 5 张卡的 512维特征全部扫出来
-        idx_expanded = act_card_idx.unsqueeze(-1).expand(-1, -1, -1, self.d_model) # [B, 80, 5, 512]
-        memory_expanded = memory.unsqueeze(1).expand(-1, act_card_idx.shape[1], -1, -1) # [B, 80, 100, 512]
-        gathered_vecs = torch.gather(memory_expanded, 2, idx_expanded) # [B, 80, 5, 512]
+        B, A, M = act_card_idx.shape
+        D = self.d_model
         
+        # 1. 把索引展平 [B, 80, 5] -> [B, 400]
+        flat_idx = act_card_idx.view(B, A * M)
+        # 2. 扩充最后一个维度对接 d_model -> [B, 400, 512]
+        flat_idx_expanded = flat_idx.unsqueeze(-1).expand(-1, -1, D)
+        # 3. 直接从原始 memory [B, 120, 512] 中捞取，彻底规避 4D 梯度爆炸！
+        gathered_flat = torch.gather(memory, 1, flat_idx_expanded) # [B, 400, 512]
+        # 4. 重新捏回我们需要的形状 -> [B, 80, 5, 512]
+        gathered_vecs = gathered_flat.view(B, A, M, D)
+        # =========================================================
 
         is_sort = (batch_dict['act_type'] == 25).unsqueeze(-1).unsqueeze(-1).float() # [B, 80, 1, 1]
         # 创建衰减权重阵：1.0, 0.8, 0.6, 0.4, 0.2
@@ -296,6 +298,10 @@ class GalateaNet(nn.Module):
         # 3. 交汇：意图与选项碰撞
         combined_vecs = torch.cat([intent_vec, option_vec], dim=-1)
         logits = self.policy_head(combined_vecs).squeeze(-1) 
-        logits = logits.masked_fill(~act_mask, -1e9)
+        logits = logits.masked_fill(~act_mask, -1e4)
 
         return logits, value, v_input.squeeze(1)
+    
+    def update_rnd_stats(self, v_input):
+        with torch.no_grad():
+            self.rnd.obs_norm.update(v_input)
