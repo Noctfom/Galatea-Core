@@ -411,9 +411,11 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     break
             
             if decision is None:
-                # 🌟 [终极防死锁机制]
-                # 如果代码走到这里，说明我们能选的所有组合，全被引擎 RETRY 拒绝了！
-                # 此时必须尝试壮士断腕：能取消就强制取消，不能取消就发随机字节强行引发熔断重置！
+                # 如果代码走到这里，说明能选的所有组合，全被引擎 RETRY 拒绝了！
+                # [新增报警]
+                print(f"🚨 [RuleBot 警报] Type {msg_type} (选卡/祭品) 算法穷尽！所有生成组合全在黑名单！")
+                print(f"   -> 引擎要求: Min={min_c}, Max={max_c}, 可选列表长度={list_len}")
+                print(f"   -> 当前黑名单: {ignore_actions}")
                 if cancelable: 
                     decision = struct.pack('<i', -1)
                 else: 
@@ -491,7 +493,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     val = struct.unpack('<I', stream.read(4))[0]
                     candidates.append({'index': i, 'val': val})
                 
-                # 🌟 [终极数学求解器] DFS 完美拆解双重星级，必定求出正确解！
+                # [终极数学求解器] DFS 拆解双重星级，必定求出正确解
                 valid_solutions = []
                 real_max = max_c if max_c > 0 else count
                 
@@ -542,6 +544,10 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                         if candidate_bytes not in ignored_set:
                             decision = candidate_bytes
                             break
+                else:
+                    # [新增报警]
+                    print("🚨 [RuleBot 警报] Type 23 (凑星计算) DFS 算法无解！")
+                    print(f"   -> Mode={mode}, 目标星数={target_val}, 必选={must_sum}, 候选池={candidates}")
                             
                 return decision
             except Exception as e:
@@ -612,7 +618,9 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 # 绝境回退：如果全被拉黑，尝试随机选一个合法的（撞大运）
                 if not candidates and valid_locs:
                     candidates = valid_locs
-                    print("⚠️ [RuleBot] MSG_SELECT_PLACE/MSG_SELECT_DISFIELD: 所有选项都被拉黑了，尝试随机选一个合法位置！")
+                    print(f"🚨 [RuleBot 警报] Type {msg_type} (站位/封锁) 合法位置全被拉黑！")
+                    print(f"   -> 引擎提供可用位置: {valid_locs}")
+                    print(f"   -> 当前黑名单: {safe_ignore_set}")
             else:
                 candidates = valid_locs # 多选暂不过滤
 
@@ -721,14 +729,9 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         decision = -1
 
     if decision is None:
-        print(f"[RuleBot] 未处理的消息类型: {msg_type}")
+        print(f"🚨 [RuleBot 警报] 消息类型 {msg_type} 的解析逻辑彻底失效，没有任何分支返回 decision！")
+        print(f"   -> Payload 长度: {len(payload)}")
         decision = -1
-
-    # ---------------------------------------------------------
-    # [数据记录点]
-    # 在这里，你应该将 (gamestate, msg_type, decision) 保存下来。
-    # 比如：data_recorder.save(gamestate, msg_type, decision)
-    # ---------------------------------------------------------
     
     return decision
 

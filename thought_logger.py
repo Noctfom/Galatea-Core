@@ -54,8 +54,27 @@ class AIThoughtLogger:
                 if act.target_entity_idx >= 0 and act.target_entity_idx < len(snapshot.entities):
                     t_card = snapshot.entities[act.target_entity_idx]
                     code = getattr(t_card, 'code', 0)
+                    
+                    # 增强版透视镜：获取归属与位置
+                    owner = getattr(t_card, 'owner', 0) 
+                    loc = getattr(t_card, 'location', 0)
+                    
                     name = card_db.get_card_name(code) if code != 0 else "盖卡/未知"
-                    target_info = f" -> [{name}]"
+                    
+                    # 翻译位置代号
+                    loc_str = "未知区域"
+                    if loc == 0x01: loc_str = "卡组"
+                    elif loc == 0x02: loc_str = "手牌"
+                    elif loc == 0x04: loc_str = "怪兽区"
+                    elif loc == 0x08: loc_str = "魔陷区"
+                    elif loc == 0x10: loc_str = "墓地"
+                    elif loc == 0x20: loc_str = "除外区"
+                    elif loc == 0x40: loc_str = "额外卡组"
+                    
+                    # 判断敌我
+                    owner_str = "我方" if owner == 0 else "敌方"
+                    
+                    target_info = f" -> [{owner_str}{loc_str}的 {name}]"
                 
                 prob_val = float(probs[i].item()) if hasattr(probs[i], 'item') else float(probs[i])
                 

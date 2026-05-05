@@ -76,7 +76,7 @@ class ModelArena:
         """
         res = deck_utils.get_random_deck_pair(ydk_dir=self.deck_dir)
         if not res: return 0, -3
-        d1_name, d1, d2_name, d2 = res
+        env_name, d1_name, d1, d2_name, d2 = res
         
         raw_data = self.env.reset(d1, d2)
         if not raw_data: return 0, -3
@@ -87,23 +87,25 @@ class ModelArena:
         consecutive_retries = 0
         current_step_ignore_list = []
         last_decision_value = None
+        last_decision_index = None
 
         ai_fallback_count = 0
 
         last_valid_hash = ""
         action_history = []
 
-        # 🌟 [新增] 合法死锁断路器
+        # 合法死锁断路器
         loop_tracker = {}
         banned_actions_for_state = {}
         
-        state_change_msgs = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
-        interaction_msgs = {10, 11, 15, 16, 18, 19, 20, 22, 26, 130, 131, 132, 133}
-        ai_managed_msgs = [10, 11, 12, 13, 14, 15, 16, 18, 19, 24] 
+        # 替换为最全的常量集合
+        STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
+        INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
+        AI_MANAGED_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 26, 27}
 
         steps = 0
-        # 增加步数上限到 2000，防止慢速卡组被误判
-        while steps < 2000: 
+        # 增加步数上限到 5000，防止慢速卡组被误判
+        while steps < 5000: 
             if not msg_queue:
                 raw_data = self.env.step()
                 if not raw_data: break
@@ -118,10 +120,16 @@ class ModelArena:
             msg_type = msg[0]
             brain.update(msg_type, msg[1:])
 
-            # 🌟 [新增] 阶段切换时，场面刷新，清空拉黑记录
-            if msg_type in [40, 41]:
-                loop_tracker.clear()
-                banned_actions_for_state.clear()
+            # 状态重置：如果发生局势变动，清空 Retry 计数和黑名单
+            if msg_type in STATE_CHANGE_MSGS:
+                consecutive_retries = 0
+                current_step_ignore_list.clear()
+                if msg_type in [40, 41]:
+                    loop_tracker.clear()
+                    banned_actions_for_state.clear()
+            elif msg_type in INTERACTION_MSGS:
+                if consecutive_retries == 0:
+                    current_step_ignore_list.clear()
             
             if msg_type == 5: # 胜利 MSG_WIN
                 # msg格式通常是 [5, winner, reason]
@@ -149,23 +157,27 @@ class ModelArena:
                 if last_decision_value is not None:
                     current_step_ignore_list.append(last_decision_value)
 
+                if last_decision_index is not None and last_valid_hash:
+                    banned_actions_for_state.setdefault(last_valid_hash, set()).add(last_decision_index)
+
                 if consecutive_retries == 1:
                      ai_fallback_count += 1
                 
-                # 💥 [关键同步] 引入 run_self_play.py 的 Jitter 扰动机制！
-                # 当 AI 和 RuleBot 都陷入死锁时，强制注入噪音打破僵局！
-                if consecutive_retries > 6:
+                # 引入 run_self_play.py 的 Jitter 扰动机制
+                # 当 AI 和 RuleBot 都陷入死锁时，强制注入噪音打破僵局
+                if consecutive_retries > 10:
                     current_step_ignore_list.append(b'\xFF\xFF\xFF')
                     current_step_ignore_list.append(b'\x00\x00\x00')
                     current_step_ignore_list.append(1)
                     current_step_ignore_list.append(4)
+                    print(f"\n⚡ [Jitter] 注入扰动打破死锁！当前连续 Retry: {consecutive_retries}, AI Fallbacks: {ai_fallback_count}")
                 
                 if consecutive_retries > 20:
                     return -1, -1, ai_fallback_count
                 continue
 
             # --- 决策 ---
-            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 26, 130, 131, 132, 133, 140, 141, 142, 143]:
+            if msg_type in AI_MANAGED_MSGS:
                 player_to_act = 0
                 if len(msg) > 1: player_to_act = msg[1]
                 
@@ -174,7 +186,7 @@ class ModelArena:
                 active_bot = self.p0_bot if is_p0_turn else self.p1_bot
 
                 # 尝试 AI 决策
-                if active_bot and msg_type in ai_managed_msgs and brain.current_valid_actions and consecutive_retries == 0:
+                if active_bot and msg_type in AI_MANAGED_MSGS and brain.current_valid_actions:
                     try:
                         # 1. 提取当前状态快照
                         snap = brain.get_snapshot(self.env)
@@ -228,6 +240,7 @@ class ModelArena:
 
                         # 4. 取出动作
                         sel_idx = action_idx.item()
+                        last_decision_index = sel_idx
                         if sel_idx < len(snap.valid_actions):
                             chosen = snap.valid_actions[sel_idx]
                         else:

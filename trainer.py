@@ -42,7 +42,7 @@ MINIBATCH_SIZE = 128    # Mini-batch: 梯度下降时的切片大小
 CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
-MAX_EPISODE_STEPS = 800 # 单局最大步数，防止死循环
+MAX_EPISODE_STEPS = 5000 # 单局最大步数，防止死循环
 
 class MemoryDataset(Dataset):
     def __init__(self, data):
@@ -248,10 +248,9 @@ class PPOTrainer:
                 
             self.iteration = checkpoint.get('iteration', 0)
             self.global_step = checkpoint.get('global_step', 0)
-            print(f"✅ 恢复成功! Iter: {self.iteration}")
-            # [优化 3] 恢复 train_step，衔接曲线
-            # 假设每个 Iteration 大约更新 (32000 / 128) * 4 = 1000 次
-            self.train_step = self.iteration * (self.update_timesteps // self.mini_batch_size) * EPOCHS
+            self.train_step = checkpoint.get('train_step', 0) # 不再用数学公式逆推
+            
+            print(f"✅ 恢复成功! Iter: {self.iteration} | Train_Step: {self.train_step}")
 
         except Exception as e:
             print(f"❌ 恢复失败: {e}")
@@ -267,6 +266,10 @@ class PPOTrainer:
         weight_file = f"tmp_weights_iter_{self.iteration}.pt"
         torch.save(cpu_weights, weight_file)
 
+        del cpu_weights
+        del raw_weights
+        import gc; gc.collect()
+
         # --- 新增：联盟训练对手选择逻辑 ---
         # 扫描 models 文件夹下的所有历史存档
         historical_models = glob.glob(os.path.join(self.save_dir, "galatea_iter_*.pth"))
@@ -276,13 +279,13 @@ class PPOTrainer:
             roll = random.random()
             if roll < 0.15:
                 # 15% 几率：对抗 RuleBot (基准锚点)
-                worker_opp_configs.append({"mode": "rule", "path": None})
+                worker_opp_configs.append({"mode": "rule", "type": "rule", "path": None})
             elif roll < 0.40 and historical_models:
                 # 25% 几率：对抗历史随机模型 (防止策略退化)
-                worker_opp_configs.append({"mode": "ai", "path": random.choice(historical_models)})
+                worker_opp_configs.append({"mode": "ai", "type": "hist", "path": random.choice(historical_models)})
             else:
                 # 60% 几率：自对局 (追求当前最优对抗)
-                worker_opp_configs.append({"mode": "ai", "path": weight_file})
+                worker_opp_configs.append({"mode": "ai", "type": "self", "path": weight_file})
         # --------------------------------------
         
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
@@ -353,10 +356,13 @@ class PPOTrainer:
         total_lens = []
 
         ## 新增：统计先后手胜率的全局计数器
-        t_wins_first = 0
-        t_games_first = 0
-        t_wins_second = 0
-        t_games_second = 0
+        t_stats = {k: 0 for k in [
+            'wins_all_first', 'games_all_first', 'wins_all_second', 'games_all_second',
+            'wins_self_first', 'games_self_first', 'wins_self_second', 'games_self_second',
+            'wins_hist', 'games_hist', 'wins_rule', 'games_rule','deadlocks', 'timeouts', 'draws'
+        ]}
+
+        t_deck_stats = {}
 
         cursor = 0
 
@@ -373,10 +379,22 @@ class PPOTrainer:
                 if r != 0: total_rewards.append(r)
                 if l != 0: total_lens.append(l)
                 
-                t_wins_first += data.get('stats_wins_first', np.array([0]))[0]
-                t_games_first += data.get('stats_games_first', np.array([0]))[0]
-                t_wins_second += data.get('stats_wins_second', np.array([0]))[0]
-                t_games_second += data.get('stats_games_second', np.array([0]))[0]
+                # 极速自动累加所有字段
+                for k in t_stats.keys():
+                    t_stats[k] += data.get(f'stats_{k}', np.array([0]))[0]
+
+                # 提取卡组雷达数据并聚合
+                for record in data.get('deck_records', []):
+                    key = f"{record['env']}/{record['deck']}"
+                    if key not in t_deck_stats:
+                        t_deck_stats[key] = {'w_1st':0, 'g_1st':0, 'w_2nd':0, 'g_2nd':0}
+                        
+                    if record['is_first']:
+                        t_deck_stats[key]['g_1st'] += 1
+                        if record['is_win']: t_deck_stats[key]['w_1st'] += 1
+                    else:
+                        t_deck_stats[key]['g_2nd'] += 1
+                        if record['is_win']: t_deck_stats[key]['w_2nd'] += 1
 
                 # 3. 如果是第一个文件，初始化静态内存池
                 if not self.buffer_allocated:
@@ -428,15 +446,43 @@ class PPOTrainer:
         avg_len = np.mean(total_lens) if total_lens else 0.0
         print(f"✅ 采集完成! 耗时: {t_cost:.1f}s | 样本: {cursor} | Avg Reward: {avg_rew:.2f}")
         
-        # 新增：计算并写入胜率图表
-        win_rate_first = t_wins_first / max(1, t_games_first)
-        win_rate_second = t_wins_second / max(1, t_games_second)
-        total_win_rate = (t_wins_first + t_wins_second) / max(1, t_games_first + t_games_second)
-
-        self.writer.add_scalar("League/WinRate_Total", total_win_rate, self.iteration)
-        self.writer.add_scalar("League/WinRate_FirstTurn", win_rate_first, self.iteration)
-        self.writer.add_scalar("League/WinRate_SecondTurn", win_rate_second, self.iteration)
+        # 计算并写入胜率图表
+        # 绘图面板分类排版
+        def safe_div(w, g): return w / max(1, g)
         
+        # 1. 总体大盘 (League_Overall)
+        self.writer.add_scalar("League_Overall/WinRate_Total", safe_div(t_stats['wins_all_first'] + t_stats['wins_all_second'], t_stats['games_all_first'] + t_stats['games_all_second']), self.iteration)
+        self.writer.add_scalar("League_Overall/WinRate_First", safe_div(t_stats['wins_all_first'], t_stats['games_all_first']), self.iteration)
+        self.writer.add_scalar("League_Overall/WinRate_Second", safe_div(t_stats['wins_all_second'], t_stats['games_all_second']), self.iteration)
+
+        # 2. 内战水平 (League_Self) - 注：由于是打自己，这个理应无限逼近 50%
+        self.writer.add_scalar("League_Self/WinRate_Total", safe_div(t_stats['wins_self_first'] + t_stats['wins_self_second'], t_stats['games_self_first'] + t_stats['games_self_second']), self.iteration)
+        self.writer.add_scalar("League_Self/WinRate_First", safe_div(t_stats['wins_self_first'], t_stats['games_self_first']), self.iteration)
+        self.writer.add_scalar("League_Self/WinRate_Second", safe_div(t_stats['wins_self_second'], t_stats['games_self_second']), self.iteration)
+
+        # 3. 外战水平 (League_Opponent) - 展现真实统治力的地方！
+        self.writer.add_scalar("League_Opponent/Historical_AI", safe_div(t_stats['wins_hist'], t_stats['games_hist']), self.iteration)
+        self.writer.add_scalar("League_Opponent/RuleBot", safe_div(t_stats['wins_rule'], t_stats['games_rule']), self.iteration)
+        
+        # 新增：废局率雷达 (占总对局的百分比)
+        total_games = max(1, t_stats['games_all_first'] + t_stats['games_all_second'])
+        self.writer.add_scalar("Rollout/Deadlock_Rate", t_stats['deadlocks'] / total_games, self.iteration)
+        self.writer.add_scalar("Rollout/Timeout_Rate", t_stats['timeouts'] / total_games, self.iteration)
+        self.writer.add_scalar("Rollout/Draw_Rate", t_stats['draws'] / total_games, self.iteration)
+
+        # 卡组专属雷达面板 (Deck_WinRate)
+        for key, ds in t_deck_stats.items():
+            g_total = ds['g_1st'] + ds['g_2nd']
+            w_total = ds['w_1st'] + ds['w_2nd']
+            
+            # TensorBoard 会自动根据 key 的斜杠 "/" 创建子文件夹
+            if g_total > 0:
+                self.writer.add_scalar(f"Deck_{key}/Total", w_total / g_total, self.iteration)
+            if ds['g_1st'] > 0:
+                self.writer.add_scalar(f"Deck_{key}/First", ds['w_1st'] / ds['g_1st'], self.iteration)
+            if ds['g_2nd'] > 0:
+                self.writer.add_scalar(f"Deck_{key}/Second", ds['w_2nd'] / ds['g_2nd'], self.iteration)
+
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
         self.writer.add_scalar('Rollout/Average_Length', avg_len, self.iteration)
         self.global_step += cursor
@@ -514,8 +560,11 @@ class PPOTrainer:
             ], dim=1).detach().cpu()
             
             for i, wid in enumerate(worker_ids):
-                # 👇 [击毙幽灵 1] 转为 numpy 数组发回给 Worker
-                resp_qs[wid].put(packed_returns[i].numpy())
+                # 转为 numpy 数组发回给 Worker
+                try:
+                    resp_qs[wid].put(packed_returns[i].numpy(), timeout=1.0)
+                except queue.Full:
+                    pass # 忽略死掉的 Worker
 
     def update_policy(self, total_steps):
         """
@@ -643,13 +692,19 @@ class PPOTrainer:
             if self.iteration % 10 == 0:
                 path = f"{self.save_dir}/galatea_iter_{self.iteration}.pth"
                 
-                # [关键] 保存所有信息
+                # 在保存的源头剥离编译前缀，确保存档是纯净标准版
+                raw_state = self.agent.net.state_dict()
+                clean_state = {k.replace("_orig_mod.", ""): v for k, v in raw_state.items()}
+                
+                # 补全生命周期字段，确保 TensorBoard 曲线 100% 无缝对接
                 checkpoint = {
-                    'model_state_dict': self.agent.net.state_dict(),
+                    'model_state_dict': clean_state,
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'net_config': self.net_config, # 出生证明
+                    'scaler_state_dict': self.scaler.state_dict(),
+                    'net_config': self.net_config, 
                     'iteration': self.iteration,
-                    'scaler_state_dict': self.scaler.state_dict(), # [新增] 保存 Scaler 状态
+                    'train_step': self.train_step,   # [新增] TensorBoard 的 X 轴坐标
+                    'global_step': self.global_step  # [新增] 环境交互总步数
                 }
                 torch.save(checkpoint, path)
                 print(f"💾 Model saved: {path}")

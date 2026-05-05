@@ -1,3 +1,7 @@
+# Galatea AI 控制中心 WebUI
+# 通过 Streamlit 提供一个简洁的界面，方便用户启动训练、
+# 等待维护修复中，敬请期待（）
+
 import streamlit as st
 import subprocess
 import os

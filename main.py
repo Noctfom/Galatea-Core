@@ -9,6 +9,7 @@ import torch
 import run_self_play
 from trainer import PPOTrainer
 from model_versus import ModelArena
+from system_logger import setup_global_logger
 
 # [必须] Windows多进程入口保护
 import torch.multiprocessing as mp
@@ -96,7 +97,7 @@ except RuntimeError:
 #  训练示例命令:
 #  python main.py train --dir ./models --batch_size 16384 --mini_batch 256 --workers 6 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile
 
-#  （例）从第 100 轮存档继续，目标是练到第 5000 轮
+#  恢复训练命令示例:  从第 100 轮存档继续，目标是练到第 5000 轮
 #  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 16384 --mini_batch 256 --workers 6 --steps 5000 --async_infer --no_compile
 
 #  测试示例命令(每隔 5 局保存一次心声):
@@ -115,6 +116,7 @@ except RuntimeError:
 
 
 def main():
+    setup_global_logger(prefix="Trainer_Main")
     parser = argparse.ArgumentParser(description="Galatea AI 主控程序")
     
     subparsers = parser.add_subparsers(dest='command', help='可用指令')

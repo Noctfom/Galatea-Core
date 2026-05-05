@@ -77,5 +77,6 @@ def get_random_deck_pair(ydk_dir='./decks'):
     
     d1 = load_deck(chosen_env, n1)
     d2 = load_deck(chosen_env, n2)
+    env_name = os.path.basename(os.path.normpath(chosen_env))
     
-    return n1, d1, n2, d2
+    return env_name, n1, d1, n2, d2

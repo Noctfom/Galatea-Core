@@ -24,16 +24,19 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules
 # 状态与消息定义
 STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
 INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
-AI_MANAGED_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 23, 24, 25]
-DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133, 140, 141, 142, 143]
+AI_MANAGED_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 26, 27]
+DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 130, 131, 132, 133, 140, 141, 142, 143]
 
 # GAE 参数 (和 Trainer 保持一致)
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
-MAX_EPISODE_STEPS = 800
+MAX_EPISODE_STEPS = 5000
 
 
 def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None, opp_config=None):
+    
+    from system_logger import setup_global_logger
+    setup_global_logger(prefix=f"Worker_{worker_id}")
     # =========================================================================
     #  [防卡死] 禁用 Windows 崩溃弹窗
     # 告诉操作系统：如果 OCGCore 发生致命写越界(Segfault)，直接静默杀死进程，不要弹窗也不要生成错误报告，以免训练被打断导致堆砌死锁
@@ -86,7 +89,17 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         episode_rewards = []
         episode_lens = []
 
-        stats = {'wins_first': 0, 'games_first': 0, 'wins_second': 0, 'games_second': 0}
+        stats = {
+            'wins_all_first': 0, 'games_all_first': 0,
+            'wins_all_second': 0, 'games_all_second': 0,
+            'wins_self_first': 0, 'games_self_first': 0,
+            'wins_self_second': 0, 'games_self_second': 0,
+            'wins_hist': 0, 'games_hist': 0,
+            'wins_rule': 0, 'games_rule': 0,
+            'deadlocks': 0, 'timeouts': 0, 'draws': 0
+        }
+
+        deck_records = []
 
         # print(f"👷 Worker {worker_id} 启动 | 目标: {target_steps} 步")
 
@@ -95,11 +108,21 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             train_p_id = random.choice([0, 1]) 
             opp_p_id = 1 - train_p_id
             
-            # 记录这局我是打先手还是后手
+            # 记录这局是打先手还是后手
+            opp_type = opp_config.get("type", "self")
             if train_p_id == 0: 
-                stats['games_first'] += 1
+                stats['games_all_first'] += 1
+                if opp_type == "self": 
+                    stats['games_self_first'] += 1
             else: 
-                stats['games_second'] += 1
+                stats['games_all_second'] += 1
+                if opp_type == "self": 
+                    stats['games_self_second'] += 1
+                
+            if opp_type == "hist": 
+                stats['games_hist'] += 1
+            elif opp_type == "rule": 
+                stats['games_rule'] += 1
 
             # --- Reset 环境 ---
             try:
@@ -107,7 +130,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 if not res or res[1] is None: 
                     time.sleep(1)
                     continue 
-                d1_name, d1, d2_name, d2 = res
+                env_name, d1_name, d1, d2_name, d2 = res
                 raw_data = env.reset(d1, d2)
             except Exception as e: 
                 print(f"⚠️ [Worker {worker_id}] 环境Reset异常 (已记录并跳过): {e}")
@@ -142,6 +165,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             while ep_steps < MAX_EPISODE_STEPS:
                 # 超时保护
                 if time.time() - last_act_time > 15.0:
+                    print(f"⚠️ [Worker {worker_id}] 引擎 15 秒无响应，触发超时强制结算！")
+                    ep_steps = MAX_EPISODE_STEPS  # 强制拉满，骗过底下的结算条件
                     break
 
                 # 消息泵
@@ -279,7 +304,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     else: arr = arr.astype(np.int16) 
                                     numpy_dict[k] = arr
                                     
-                                req_q.put((worker_id, iteration, numpy_dict))
+                                try:
+                                    # 如果 Server 死掉导致队列满，Worker 等 2 秒就直接自毁
+                                    req_q.put((worker_id, iteration, numpy_dict), timeout=2.0)
+                                except queue.Full:
+                                    raise RuntimeError("请求队列已满/Server可能已崩溃，触发 Worker 上行熔断")
                                 
                                 try:
                                     res_array = resp_q.get(timeout=15.0)
@@ -318,11 +347,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             else:
                                 chosen = random.choice(snap.valid_actions)
 
-                            # 1. 计算内在好奇心奖励 (RND Reward)
-                            intrinsic_reward = 0.005 * rnd_reward 
-
-                            # 2. 软性时间惩罚 (Soft Enrage)
-                            step_reward = intrinsic_reward 
+                            # 软性时间惩罚 (Soft Enrage)
+                            step_reward = 0.0
                             if chosen.action_type == 7: # 选择进入结束阶段 (To EP)
                                 # 如果回合数大于 10，且这回合有操作空间但 AI 疯狂空过
                                 if brain.turn > 10 and len(snap.valid_actions) > 2:
@@ -449,25 +475,48 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 traj = game_buffer[train_p_id]
                 if traj:
                     final_reward = 0.0
+
+                    if ep_steps >= MAX_EPISODE_STEPS:
+                        stats['timeouts'] += 1
+
                     if winner != -1 and winner <= 1:
                         if winner == train_p_id:
                             # 赢了！记录对应的胜率
-                            if train_p_id == 0: stats['wins_first'] += 1
-                            else: stats['wins_second'] += 1
+                            if train_p_id == 0:
+                                stats['wins_all_first'] += 1
+                                if opp_type == "self": 
+                                    stats['wins_self_first'] += 1
+                            else:
+                                stats['wins_all_second'] += 1
+                                if opp_type == "self": 
+                                    stats['wins_self_second'] += 1
+                            my_deck = d1_name if train_p_id == 0 else d2_name
+                            deck_records.append({'env': env_name, 'deck': my_deck, 'is_first': (train_p_id == 0), 'is_win': True})
+                                
+                            if opp_type == "hist": 
+                                stats['wins_hist'] += 1
+                            elif opp_type == "rule": 
+                                stats['wins_rule'] += 1
                             
                             turns = brain.turn
-                            if turns <= 20: 
+                            if turns <= 40: 
                                 final_reward = 1.0
                             else: 
-                                final_reward = 0.05 if win_reason == 2 else 1.0
+                                final_reward = 0.05
                         
                         elif winner == opp_p_id:
                             final_reward = -1.0 # 输了
+                            my_deck = d1_name if train_p_id == 0 else d2_name
+                            deck_records.append({'env': env_name, 'deck': my_deck, 'is_first': (train_p_id == 0), 'is_win': False})
                         else:
+                            stats['draws'] += 1
                             final_reward = 0.0  # 平局
                     elif winner == -1:
+                        if ep_steps < MAX_EPISODE_STEPS:
+                            stats['deadlocks'] += 1
                         final_reward = -1.0 # 把死锁直接视为惨败
                     else:
+                        stats['draws'] += 1
                         final_reward = 0.0
                     
                     episode_rewards.append(final_reward)
@@ -477,7 +526,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     
                     advantages = []
                     last_gae_lam = 0
-                    next_value = 0
+                    # 修复：区分“真死”和“超时截断”
+                    next_value = 0.0
+                    if ep_steps >= MAX_EPISODE_STEPS: # 如果是超时被强行截断的
+                        # 使用最后一步的价值网络预测值作为未来收益的保底，而不是直接视为 0，这样可以让模型学会在超时前尽可能积累价值，而不是放弃抵抗
+                        next_value = traj[-1]['value'].item()
 
                     # ==========================================
                     # 终极内存防爆：预分配连续内存，告别 list 与 torch.cat
@@ -551,10 +604,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         batch_data['avg_len'] = np.array([avg_len], dtype=np.float32)
 
         # 把胜率字典打包成 numpy 发回去
-        batch_data['stats_wins_first'] = np.array([stats['wins_first']], dtype=np.int32)
-        batch_data['stats_games_first'] = np.array([stats['games_first']], dtype=np.int32)
-        batch_data['stats_wins_second'] = np.array([stats['wins_second']], dtype=np.int32)
-        batch_data['stats_games_second'] = np.array([stats['games_second']], dtype=np.int32)
+        for k, v in stats.items():
+            batch_data[f'stats_{k}'] = np.array([v], dtype=np.int32)
+
+        batch_data['deck_records'] = deck_records
         
         # 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局！
         tmp_write_file = tmp_file + ".tmp"

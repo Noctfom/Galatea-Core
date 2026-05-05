@@ -2,7 +2,7 @@
 libocgcore.so
 cards.cdb
 
-# 模型与训练日志 (太大，不要传)
+# 模型与训练日志
 models/
 runs/
 __pycache__/
@@ -12,6 +12,7 @@ script/
 ai_thoughts/
 replays/
 replay_data/
+system_logs/
 crash_report.txt
 
 # 卡组文件 
