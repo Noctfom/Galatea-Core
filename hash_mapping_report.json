@@ -47,7 +47,8 @@
       "80776622_E3",
       "83965310_E2",
       "88619463_E2",
-      "97800311_E2"
+      "97800311_E2",
+      "52768390_E1"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>,<VAR>)=<VAR>:GetLabelObject()Duel.Release(<VAR>,REASON_SPSUMMON)<VAR>:DeleteGroup()end"
   },
@@ -298,7 +299,8 @@
       "93332803_E1",
       "94388754_E1",
       "96561011_E2",
-      "99913726_E1"
+      "99913726_E1",
+      "54725177_E1"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>,<VAR>)=<VAR>:GetLabelObject()Duel.Release(<VAR>,REASON_SPSUMMON)end"
   },
@@ -2187,7 +2189,8 @@
   },
   "CUSTOM_HASH_4AB66CA3": {
     "cards": [
-      "17749468_E2"
+      "17749468_E2",
+      "82370493_E2"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>,<VAR>)=<VAR>:GetLabelObject()<VAR>:SetMaterial(sg)Duel.Release(sg,REASON_SPSUMMON|REASON_MATERIAL)sg:DeleteGroup()end"
   },
@@ -3685,7 +3688,8 @@
       "82301904_E2",
       "90488465_E1",
       "9596126_E1",
-      "99365553_E1"
+      "99365553_E1",
+      "41424250_E3"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>,<VAR>)=<VAR>:GetLabelObject()Duel.Remove(sg,<CONST>,REASON_SPSUMMON)sg:DeleteGroup()end"
   },
@@ -11949,7 +11953,8 @@
   },
   "CUSTOM_HASH_68F24F75": {
     "cards": [
-      "81788994_E2"
+      "81788994_E2",
+      "44857722_E2"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)=<VAR>:FilterCount(<FUNC>,nil)<CARD>:AddCounter(<HEX>,ct)end"
   },
@@ -14019,5 +14024,23 @@
       "99946920_E3"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)=<CARD>=<VAR>:GetReasonCard()=Effect.CreateEffect(<VAR>)e1:SetDescription(aux.Stringid(<NUM>,<NUM>))e1:SetProperty(EFFECT_FLAG_CLIENT_HINT)e1:SetType(EFFECT_<CONST>)e1:SetCode(EFFECT_CANNOT_CHANGE_CONTROL)e1:SetReset(RESET_EVENT+RESETS_STANDARD)rc:RegisterEffect(e1,<BOOL>)end"
+  },
+  "CUSTOM_HASH_56531B93": {
+    "cards": [
+      "14425515_E2"
+    ],
+    "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)=<CARD>=Duel.IsExistingMatchingCard(aux.TRUE,<PLAYER>,<CONST>,<NUM>,<NUM>,nil)=<BOOL>=<NUM>ifb1orb2thenop=aux.SelectFromOptions(<OPPO>,{b1,aux.Stringid(id,<NUM>),<NUM>},{b2,aux.Stringid(id,<NUM>),<NUM>})endifop==<NUM>thenDuel.ConfirmDecktop(<PLAYER>,<NUM>)=Duel.GetDecktopGroup(<PLAYER>,<NUM>)=g1:GetFirst():IsType(<CONST>)ifres1then=Effect.CreateEffect(<VAR>)e1:SetType(EFFECT_<CONST>)e1:SetProperty(EFFECT_FLAG_PLAYER_TARGET)e1:SetCode(EFFECT_REFLECT_DAMAGE)e1:SetTargetRange(<NUM>,<NUM>)e1:SetValue(<FUNC>)e1:SetReset(RESET_PHASE+<CONST>)Duel.RegisterEffect(e1,<PLAYER>)elseDuel.Damage(<PLAYER>,<NUM>,REASON_EFFECT)endelseifop==<NUM>then=Effect.CreateEffect(<CARD>)e1:SetType(EFFECT_<CONST>)e1:SetCode(EFFECT_CHANGE_DAMAGE)e1:SetProperty(EFFECT_FLAG_PLAYER_TARGET)e1:SetTargetRange(<NUM>,<NUM>)e1:SetValue(<FUNC>)e1:SetReset(RESET_PHASE+<CONST>)Duel.RegisterEffect(e1,<PLAYER>)=e1:Clone()e2:SetCode(EFFECT_NO_EFFECT_DAMAGE)e2:SetReset(RESET_PHASE+<CONST>)Duel.RegisterEffect(e2,<PLAYER>)endend"
+  },
+  "CUSTOM_HASH_90312F79": {
+    "cards": [
+      "65541655_E1"
+    ],
+    "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)for<VAR>inaux.Next(<VAR>)doif<VAR>:IsCode(<NUM>)and<VAR>:IsSummonType(SUMMON_<CONST>)thenDuel.RegisterFlagEffect(<VAR>:GetSummonPlayer(),id,<NUM>,<NUM>,<NUM>)endendend"
+  },
+  "CUSTOM_HASH_F773CB4D": {
+    "cards": [
+      "65541655_E2"
+    ],
+    "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>,<VAR>)=<VAR>:GetLabelObject()<VAR>:SetMaterial(sg)Duel.Remove(sg,<CONST>,REASON_SPSUMMON)end"
   }
 }

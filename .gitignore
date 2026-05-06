@@ -13,6 +13,7 @@ ai_thoughts/
 replays/
 replay_data/
 system_logs/
+web_data/
 crash_report.txt
 
 # 卡组文件 

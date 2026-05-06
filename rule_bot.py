@@ -305,18 +305,45 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             decision = struct.pack('<I', result_mask)
 
         # =================================================================
-        # [终极修正] 11. 卡片/数字宣言 (拆分：C++ 源码揭示的陷阱！)
+        #  卡片/数字宣言 
         # =================================================================
         elif msg_type == MSG_ANNOUNCE_CARD: # 142: 必须返回真实卡密
             stream.read(1)
             count = struct.unpack('B', stream.read(1))[0]
-            options = [struct.unpack('<I', stream.read(4))[0] for _ in range(count)]
-            if options:
-                decision = struct.pack('<I', random.choice(options))
-            else:
-                decision = struct.pack('<I', 0)
+
+            # 过滤码已经在 gamestate 处理了，这里直接跳过
+            for _ in range(count): stream.read(4)
                 
-        elif msg_type == MSG_ANNOUNCE_NUMBER: # 143: 必须返回索引！
+            # 建立三系齐全的兜底池 (怪兽,魔法,陷阱)，防引擎 is_declarable 类型卡壳
+            safenets = [14558127, 24094653, 10045474, 23434538, 73642296, 32807846]
+            
+            if hasattr(gamestate, 'announce_card_candidates') and gamestate.announce_card_candidates:
+                # 覆盖兜底池，因为 gamestate 的池子是最纯净的
+                safenets = gamestate.announce_card_candidates
+            
+            valid_safenets = []
+            for code in safenets:
+                packed = struct.pack('<I', code)
+                # 利用强大的黑名单机制，避开被引擎 Retry 过的卡
+                if packed not in ignore_actions and packed not in valid_safenets:
+                    valid_safenets.append(packed)
+            
+            if valid_safenets:
+                # 每次取没被 Ban 过的第一个，如果猜错类型，下一次会取下一个
+                decision = valid_safenets[0] 
+            else:
+                print("🚨 [RuleBot 警报] Type 142 (卡片宣言) 全部候选卡被引擎拉黑！发送 -1 取消尝试！")
+                culprit = "Unknown"
+                if hasattr(gamestate, 'chain_stack') and gamestate.chain_stack:
+                    # 堆栈顶部的就是当前正在处理的连锁
+                    culprit_code = gamestate.chain_stack[-1].get('code', 0)
+                    culprit = f"卡密 {culprit_code}"
+                print(f"   -> 🔪 正在发难的罪魁祸首是: {culprit}")
+
+                # 如果全被引擎拉黑了，说明没有符合条件的卡，发送 -1 强制尝试取消打断死锁
+                decision = struct.pack('<i', -1)
+                
+        elif msg_type == MSG_ANNOUNCE_NUMBER: # 143: 必须返回索引
             stream.read(1)
             count = struct.unpack('B', stream.read(1))[0]
             for _ in range(count): stream.read(4) # 选项具体数值跳过

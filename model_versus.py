@@ -81,13 +81,14 @@ class ModelArena:
         raw_data = self.env.reset(d1, d2)
         if not raw_data: return 0, -3
 
-        brain = DuelState()
+        brain = DuelState(d1.main, d1.extra, d2.main, d2.extra)
         msg_queue = MessageParser.parse(raw_data)
         
         consecutive_retries = 0
         current_step_ignore_list = []
         last_decision_value = None
         last_decision_index = None
+        last_interaction_msg = None
 
         ai_fallback_count = 0
 
@@ -101,7 +102,8 @@ class ModelArena:
         # 替换为最全的常量集合
         STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
         INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
-        AI_MANAGED_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 26, 27}
+        AI_MANAGED_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 130, 131, 132, 133, 140, 141, 142, 143}
+        DECISION_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 130, 131, 132, 133, 140, 141, 142, 143}
 
         steps = 0
         # 增加步数上限到 5000，防止慢速卡组被误判
@@ -120,6 +122,9 @@ class ModelArena:
             msg_type = msg[0]
             brain.update(msg_type, msg[1:])
 
+            if msg_type in DECISION_MSGS:
+                last_interaction_msg = msg
+
             # 状态重置：如果发生局势变动，清空 Retry 计数和黑名单
             if msg_type in STATE_CHANGE_MSGS:
                 consecutive_retries = 0
@@ -135,6 +140,10 @@ class ModelArena:
                 # msg格式通常是 [5, winner, reason]
                 winner = msg[1:][0]
                 reason = msg[1:][1] if len(msg[1:]) > 1 else 0
+
+                # 🌟 修复 4：翻译底层的胜利原因代码
+                r_map = {0: "投降 (Surrender)", 1: "LP 归零", 2: "卡组抽干 (Deck Out)", 3: "时间耗尽", 4: "特殊胜利"}
+                reason_str = r_map.get(reason, f"未知代码({reason})")
                 # 🚨 [黑匣子] 抓取异常胜利代码
                 if reason not in [0, 1, 2, 3, 4]:
                     print(f"\n🚨 [黑匣子触发] 捕获异常 WIN_REASON: {reason} | 赢家: P{winner}")
@@ -147,9 +156,10 @@ class ModelArena:
 
                 # [新增] 比赛结束，保存这局的日记
                 elif self.logger.is_active:
-                    saved_path = self.logger.save(winner, game_idx)
+                    # 将 reason_str 透传给记录器
+                    saved_path = self.logger.save(winner, game_idx, reason_str)
                     print(f"\n🧠 [AI 读心] 第 {game_idx} 局的心声已保存至 {saved_path}")
-                return winner, reason, ai_fallback_count # 补齐 3 个返回值
+                return winner, reason, ai_fallback_count
 
             # --- Retry 处理 ---
             if msg_type == 1:
@@ -163,18 +173,25 @@ class ModelArena:
                 if consecutive_retries == 1:
                      ai_fallback_count += 1
                 
-                # 引入 run_self_play.py 的 Jitter 扰动机制
-                # 当 AI 和 RuleBot 都陷入死锁时，强制注入噪音打破僵局
-                if consecutive_retries > 10:
-                    current_step_ignore_list.append(b'\xFF\xFF\xFF')
-                    current_step_ignore_list.append(b'\x00\x00\x00')
-                    current_step_ignore_list.append(1)
-                    current_step_ignore_list.append(4)
-                    print(f"\n⚡ [Jitter] 注入扰动打破死锁！当前连续 Retry: {consecutive_retries}, AI Fallbacks: {ai_fallback_count}")
+                # [犯罪现场记录仪] 如果连 RuleBot 都卡死了，立刻在终端打印尸检报告
+                if consecutive_retries > 6:
+                    print(f"\n   [🚨 深度追凶] 连续被引擎拒绝 {consecutive_retries} 次！")
+                    print(f"      - 引擎正在追问的 MsgType: {last_interaction_msg[0] if last_interaction_msg else 'Unknown'}")
+                    print(f"      - 刚被引擎拒绝的动作代码 (Raw Bytes/Int): {last_decision_value}")
+                    print(f"      - 当前 RuleBot 忽略名单 (黑名单): {current_step_ignore_list}")
+                    if brain.current_valid_actions:
+                        print(f"      - 当前回合可用的合法选项: {[f'类型:{a.action_type}_索引:{a.index}' for a in brain.current_valid_actions]}")
                 
-                if consecutive_retries > 20:
+                current_limit = 100 if (last_interaction_msg and last_interaction_msg[0] == 142) else 20
+                if consecutive_retries > current_limit:
                     return -1, -1, ai_fallback_count
-                continue
+                
+                # 时空回溯
+                if last_interaction_msg is not None:
+                    msg = last_interaction_msg
+                    msg_type = msg[0]
+                else:
+                    continue
 
             # --- 决策 ---
             if msg_type in AI_MANAGED_MSGS:
@@ -186,7 +203,7 @@ class ModelArena:
                 active_bot = self.p0_bot if is_p0_turn else self.p1_bot
 
                 # 尝试 AI 决策
-                if active_bot and msg_type in AI_MANAGED_MSGS and brain.current_valid_actions:
+                if active_bot and msg_type in AI_MANAGED_MSGS and brain.current_valid_actions and consecutive_retries < 4:
                     try:
                         # 1. 提取当前状态快照
                         snap = brain.get_snapshot(self.env)
@@ -271,8 +288,10 @@ class ModelArena:
                             resp = int((chosen.index << 16) | chosen.action_type)
                         elif msg_type == 16:
                             resp = int(chosen.index)
-                        elif msg_type in [12, 13, 14]:
-                            resp = int(chosen.index)
+                        elif msg_type in [12, 13, 14, 143]:
+                            resp = int(chosen.index) # 引擎要求 4字节 索引
+                        elif msg_type in [140, 141, 142]:
+                            resp = struct.pack('<I', int(chosen.desc_id))
                             
                         # 19 和 区域选择 依然保留 bytes，galatea_env 会帮我们安全补全 64 字节
                         elif msg_type == 19:
@@ -316,7 +335,7 @@ class ModelArena:
         
         # [防漏电] 如果因为超时或死锁非正常退出，强制关闭录像机
         if self.logger.is_active:
-            self.logger.is_active = False
+            self.logger.save(-1, game_idx, "超时强制截断/死锁熔断")
         
         return -1, -2, ai_fallback_count # 超时
 

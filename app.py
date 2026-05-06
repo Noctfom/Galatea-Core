@@ -1,0 +1,1341 @@
+# webui
+#输入命令：streamlit run app.py
+
+import streamlit as st
+import pandas as pd
+import os
+import glob
+import subprocess
+import torch
+import psutil
+import json
+import shutil
+import streamlit.components.v1 as components
+import socket
+from card_reader import CardReader
+
+import warnings
+warnings.filterwarnings("ignore")
+
+# 强制使用绝对路径挂载 CDB，防止 WebUI 运行目录错位导致查不到卡名
+card_db_ui = CardReader(db_path=os.path.abspath(os.path.join(os.path.dirname(__file__), 'cards.cdb')))
+
+st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wide")
+
+# ==========================================
+# 🛠️ 进程管理辅助函数与状态初始化
+# ==========================================
+def terminate_process(pid):
+    """跨平台安全终止进程及其所有子进程"""
+    try:
+        parent = psutil.Process(pid)
+        for child in parent.children(recursive=True):
+            child.kill()
+        parent.kill()
+        return True
+    except psutil.NoSuchProcess:
+        return False
+    except Exception as e:
+        print(f"终止进程错误: {e}")
+        return False
+
+if 'running_pid' not in st.session_state:
+    st.session_state.running_pid = None
+
+# ==========================================
+# 🧠 全局辅助：极速读取存档配置
+# 🌟 必须写在最外层全局，否则缓存会失效
+# ==========================================
+@st.cache_data(show_spinner=False)
+def load_model_config(path):
+    try:
+        # 只加载字典信息到 CPU，不把张量放进 GPU，极速且不占显存
+        cp = torch.load(path, map_location='cpu', weights_only=False)
+        return cp.get('net_config', {})
+    except Exception as e:
+        print(f"读取配置失败: {e}")
+        return {}
+
+# ==========================================
+# 🎨 前端 CSS 魔法
+# ==========================================
+st.markdown("""
+<style>
+/* 🔪 精准隐藏 Deploy 按钮 */
+.stAppDeployButton {display: none !important;}
+/* 🔪 隐藏底部 Streamlit 水印 */
+footer {visibility: hidden !important;}
+/* 🛡️ 强制保护侧边栏展开按钮 */
+[data-testid="collapsedControl"] {visibility: visible !important; display: flex !important; z-index: 9999 !important;}
+.stDataFrame {width: 100%;}
+</style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 🌐 国际化与侧边栏
+# ==========================================
+lang = st.sidebar.radio("🌐 Language / 语言", ["🇨🇳 中文", "🇺🇸 English"])
+def _(zh, en): return zh if lang == "🇨🇳 中文" else en
+
+st.sidebar.title(_("🎛️ 司令塔菜单", "🎛️ Command Menu"))
+menu = st.sidebar.radio(
+    "Navigation", 
+    [
+        _("📈 卡组生态大盘", "📈 Meta Dashboard"), 
+        _("📉 训练流形图", "📉 TensorBoard"),   # <--- 新增这行！
+        _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"),
+        _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"),  
+        _("🔄 资源同步中枢", "🔄 Update Manager"),  
+        _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"), 
+        _("📁 存储与日志仓库", "📁 Storage & Logs"), 
+        _("👁️ 全息读心回放", "👁️ Holographic Replay")
+    ],
+    label_visibility="collapsed"
+)
+
+csv_path = "./web_data/match_history.csv"
+
+# ==========================================
+# 📈 模块一：卡组生态大盘 (代码保持不变)
+# ==========================================
+if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
+    st.title(_("📈 实时 Meta 卡组天梯", "📈 Live Meta Tier List"))
+    if st.sidebar.button(_("🔄 刷新数据", "🔄 Refresh Data"), use_container_width=True):
+        st.rerun()
+
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        min_iter, max_iter = int(df['iteration'].min()), int(df['iteration'].max())
+        selected_range = st.slider(
+            _("⏳ 选择分析的训练轮次范围", "⏳ Select Iteration Range"), 
+            min_value=min_iter, max_value=max_iter, value=(max(min_iter, max_iter-200), max_iter)
+        )
+        filtered_df = df[(df['iteration'] >= selected_range[0]) & (df['iteration'] <= selected_range[1])]
+        
+        if filtered_df.empty:
+            st.warning(_("选定范围内无数据", "No data in selected range."))
+        else:
+            # 🌟 新增：将大盘分为“综合战报”和“卡组对比”两个主要标签页
+            main_tab_overview, main_tab_compare = st.tabs([_("📊 综合大盘战报", "📊 Overall Dashboard"), _("⚔️ 双卡组胜率对比", "⚔️ Deck Comparison")])
+            
+            with main_tab_overview:
+                env_pools = filtered_df['env'].unique().tolist()
+                sub_tabs = st.tabs(env_pools)
+                for tab, env in zip(sub_tabs, env_pools):
+                    with tab:
+                        env_df = filtered_df[filtered_df['env'] == env]
+                        st.markdown(_(f"### 📊 【{env}】卡池综合战报", f"### 📊 [{env}] Pool Overview"))
+                        
+                        stats = env_df.groupby('my_deck').agg(
+                            总场数=('is_win', 'count'),
+                            总胜场=('is_win', 'sum'),
+                            先手场数=('is_first', 'sum')
+                        ).reset_index()
+                        
+                        first_wins = env_df[env_df['is_first'] == True].groupby('my_deck')['is_win'].sum().reset_index(name='先手胜场')
+                        second_wins = env_df[env_df['is_first'] == False].groupby('my_deck')['is_win'].sum().reset_index(name='后手胜场')
+                        second_games = env_df[env_df['is_first'] == False].groupby('my_deck')['is_first'].count().reset_index(name='后手场数')
+                        
+                        stats = stats.merge(first_wins, on='my_deck', how='left').merge(second_wins, on='my_deck', how='left').merge(second_games, on='my_deck', how='left').fillna(0)
+                        stats['总胜率'] = stats['总胜场'] / stats['总场数']
+                        stats['先手胜率'] = stats['先手胜场'] / stats['先手场数'].replace(0, 1)
+                        stats['后手胜率'] = stats['后手胜场'] / stats['后手场数'].replace(0, 1)
+                        stats = stats[stats['总场数'] >= 5]
+                        
+                        if not stats.empty:
+                            col_a, col_b, col_c = st.columns(3)
+                            with col_a:
+                                st.caption(_("🏆 综合胜率榜", "🏆 Overall Win Rate"))
+                                df_overall = stats[['my_deck', '总场数', '总胜率']].sort_values(by='总胜率', ascending=False)
+                                st.dataframe(df_overall.style.format({'总胜率': "{:.1%}"}).background_gradient(cmap='RdYlGn', subset=['总胜率']), hide_index=True)
+                            with col_b:
+                                st.caption(_("🥇 先手胜率榜", "🥇 Going 1st Win Rate"))
+                                df_first = stats[['my_deck', '先手场数', '先手胜率']].sort_values(by='先手胜率', ascending=False)
+                                st.dataframe(df_first.style.format({'先手胜率': "{:.1%}"}).background_gradient(cmap='Greens', subset=['先手胜率']), hide_index=True)
+                            with col_c:
+                                st.caption(_("🥈 后手突破榜", "🥈 Going 2nd Win Rate"))
+                                df_second = stats[['my_deck', '后手场数', '后手胜率']].sort_values(by='后手胜率', ascending=False)
+                                st.dataframe(df_second.style.format({'后手胜率': "{:.1%}"}).background_gradient(cmap='Oranges', subset=['后手胜率']), hide_index=True)
+                            
+                            st.divider()
+                            st.markdown(_("#### ⚔️ 卡组克制矩阵 (行: 我方, 列: 敌方)", "#### ⚔️ Matchup Matrix (Row: My Deck, Col: Opponent)"))
+                            pivot_df = env_df.pivot_table(index='my_deck', columns='opp_deck', values='is_win', aggfunc='mean')
+                            st.dataframe(pivot_df.style.format("{:.1%}").background_gradient(cmap='RdYlGn', axis=None).highlight_null(color='lightgrey'))
+                        else:
+                            st.info(_("该池子有效对局数不足。", "Not enough valid games in this pool."))
+                            
+            # 🌟 优化：卡组对比模块逻辑 (增加环境池先置筛选)
+            with main_tab_compare:
+                st.markdown(_("### ⚔️ 双卡组核心指标 PK", "### ⚔️ Dual Deck PK"))
+                
+                # 1. 先提取所有可用的环境池
+                env_pools_compare = filtered_df['env'].unique().tolist()
+                
+                if not env_pools_compare:
+                    st.info(_("无可用的环境池数据。", "No environment pools available."))
+                else:
+                    # 2. 渲染环境池选择器
+                    selected_env = st.selectbox(_("1️⃣ 首先，选择要对比的环境池", "1️⃣ First, Select Environment Pool"), env_pools_compare, key="compare_env_select")
+                    
+                    # 3. 仅提取选中环境池内的对局数据和卡组
+                    compare_df = filtered_df[filtered_df['env'] == selected_env]
+                    all_decks_in_env = sorted(compare_df['my_deck'].unique().tolist())
+                    
+                    if len(all_decks_in_env) >= 2:
+                        st.markdown(_("### 2️⃣ 接下来，选择要对决的卡组", "### 2️⃣ Next, Select Decks"))
+                        col_pk1, col_pk2 = st.columns(2)
+                        with col_pk1:
+                            deck_a = st.selectbox(_("选择卡组 A (蓝方)", "Select Deck A (Blue)"), all_decks_in_env, index=0)
+                        with col_pk2:
+                            deck_b = st.selectbox(_("选择卡组 B (红方)", "Select Deck B (Red)"), all_decks_in_env, index=1 if len(all_decks_in_env) > 1 else 0)
+                            
+                        if deck_a and deck_b:
+                            # 提取 A 和 B 在该环境下的具体数据
+                            df_a = compare_df[compare_df['my_deck'] == deck_a]
+                            df_b = compare_df[compare_df['my_deck'] == deck_b]
+                            
+                            def calc_metrics(df_sub):
+                                total = len(df_sub)
+                                wins = df_sub['is_win'].sum()
+                                first_games = len(df_sub[df_sub['is_first'] == True])
+                                first_wins = df_sub[df_sub['is_first'] == True]['is_win'].sum()
+                                second_games = len(df_sub[df_sub['is_first'] == False])
+                                second_wins = df_sub[df_sub['is_first'] == False]['is_win'].sum()
+                                return {
+                                    "total": total,
+                                    "win_rate": (wins / total) if total > 0 else 0,
+                                    "first_wr": (first_wins / first_games) if first_games > 0 else 0,
+                                    "second_wr": (second_wins / second_games) if second_games > 0 else 0
+                                }
+                                
+                            metrics_a = calc_metrics(df_a)
+                            metrics_b = calc_metrics(df_b)
+                            
+                            # 渲染对比指标
+                            st.markdown("---")
+                            c1, c2, c3 = st.columns(3)
+                            
+                            c1.metric(label=_("总胜率对比", "Overall Win Rate"), 
+                                      value=f"{deck_a}: {metrics_a['win_rate']:.1%}", 
+                                      delta=f"{metrics_a['win_rate'] - metrics_b['win_rate']:.1%} (vs {deck_b})",
+                                      delta_color="normal" if metrics_a['win_rate'] >= metrics_b['win_rate'] else "inverse")
+                            c1.caption(f"{deck_b}: {metrics_b['win_rate']:.1%}")
+                            
+                            c2.metric(label=_("先手压制力对比", "Going 1st WR"), 
+                                      value=f"{deck_a}: {metrics_a['first_wr']:.1%}", 
+                                      delta=f"{metrics_a['first_wr'] - metrics_b['first_wr']:.1%} (vs {deck_b})",
+                                      delta_color="normal" if metrics_a['first_wr'] >= metrics_b['first_wr'] else "inverse")
+                            c2.caption(f"{deck_b}: {metrics_b['first_wr']:.1%}")
+                            
+                            c3.metric(label=_("后手突破力对比", "Going 2nd WR"), 
+                                      value=f"{deck_a}: {metrics_a['second_wr']:.1%}", 
+                                      delta=f"{metrics_a['second_wr'] - metrics_b['second_wr']:.1%} (vs {deck_b})",
+                                      delta_color="normal" if metrics_a['second_wr'] >= metrics_b['second_wr'] else "inverse")
+                            c3.caption(f"{deck_b}: {metrics_b['second_wr']:.1%}")
+                            
+                            # 直接交锋数据
+                            st.markdown("---")
+                            st.markdown(_("#### 🥊 直接交锋 (Head-to-Head)", "#### 🥊 Head-to-Head"))
+                            h2h_df = df_a[df_a['opp_deck'] == deck_b]
+                            h2h_games = len(h2h_df)
+                            if h2h_games > 0:
+                                h2h_wins = h2h_df['is_win'].sum()
+                                st.info(f"在限定轮次内，**{deck_a}** 与 **{deck_b}** 共交手 **{h2h_games}** 次。")
+                                st.success(f"**{deck_a}** 赢了 **{h2h_wins}** 次 (胜率: {h2h_wins/h2h_games:.1%})")
+                            else:
+                                st.info(_("在限定轮次内，这两个卡组没有直接交手记录。", "No direct matches between these two decks in the selected range."))
+                    else:
+                        st.info(_("所选环境池中卡组种类不足 2 个，无法进行对比。", "Not enough deck types in this pool for comparison."))
+    else:
+        st.info(_("数据库为空，等待训练进程写入数据...", "Database is empty. Waiting for training process..."))
+
+# ==========================================
+# ⚔️ 模块二：启动与监控中枢
+# ==========================================
+elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
+    st.title(_("🚀 进程控制与全息监控", "🚀 Process Control & Live Logs"))
+    
+    # 新增：全局进程控制台
+    is_running = False
+    if st.session_state.running_pid:
+        try:
+            p = psutil.Process(st.session_state.running_pid)
+            is_running = p.is_running() and p.status() != psutil.STATUS_ZOMBIE
+        except: pass
+        if not is_running: st.session_state.running_pid = None
+            
+    col_status, col_kill, col_purge = st.columns([6, 2, 2])
+    with col_status:
+        if is_running:
+            st.success(f"🟢 {_('检测到后台正在运行任务', 'Task running')} (PID: {st.session_state.running_pid})")
+        else:
+            st.info(f"⚪ {_('当前没有任务在后台运行', 'No tasks running')}")
+    
+    with col_kill:
+        if is_running:
+            if st.button("🛑 " + _("紧急制动", "Abort"), type="primary", use_container_width=True):
+                terminate_process(st.session_state.running_pid)
+                st.session_state.running_pid = None
+                st.rerun()
+                
+    with col_purge:
+        # 🌟 新增：物理净化按钮 (仅限 Windows)
+        if os.name == 'nt':
+            if st.button("🧨 " + _("净化僵尸进程", "Purge Zombies"), use_container_width=True, 
+                         help=_("当遇到引擎 DLL 残留或文件占用报错时，点击此按钮强杀所有 Python 进程。注意：这会连同 WebUI 一起重启！", 
+                                "Force kill all Python processes to release locked DLLs (Will restart UI too!).")):
+                # 提示用户即将发生的事情
+                st.warning("正在执行物理级清洗... 请等待系统自动重启UI。")
+                import time
+                time.sleep(1) # 给前端一点点渲染提示的时间
+                os.system("taskkill /F /IM python.exe") 
+    st.divider()
+    
+    tab_train, tab_duel = st.tabs([_("🔥 发起训练 (Train)", "🔥 Start Training"), _("🏟️ 发起竞技 (Duel)", "🏟️ Start Arena")])
+    models = ["None"] + sorted(glob.glob("./models/*.pth"), key=os.path.getmtime, reverse=True)
+    
+    # --- 🔥 训练控制台 ---
+    with tab_train:
+        # 🌟 核心修复：将选择框移出表单！这样一选中就会立刻刷新网页！
+        st.markdown("### 📂 " + _("存档加载器", "Checkpoint Loader"))
+        t_resume = st.selectbox(
+            _("选择恢复存档 (Resume)", "Resume Checkpoint"), models, 
+            help=_("选择一个之前训练好的 .pth 文件继续训练。如果选 None 则是从零开始。", "Select a checkpoint to resume training.")
+        )
+        
+        is_resume = (t_resume != "None")
+        saved_cfg = load_model_config(t_resume) if is_resume else {}
+        
+        # 将读取到的配置安全转化为整数，防止格式报错
+        default_d_model = int(saved_cfg.get('d_model', 256))
+        default_n_heads = int(saved_cfg.get('n_heads', 4))
+        default_n_layers = int(saved_cfg.get('n_layers', 2))
+
+        # 🌟 只有按下这个按钮才提交训练
+        with st.form("train_form"):
+            # --- 模型架构参数区 ---
+            with st.expander("🧠 " + _("模型架构参数 (Model Architecture)", "Model Architecture"), expanded=not is_resume):
+                if is_resume:
+                    st.success(_("🔒 已选择恢复存档，架构参数已自动读取并锁定！", "Architecture locked to the selected checkpoint."))
+                
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    t_d_model = st.number_input("d_model", value=default_d_model, step=64, disabled=is_resume, 
+                                                help=_("卡片向量的维度。越高越聪明，但计算越慢。必须能被 n_heads 整除。", "Feature dimension. Must be divisible by n_heads."))
+                with m2:
+                    t_n_heads = st.number_input("n_heads", value=default_n_heads, step=1, disabled=is_resume, 
+                                                help=_("注意力头数。AI同时观察局面的视角数量(例如有的头看手牌，有的头看墓地)。", "Num of attention heads."))
+                with m3:
+                    t_n_layers = st.number_input("n_layers", value=default_n_layers, step=1, disabled=is_resume, 
+                                                 help=_("神经网络的思考深度。2层适合简单尝试，6层适合复杂的长线战术推演。", "Num of Transformer layers."))
+
+            st.markdown("---")
+            
+            # --- 训练超参数区 ---
+            st.markdown("### ⚙️ " + _("训练环境配置", "Training Hyperparameters"))
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                t_steps = st.number_input(_("目标轮数 (Target Iterations)", "Target Iterations"), value=5000, step=100, 
+                                          help=_("打算练多少轮。如果是恢复训练，它会自动追加。例如当前是 500，设为 1000 就会再练 500 轮。", "Total iterations to reach."))
+            with col2:
+                t_batch = st.number_input(_("总经验池 (Batch Size)", "Batch Size"), value=4096, step=512, 
+                                          help=_("每次触发网络更新前，要求 Worker 们收集到的总对局步数。越大越稳定，但内存需求大。", "Total steps to collect before updating policy."))
+                t_mini = st.number_input(_("切片大小 (Mini Batch)", "Mini Batch"), value=512, step=128, 
+                                         help=_("PPO 梯度下降时每次送入 GPU 的数据量。根据您的显存大小调整（例如 8G显存设 512）。", "Size of data slices sent to GPU during update."))
+            with col3:
+                t_workers = st.number_input(_("进程数 (CPU Workers)", "CPU Workers"), value=4, min_value=1, max_value=32, 
+                                            help=_("同时开启几个后台 YGOPro 环境来收集数据。不要超过您的 CPU 物理核心数！", "Number of parallel environment processes."))
+                t_device = st.selectbox(_("推理设备 (Worker Device)", "Worker Device"), ["cpu", "cuda"], 
+                                        help=_("Worker 自身的推理设备。如果开启了异步推断(Async)，这里保持 cpu 即可。", "Device used by workers for local inference."))
+            
+            # --- 高级开关 ---
+            st.write(_("⚡ 高级开关", "⚡ Advanced Toggles"))
+            c_async = st.checkbox(_("开启异步推断 (--async_infer)", "Enable Async Inference"), value=True, 
+                                  help=_("【强烈推荐】让主进程开一个全局 GPU 服务端集中处理推理。能节省成倍的显存！", "Use central GPU server for fast inference."))
+            c_nocomp = st.checkbox(_("禁用模型编译 (--no_compile)", "Disable Torch Compile"), value=True, 
+                                   help=_("Windows 系统下 PyTorch 2.0+ 的 compile 极易报错，勾选此项牺牲 5% 速度换取绝对稳定。", "Disable torch.compile for Windows compatibility."))
+            
+            if st.form_submit_button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
+                if is_running:
+                    st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
+                else:
+                    cmd = ["python", "main.py", "train", "--steps", str(t_steps), "--batch_size", str(t_batch), 
+                        "--mini_batch", str(t_mini), "--workers", str(t_workers), "--worker_device", t_device,
+                        "--d_model", str(int(t_d_model)), "--n_heads", str(int(t_n_heads)), "--n_layers", str(int(t_n_layers))]
+                    if t_resume != "None": cmd.extend(["--resume", t_resume])
+                    if c_async: cmd.append("--async_infer")
+                    if c_nocomp: cmd.append("--no_compile")
+                
+                    p = subprocess.Popen(cmd) 
+                    st.session_state.running_pid = p.pid # 🌟 记录PID
+                    st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
+                    st.rerun()
+
+    # --- 🏟️ 竞技场表单 ---
+    with tab_duel:
+        st.markdown("### ⚔️ " + _("发起模型对决", "Initiate Model Duel"))
+        
+        # 同样把竞技场的出战模型拉到表单外面
+        c_p0, c_p1 = st.columns(2)
+        with c_p0:
+            d_p0 = st.selectbox(_("出战模型 (P0)", "Select P0 Model"), models, index=1 if len(models)>1 else 0)
+        with c_p1:
+            d_p1 = st.selectbox(_("守擂模型/规则 (P1)", "Select P1 Model/RuleBot"), models, index=0, help=_("如果选 None，对手就是内置的规则脚本 (RuleBot)。", "Opponent. None means RuleBot."))
+            
+        with st.form("duel_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                d_num = st.number_input(_("对战局数", "Number of Games"), value=100, step=10, 
+                                        help=_("让双方在竞技场打多少局。打完会在终端打印胜负原因统计。", "Total games to play."))
+            with c2:
+                d_freq = st.number_input("🧠 " + _("读心频率 (导出 JSON)", "Thought Log Freq"), value=5, 
+                                         help=_("每隔 N 局保存一次极其详尽的 AI 脑电波日志（存放于 ./ai_thoughts/），用于后续读心回放复盘。设为 0 关闭。", "Save AI probability dist every N games for replay."))
+            
+            if st.form_submit_button("⚔️ " + _("在后台启动竞技场", "Start Arena Process"), use_container_width=True):
+                if is_running:
+                    st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
+                elif d_p0 != "None":
+                    if d_p0 != "None":
+                        cmd = ["python", "main.py", "duel", "--p0", d_p0, "--num", str(d_num), "--thought_freq", str(d_freq)]
+                        if d_p1 != "None": cmd.extend(["--p1", d_p1])
+                        p = subprocess.Popen(cmd)
+                        st.session_state.running_pid = p.pid # 🌟 记录PID
+                        st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
+                        st.rerun()
+                    else:
+                        st.error(_("请至少为 P0 选择一个有效的出战模型！", "Please select a valid P0 model!"))
+
+    st.divider()
+    
+    # --- 终端日志全息映射 (滚动 + 自动刷新版) ---
+    st.divider()
+    
+    # --- 终端日志全息映射 ---
+    col_log, col_btn_manual, col_btn_auto = st.columns([6, 2, 2])
+    with col_log:
+        st.subheader("📝 " + _("实时终端映射 (Live Logs)", "Live Logs"))
+    with col_btn_manual:
+        if st.button("🔄 " + _("手动刷新", "Refresh"), use_container_width=True):
+            pass # 点击触发 Rerun
+    with col_btn_auto:
+        auto_refresh = st.toggle("⏱️ " + _("自动刷新", "Auto"), value=False)
+
+    # 🌟 修复：精准过滤，只抓取主控进程的日志，过滤掉 Worker 的杂音
+    log_files = glob.glob("./system_logs/Trainer_Main_*.log")
+    if log_files:
+        latest_log = max(log_files, key=os.path.getmtime)
+        st.caption(_(f"正在监视文件: `{latest_log}`", f"Monitoring: `{latest_log}`"))
+        
+        try:
+            with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
+                # 读取最后 200 行，而不是 40 行，给您充足的上下文
+                lines = f.readlines()
+                display_lines = lines[-200:] if len(lines) > 200 else lines
+                log_text = "".join(display_lines)
+            
+            # 🌟 核心升级：放入固定高度的 Container，产生原生滚动条！
+            with st.container(height=400):
+                st.code(log_text, language="bash")
+                
+        except Exception as e:
+            st.error(f"读取日志失败: {e}")
+    else:
+        st.info(_("暂无日志文件生成。请点击上方的启动按钮。", "No logs generated yet. Click start above."))
+
+    # 🌟 自动刷新引擎 (放在文件最末尾)
+    if auto_refresh:
+        import time
+        time.sleep(2) # 每 2 秒刷新一次
+        st.rerun()
+
+# ==========================================
+# 🔄 模块三：资源同步中枢
+# ==========================================
+elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
+    st.title(_("🌐 核心数据与代码同步", "🌐 Data & Core Sync"))
+    st.markdown(_("从官方与萌卡仓库拉取最新的环境依赖，确保您的 AI 掌握最新的卡片效果与规则。", 
+                  "Fetch latest databases and Lua scripts to keep your AI up to date."))
+    
+    with st.form("update_form"):
+        st.subheader(_("选择同步目标", "Select Sync Targets"))
+        c_core = st.checkbox(_("🔄 更新 Galatea 核心代码 (Git Pull)", "Sync Core Code (Git Pull)"), value=False, 
+                             help=_("从 GitHub 拉取最新的框架 Python 代码。", "Pull the latest framework Python code from GitHub."))
+        c_data = st.checkbox(_("🃏 更新 CDB卡库与官方 Lua 脚本", "Sync CDB & Scripts"), value=True, 
+                             help=_("从萌卡拉取最新的 cards.cdb，并从官方仓库同步 script 文件夹。", "Fetch the latest cards.cdb from MyCard and sync the script folder from the official repo."))
+        
+        st.subheader(_("高级选项", "Advanced Options"))
+        t_repo = st.text_input(_("脚本仓库源 (留空为官方)", "Script Repo Source"), value="default")
+        c_force = st.checkbox(_("⚠️ 覆盖模式 (强制覆盖本地修改)", "Force Overwrite"), value=False)
+        
+        if st.form_submit_button("🚀 " + _("立即开始同步", "Start Synchronization"), use_container_width=True):
+            if not c_core and not c_data:
+                st.warning(_("请至少勾选一个同步目标！", "Please select at least one target!"))
+            else:
+                cmd = ["python", "main.py", "update"]
+                if c_core: cmd.append("--core")
+                if c_data: cmd.append("--data")
+                if t_repo != "default": cmd.extend(["--repo", t_repo])
+                if c_force: cmd.append("--force")
+                
+                with st.spinner(_("⏳ 正在全力同步中，这可能需要几分钟时间，请勿刷新页面...", "⏳ Syncing... Please wait.")):
+                    try:
+                        # 核心修复：强制注入环境变量，让 Windows 的 Python 子进程使用 UTF-8 打印 Emoji
+                        custom_env = os.environ.copy()
+                        custom_env["PYTHONIOENCODING"] = "utf-8"
+                        
+                        # 使用 run 阻塞执行，并明确声明抓取的文本编码为 utf-8
+                        result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8', env=custom_env)
+                        
+                        if result.returncode == 0:
+                            st.success(_("✅ 同步完成！", "✅ Synchronization Complete!"))
+                        else:
+                            st.error(_("⚠️ 同步遇到问题，请查看下方日志：", "⚠️ Sync encountered issues:"))
+                        
+                        # 在网页上直接打印出终端的彩色日志 (去掉 ANSI 转义字符)
+                        import re
+                        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                        clean_log = ansi_escape.sub('', result.stdout + "\n" + result.stderr)
+                        st.code(clean_log, language="bash")
+                        
+                    except Exception as e:
+                        st.error(f"执行失败: {e}")
+
+# ==========================================
+# 🧠 模块四：语义知识库引擎
+# ==========================================
+elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
+    st.title(_("🧠 语义知识库引擎", "🧠 Semantic KB Engine"))
+    st.markdown(_("将 Lua 脚本降维提纯，生成供神经网络食用的高维特征字典。", 
+                  "Compress Lua scripts into high-dimensional semantic features for neural networks."))
+    
+    tab_exec, tab_hash, tab_card = st.tabs([
+        _("⚙️ 执行中枢", "⚙️ Execution Hub"), 
+        _("🧬 特殊效果图鉴", "🧬 Custom Hash Explorer"),
+        _("🔍 单卡语义解剖", "🔍 Card Semantic Viewer")
+    ])
+    
+    # --- 1. 执行中枢 ---
+    with tab_exec:
+        st.markdown("### " + _("扫描与构建", "Scan & Build"))
+        with st.form("parse_form"):
+            st.info(_("一键扫描 `./script` 目录下的所有 Lua 脚本，利用正则与降维算法提取出所有卡片的动作条件与种类。", 
+                      "Scan all Lua scripts to extract semantic requirements and categories."))
+            p_clear = st.checkbox(_("🧨 物理清空本地旧数据 (--clear)", "Clear Local KB"), value=False, 
+                                  help=_("彻底删除本地的知识库与映射表，重新全量解析。", "Delete local JSON files and re-parse everything."))
+            p_sync = st.checkbox(_("🌐 从 Github 拉取基础卡库同步 (--sync)", "Sync Base KB from Github"), value=False,
+                                 help=_("以主仓库的知识库作为基础字典，跳过已有的卡片，大幅加快本地解析速度。", "Use remote KB as baseline to skip existing cards and speed up parsing."))
+            p_url = st.text_input(_("远程基座 URL (可选)", "Remote Base URL (Optional)"), value="https://raw.githubusercontent.com/Noctfom/astrbot-plugin-duel-galatea/main/knowledge_base.json")
+            
+            if st.form_submit_button("🧠 " + _("开始提取卡片语义", "Start Semantic Parsing"), use_container_width=True):
+                cmd = ["python", "main.py", "parse"]
+                if p_clear: cmd.append("--clear")
+                if p_sync: 
+                    cmd.append("--sync")
+                    if p_url: cmd.extend(["--remote_url", p_url])
+                
+                with st.spinner(_("⏳ 正在暴力解析全卡池 Lua 脚本中，请耐心等待...", "⏳ Parsing all Lua scripts... Please wait.")):
+                    try:
+                        custom_env = os.environ.copy()
+                        custom_env["PYTHONIOENCODING"] = "utf-8"
+                        result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8', env=custom_env)
+                        
+                        import re
+                        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                        clean_log = ansi_escape.sub('', result.stdout + "\n" + result.stderr)
+                        
+                        if result.returncode == 0:
+                            st.success(_("✅ 解析完成！", "✅ Parsing Complete!"))
+                        else:
+                            st.error(_("⚠️ 解析遭遇异常：", "⚠️ Parsing encountered issues:"))
+                        st.code(clean_log, language="bash")
+                    except Exception as e:
+                        st.error(f"执行失败: {e}")
+
+    # --- 2. 特殊效果图鉴 ---
+    with tab_hash:
+        st.markdown("### " + _("共用底层逻辑探测仪", "Shared Logic Detector"))
+        hash_file = "hash_mapping_report.json"
+        if os.path.exists(hash_file):
+            with open(hash_file, 'r', encoding='utf-8') as f:
+                hash_data = json.load(f)
+            
+            if hash_data:
+                # 按共用这张卡的数量从大到小排序
+                hash_keys = sorted(list(hash_data.keys()), key=lambda k: len(hash_data[k]["cards"]), reverse=True)
+                
+                # 提取格式供展示
+                display_options = [f"{k} (共用卡数: {len(hash_data[k]['cards'])})" for k in hash_keys]
+                selected_idx = st.selectbox(_("选择降维 Hash 标签查看", "Select Custom Hash Tag"), range(len(display_options)), format_func=lambda x: display_options[x])
+                
+                if selected_idx is not None:
+                    selected_hash = hash_keys[selected_idx]
+                    h_info = hash_data[selected_hash]
+                    
+                    c1, c2 = st.columns([1, 1])
+                    with c1:
+                        st.markdown(f"**🛠️ {_('极致压缩提取的底层逻辑 (机器码):', 'Compressed Lua Logic:')}**")
+                        st.code(h_info.get("sample_code", "N/A"), language="lua")
+                    
+                    with c2:
+                        st.markdown(f"**🔗 {_('共用此逻辑的卡片族群', 'Cards sharing this logic')} (Total: {len(h_info['cards'])}):**")
+                        # 格式化输出带名称的卡片列表
+                        card_displays = []
+                        for cl in h_info["cards"]:
+                            c_id = cl.split('_')[0]
+                            # 使用强绑定的 UI 专属 DB 读取
+                            c_name = card_db_ui.get_card_name(int(c_id)) 
+                            # 如果实在查不到(比如是先行卡/未同步)，给个干净的占位符
+                            if c_name.startswith("Code "): c_name = "未收录卡片"
+                            
+                            ygocdb_link = f"https://ygocdb.com/card/{c_id}"
+                            card_displays.append(f"- **{c_name}** (`{c_id}`) → [🌐 百鸽 YGOCDB]({ygocdb_link}) *(Slot: {cl.split('_')[1]})*")
+                        
+                        with st.container(height=400):
+                            st.markdown("\n".join(card_displays))
+            else:
+                st.info(_("映射表为空。", "Hash mapping report is empty."))
+        else:
+            st.info(_("请先在 [执行中枢] 提取语义数据。", "Please run the parser in Execution Hub first."))
+
+    # --- 3. 单卡语义解剖 ---
+    with tab_card:
+        st.markdown("### " + _("AI 视觉下的单卡解剖", "AI Vision Semantic Viewer"))
+        kb_file = "knowledge_base.json"
+        if os.path.exists(kb_file):
+            with open(kb_file, 'r', encoding='utf-8') as f:
+                kb_data = json.load(f)
+                
+            search_id = st.text_input(_("输入 8 位卡片密码 (Code) 进行搜索", "Enter 8-digit Card Code"), placeholder="例如: 14558127")
+            if search_id:
+                if search_id in kb_data:
+                    c_name = card_db_ui.get_card_name(int(search_id))
+                    st.success(f"**{c_name}** (`{search_id}`)")
+                    st.markdown(f"🔗 **[点击此处在 百鸽 (YGOCDB) 中查看卡图与详细裁定](https://ygocdb.com/card/{search_id})** *(鸣谢: YGOCDB)*")
+                    st.json(kb_data[search_id])
+                else:
+                    st.warning(_("知识库中未找到该卡片的独立效果，这可能是一张白板怪兽，或脚本极其特殊。", "Card not found in Knowledge Base. It might be a Normal Monster or has no extractable effects."))
+        else:
+            st.info(_("请先在 [执行中枢] 提取语义数据。", "Please run the parser in Execution Hub first."))
+
+# ==========================================
+# 🗃️ 模块五：资产与卡组管理
+# ==========================================
+elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
+    st.title(_("🗃️ 资产与卡组管理", "🗃️ Assets & Decks Manager"))
+    
+    tab_staples, tab_decks = st.tabs([
+        _("🃏 泛用卡池配置 (142 兜底)", "🃏 Meta Staples (142 Cache)"),
+        _("📂 卡组与环境管理", "📂 Deck & Pool Manager")
+    ])
+    
+    # --- 1. 泛用卡池配置 ---
+    with tab_staples:
+        st.markdown(_("当引擎发来极限刁钻的 142 宣言条件时，AI 将优先从这个纯净池里挑选答案。", 
+                      "AI will prioritize this clean pool when facing extreme 142 card announce conditions."))
+        
+        staples_file = 'meta_staples.json'
+        # 确保文件存在
+        if not os.path.exists(staples_file):
+            with open(staples_file, 'w', encoding='utf-8') as f: 
+                json.dump([14558127, 23434538, 10045474, 24094653, 73642296, 32807846], f)
+        
+        with open(staples_file, 'r', encoding='utf-8') as f:
+            staples_list = json.load(f)
+            
+        c_add, c_del = st.columns(2)
+        with c_add:
+            st.subheader(_("➕ 添加新卡", "Add New Card"))
+            new_code = st.text_input(_("输入 8 位卡片密码", "Enter 8-digit Card Code"), placeholder="例如: 14558127")
+            if st.button(_("添加到泛用池", "Add to Pool"), use_container_width=True):
+                if new_code.isdigit():
+                    code_int = int(new_code)
+                    if code_int in staples_list:
+                        st.warning(_("该卡片已在池中！", "Card already in pool!"))
+                    else:
+                        c_name = card_db_ui.get_card_name(code_int)
+                        if c_name.startswith("Code "):
+                            st.error(_("数据库中查无此卡，请检查卡密！", "Card not found in database, check code!"))
+                        else:
+                            staples_list.append(code_int)
+                            with open(staples_file, 'w', encoding='utf-8') as f:
+                                json.dump(staples_list, f, indent=4)
+                            st.success(_(f"✅ 成功添加: {c_name}", f"✅ Added: {c_name}"))
+                            st.rerun()
+                else:
+                    st.error(_("请输入纯数字卡密！", "Please enter numeric code only!"))
+                    
+        with c_del:
+            st.subheader(_("🗑️ 移除卡片", "Remove Card"))
+            # 构建字典供选择
+            options = {code: f"{card_db_ui.get_card_name(code)} ({code})" for code in staples_list}
+            to_delete = st.multiselect(_("选择要移除的卡片", "Select cards to remove"), options=list(options.keys()), format_func=lambda x: options[x])
+            if st.button(_("从泛用池中移除", "Remove Selected"), type="primary", use_container_width=True):
+                if to_delete:
+                    staples_list = [c for c in staples_list if c not in to_delete]
+                    with open(staples_file, 'w', encoding='utf-8') as f:
+                        json.dump(staples_list, f, indent=4)
+                    st.success(_("✅ 移除成功！", "✅ Removed successfully!"))
+                    st.rerun()
+                else:
+                    st.warning(_("请先选择卡片！", "Please select cards first!"))
+        
+        st.divider()
+        st.write(_("📜 当前卡池列表预览：", "📜 Current Staples Preview:"))
+        # 用易读的格式展示
+        display_list = [f"- **{card_db_ui.get_card_name(code)}** (`{code}`)" for code in staples_list]
+        st.markdown("\n".join(display_list))
+
+    # --- 2. 卡组与环境管理 ---
+    with tab_decks:
+        st.markdown(_("上传 `.ydk` 卡组，或建立子文件夹作为不同的“环境池” (例如 `meta`, `fun`)供竞技场和训练场读取。", 
+                      "Upload `.ydk` decks or create subfolders as different 'Pools' for training and arenas."))
+        
+        # 引入deck_utils 读取器
+        import deck_utils 
+        
+        deck_root = "./decks"
+        os.makedirs(deck_root, exist_ok=True)
+        
+        # 扫描现有目录
+        pools = [d for d in os.listdir(deck_root) if os.path.isdir(os.path.join(deck_root, d))]
+        pools.insert(0, ".") # 根目录
+        
+        c_nav, c_new = st.columns([2, 1])
+        with c_nav:
+            sel_pool = st.selectbox(_("📂 选择目标文件夹 (环境池)", "📂 Select Target Folder (Pool)"), pools, help=_("'.' 代表根目录 ./decks", "'.' means root ./decks"))
+            pool_path = deck_root if sel_pool == "." else os.path.join(deck_root, sel_pool)
+        
+        with c_new:
+            new_pool_name = st.text_input(_("新建子文件夹", "Create Subfolder"), placeholder="e.g. tier1_decks")
+            if st.button(_("创建文件夹", "Create Folder"), use_container_width=True):
+                if new_pool_name:
+                    os.makedirs(os.path.join(deck_root, new_pool_name), exist_ok=True)
+                    st.success(_("✅ 创建成功！", "✅ Created!"))
+                    st.rerun()
+                    
+        st.divider()
+        
+        # 文件上传区
+        uploaded_files = st.file_uploader(_(f"📥 将 .ydk 上传至 `{sel_pool}`", f"📥 Upload .ydk to `{sel_pool}`"), accept_multiple_files=True, type=['ydk'])
+        if uploaded_files:
+            if st.button(_("💾 保存上传的卡组", "Save Uploaded Decks"), use_container_width=True):
+                for f in uploaded_files:
+                    with open(os.path.join(pool_path, f.name), "wb") as out_f:
+                        out_f.write(f.read())
+                st.success(_("✅ 卡组保存成功！", "✅ Decks saved!"))
+                st.rerun()
+                
+        # 🌟 获取目录下的所有 .ydk 文件 (对齐本地)
+        files = deck_utils.list_decks(pool_path)
+        
+        if files:
+            # === [新功能] 全息卡组可视化浏览 ===
+            st.markdown(_("### 👁️ 全息卡组阅览室", "### 👁️ Holographic Deck Viewer"))
+            view_deck_name = st.selectbox(_("选择卡组以阅览", "Select deck to view"), ["None"] + files)
+            
+            if view_deck_name != "None":
+                # 加载卡组对象
+                d_obj = deck_utils.load_deck(pool_path, view_deck_name)
+                
+                if d_obj:
+                    # 确定 CDN 语言参数
+                    api_lang = "sc" if lang == "🇨🇳 中文" else "en"
+                    
+                    def render_card_grid(card_list, title):
+                        st.write(f"**{title} (Total: {len(card_list)})**")
+                        if not card_list: return
+                        
+                        # 每行显示 10 张卡
+                        cols_per_row = 10 
+                        for i in range(0, len(card_list), cols_per_row):
+                            cols = st.columns(cols_per_row)
+                            for j in range(cols_per_row):
+                                if i + j < len(card_list):
+                                    code = card_list[i + j]
+                                    # 拼装百鸽 API (使用 !half 获取适中分辨率)
+                                    img_url = f"https://cdn.233.momobako.com/ygoimg/{api_lang}/{code}.webp!half"
+                                    
+                                    # 利用 Streamlit 的 HTML 渲染去除空隙，做成卡组堆叠感
+                                    # 🌟 新增：包裹 <a> 标签直达百鸽，并加上 hover 放大动画
+                                    card_html = f"""
+                                    <div style="margin-bottom: 5px; text-align: center; transition: transform 0.2s;" 
+                                         onmouseover="this.style.transform='scale(1.05)'" 
+                                         onmouseout="this.style.transform='scale(1)'">
+                                        <a href="https://ygocdb.com/card/{code}" target="_blank">
+                                            <img src="{img_url}" title="{card_db_ui.get_card_name(code)} ({code})" 
+                                                 style="width: 100%; border-radius: 4px; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);">
+                                        </a>
+                                    </div>
+                                    """
+                                    cols[j].markdown(card_html, unsafe_allow_html=True)
+
+                    # 渲染主卡组和额外卡组
+                    render_card_grid(d_obj.main, _("📜 主卡组", "📜 Main Deck"))
+                    st.write("") # 间距
+                    render_card_grid(d_obj.extra, _("🎴 额外卡组", "🎴 Extra Deck"))
+            
+            st.divider()
+            
+            # === 文件管理区 (移动 / 删除) ===
+            st.write(_(f"📑 `{sel_pool}` 中的卡组列表：", f"📑 Decks in `{sel_pool}`:"))
+            # 用户选择时补上 .ydk 后缀方便后台处理
+            sel_files = st.multiselect(_("勾选进行批量操作", "Select for batch actions"), [f"{n}.ydk" for n in files])
+            
+            c_move, c_del = st.columns(2)
+            with c_move:
+                target_pool = st.selectbox(_("移动到...", "Move to..."), pools, key="move_dest")
+                if st.button(_("➡️ 移动选中卡组", "Move Selected"), use_container_width=True):
+                    if sel_files and target_pool != sel_pool:
+                        dest_path = deck_root if target_pool == "." else os.path.join(deck_root, target_pool)
+                        for f in sel_files:
+                            shutil.move(os.path.join(pool_path, f), os.path.join(dest_path, f))
+                        st.success(_("✅ 移动成功！", "✅ Moved!"))
+                        st.rerun()
+            with c_del:
+                st.write("") # 占位对齐
+                st.write("")
+                if st.button(_("🗑️ 删除选中卡组", "Delete Selected"), type="primary", use_container_width=True):
+                    if sel_files:
+                        for f in sel_files:
+                            os.remove(os.path.join(pool_path, f))
+                        st.success(_("✅ 删除成功！", "✅ Deleted!"))
+                        st.rerun()
+        else:
+            st.info(_("此文件夹中暂无 `.ydk` 卡组文件。", "No `.ydk` decks in this folder."))
+
+# ==========================================
+# 📁 模块六：存储与日志仓库
+# ==========================================
+elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
+    st.title(_("📁 存储与日志仓库", "📁 Storage & Logs Manager"))
+    st.markdown(_("管理系统运行期间产生的所有日志、模型文件与 AI 心声记录。", 
+                  "Manage all logs, models, and AI thoughts generated during system operation."))
+    
+    tab_logs, tab_thoughts, tab_models, tab_data, tab_tb = st.tabs([ # <--- 增加了 tab_tb
+        _("📜 系统日志", "📜 System Logs"),
+        _("🧠 读心记录", "🧠 Thought Replays"),
+        _("🤖 模型仓库", "🤖 Model Storage"),
+        _("📊 对局大盘数据", "📊 Match Data"),
+        _("📉 TensorBoard 数据", "📉 TensorBoard Runs") # <--- 增加这行
+    ])
+    
+    # 🌟 定义一个通用的文件管理器模板函数，直接消灭重复代码
+    def build_file_manager(folder_path, ext, title_str, allow_view=False, allow_upload=False):
+        os.makedirs(folder_path, exist_ok=True)
+        files = sorted(glob.glob(os.path.join(folder_path, f"*{ext}")), key=os.path.getmtime, reverse=True)
+        file_names = [os.path.basename(f) for f in files]
+        
+        # --- 导入/上传功能 ---
+        if allow_upload:
+            uploaded = st.file_uploader(_(f"📥 上传 {ext} 文件", f"📥 Upload {ext} file"), type=[ext.replace('.', '')], accept_multiple_files=True, key=f"up_{folder_path}")
+            if uploaded and st.button(_("💾 保存上传", "Save Uploads"), key=f"save_{folder_path}"):
+                for f in uploaded:
+                    with open(os.path.join(folder_path, f.name), "wb") as out: out.write(f.read())
+                st.success(_("✅ 上传成功！", "✅ Uploaded!"))
+                st.rerun()
+            st.divider()
+
+        if not files:
+            st.info(_(f"{folder_path} 目录下暂无 {ext} 文件。", f"No {ext} files found in {folder_path}."))
+            return
+
+        # --- 导出/查看功能 ---
+        sel_view = st.selectbox(_("🔍 选择文件操作 (查看/导出)", "🔍 Select file for View/Export"), file_names, key=f"view_{folder_path}")
+        if sel_view:
+            file_to_read = os.path.join(folder_path, sel_view)
+            with open(file_to_read, "rb") as f: file_bytes = f.read()
+            
+            st.download_button(_("⬇️ 导出 (下载) 此文件", "Export (Download) this file"), data=file_bytes, file_name=sel_view, use_container_width=True, key=f"dl_{folder_path}")
+            
+            if allow_view:
+                with st.expander(_("👀 预览文件尾部内容", "Preview File Content (Tail)")):
+                    try:
+                        content = file_bytes.decode('utf-8', errors='replace')
+                        # 日志太长会导致浏览器卡死，只展示最后 10000 个字符
+                        display_content = content[-10000:] if len(content) > 10000 else content
+                        if len(content) > 10000: st.caption("*(文件过长，仅展示尾部内容)*")
+                        st.code(display_content, language="bash" if ext == ".log" else "json")
+                    except Exception as e:
+                        st.warning(_("无法预览此文件。", "Cannot preview this file."))
+        st.divider()
+        
+        # --- 批量删除功能 ---
+        c_del, c_clr = st.columns([2, 1])
+        with c_del:
+            st.markdown(f"**🗑️ {_('批量删除', 'Batch Delete')}**")
+            sel_del = st.multiselect(_("勾选要删除的文件", "Select files to delete"), file_names, key=f"del_{folder_path}")
+            if st.button(_("删除选中文件", "Delete Selected"), key=f"btn_del_{folder_path}"):
+                if sel_del:
+                    for f in sel_del: os.remove(os.path.join(folder_path, f))
+                    st.success(_("✅ 删除成功！", "✅ Deleted!"))
+                    st.rerun()
+                else:
+                    st.warning(_("请先勾选文件！", "Please select files first!"))
+                    
+        # --- 安全清空功能 (双重确认锁) ---
+        with c_clr:
+            st.markdown(f"**🧨 {_('危险操作区', 'Danger Zone')}**")
+            with st.expander(_("一键清空...", "Clear All...")):
+                st.error(_(f"将彻底删除 `{folder_path}` 下所有文件！", f"Will completely delete all files in `{folder_path}`!"))
+                confirm = st.checkbox(_("我确认清空", "I confirm to clear"), key=f"chk_clr_{folder_path}")
+                # 只有勾选了确认框，删除按钮才会解锁 (disabled=not confirm)
+                if st.button(_("彻底清空所有文件", "Clear ALL Files"), type="primary", disabled=not confirm, key=f"btn_clr_{folder_path}"):
+                    for f in files: os.remove(f)
+                    st.success(_("✅ 已全部清空！", "✅ Cleared all!"))
+                    st.rerun()
+
+    # 渲染标签页的内容
+    with tab_logs:
+        build_file_manager("./system_logs", ".log", _("系统运行日志", "System Logs"), allow_view=True, allow_upload=False)
+    with tab_thoughts:
+        build_file_manager("./ai_thoughts", ".json", _("AI 读心记录", "AI Thought Records"), allow_view=True, allow_upload=False)
+    with tab_models:
+        build_file_manager("./models", ".pth", _("模型 Checkpoint", "Model Checkpoints"), allow_view=False, allow_upload=True)
+    with tab_data: # <--- 新增
+        build_file_manager("./web_data", ".csv", _("天梯对局数据", "Match Data"), allow_view=True, allow_upload=False)
+    # 🌟 新增：TensorBoard 专属清空逻辑
+    with tab_tb:
+        st.markdown("### 📉 TensorBoard 运行记录管理")
+        st.markdown(_("TensorBoard 日志为庞大的二进制流，此处仅提供容量监测与一键清理功能，用于释放硬盘空间。", 
+                      "Manage TensorBoard event files. Preview is disabled for binary files."))
+        
+        tb_dir = "./runs"
+        os.makedirs(tb_dir, exist_ok=True)
+        
+        # 计算文件夹大小
+        tb_size = sum(os.path.getsize(os.path.join(dirpath, f)) for dirpath, _, filenames in os.walk(tb_dir) for f in filenames)
+        tb_size_mb = tb_size / (1024 * 1024)
+        
+        st.info(f"**当前 ./runs 目录占用空间:** {tb_size_mb:.2f} MB")
+        
+        with st.expander(_("🧨 危险操作区 (一键清空...)", "Danger Zone (Clear All...)")):
+            st.error(_(f"将彻底删除 `{tb_dir}` 下所有文件！注意：这会重置 TensorBoard 的所有历史训练曲线！", 
+                       f"Will completely delete all files in `{tb_dir}`!"))
+            confirm_tb = st.checkbox(_("我确认清空", "I confirm to clear"), key="chk_clr_runs")
+            
+            if st.button(_("彻底清空 TensorBoard 数据", "Clear ALL TensorBoard Data"), type="primary", disabled=not confirm_tb):
+                # 递归删除并重建空文件夹
+                shutil.rmtree(tb_dir)
+                os.makedirs(tb_dir, exist_ok=True)
+                st.success(_("✅ 已全部清空 TensorBoard 记录！", "✅ Cleared all!"))
+                st.rerun()
+
+# ==========================================
+# 👁️ 模块七：全息读心回放 (战术沙盘 V7.0)
+# ==========================================
+elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
+    import time
+    import re
+    
+    st.title(_("👁️ 全息战术沙盘", "👁️ Holographic Tactical Board"))
+    st.markdown(_("真实坐标系连线，沉浸式悬停状态窗，动态墓地/额外/除外实体渲染。", 
+                  "True coordinate SVG tracking, immersive hover tooltips, and dynamic off-field rendering."))
+    
+    log_dir = "./ai_thoughts"
+    os.makedirs(log_dir, exist_ok=True)
+    json_files = sorted(glob.glob(os.path.join(log_dir, "*.json")), key=os.path.getmtime, reverse=True)
+    
+    if not json_files:
+        st.info(_("暂无录像文件。请先在竞技场生成对局。", "No replay files found."))
+    else:
+        c_file, c_space = st.columns([2, 1])
+        with c_file:
+            sel_file = st.selectbox(_("📂 选择录像文件", "Select Replay File"), [os.path.basename(f) for f in json_files])
+        
+        with open(os.path.join(log_dir, sel_file), "r", encoding="utf-8") as f:
+            try: replay_data = json.load(f)
+            except Exception: replay_data = {}
+            
+        decisions = replay_data.get("decisions", [])
+        if not decisions:
+            st.warning(_("录像格式过旧或损坏。", "Replay is empty or old format."))
+        else:
+            max_steps = len(decisions) - 1
+            if "replay_step" not in st.session_state: st.session_state.replay_step = 0
+            if "is_playing" not in st.session_state: st.session_state.is_playing = False
+            if st.session_state.replay_step > max_steps: st.session_state.replay_step = max_steps
+            
+            # 提前注册透视开关状态，防止回收
+            if "tgl_p1_hand" not in st.session_state: st.session_state.tgl_p1_hand = False
+            if "tgl_p0_hand" not in st.session_state: st.session_state.tgl_p0_hand = True
+            if "tgl_p1_set" not in st.session_state: st.session_state.tgl_p1_set = False
+            if "tgl_p0_set" not in st.session_state: st.session_state.tgl_p0_set = True
+            if "tgl_rotate_p1" not in st.session_state: st.session_state.tgl_rotate_p1 = True
+
+            st.markdown(f"**🤖 {_('模型', 'Model')}:** `{replay_data.get('model_name', 'Unknown')}` &nbsp;|&nbsp; **🏆 {_('胜者', 'Winner')}:** `P{replay_data.get('winner', '?')} ({replay_data.get('win_reason', '结束')})`")
+            
+            # --- 🎛️ 控制台 (绝对去重版) ---
+            st.markdown("---")
+            ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([1,1,1,2,5])
+            
+            def step_prev():
+                st.session_state.replay_step = max(0, st.session_state.replay_step - 1)
+                st.session_state.is_playing = False
+            def step_next():
+                st.session_state.replay_step = min(max_steps, st.session_state.replay_step + 1)
+                st.session_state.is_playing = False
+            def toggle_play():
+                st.session_state.is_playing = not st.session_state.is_playing
+            def on_slider():
+                st.session_state.replay_step = st.session_state.step_slider_widget
+                st.session_state.is_playing = False
+            
+            ctrl1.button("⏮️ 上一步", use_container_width=True, key="btn_prev_step", on_click=step_prev)
+            play_label = "⏸️ 暂停播放" if st.session_state.is_playing else "▶️ 自动播放"
+            ctrl2.button(play_label, type="primary" if st.session_state.is_playing else "secondary", use_container_width=True, key="btn_toggle_play", on_click=toggle_play)
+            ctrl3.button("⏭️ 下一步", use_container_width=True, key="btn_next_step", on_click=step_next)
+                
+            play_speed = ctrl4.slider("⏱️ 播放间隔", 0.5, 5.0, 1.5, 0.5, label_visibility="collapsed", key="slider_play_speed")
+            st.slider("时间轴", 0, max_steps, st.session_state.replay_step, format="Step %d", label_visibility="collapsed", key="step_slider_widget", on_change=on_slider)
+                
+            t_col1, t_col2, t_col3, t_col4, t_col5 = st.columns(5)
+            t_col1.toggle("👁️ P1 手牌", key="tgl_p1_hand")
+            t_col2.toggle("👁️ P0 手牌", key="tgl_p0_hand")
+            t_col3.toggle("👁️ P1 盖卡", key="tgl_p1_set")
+            t_col4.toggle("👁️ P0 盖卡", key="tgl_p0_set")
+            t_col5.toggle("🔄 P1 翻转180°", key="tgl_rotate_p1")
+
+            step_data = decisions[st.session_state.replay_step]
+            state = step_data.get("state", {})
+            api_lang = "sc" if lang == "🇨🇳 中文" else "en"
+            
+            chosen_opt = next((o for o in step_data.get("options", []) if o.get("is_chosen")), {})
+            action_desc = chosen_opt.get("desc", "")
+            actor_data = chosen_opt.get("actor")
+            target_data = chosen_opt.get("target")
+
+            css_style = """
+            <style>
+            .ygo-hand { display: flex; justify-content: center; gap: 5px; min-height: 90px; margin: 10px 0; background: rgba(0,0,0,0.2); padding: 5px; border-radius: 8px;}
+            .ygo-board-wrapper { position: relative; width: max-content; margin: 0 auto; }
+            .ygo-board {
+                display: grid;
+                grid-template-columns: 75px repeat(5, 75px) 75px;
+                grid-template-rows: 106px 106px 106px 106px 106px;
+                gap: 6px; justify-content: center;
+                background: #1e1e1e; padding: 20px; border-radius: 12px; box-shadow: inset 0 0 20px #000;
+            }
+            .ygo-cell {
+                width: 75px; height: 106px;
+                border: 2px dashed #444; border-radius: 5px; display: flex; justify-content: center; align-items: center;
+                background: rgba(0,0,0,0.4); position: relative;
+            }
+            .ygo-cell.empty-space { border: none; background: transparent; }
+            
+            .ygo-card-wrapper { transition: transform 0.2s; z-index: 10; display: flex; align-items: center; justify-content: center; height: 100%; width: 100%; position: relative;}
+            .ygo-card-wrapper:hover { transform: scale(1.4); z-index: 999; }
+            
+            .ygo-card { width: 100%; height: auto; aspect-ratio: 59/86; object-fit: contain; border-radius: 4px; box-shadow: 2px 2px 5px rgba(0,0,0,0.6); pointer-events: auto;}
+            .facedown { background: repeating-linear-gradient(45deg, #4a2e15, #4a2e15 10px, #36210f 10px, #36210f 20px); border: 2px solid #222; }
+            
+            /* 🌟 核心新增：透视幽灵特效 */
+            @keyframes ghostPulse {
+                0% { opacity: 0.5; box-shadow: 0 0 5px rgba(0, 255, 255, 0.4); }
+                50% { opacity: 0.9; box-shadow: 0 0 15px rgba(0, 255, 255, 0.8); }
+                100% { opacity: 0.5; box-shadow: 0 0 5px rgba(0, 255, 255, 0.4); }
+            }
+            .xray-ghost {
+                animation: ghostPulse 2.5s infinite ease-in-out;
+                border: 2px dashed rgba(0, 255, 255, 0.7) !important;
+            }
+
+            @keyframes pulseActor { 0% {box-shadow: 0 0 10px #0ff; border: 2px solid #0ff;} 50% {box-shadow: 0 0 25px #08f; border: 2px solid #08f;} 100% {box-shadow: 0 0 10px #0ff; border: 2px solid #0ff;} }
+            .hl-actor { animation: pulseActor 1.5s infinite; border-radius: 4px;}
+            @keyframes pulseTarget { 0% {box-shadow: 0 0 10px #f00; border: 2px solid #f00;} 50% {box-shadow: 0 0 25px #fa0; border: 2px solid #fa0;} 100% {box-shadow: 0 0 10px #f00; border: 2px solid #f00;} }
+            .hl-target { animation: pulseTarget 1.5s infinite; border-radius: 4px;}
+            
+            .svg-overlay { position: absolute; top: 20px; left: 20px; width: calc(100% - 40px); height: calc(100% - 40px); pointer-events: none; z-index: 50; overflow: visible; }
+            .dash-line { stroke-dasharray: 10; animation: dashAnim 1s linear infinite; }
+            @keyframes dashAnim { to { stroke-dashoffset: -20; } }
+            [data-testid="column"] { padding: 0.2rem !important; }
+            </style>
+            """
+            
+            ATTR_MAP = {1:"地", 2:"水", 4:"炎", 8:"风", 16:"光", 32:"暗", 64:"神"}
+            RACE_MAP = {1:"战士", 2:"魔法师", 4:"天使", 8:"恶魔", 16:"不死", 32:"机械", 64:"水", 128:"炎", 256:"岩石", 512:"鸟兽", 1024:"植物", 2048:"昆虫", 4096:"雷", 8192:"龙", 16384:"兽", 32768:"兽战士", 65536:"恐龙", 131072:"鱼", 262144:"海龙", 524288:"爬虫", 1048576:"念动力", 2097152:"幻神兽", 4194304:"创造神", 8388608:"幻龙", 16777216:"电子界", 33554432:"幻想魔"}
+
+            def get_grid_pos(owner, loc, seq):
+                if owner == 0:
+                    if loc == 0x04:
+                        if seq < 5: return (4, seq + 2)
+                        elif seq == 5: return (3, 3)
+                        elif seq == 6: return (3, 5)
+                    elif loc == 0x08:
+                        if seq < 5: return (5, seq + 2)
+                        elif seq == 5: return (4, 1)
+                    elif loc == 0x10: return (4, 7)
+                    elif loc == 0x20: return (3, 7)
+                    elif loc == 0x40: return (5, 1)
+                    elif loc == 0x01: return (5, 7)
+                    elif loc == 0x02: return (6, 4)
+                elif owner == 1:
+                    if loc == 0x04:
+                        if seq < 5: return (2, 6 - seq)
+                        elif seq == 5: return (3, 5)
+                        elif seq == 6: return (3, 3)
+                    elif loc == 0x08:
+                        if seq < 5: return (1, 6 - seq)
+                        elif seq == 5: return (2, 7)
+                    elif loc == 0x10: return (2, 1)
+                    elif loc == 0x20: return (3, 1)
+                    elif loc == 0x40: return (1, 7)
+                    elif loc == 0x01: return (1, 1)
+                    elif loc == 0x02: return (0, 4)
+                return None
+
+            def render_card(c, loc, owner, is_hand=False, force_faceup=False):
+                if not c: return "" 
+                code = c.get("code", 0)
+                pos = c.get("pos", 0)
+                seq = c.get("seq", 0)
+                
+                is_mine = (owner == 0)
+                is_set = (pos in [0x2, 0x8, 0xa]) or (code == 0)
+                
+                should_hide = False
+                if not force_faceup:
+                    if is_hand: should_hide = not st.session_state.tgl_p0_hand if is_mine else not st.session_state.tgl_p1_hand
+                    elif is_set: should_hide = not st.session_state.tgl_p0_set if is_mine else not st.session_state.tgl_p1_set
+                
+                is_def = pos in [0x4, 0x8, 0xa]
+                is_monster_zone = (loc == 0x04) 
+                
+                rotation = 0
+                if is_def and is_monster_zone:
+                    rotation = 90 if is_mine else (-90 if st.session_state.tgl_rotate_p1 else 90)
+                elif not is_mine and st.session_state.tgl_rotate_p1 and loc in [0x04, 0x08, 0x40, 0x10, 0x20]:
+                    rotation = 180
+
+                hl_class = ""
+                if actor_data and actor_data.get('owner') == owner and actor_data.get('loc') == loc and actor_data.get('seq') == seq:
+                    hl_class = " hl-actor"
+                elif target_data and target_data.get('owner') == owner and target_data.get('loc') == loc and target_data.get('seq') == seq:
+                    hl_class = " hl-target"
+
+                # 🌟 核心优化：透视特效仅作用于场上的里侧卡片 (排除手牌)
+                # loc == 0x04 是怪兽区，loc == 0x08 是魔陷区
+                is_on_field = (loc == 0x04 or loc == 0x08)
+                xray_class = " xray-ghost" if (is_set and not should_hide and code != 0 and is_on_field) else ""
+
+                c_name = card_db_ui.get_card_name(code) if code else "未知卡片"
+                
+                title = ""
+                if is_set: title += "[面朝下] "
+                elif is_hand: title += "[手牌] "
+                title += f"【{c_name}】 ({code})"
+                
+                if code != 0:
+                    stats = card_db_ui.get_full_stats(code)
+                    t_race = RACE_MAP.get(stats[1], "未知")
+                    t_attr = ATTR_MAP.get(stats[2], "未知")
+                    if stats[8] > 0 or stats[9] > 0 or loc == 0x04: 
+                        title += f"&#10;⚔️ ATK: {c.get('atk', stats[8])} | 🛡️ DEF: {c.get('def', stats[9])}"
+                    if stats[3] > 0: title += f"&#10;⭐ 星级/阶级: {c.get('lvl', stats[3])}"
+                    title += f"&#10;🧬 种族: {t_race} | 🔮 属性: {t_attr}"
+                    if c.get("overlays", 0) > 0: title += f"&#10;💿 Xyz 素材数: {c.get('overlays', 0)}"
+                    if c.get("counters", 0) > 0: title += f"&#10;🎲 指示物: {c.get('counters', 0)}"
+
+                transform_style = f"transform: rotate({rotation}deg);" if rotation != 0 else ""
+                
+                if should_hide or code == 0:
+                    return f'<div class="ygo-card-wrapper"><div class="ygo-card facedown{hl_class}" style="{transform_style}" title="{title}"></div></div>'
+                else:
+                    img_url = f"https://cdn.233.momobako.com/ygoimg/{api_lang}/{code}.webp!half"
+                    # 🌟 注入幽灵特效类 xray_class
+                    return f'<div class="ygo-card-wrapper"><a href="https://ygocdb.com/card/{code}" target="_blank" style="display:block; width:100%; height:100%;"><img src="{img_url}" class="ygo-card{hl_class}{xray_class}" style="{transform_style}" title="{title}"></a></div>'
+
+            grid_html = { (r, c): '<div class="ygo-cell"></div>' for r in range(1, 6) for c in range(1, 8) }
+            for c in [2, 4, 6]: grid_html[(3, c)] = '<div class="ygo-cell empty-space"></div>'
+
+            to_play = state.get("to_play", 0)
+            turn_str = "我方回合" if to_play == 0 else "敌方回合"
+            grid_html[(3, 4)] = f'<div style="text-align:center;color:#fff;"><b>Turn {step_data.get("turn", "?")}</b><br><span style="color:#0ff">{step_data.get("phase", "?")}</span><br><span style="font-size:12px;color:#aaa;">({turn_str})</span></div>'
+
+            # 🌟 修复 2：在空位注入双方 LP 显示 (行3列2为 P1_LP，行3列6为 P0_LP)
+            grid_html[(3, 2)] = f'<div class="ygo-cell empty-space" style="display:flex; flex-direction:column; color:#ff4444; font-weight:bold; font-size:18px; text-shadow: 1px 1px 2px #000;"><span>P1 LP</span><span>{state.get("p1_lp", 8000)}</span></div>'
+            grid_html[(3, 6)] = f'<div class="ygo-cell empty-space" style="display:flex; flex-direction:column; color:#44ff44; font-weight:bold; font-size:18px; text-shadow: 1px 1px 2px #000;"><span>P0 LP</span><span>{state.get("p0_lp", 8000)}</span></div>'
+
+            def fill_board(zone_list, owner, loc):
+                for c in zone_list:
+                    rc = get_grid_pos(owner, loc, c['seq'])
+                    if rc: grid_html[rc] = f'<div class="ygo-cell">{render_card(c, loc, owner)}</div>'
+                    
+            fill_board(state.get('p0_mzone', []), 0, 0x04); fill_board(state.get('p0_szone', []), 0, 0x08)
+            fill_board(state.get('p1_mzone', []), 1, 0x04); fill_board(state.get('p1_szone', []), 1, 0x08)
+
+            # 🌟 修复魔法区越界 Bug：强制检查 expected_seq
+            def fixed_cell(r, c, label, count, loc_id, owner_id, expected_seq=-1):
+                active_c = None
+                for act_data in [actor_data, target_data]:
+                    if act_data and act_data.get('loc') == loc_id and act_data.get('owner') == owner_id:
+                        if expected_seq == -1 or act_data.get('seq') == expected_seq:
+                            active_c = act_data
+                            break
+                if active_c:
+                    content = render_card({"code": active_c['code'], "pos": 0, "seq": 0}, loc_id, owner_id, force_faceup=True)
+                else:
+                    content = f'<div style="color:gray;font-weight:bold;text-align:center;width:100%;">{label}<br>{count}</div>'
+                grid_html[(r, c)] = f'<div class="ygo-cell" style="border: 2px solid #555;">{content}</div>'
+
+            # 🌟 修复 1：读取刚刚在 Logger 中增加的 _len 字段 (并保留旧日志兼容)
+            fixed_cell(5, 7, "Deck", state.get("p0_deck_len", "?"), 0x01, 0)
+            fixed_cell(1, 1, "Deck", state.get("p1_deck_len", "?"), 0x01, 1)
+            fixed_cell(4, 7, "Grave", len(state.get('p0_grave', [])), 0x10, 0)
+            fixed_cell(2, 1, "Grave", len(state.get('p1_grave', [])), 0x10, 1)
+            fixed_cell(3, 7, "Removed", len(state.get('p0_removed', [])), 0x20, 0)
+            fixed_cell(3, 1, "Removed", len(state.get('p1_removed', [])), 0x20, 1)
+            
+            # 使用 get 获取新加的 extra_len 字段，如果没有（读取老日志）则 fallback 退回读列表长度
+            fixed_cell(5, 1, "Extra", state.get("p0_extra_len", len(state.get('p0_extra', []))), 0x40, 0)
+            fixed_cell(1, 7, "Extra", state.get("p1_extra_len", len(state.get('p1_extra', []))), 0x40, 1)
+            
+            # 🌟 强制检查 seq==5 才算场地区
+            fixed_cell(4, 1, "Field", "", 0x08, 0, expected_seq=5)
+            fixed_cell(2, 7, "Field", "", 0x08, 1, expected_seq=5)
+
+            # 🏹 SVG 连线计算
+            svg_html = ""
+            if actor_data and target_data:
+                arc = get_grid_pos(actor_data['owner'], actor_data['loc'], actor_data['seq'])
+                trc = get_grid_pos(target_data['owner'], target_data['loc'], target_data['seq'])
+                if arc and trc:
+                    ax = (arc[1] - 1) * 81 + 37.5; ay = (arc[0] - 1) * 112 + 53
+                    tx = (trc[1] - 1) * 81 + 37.5; ty = (trc[0] - 1) * 112 + 53
+                    svg_html = f"""
+                    <svg class="svg-overlay">
+                        <defs>
+                            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="#f00" />
+                            </marker>
+                        </defs>
+                        <line x1="{ax}" y1="{ay}" x2="{tx}" y2="{ty}" stroke="#f00" stroke-width="4" class="dash-line" marker-end="url(#arrowhead)" />
+                    </svg>
+                    """
+
+            board_html = '<div class="ygo-board-wrapper"><div class="ygo-board">'
+            for r in range(1, 6):
+                for c in range(1, 8): board_html += grid_html[(r, c)]
+            board_html += '</div>' + svg_html + '</div>'
+
+            p1_hand_html = '<div class="ygo-hand">' + "".join([f'<div style="width:60px;">{render_card(c, 0x02, 1, True)}</div>' for c in state.get('p1_hand', [])]) + '</div>'
+            p0_hand_html = '<div class="ygo-hand">' + "".join([f'<div style="width:60px;">{render_card(c, 0x02, 0, True)}</div>' for c in state.get('p0_hand', [])]) + '</div>'
+
+            st.markdown(css_style, unsafe_allow_html=True)
+            c_left, c_right = st.columns([6, 4])
+            
+            with c_left:
+                st.markdown(p1_hand_html, unsafe_allow_html=True)
+                st.markdown(board_html, unsafe_allow_html=True)
+                st.markdown(p0_hand_html, unsafe_allow_html=True)
+                
+                with st.expander("📂 " + _("展开查看 墓地 / 除外 / 额外 详情", "Expand Grave / Banished / Extra View")):
+                    col_p1, col_p0 = st.columns(2)
+                    with col_p1:
+                        st.write("P1 墓地 Grave"); st.markdown('<div class="ygo-hand" style="flex-wrap:wrap;">' + "".join([f'<div style="width:50px;">{render_card(c, 0x10, 1, force_faceup=True)}</div>' for c in state.get('p1_grave', [])]) + '</div>', unsafe_allow_html=True)
+                        st.write("P1 除外 Banished"); st.markdown('<div class="ygo-hand" style="flex-wrap:wrap;">' + "".join([f'<div style="width:50px;">{render_card(c, 0x20, 1, force_faceup=True)}</div>' for c in state.get('p1_removed', [])]) + '</div>', unsafe_allow_html=True)
+                        st.write("P1 额外 Extra"); st.markdown('<div class="ygo-hand" style="flex-wrap:wrap;">' + "".join([f'<div style="width:50px;">{render_card(c, 0x40, 1, force_faceup=True)}</div>' for c in state.get('p1_extra', [])]) + '</div>', unsafe_allow_html=True)
+                    with col_p0:
+                        st.write("P0 墓地 Grave"); st.markdown('<div class="ygo-hand" style="flex-wrap:wrap;">' + "".join([f'<div style="width:50px;">{render_card(c, 0x10, 0, force_faceup=True)}</div>' for c in state.get('p0_grave', [])]) + '</div>', unsafe_allow_html=True)
+                        st.write("P0 除外 Banished"); st.markdown('<div class="ygo-hand" style="flex-wrap:wrap;">' + "".join([f'<div style="width:50px;">{render_card(c, 0x20, 0, force_faceup=True)}</div>' for c in state.get('p0_removed', [])]) + '</div>', unsafe_allow_html=True)
+                        st.write("P0 额外 Extra"); st.markdown('<div class="ygo-hand" style="flex-wrap:wrap;">' + "".join([f'<div style="width:50px;">{render_card(c, 0x40, 0, force_faceup=True)}</div>' for c in state.get('p0_extra', [])]) + '</div>', unsafe_allow_html=True)
+
+            with c_right:
+                chain_list = state.get("chain", [])
+                hist_list = state.get("history", [])
+                
+                if chain_list or hist_list:
+                    st.subheader("📜 " + _("场面态势与连锁", "Board History & Chain"))
+                    if chain_list:
+                        for ch in chain_list:
+                            cname = card_db_ui.get_card_name(ch.get('code', 0))
+                            st.warning(f"⚡ 连锁 {ch.get('ct', '?')}: {cname}")
+                    if hist_list:
+                        h_names = [card_db_ui.get_card_name(h.get('code', 0)) for h in hist_list[:5]]
+                        st.caption(f"最近动作: {' ➡️ '.join(h_names)}")
+                        
+                st.subheader("🧠 " + _("AI 决策动作推演", "AI Operations"))
+                if action_desc:
+                    arr_hint = " 🎯 [红色虚线指向锁定目标]" if svg_html else ""
+                    st.info(f"👉 **AI 最终决定:** {action_desc}{arr_hint}")
+                
+                df_data = []
+                for opt in step_data.get("options", []):
+                    df_data.append({
+                        _("采纳", "Action"): "✅" if opt.get("is_chosen") else "",
+                        _("信心", "Confidence"): f"{opt.get('confidence', 0)*100:.1f}%",
+                        _("动作推演", "Operation Detail"): opt.get("desc", "")
+                    })
+                
+                df = pd.DataFrame(df_data)
+                def highlight_row(row):
+                    if row[_("采纳", "Action")] == "✅": return ['background-color: rgba(0, 255, 255, 0.2); font-weight: bold'] * len(row)
+                    return [''] * len(row)
+                
+                st.dataframe(df.style.apply(highlight_row, axis=1), use_container_width=True, height=550, hide_index=True)
+
+            if st.session_state.is_playing:
+                time.sleep(play_speed)
+                if st.session_state.replay_step < max_steps:
+                    st.session_state.replay_step += 1
+                    st.rerun()
+                else:
+                    st.session_state.is_playing = False
+                    st.rerun()
+
+# ==========================================
+# 📉 模块 X：TensorBoard 训练流形图
+# ==========================================
+elif menu == _("📉 训练流形图", "📉 TensorBoard"):
+    st.title(_("📉 TensorBoard 训练大盘", "📉 TensorBoard Dashboard"))
+    st.markdown(_("在这里直接观测 AI 训练的 Loss 曲线、熵值(探索欲)、以及各卡组的胜率走势！", 
+                  "View training curves, entropy, and win rates here directly!"))
+
+    # 🌟 修复 1: 强制使用 127.0.0.1 替代 localhost，防止 IPv6 解析横跳导致的闪烁
+    def is_tb_running(port=6006):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(('127.0.0.1', port)) == 0
+
+    tb_running = is_tb_running(6006)
+
+    # 顶部的控制按钮 (去除了 use_container_width 以防后续版本报错)
+    col1, col2, col3 = st.columns([2, 2, 6])
+    with col1:
+        if not tb_running:
+            if st.button("🚀 启动 TensorBoard", type="primary"):
+                # 🌟 修复 2: 后台静默启动，将标准输出和报错全部扔进黑洞，终端彻底清静！
+                subprocess.Popen(
+                    ["tensorboard", "--logdir", "./runs", "--port", "6006", "--host", "127.0.0.1"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                import time
+                time.sleep(2.5) # 给服务器 2.5 秒的启动时间
+                st.rerun()
+        else:
+            if st.button("🛑 关闭 TensorBoard"):
+                if os.name == 'nt':
+                    os.system("taskkill /F /IM tensorboard.exe")
+                else:
+                    os.system("pkill -f tensorboard")
+                import time
+                time.sleep(1)
+                st.rerun()
+    with col2:
+        if tb_running:
+            if st.button("🔄 刷新图表"):
+                st.rerun()
+
+    st.divider()
+
+    # 展示区
+    if tb_running:
+        st.success(_("🟢 TensorBoard 正在后台运行！", "🟢 TensorBoard is running!"))
+        
+        # 🌟 修复 3: 提供极强提示的外部链接作为兜底，这是最完美的浏览体验
+        st.markdown(_("### 👉 **[点此在新标签页中全屏打开 TensorBoard](http://127.0.0.1:6006)**", "### 👉 **[Click here to open TensorBoard in a new tab](http://127.0.0.1:6006)**"))
+        st.caption(_("如果下方内嵌窗口空白或闪烁，是因为部分浏览器严格拦截了本地端口的 iframe 嵌套，请直接点击上方链接使用浏览器原生标签页浏览。", "If the iframe below is blank, use the link above."))
+        
+        # 尝试嵌入，如果被拦截，用户还可以通过上面的链接走
+        components.iframe("http://127.0.0.1:6006", height=850, scrolling=True)
+    else:
+        st.info(_("⚪ TensorBoard 尚未启动，请点击左上方按钮启动服务器。", "⚪ TensorBoard is not running. Click Start."))

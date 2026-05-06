@@ -5,11 +5,15 @@ gamestate模块
 
 import struct
 import io
-import traceback # <--- 新增
+import traceback 
+import json
+import os
 from game_constants import LocationInfo, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
 from data_types import GameSnapshot, GlobalFeature, CardEntity, GameAction
+
+_META_STAPLES = None
 
 class MessageParser:
     # 基于源码的精确长度定义 (Payload长度)
@@ -556,7 +560,7 @@ class DuelState:
                 ctype, c, l, s, count = struct.unpack('<HBBBH', stream.read(7))
                 if c in [0,1] and s in self.field_map[c].get(l, {}):
                     self.field_map[c][l][s]['counters'] = max(0, self.field_map[c][l][s].get('counters', 0) - count)
-
+                    
             # [修正] 真正的装备雷达 MSG_EQUIP (93)
             elif msg_type == 93: 
                 equip_raw = struct.unpack('<I', stream.read(4))[0] # 装备卡的位置
@@ -843,10 +847,117 @@ class DuelState:
                             self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=bit, desc_str=f"Announce Bit {i}"))
                 
                 # 卡名 (142) / 数字 (143)
-                else:
+                elif msg_type == 142: # 卡名宣言：启动微型 RPN 虚拟机
+                    
+                    # 1. 获取引擎发来的 Opcodes (逆波兰表达式)
+                    opcodes = []
+                    for _ in range(count):
+                        buf = stream.read(4)
+                        if len(buf) < 4: break # 防御性编程
+                        opcodes.append(struct.unpack('<I', buf)[0])
+                    
+                    unique_codes = set()
+                    
+                    def add_valid_code(raw_code):
+                        pure_code = raw_code & 0x0FFFFFFF
+                        if pure_code > 10000: # 屏蔽乱码/Token
+                            try:
+                                card_db.get_full_stats(pure_code) # 数据库自检
+                                unique_codes.add(pure_code)
+                            except Exception:
+                                pass
+                    
+                    # 有些卡会把真实卡密直接作为参数发过来！
+                    for op in opcodes:
+                        if 10000 < op < 0x40000000: 
+                            add_valid_code(op)
+
+                    # 2. 收集自身卡组与公开情报
+                    my_cards = (self.p0_deck + self.p0_extra) if self.active_player == 0 else (self.p1_deck + self.p1_extra)
+                    for c in my_cards: add_valid_code(c)
+                        
+                    for p in [0, 1]:
+                        for code in self.known_hand_codes[p]: add_valid_code(code)
+                        for loc in [Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA]:
+                            for seq, info in self.field_map[p].get(loc, {}).items():
+                                code = info.get('code', 0)
+                                pos = info.get('pos', 0)
+                                is_public = (pos & 0x1 or pos & 0x4)
+                                if p != self.active_player and not is_public and loc not in [Zone.GRAVE, Zone.REMOVED]:
+                                    continue
+                                if code != 0: add_valid_code(code)
+
+                    # 3. 常识字典缓存
+                    global _META_STAPLES
+                    if _META_STAPLES is None:
+                        try:
+                            staples_path = os.path.join(os.path.dirname(__file__), 'meta_staples.json')
+                            with open(staples_path, 'r') as f: _META_STAPLES = json.load(f)
+                        except Exception:
+                            _META_STAPLES = [14558127, 23434538, 10045474, 24094653, 73642296, 32807846]
+                    for c in _META_STAPLES: add_valid_code(c)
+                    
+                    if not unique_codes: unique_codes = {14558127, 23434538}
+
+                    # 微型 RPN 逆波兰计算器
+                    def evaluate_rpn(code_to_test):
+                        if not opcodes: return True
+                        try:
+                            stats = card_db.get_full_stats(code_to_test)
+                            c_type = stats[0]; c_race = stats[1]; c_att = stats[2]; c_setcodes = stats[10]
+                        except:
+                            return False
+                        
+                        stack = []
+                        for op in opcodes:
+                            if op < 0x40000000: # 参数压栈
+                                stack.append(op)
+                            else: # 执行操作
+                                if not stack: return False
+                                if op == 0x40000100: # ISCODE
+                                    stack.append(1 if code_to_test == stack.pop() else 0)
+                                elif op == 0x40000101: # ISSETCARD
+                                    v = stack.pop()
+                                    match = 1 if any((sc & 0xffff) == (v & 0xffff) for sc in c_setcodes) else 0
+                                    stack.append(match)
+                                elif op == 0x40000102: # ISTYPE
+                                    stack.append(1 if (c_type & stack.pop()) else 0)
+                                elif op == 0x40000103: # ISRACE
+                                    stack.append(1 if (c_race & stack.pop()) else 0)
+                                elif op == 0x40000104: # ISATTRIBUTE
+                                    stack.append(1 if (c_att & stack.pop()) else 0)
+                                elif op == 0x40000004: # AND
+                                    if len(stack) < 2: return False
+                                    v2 = stack.pop(); v1 = stack.pop()
+                                    stack.append(1 if (v1 and v2) else 0)
+                                elif op == 0x40000005: # OR
+                                    if len(stack) < 2: return False
+                                    v2 = stack.pop(); v1 = stack.pop()
+                                    stack.append(1 if (v1 or v2) else 0)
+                                elif op == 0x40000007: # NOT
+                                    stack.append(0 if stack.pop() else 1)
+                                else:
+                                    stack.append(0) # 兜底未知操作
+                        return bool(stack[0]) if stack else True
+
+                    # 批改返回卡池，只保留满足 RPN 条件的选项
+                    filtered_codes = [c for c in unique_codes if evaluate_rpn(c)]
+                    
+                    # 防御机制：如果 RPN 解析有瑕疵导致全灭，回退到全集交给 RuleBot 强行穷举
+                    if not filtered_codes: 
+                        filtered_codes = list(unique_codes)
+                        
+                    self.announce_card_candidates = list(filtered_codes)
+                    
+                    # 此时，交给 AI 的选项将是 100% 完美的
+                    for i, code in enumerate(self.announce_card_candidates):
+                        self.current_valid_actions.append(GameAction(action_type=142, index=i, desc_id=code, desc_str=f"Announce_Blind_{code}"))
+                
+                elif msg_type == 143: # 数字宣言
                     for i in range(count):
-                        val = struct.unpack('<I', stream.read(4))[0]
-                        # 142 的 desc_id 是卡密，143 的 desc_id 是具体数字
+                        buf = stream.read(4)
+                        if len(buf) < 4: break
+                        val = struct.unpack('<I', buf)[0]
                         self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=val, desc_str=f"Announce Val {val}"))
 
 
@@ -872,10 +983,15 @@ class DuelState:
             turn_count=self.turn, phase_id=self.phase, to_play=self.active_player,
             my_lp=self.my_lp, op_lp=self.op_lp,
             my_hand_len=count_zone(0, Zone.HAND), op_hand_len=count_zone(1, Zone.HAND),
-            my_deck_len=count_zone(0, Zone.DECK), op_deck_len=count_zone(1, Zone.DECK),
+            
+            # --- 修复：使用真实的列表长度，而不是通过 field_map 统计 ---
+            my_deck_len=len(self.p0_deck), op_deck_len=len(self.p1_deck),
+            
             my_grave_len=count_zone(0, Zone.GRAVE), op_grave_len=count_zone(1, Zone.GRAVE),
             my_removed_len=count_zone(0, Zone.REMOVED), op_removed_len=count_zone(1, Zone.REMOVED),
-            my_extra_len=count_zone(0, Zone.EXTRA), op_extra_len=count_zone(1, Zone.EXTRA)
+            
+            # --- 修复：额外卡组同理 ---
+            my_extra_len=len(self.p0_extra), op_extra_len=len(self.p1_extra)
         )
 
         entities = []

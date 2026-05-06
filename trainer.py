@@ -6,6 +6,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import json
 import os
 import time
 import datetime
@@ -15,6 +16,7 @@ import gc
 import threading
 import queue
 import glob
+import pandas as pd
 
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
@@ -42,7 +44,7 @@ MINIBATCH_SIZE = 128    # Mini-batch: 梯度下降时的切片大小
 CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
-MAX_EPISODE_STEPS = 5000 # 单局最大步数，防止死循环
+MAX_EPISODE_STEPS = 2000 # 单局最大步数，防止死循环
 
 class MemoryDataset(Dataset):
     def __init__(self, data):
@@ -123,7 +125,7 @@ class PPOTrainer:
         
         # 清理上一次意外中断留下的临时文件
         print("🧹 正在清理上一次训练遗留的临时通讯文件...")
-        # 🌟 修复：加上 .pt* 就能同时匹配 .pt 和 .pt.tmp
+        # 修复：加上 .pt* 就能同时匹配 .pt 和 .pt.tmp
         for f in glob.glob("tmp_rollout_*.pt*") + glob.glob("tmp_weights_*.pt*"):
             try: os.remove(f)
             except Exception as e: 
@@ -131,11 +133,11 @@ class PPOTrainer:
 
         # 初始化 AI
         self.agent = AiBot(device=self.device, net_config=self.net_config)
-        # [新增] 内存布局优化
+        # 内存布局优化
         #self.agent.net = self.agent.net.to(memory_format=torch.channels_last)
         self.agent.net.train()
 
-        # [新增] 编译优化
+        # 编译优化
         if self.enable_compile and self.device.type == 'cuda':
             try:
                 print("🚀 [编译] 正在启用 torch.compile...")
@@ -145,7 +147,7 @@ class PPOTrainer:
 
         self.optimizer = optim.Adam(self.agent.net.parameters(), lr=LR)
         # 初始化 Scaler (BF16时其实不需要缩放，但为了代码通用，我们保留它)
-        # [修改] 使用新版 API，指定设备类型 'cuda'
+        # 使用新版 API，指定设备类型 'cuda'
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.amp_dtype == torch.float16))
         # 初始化环境 (仅用于参数查询等，不参与对战)
         self.env = GalateaEnv()
@@ -160,7 +162,7 @@ class PPOTrainer:
         # 容量 = 目标步数 + 容错余量
         self.max_buffer_steps = self.update_timesteps + (self.num_workers * 1000)
 
-        # [新增] 初始化 TensorBoard 记录器
+        # 初始化 TensorBoard 记录器
         # log_dir 可以按时间戳命名，方便区分不同次训练
         import datetime
         time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -191,13 +193,13 @@ class PPOTrainer:
             self.req_q = None
             self.resp_qs = [None] * self.num_workers
 
-        # [修改] 恢复训练逻辑简化为调用函数
+        # 恢复训练逻辑简化为调用函数
         if resume_path and os.path.exists(resume_path):
             self.load_checkpoint(resume_path)
 
     def load_checkpoint(self, path):
         """
-        [新增] 独立的加载函数，增强了对编译模型的兼容性
+        独立的加载函数，增强了对编译模型的兼容性
         """
         print(f"📥 正在从 {path} 恢复训练...")
         try:
@@ -355,7 +357,7 @@ class PPOTrainer:
         total_rewards = []
         total_lens = []
 
-        ## 新增：统计先后手胜率的全局计数器
+        ## 统计先后手胜率的全局计数器
         t_stats = {k: 0 for k in [
             'wins_all_first', 'games_all_first', 'wins_all_second', 'games_all_second',
             'wins_self_first', 'games_self_first', 'wins_self_second', 'games_self_second',
@@ -363,10 +365,11 @@ class PPOTrainer:
         ]}
 
         t_deck_stats = {}
+        all_match_records = []
 
         cursor = 0
 
-        # 核心改动：逐文件加载并直接注入预分配的静态内存池，避免一次性加载全部数据导致内存暴涨
+        # 逐文件加载并直接注入预分配的静态内存池，避免一次性加载全部数据导致内存暴涨
         for i, f in enumerate(file_list):
             try:
                 # 1. 仅将当前 1 个 Worker 的数据加载到物理内存
@@ -385,16 +388,8 @@ class PPOTrainer:
 
                 # 提取卡组雷达数据并聚合
                 for record in data.get('deck_records', []):
-                    key = f"{record['env']}/{record['deck']}"
-                    if key not in t_deck_stats:
-                        t_deck_stats[key] = {'w_1st':0, 'g_1st':0, 'w_2nd':0, 'g_2nd':0}
-                        
-                    if record['is_first']:
-                        t_deck_stats[key]['g_1st'] += 1
-                        if record['is_win']: t_deck_stats[key]['w_1st'] += 1
-                    else:
-                        t_deck_stats[key]['g_2nd'] += 1
-                        if record['is_win']: t_deck_stats[key]['w_2nd'] += 1
+                    record['iteration'] = self.iteration
+                    all_match_records.append(record) # 需要在读取 file_list 前声明 all_match_records = []
 
                 # 3. 如果是第一个文件，初始化静态内存池
                 if not self.buffer_allocated:
@@ -485,6 +480,22 @@ class PPOTrainer:
 
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
         self.writer.add_scalar('Rollout/Average_Length', avg_len, self.iteration)
+
+        # WebUI 数据脱水：将本轮卡组胜率抛出给前端，零性能损耗
+        if all_match_records:
+            web_data_dir = "./web_data"
+            os.makedirs(web_data_dir, exist_ok=True)
+            csv_path = os.path.join(web_data_dir, "match_history.csv")
+            
+            df_new = pd.DataFrame(all_match_records)
+            try:
+                if not os.path.exists(csv_path):
+                    df_new.to_csv(csv_path, index=False, mode='w', encoding='utf-8')
+                else:
+                    df_new.to_csv(csv_path, index=False, mode='a', header=False, encoding='utf-8')
+            except Exception as e:
+                print(f"⚠️ [WebUI] CSV 数据库写入冲突: {e}")
+
         self.global_step += cursor
         
         return cursor # 核心改动：不再返回内存大字典，而是返回有效步数！

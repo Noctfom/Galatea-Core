@@ -30,7 +30,7 @@ DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
 # GAE 参数 (和 Trainer 保持一致)
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
-MAX_EPISODE_STEPS = 5000
+MAX_EPISODE_STEPS = 2000
 
 
 def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None, opp_config=None):
@@ -219,7 +219,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     if last_decision_value is not None:
                         current_step_ignore_list.append(last_decision_value)
                     
-                    if consecutive_retries > 40: 
+                    current_limit = 100 if (last_interaction_msg and last_interaction_msg[0] == 142) else 40
+                    if consecutive_retries > current_limit: 
                         # AI疯狂瞎按：直接判输，结束对局并惩罚
                         winner = 1 - player
                         win_reason = 0
@@ -362,6 +363,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 resp = chosen.decision_bytes
                             elif msg_type in [10, 11, 15, 16]:
                                 resp = agent._pack_response(chosen, msg_type=msg_type)
+                            elif msg_type in [140, 141, 142]:
+                                resp = struct.pack('<I', int(chosen.desc_id))
                             else:
                                 val = chosen.index
                                 # 位置处理
@@ -491,7 +494,14 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 if opp_type == "self": 
                                     stats['wins_self_second'] += 1
                             my_deck = d1_name if train_p_id == 0 else d2_name
-                            deck_records.append({'env': env_name, 'deck': my_deck, 'is_first': (train_p_id == 0), 'is_win': True})
+                            opp_deck = d2_name if train_p_id == 0 else d1_name
+                            deck_records.append({
+                                'env': env_name, 
+                                'my_deck': my_deck, 
+                                'opp_deck': opp_deck, # <--- 记录对手是谁
+                                'is_first': (train_p_id == 0), 
+                                'is_win': True
+                            })
                                 
                             if opp_type == "hist": 
                                 stats['wins_hist'] += 1
@@ -507,7 +517,14 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         elif winner == opp_p_id:
                             final_reward = -1.0 # 输了
                             my_deck = d1_name if train_p_id == 0 else d2_name
-                            deck_records.append({'env': env_name, 'deck': my_deck, 'is_first': (train_p_id == 0), 'is_win': False})
+                            opp_deck = d2_name if train_p_id == 0 else d1_name
+                            deck_records.append({
+                                'env': env_name, 
+                                'my_deck': my_deck, 
+                                'opp_deck': opp_deck, 
+                                'is_first': (train_p_id == 0), 
+                                'is_win': False
+                            })
                         else:
                             stats['draws'] += 1
                             final_reward = 0.0  # 平局

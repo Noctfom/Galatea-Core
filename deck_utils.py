@@ -21,31 +21,39 @@ def load_deck(base_dir, deck_name):
     """根据名字加载卡组"""
     filepath = os.path.join(base_dir, f"{deck_name}.ydk")
     d = Deck(name=deck_name)
-    current_section = 'main'
+    current_section = 'ignore' # 初始状态为忽略，直到碰到 #main
     
     if not os.path.exists(filepath):
         return None
 
     # 使用 errors='ignore' 防止因为奇怪字符导致崩溃
-    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as f:
         for line in f:
             line = line.strip()
-            if line.startswith('!'): continue
+            if not line: continue
+            if line.startswith('!'): 
+                current_section = 'ignore' # 暂时忽略 side
+                continue
+                
+            # 核心修复：绝对白名单区域划分
             if line.startswith('#'):
-                if 'extra' in line: current_section = 'extra'
-                elif 'main' in line: current_section = 'main'
+                if line == '#main': current_section = 'main'
+                elif line == '#extra': current_section = 'extra'
+                else: current_section = 'ignore' # 屏蔽 #pickup, #case 等一切杂音
                 continue
             
+            # 如果处于被忽略的区域，直接跳过解析
+            if current_section == 'ignore':
+                continue
+                
             try:
                 code = int(line)
                 if current_section == 'main': d.main.append(code)
                 elif current_section == 'extra': d.extra.append(code)
-            except Exception as e:
-                print(f"[Deck]⚠️ 解析卡组 {deck_name} 时遇到非整数行: '{line}' (错误: {e})")
-                continue
+            except Exception:
+                print(f"[Deck] ⚠️ 解析 {deck_name}.ydk 时遇到非整数行: {line}")
             
     return d
-
 
 def get_random_deck_pair(ydk_dir='./decks'):
     """
