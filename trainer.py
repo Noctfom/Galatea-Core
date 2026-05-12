@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore", category=UserWarning) # 屏蔽 PyTorch 2.0 啰
 
 # === 超参数配置 ===
 LR = 1e-4               # Learning Rate: 步长，决定学得有多快（太快容易震荡）
-GAMMA = 0.99            # Discount Factor: 远视眼程度，0.99表示很看重未来收益
+GAMMA = 0.998            # Discount Factor: 远视眼程度，0.998表示很看重未来收益
 GAE_LAMBDA = 0.95       # GAE参数: 平衡方差和偏差的关键
 UPDATE_TIMESTEPS = 2048 # Batch Size: 攒多少经验升一级
 EPOCHS = 4              # PPO Update Epochs:同一批数据反复榨取几次
@@ -45,47 +45,23 @@ CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
 MAX_EPISODE_STEPS = 2000 # 单局最大步数，防止死循环
-
-class MemoryDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
-    def __len__(self):
-        return len(self.data)
-    def __getitem__(self, idx):
-        return self.data[idx]
     
-def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, result_q):
+def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, result_q, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4):
     """用于原生 Process 的安全包装器，防止 DLL 崩溃导致主进程死锁"""
     try:
         from worker import worker_process
-        res = worker_process(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q)
+        res = worker_process(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, worker_timeout=worker_timeout, gamma=gamma, gae_lambda=gae_lambda, num_workers=num_workers)
         result_q.put((worker_id, res))
     except Exception as e:
         print(f"Worker {worker_id} 发生异常退出: {e}")
         result_q.put((worker_id, None))
 
-def collate_fn(batch):
-    obs_list = [item['obs'] for item in batch]
-    obs_batch = {}
-    # 将字典中的 tensor 堆叠
-    for k in obs_list[0].keys():
-        obs_batch[k] = torch.cat([x[k] for x in obs_list], dim=0)
-    
-    actions = torch.stack([item['action'] for item in batch])
-    old_log_probs = torch.stack([item['log_prob'] for item in batch])
-    returns = torch.tensor([item['return'] for item in batch], dtype=torch.float32)
-    advantages = torch.tensor([item['advantage'] for item in batch], dtype=torch.float32)
-    valid_actions_list = [item['valid_actions'] for item in batch]
-    
-    return obs_batch, actions, old_log_probs, returns, advantages, valid_actions_list
-
 class PPOTrainer:
-    # [修改] 增加 compile_model 参数
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None, 
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cuda', async_infer=False, compile_model=True): # <--- 新增
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cuda', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2): # <--- 新增
         self.save_dir = save_dir
         self.deck_dir = deck_dir
-        self.update_timesteps = update_timesteps  # [新增] 存下来
+        self.update_timesteps = update_timesteps
         self.mini_batch_size = mini_batch_size
         self.num_workers = num_workers
         self.worker_device = worker_device
@@ -98,7 +74,13 @@ class PPOTrainer:
             net_config = {'d_model': 256, 'n_heads': 4, 'n_layers': 2, 'vocab_size': 20000}
         
         self.net_config = net_config 
-        
+        self.worker_timeout = worker_timeout
+        self.gamma = gamma
+        self.lr = lr
+        self.entropy = entropy
+        self.gae_lambda = gae_lambda
+        self.clip_eps = clip_eps
+
         # 硬件检查与黑科技自动配置
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.amp_dtype = torch.float16 # 默认兼容老显卡
@@ -145,7 +127,7 @@ class PPOTrainer:
             except Exception as e:
                 print(f"⚠️ 编译跳过: {e}")
 
-        self.optimizer = optim.Adam(self.agent.net.parameters(), lr=LR)
+        self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
         # 初始化 Scaler (BF16时其实不需要缩放，但为了代码通用，我们保留它)
         # 使用新版 API，指定设备类型 'cuda'
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.amp_dtype == torch.float16))
@@ -164,9 +146,9 @@ class PPOTrainer:
 
         # 初始化 TensorBoard 记录器
         # log_dir 可以按时间戳命名，方便区分不同次训练
-        import datetime
         time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.writer = SummaryWriter(log_dir=f"./runs/galatea_{time_str}")
+        self.run_id = time_str
         print(f"📊 TensorBoard 日志将保存至: ./runs/galatea_{time_str}")
 
         # Windows 必须设置
@@ -227,7 +209,7 @@ class PPOTrainer:
                     
                     self.agent.net.train()
                     # 重建优化器 (因为网络参数对象变了)
-                    self.optimizer = optim.Adam(self.agent.net.parameters(), lr=LR)
+                    self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
 
             # 2. 权重加载 (核心修复：处理 compile 产生的前缀)
             state_dict = checkpoint['model_state_dict']
@@ -316,7 +298,11 @@ class PPOTrainer:
                 steps_per_worker,
                 self.worker_device,
                 self.req_q, self.resp_qs[i],        # 恢复队列传参
-                worker_opp_configs[i]
+                worker_opp_configs[i],
+                self.worker_timeout,
+                self.gamma,
+                self.gae_lambda,
+                self.num_workers
             ))
             p.daemon = True
             p.start()
@@ -325,14 +311,22 @@ class PPOTrainer:
         print(f"   ... {'异步 GPU Server' if self.async_infer else '纯本地 CPU'} 运算中 ...")
         
         # 等待工人自然死亡
+        start_wait = time.time()
+        while time.time() - start_wait < self.worker_timeout:
+            all_dead = True
+            for p in processes:
+                if p.is_alive(): all_dead = False
+            if all_dead: break
+            time.sleep(1.0)
+
+        # 时间到，执行收尸
         for p in processes:
-            p.join(timeout=300)
             if p.is_alive():
-                print("⚠️ 侦测到 Worker 卡死在 C++ 引擎中，执行物理超度...")
+                print(f"⏳ [Trainer] 经过 {self.worker_timeout} 秒仍有 Worker 未完成采集。触发安全超时截断机制，终止冗余进程。")
                 p.terminate() 
-                p.join() # 🌟 必须收尸
+                p.join()
             try: 
-                p.close() # 🌟 强制释放 Windows 进程句柄
+                p.close() # 强制释放 Windows 进程句柄
             except Exception as e: 
                 print(f"[trainer]⚠️ 无法关闭 Worker 进程 (可能已被系统回收): {e}")
 
@@ -390,6 +384,16 @@ class PPOTrainer:
                 for record in data.get('deck_records', []):
                     record['iteration'] = self.iteration
                     all_match_records.append(record) # 需要在读取 file_list 前声明 all_match_records = []
+                    dk = record['my_deck']
+                    if dk not in t_deck_stats:
+                        t_deck_stats[dk] = {'g_1st':0, 'w_1st':0, 'g_2nd':0, 'w_2nd':0}
+
+                    if record['is_first']:
+                        t_deck_stats[dk]['g_1st'] += 1
+                        if record['is_win']: t_deck_stats[dk]['w_1st'] += 1
+                    else:
+                        t_deck_stats[dk]['g_2nd'] += 1
+                        if record['is_win']: t_deck_stats[dk]['w_2nd'] += 1
 
                 # 3. 如果是第一个文件，初始化静态内存池
                 if not self.buffer_allocated:
@@ -472,11 +476,11 @@ class PPOTrainer:
             
             # TensorBoard 会自动根据 key 的斜杠 "/" 创建子文件夹
             if g_total > 0:
-                self.writer.add_scalar(f"Deck_{key}/Total", w_total / g_total, self.iteration)
+              self.writer.add_scalar(f"Deck_WinRates/{key}_Total", w_total / g_total, self.iteration)
             if ds['g_1st'] > 0:
-                self.writer.add_scalar(f"Deck_{key}/First", ds['w_1st'] / ds['g_1st'], self.iteration)
+                self.writer.add_scalar(f"Deck_WinRates/{key}_First", ds['w_1st'] / ds['g_1st'], self.iteration)
             if ds['g_2nd'] > 0:
-                self.writer.add_scalar(f"Deck_{key}/Second", ds['w_2nd'] / ds['g_2nd'], self.iteration)
+                self.writer.add_scalar(f"Deck_WinRates/{key}_Second", ds['w_2nd'] / ds['g_2nd'], self.iteration)
 
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
         self.writer.add_scalar('Rollout/Average_Length', avg_len, self.iteration)
@@ -485,7 +489,8 @@ class PPOTrainer:
         if all_match_records:
             web_data_dir = "./web_data"
             os.makedirs(web_data_dir, exist_ok=True)
-            csv_path = os.path.join(web_data_dir, "match_history.csv")
+            csv_filename = f"match_history_{self.run_id}.csv"
+            csv_path = os.path.join(web_data_dir, csv_filename)
             
             df_new = pd.DataFrame(all_match_records)
             try:
@@ -506,76 +511,90 @@ class PPOTrainer:
         """
         print("🚀 [Server] 异步推断服务器已启动，等待 Worker 请求...")
         self.agent.net.eval()
-        
         while not stop_event.is_set():
-            requests = []
             try:
-                # 1. 尝试获取第一个请求
-                item = req_q.get(timeout=0.05)
-                # 解包：现在是 3 个元素
-                wid, msg_iter, numpy_dict = item
-                
-                # 防污染安检：如果请求轮次落后于主线程轮次，直接丢弃
-                if msg_iter >= iter_tracker.value:
-                    requests.append((wid, numpy_dict)) # 安检通过，剥离 iter_id 放入处理列表
-                
-                # 2. 尝试凑齐这批次的其它请求
-                while len(requests) < self.num_workers:
-                    try:
-                        item = req_q.get_nowait()
-                        wid, msg_iter, numpy_dict = item
-                        
-                        # 同样进行防污染安检
-                        if msg_iter >= iter_tracker.value:
-                            requests.append((wid, numpy_dict))
-                    except queue.Empty:
-                        break
-            except queue.Empty:
-                pass
-            
-            if not requests:
-                continue
-                
-            # --- 1. 光速解包并恢复张量 ---
-            worker_ids = [r[0] for r in requests]
-            batch_obs = {}
-            for k in requests[0][1].keys():
-                #把 np.stack 换成 np.concatenate，并且指定 axis=0
-                stacked = np.concatenate([r[1][k] for r in requests], axis=0)
-                
-                # 按原样恢复成 PyTorch 认识的类型
-                if stacked.dtype == np.bool_:
-                    tensor = torch.from_numpy(stacked).to(torch.bool)
-                elif stacked.dtype == np.float16:
-                    tensor = torch.from_numpy(stacked).to(torch.float32) # 网络计算需要 fp32
-                else:
-                    tensor = torch.from_numpy(stacked).to(torch.long)
-                    
-                batch_obs[k] = tensor.to(self.device, non_blocking=True)
-            
-            with torch.amp.autocast('cuda', dtype=self.amp_dtype):
-                with torch.no_grad():
-                    # 修复1：加上 v_inputs，接收第5个返回值
-                    actions, log_probs, _, values, v_inputs = self.agent.get_action_and_value_from_tensor(batch_obs, None)
-                    # 修复2：直接在 GPU 服务端计算出 RND 奖励
-                    rnd_rewards = self.agent.net.rnd(v_inputs)
-                    self.agent.net.update_rnd_stats(v_inputs)
-            
-            # --- 4. 组装回传封包 ---
-            # 新增 .detach()，彻底斩断与 GPU 计算图的最后一点阴阳联系
-            packed_returns = torch.stack([
-                actions.to(torch.float32), 
-                log_probs.to(torch.float32), 
-                values.squeeze(-1).to(torch.float32),
-                rnd_rewards.to(torch.float32)
-            ], dim=1).detach().cpu()
-            
-            for i, wid in enumerate(worker_ids):
-                # 转为 numpy 数组发回给 Worker
+                requests = []
                 try:
-                    resp_qs[wid].put(packed_returns[i].numpy(), timeout=1.0)
-                except queue.Full:
-                    pass # 忽略死掉的 Worker
+                    # 1. 尝试获取第一个请求
+                    item = req_q.get(timeout=0.05)
+                    # 解包：现在是 3 个元素
+                    wid, msg_iter, numpy_dict = item
+                    
+                    # 防污染安检：如果请求轮次落后于主线程轮次，直接丢弃
+                    if msg_iter >= iter_tracker.value:
+                        requests.append((wid, numpy_dict)) # 安检通过，剥离 iter_id 放入处理列表
+                    
+                    # 2. 尝试凑齐这批次的其它请求
+                    while len(requests) < self.num_workers:
+                        try:
+                            item = req_q.get_nowait()
+                            wid, msg_iter, numpy_dict = item
+                            
+                            # 同样进行防污染安检
+                            if msg_iter >= iter_tracker.value:
+                                requests.append((wid, numpy_dict))
+                        except queue.Empty:
+                            break
+                except queue.Empty:
+                    pass
+                
+                if not requests:
+                    continue
+                    
+                # --- 1. 光速解包并恢复张量 ---
+                worker_ids = [r[0] for r in requests]
+                batch_obs = {}
+                for k in requests[0][1].keys():
+                    #把 np.stack 换成 np.concatenate，并且指定 axis=0
+                    stacked = np.concatenate([r[1][k] for r in requests], axis=0)
+
+                    # [ Fail-Fast 安检哨卡 ] 不洗白数据，一旦发现 NaN 或 Inf，当场抓出内鬼
+                    if stacked.dtype in [np.float16, np.float32]:
+                        if np.isnan(stacked).any() or np.isinf(stacked).any():
+                            # 找出到底是哪个 Worker 传来的毒药
+                            poisoned_workers = [req[0] for req in requests if np.isnan(req[1][k]).any() or np.isinf(req[1][k]).any()]
+                            # 直接抛出异常，触发底下的 except 熔断
+                            raise ValueError(f"🛑 发现致命毒素！Worker {poisoned_workers} 传输了包含 NaN/Inf 的极端超界特征 '{k}'！")
+                    
+                    # 按原样恢复成 PyTorch 认识的类型
+                    if stacked.dtype == np.bool_:
+                        tensor = torch.from_numpy(stacked).to(torch.bool)
+                    elif stacked.dtype == np.float16:
+                        tensor = torch.from_numpy(stacked).to(torch.float32) # 网络计算需要 fp32
+                    else:
+                        tensor = torch.from_numpy(stacked).to(torch.long)
+                        
+                    batch_obs[k] = tensor.to(self.device, non_blocking=True)
+                
+                with torch.amp.autocast('cuda', dtype=self.amp_dtype):
+                    with torch.no_grad():
+                        # 加上 v_inputs，接收第5个返回值
+                        actions, log_probs, _, values, v_inputs = self.agent.get_action_and_value_from_tensor(batch_obs, None)
+                        # 直接在 GPU 服务端计算出 RND 奖励(暂时舍弃)
+                        #rnd_rewards = self.agent.net.rnd(v_inputs)
+                        #self.agent.net.update_rnd_stats(v_inputs)
+                
+                # --- 4. 组装回传封包 ---
+                # 新增 .detach()，彻底斩断与 GPU 计算图的最后一点阴阳联系
+                packed_returns = torch.stack([
+                    actions.to(torch.float32), 
+                    log_probs.to(torch.float32), 
+                    values.squeeze(-1).to(torch.float32),
+                    torch.zeros_like(actions, dtype=torch.float32) #暂时舍弃rnd,用0占位
+                ], dim=1).detach().cpu()
+                
+                for i, wid in enumerate(worker_ids):
+                    # 转为 numpy 数组发回给 Worker
+                    try:
+                        resp_qs[wid].put(packed_returns[i].numpy(), timeout=1.0)
+                    except queue.Full:
+                        pass # 忽略死掉的 Worker
+
+            except Exception as e:
+                # 当批次中出现毒药数据(如 NaN)，拦截异常，仅抛弃这一批次
+                print(f"\n🚨 [Server 局部熔断] 推断批次出现异常，已自动丢弃并恢复服务: {e}")
+                # import traceback; traceback.print_exc() # 嫌吵可以注释掉堆栈打印
+                time.sleep(0.1) # 稍微缓一下继续服务
 
     def update_policy(self, total_steps):
         """
@@ -593,7 +612,15 @@ class PPOTrainer:
 
         # [优化 1] 全局优势归一化，稳定训练方向
         if len(cpu_advantages) > 1:
-            cpu_advantages = (cpu_advantages - cpu_advantages.mean()) / (cpu_advantages.std() + 1e-8)
+            adv_mean = cpu_advantages.mean()
+            adv_std = cpu_advantages.std()
+            
+            # 严密防范方差除零 NaN
+            if torch.isnan(adv_std) or adv_std < 1e-5:
+                print(f"⚠️ 警告: 优势标准差过小 ({adv_std:.5f})，已自动跳过归一化以防止 NaN")
+                cpu_advantages = cpu_advantages - adv_mean
+            else:
+                cpu_advantages = (cpu_advantages - adv_mean) / (adv_std + 1e-8)
         
         batch_size = cpu_actions.shape[0]
 
@@ -616,7 +643,7 @@ class PPOTrainer:
                     else:
                         mb_obs[k] = cpu_t.to(device=self.device, dtype=torch.long, non_blocking=True)
                 
-                mb_actions = cpu_actions[mb_idx].to(self.device, non_blocking=True)
+                mb_actions = cpu_actions[mb_idx].to(self.device, dtype=torch.long, non_blocking=True)
                 mb_old_log_probs = cpu_log_probs[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
                 mb_returns = cpu_returns[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
                 mb_advs = cpu_advantages[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
@@ -627,22 +654,23 @@ class PPOTrainer:
                     logits, values, v_input = self.agent.net(mb_obs)
                     values = values.squeeze(1)
 
-                    # 计算 RND 预测误差损失，让 Predictor 学习当前状态
-                    rnd_loss = self.agent.net.rnd(v_input.detach()).mean()
+                    # 计算 RND 预测误差损失，让 Predictor 学习当前状态(暂时舍弃)
+                    #rnd_loss = self.agent.net.rnd(v_input.detach()).mean()
 
                     dist = torch.distributions.Categorical(logits=logits)
                     new_log_probs = dist.log_prob(mb_actions)
                     entropy = dist.entropy()
                     ratio = torch.exp(new_log_probs - mb_old_log_probs)
                     surr1 = ratio * mb_advs
-                    surr2 = torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * mb_advs
+                    surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * mb_advs
                     
                     # 拆解 Loss，方便我们在图表里监控
                     policy_loss = -torch.min(surr1, surr2).mean()
-                    value_loss = 0.5 * ((values - mb_returns) ** 2).mean()
+                    value_loss_fn = nn.SmoothL1Loss()
+                    value_loss = value_loss_fn(values, mb_returns)
                     entropy_loss = -entropy.mean()
                     
-                    loss = policy_loss + VALUE_LOSS_COEF * value_loss + ENTROPY_COEF * entropy_loss + rnd_loss
+                    loss = policy_loss + VALUE_LOSS_COEF * value_loss + self.entropy * entropy_loss # + rnd_loss 暂时舍弃
 
                 if torch.isnan(loss) or torch.isinf(loss):
                     self.optimizer.zero_grad(set_to_none=True)
@@ -652,7 +680,7 @@ class PPOTrainer:
                     self.writer.add_scalar('Train/Total_Loss', loss.item(), self.train_step)
                     self.writer.add_scalar('Train/Policy_Loss', policy_loss.item(), self.train_step) # 策略偏移
                     self.writer.add_scalar('Train/Value_Loss', value_loss.item(), self.train_step)   # 价值预测准确度
-                    self.writer.add_scalar('Train/Entropy', entropy.mean().item(), self.train_step)  # 🌟 探索欲 (如果急剧降到0，说明AI变傻钻牛角尖了)
+                    self.writer.add_scalar('Train/Entropy', entropy.mean().item(), self.train_step)  # 探索欲 (如果急剧降到0，说明AI变傻钻牛角尖了)
                 self.train_step += 1
 
                 self.optimizer.zero_grad(set_to_none=True)
@@ -715,7 +743,12 @@ class PPOTrainer:
                     'net_config': self.net_config, 
                     'iteration': self.iteration,
                     'train_step': self.train_step,   # [新增] TensorBoard 的 X 轴坐标
-                    'global_step': self.global_step  # [新增] 环境交互总步数
+                    'global_step': self.global_step,  # [新增] 环境交互总步数
+                    'gamma': self.gamma,
+                    'lr': self.lr,
+                    'entropy': self.entropy,
+                    'gae_lambda': self.gae_lambda,
+                    'clip_eps': self.clip_eps
                 }
                 torch.save(checkpoint, path)
                 print(f"💾 Model saved: {path}")

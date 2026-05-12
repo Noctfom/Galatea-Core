@@ -9,17 +9,13 @@ from galatea_env import GalateaEnv
 import deck_utils
 import run_self_play # 引入刚才改好的 worker
 
-# ================= 配置 =================
-CORE_DIR = r"E:\Galatea_Core\ocgcore.dll"# ocgcore.dll 路径
-DECK_DIR = r"E:\Galatea_Core\decks"# 卡组文件夹路径
-TOTAL_GAMES = 100 # 你可以在这里修改总局数
-# =======================================
-
 class DuelManager:
     def __init__(self, core_dir, deck_dir):
         self.deck_dir = deck_dir
-        print("🔧 初始化核心环境...")
-        self.env = GalateaEnv(core_dir) 
+        print(f"🔧 初始化核心环境: {core_dir}")
+        # 如果是相对路径，转换为绝对路径防止 cdb 加载错位
+        import os
+        self.env = GalateaEnv(os.path.abspath(core_dir))
 
     def run_tournament(self, n_games):
         """运行 N 场决斗并统计"""
@@ -34,7 +30,7 @@ class DuelManager:
 
         for i in range(1, n_games + 1):
             # 1. 选卡组 (使用增强版 deck_utils)
-            name1, d1, name2, d2 = deck_utils.get_random_deck_pair(self.deck_dir)
+            env_name, name1, d1, name2, d2 = deck_utils.get_random_deck_pair(self.deck_dir)
             if not d1: 
                 print("⚠️ 无法加载卡组，跳过")
                 continue
@@ -91,7 +87,3 @@ class DuelManager:
             )
         
         console.print(table)
-
-if __name__ == "__main__":
-    manager = DuelManager(CORE_DIR, DECK_DIR)
-    manager.run_tournament(TOTAL_GAMES)

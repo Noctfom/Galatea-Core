@@ -9,6 +9,7 @@ import io
 import random
 import itertools
 from game_constants import LocationInfo
+from card_reader import card_db
 
 # --- 消息类型常量 ---
 MSG_SELECT_BATTLECMD = 10
@@ -38,6 +39,13 @@ POS_FACEUP_DEFENSE = 0x4
 POS_FACEDOWN_DEFENSE = 0x8
 
 # --- 辅助解析函数 ---
+
+_shared_valid_actions = []
+
+def sync_valid_actions(actions):
+    """接收来自 gamestate 完美解析的合法动作池"""
+    global _shared_valid_actions
+    _shared_valid_actions = actions
 
 # --- 辅助算法: Subset Sum ---
 def solve_subset_sum(target_val, candidates, min_c, max_c):
@@ -230,46 +238,35 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
 
         elif msg_type == MSG_SELECT_CHAIN:
             try:
-                # 1. 尝试读取前 4 个关键字节
-                # P(1) + Count(1) + Spe(1) + Forced(1)
-                # 只要读到这 4 个，我们就掌握了主动权
+                # 1. 精确读取头部的 4 个字节
                 header_start = stream.read(4)
                 if len(header_start) < 4: raise Exception("Header incomplete")
                 
                 count = header_start[1]
-                forced = header_start[3] # 第4个字节是强制标志
+                forced = header_start[3] # 强制标志位
                 
-                # 2. 尝试吞掉剩下的头部 (Hint)
-                # 标准是 12，我们读了 4，还剩 8。但考虑到那个怪异的 11 字节包，我们宽松一点
-                # 只要流里还有数据，就尽量读，但不强求读满
-                stream.read(8) 
+                # 2. 构造选项：无论是谁，只能从 0 到 count-1 里选
+                candidates = list(range(count))
                 
-                # 3. 构造选项
-                candidates = list(range(count)) + [-1]
+                # 如果不是强制发动 (forced == 0)，才可以追加 Cancel (-1)
+                if forced == 0:
+                    candidates.append(-1)
+                    
+                # 3. 过滤掉已经被核心拒绝过的操作
                 valid_choices = [c for c in candidates if c not in ignore_actions]
                 
-                # [核心修复] 决策逻辑
+                # 4. 安全决策
                 if valid_choices:
-                    activation_choices = [c for c in valid_choices if c != -1]
-                    
-                    # 如果是【强制发动】(forced != 0) 且有可发动的选项
-                    # 我们绝对不能选 -1，必须随机选一个发动的
-                    if forced and activation_choices:
-                        decision = random.choice(activation_choices)
-                    
-                    # 如果不是强制的，或者没得选，再考虑 -1
-                    elif activation_choices:
-                        decision = random.choice(activation_choices + [-1]) # 纯随机
-                    else:
-                        decision = -1
+                    decision = random.choice(valid_choices)
                 else:
-                    decision = -1
+                    # 终极兜底：如果所有合法选项都被拒绝了，说明 C++ 陷入了必须发动的死角
+                    # 我们强行返回 0（发动第一个效果），绝不返回 -1
+                    decision = 0 
                     
             except Exception:
-                # 解析彻底失败时的兜底
-                # 如果我们连 Forced 都没读出来，为了防止死循环，我们盲猜 0 (发动第一个)
-                # 这是一个赌博：如果是必发，0 可能蒙对；如果不是必发，0 也只是发动效果而已
                 decision = 0
+            
+            return decision
 
         # ==================== 3. 宣言与竞猜 (新增与补全) ====================
         # 这类消息如果不处理，遇到《抹杀之指名者》等卡会直接卡死
@@ -310,47 +307,40 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         elif msg_type == MSG_ANNOUNCE_CARD: # 142: 必须返回真实卡密
             stream.read(1)
             count = struct.unpack('B', stream.read(1))[0]
-
-            # 过滤码已经在 gamestate 处理了，这里直接跳过
             for _ in range(count): stream.read(4)
-                
-            # 建立三系齐全的兜底池 (怪兽,魔法,陷阱)，防引擎 is_declarable 类型卡壳
-            safenets = [14558127, 24094653, 10045474, 23434538, 73642296, 32807846]
             
-            if hasattr(gamestate, 'announce_card_candidates') and gamestate.announce_card_candidates:
-                # 覆盖兜底池，因为 gamestate 的池子是最纯净的
-                safenets = gamestate.announce_card_candidates
+            # 彻底抛弃原来愚蠢的“盲猜灰流丽”逻辑
+            # 直接从 gamestate 传过来的完美选项池里提取合法的卡密
+            valid_codes = [act.desc_id for act in _shared_valid_actions if act.action_type == 142]
             
-            valid_safenets = []
-            for code in safenets:
+            # 过滤掉已经被引擎拒绝的卡（防死锁保护）
+            safe_codes = []
+            for code in valid_codes:
                 packed = struct.pack('<I', code)
-                # 利用强大的黑名单机制，避开被引擎 Retry 过的卡
-                if packed not in ignore_actions and packed not in valid_safenets:
-                    valid_safenets.append(packed)
+                if packed not in ignore_actions:
+                    safe_codes.append(packed)
             
-            if valid_safenets:
-                # 每次取没被 Ban 过的第一个，如果猜错类型，下一次会取下一个
-                decision = valid_safenets[0] 
+            if safe_codes:
+                # 完美过关
+                decision = random.choice(safe_codes)
             else:
-                print("🚨 [RuleBot 警报] Type 142 (卡片宣言) 全部候选卡被引擎拉黑！发送 -1 取消尝试！")
-                culprit = "Unknown"
-                if hasattr(gamestate, 'chain_stack') and gamestate.chain_stack:
-                    # 堆栈顶部的就是当前正在处理的连锁
-                    culprit_code = gamestate.chain_stack[-1].get('code', 0)
-                    culprit = f"卡密 {culprit_code}"
-                print(f"   -> 🔪 正在发难的罪魁祸首是: {culprit}")
+                print("🚨 [RuleBot 警报] Type 142 (宣言卡片) 没有合法选项可选！")
 
-                # 如果全被引擎拉黑了，说明没有符合条件的卡，发送 -1 强制尝试取消打断死锁
-                decision = struct.pack('<i', -1)
-                
         elif msg_type == MSG_ANNOUNCE_NUMBER: # 143: 必须返回索引
             stream.read(1)
             count = struct.unpack('B', stream.read(1))[0]
-            for _ in range(count): stream.read(4) # 选项具体数值跳过
+            for _ in range(count): stream.read(4) 
+            
+            ignored_set = set(b for b in ignore_actions if isinstance(b, bytes))
+            decision = struct.pack('<I', 0)
+            
             if count > 0:
-                decision = struct.pack('<I', random.randint(0, count - 1)) # 返回索引
-            else:
-                decision = struct.pack('<I', 0)
+                valid_indices = []
+                for i in range(count):
+                    cand = struct.pack('<I', i)
+                    if cand not in ignored_set: valid_indices.append(cand)
+                if valid_indices:
+                    decision = random.choice(valid_indices)
 
         # ==================== 4. 复杂对象选择 (位置/卡片) ====================
         
@@ -382,7 +372,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                         decision = bytes([random.choice(options)])
                     else:
                         decision = bytes([1])
-            except:
+            except Exception as e:
+                print(f"⚠️ [RuleBot] 处理 MSG_SELECT_POSITION 时发生异常: {e}")
                 decision = bytes([1])
 
         # [RuleBot 修正 1] 选卡/素材：优先凑满 Max (为了连接召唤)
@@ -399,7 +390,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 min_c = struct.unpack('B', stream.read(1))[0]
                 max_c = struct.unpack('B', stream.read(1))[0]
                 list_len = struct.unpack('B', stream.read(1))[0]
-            except:
+            except Exception as e:
+                print(f"⚠️ [RuleBot] 处理 MSG_SELECT_CARD 时发生异常: {e}")
                 return bytes([0]) 
             
             stream.read(list_len * 8) # 跳过卡片数据
@@ -525,6 +517,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 real_max = max_c if max_c > 0 else count
                 
                 def backtrack(start, k, current_sum, path, min_v):
+                    if len(valid_solutions) >= 100: return # 防内存爆炸
                     if k >= min_c:
                         # Mode 0: 同步召唤 (绝对相等)
                         if mode == 0 and current_sum == target_val:
@@ -574,7 +567,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 else:
                     # [新增报警]
                     print("🚨 [RuleBot 警报] Type 23 (凑星计算) DFS 算法无解！")
-                    print(f"   -> Mode={mode}, 目标星数={target_val}, 必选={must_sum}, 候选池={candidates}")
+                    print(f"   -> Mode={mode}, 目标星数={target_val}, 必选={must_sum}, 候选池={candidates}，尝试发送-1取消操作.....")
+                    decision = struct.pack('<i', -1)
                             
                 return decision
             except Exception as e:
@@ -601,6 +595,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             stream.seek(0) 
             req_player = struct.unpack('B', stream.read(1))[0]
             count = struct.unpack('B', stream.read(1))[0]
+            # 防止核心发疯传来 count=0 导致 b'' 和 loc=0 越界崩溃
+            count = max(1, count)
             mask = struct.unpack('<I', stream.read(4))[0]
             
             # 1. 黑名单强力清洗：只保留长度为 3 的 bytes
@@ -663,7 +659,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     resp_buf.extend(loc)
             
             # 4. 最终守门员：强制补齐与校验
-            expected_len = count * 3
+            expected_len = max(1, count) * 3
             
             # 如果长度不够，补 0
             while len(resp_buf) < expected_len:
@@ -763,13 +759,21 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
     return decision
 
 
-def get_macro_options(msg_type, msg_payload):
+def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=None):
     """
     [AI 参谋部] 后台穷举合法素材组合，打包成“套餐”供 AI 挑选
     返回格式: [{'bytes': b'\x01...', 'locs': [loc_raw1, loc_raw2]}, ...]
     """
+    if pref_weights is None: pref_weights = {}
     stream = io.BytesIO(msg_payload)
     options = []
+
+    # 1. 抓取犯罪嫌疑卡 (用于雷达日志溯源)
+    trigger_card = "未知机制/阶段动作"
+    if brain and brain.chain_stack:
+        trigger_card = f"【{card_db.get_card_name(brain.chain_stack[-1]['code'])}】"
+    elif brain and brain.history_stack:
+        trigger_card = f"【{card_db.get_card_name(brain.history_stack[0]['code'])}】"
     
     try:
         # 1. 普通选卡 / 祭品 (Link, Xyz, 融合)
@@ -782,34 +786,71 @@ def get_macro_options(msg_type, msg_payload):
             
             cards = []
             for i in range(count):
-                struct.unpack('<I', stream.read(4))[0] # Code
+                code = struct.unpack('<I', stream.read(4))[0] # 提取真实卡密
                 c = struct.unpack('B', stream.read(1))[0]
                 l = struct.unpack('B', stream.read(1))[0]
                 s = struct.unpack('B', stream.read(1))[0]
                 stream.read(1) # Skip desc
                 loc_raw = LocationInfo.encode(c, l, s, 0)
-                cards.append((i, loc_raw))
+                cards.append({'idx': i, 'loc': loc_raw, 'code': code})
             
+            # 权重越高的卡片，在 DFS 穷举时越先被组合，完美确保前 5000 个必定包含最优解
+            cards.sort(key=lambda x: pref_weights.get(x['code'], 0.0), reverse=True)
+
             real_max = min(max_c, count)
             real_min = min(min_c, count)
             if real_min > real_max: real_min = real_max
             
+            # [聚类 DFS 算法] 先区域去重，后按需分配，零内存泄漏
+            groups = {}
+            for cd in cards:
+                c, l, s, _ = LocationInfo.decode(cd['loc'])
+                if l == 0x04 or l == 0x08: 
+                    key = ('FIELD', cd['idx']) # 场上卡片绝对不去重
+                else: 
+                    key = ('NON_FIELD', cd['code'], l) # 区域 + 卡密 独立去重
+                    
+                if key not in groups: groups[key] = []
+                groups[key].append(cd)
+                
+            group_lists = list(groups.values())
             all_combos = []
+            
+            def dfs(group_idx, current_combo, needed):
+                if needed == 0:
+                    all_combos.append(current_combo)
+                    return
+                if group_idx >= len(group_lists): return
+                if len(all_combos) >= limit: return
+                
+                group = group_lists[group_idx]
+                max_pick = min(needed, len(group))
+                
+                # 完美覆盖挑选 0 到 N 张同名卡的情况
+                for i in range(max_pick, -1, -1):
+                    dfs(group_idx + 1, current_combo + group[:i], needed - i)
+                    if len(all_combos) >= limit: return
+
             for r in range(real_min, real_max + 1):
-                all_combos.extend(list(itertools.combinations(cards, r)))
+                dfs(0, [], r)
+                if len(all_combos) >= limit: 
+                    sample_names = [card_db.get_card_name(c['code']) for c in cards[:4]]
+                    # 高级版雷达日志
+                    print(f"📡 [RuleBot 截断雷达] Type {msg_type} (选卡/祭品) 组合超 {limit}，安全阻断。")
+                    print(f"   -> 🎯 发动源头: {trigger_card}")
+                    print(f"   -> 📊 引擎要求: 从 {len(cards)} 张备选卡中挑选 {real_min} ~ {real_max} 张")
+                    print(f"   -> 🃏 候选样本: {sample_names}...")
+                    break
             
-            # 限制套餐数量防爆炸
-            # 强制排序：Python的 sort 对 tuple 会逐个元素对比，保证绝对的确定性
-            all_combos.sort() 
-            if len(all_combos) > 60: all_combos = all_combos[:60]
-            
+            # 打包组合
             for combo in all_combos:
                 resp_buf = bytearray([len(combo)])
                 locs = []
-                for idx, loc in combo:
-                    resp_buf.append(idx)
-                    locs.append(loc)
+                for cd in combo:
+                    resp_buf.append(cd['idx'])
+                    locs.append(cd['loc'])
                 options.append({'bytes': bytes(resp_buf), 'locs': locs})
+                
             if cancelable:
                 options.append({'bytes': struct.pack('<i', -1), 'locs': []})
                 
@@ -838,17 +879,26 @@ def get_macro_options(msg_type, msg_payload):
             
             candidates = []
             for i in range(count):
-                stream.read(4)
+                code = struct.unpack('<I', stream.read(4))[0]
                 c = struct.unpack('B', stream.read(1))[0]
                 l = struct.unpack('B', stream.read(1))[0]
                 s = struct.unpack('B', stream.read(1))[0]
                 val = struct.unpack('<I', stream.read(4))[0]
-                candidates.append({'index': i, 'val': val, 'loc': LocationInfo.encode(c, l, s, 0)})
+                candidates.append({'index': i, 'val': val, 'code': code, 'loc': LocationInfo.encode(c, l, s, 0)})
             
             valid_solutions = []
             real_max = max_c if max_c > 0 else count
             
             def backtrack(start, k, current_sum, path, min_v):
+                if len(valid_solutions) >= limit: 
+                    if len(valid_solutions) == limit: # 只报一次警
+                        sample_names = [card_db.get_card_name(c['code']) for c in candidates[:4]]
+                        print(f"📡 [RuleBot 截断雷达] Type 23 (凑星) DFS 搜满 {limit} 种，触发阻断")
+                        print(f"   -> 🎯 发动源头: {trigger_card}")
+                        print(f"   -> 📊 目标星数: {target_val}, 必选={must_sum}, 可用素材: {len(candidates)} 张")
+                        print(f"   -> 🃏 候选样本: {sample_names}...")
+                        valid_solutions.append([]) # 占个位防止反复触发
+                    return
                 if k >= min_c:
                     if mode == 0 and current_sum == target_val: valid_solutions.append(list(path))
                     elif mode == 1 and current_sum >= target_val and (current_sum - min_v) < target_val: valid_solutions.append(list(path))
@@ -866,9 +916,8 @@ def get_macro_options(msg_type, msg_payload):
                     path.pop()
             
             backtrack(0, 0, 0, [], -1)
-            # 这里 path 存的是字典对象，不能直接 sort()，按抽取出来的索引进行排序
             valid_solutions.sort(key=lambda sol: [x['index'] for x in sol])
-            if len(valid_solutions) > 60: valid_solutions = valid_solutions[:60]
+            if len(valid_solutions) > limit: valid_solutions = valid_solutions[:limit]
                 
             for sol in valid_solutions:
                 resp_buf = bytearray([must_count + len(sol)])
@@ -878,69 +927,123 @@ def get_macro_options(msg_type, msg_payload):
                     resp_buf.append(cd['index'])
                     locs.append(cd['loc'])
                 options.append({'bytes': bytes(resp_buf), 'locs': locs})
+            options.append({'bytes': struct.pack('<i', -1), 'locs': []})
 
+        # 3. 移除指示物大一统解析
+        elif msg_type == MSG_SELECT_COUNTER:
+            stream.read(1) # Player
+            stream.read(2) # Type
+            qty = struct.unpack('H', stream.read(2))[0]
+            size = struct.unpack('B', stream.read(1))[0]
+            
+            cards = []
+            for i in range(size):
+                code = struct.unpack('<I', stream.read(4))[0]
+                c = struct.unpack('B', stream.read(1))[0]
+                l = struct.unpack('B', stream.read(1))[0]
+                s = struct.unpack('B', stream.read(1))[0]
+                avail = struct.unpack('H', stream.read(2))[0]
+                cards.append({'idx': i, 'avail': avail, 'code': code, 'loc': LocationInfo.encode(c, l, s, 0)})
+            
+            # DFS 分配指示物
+            def distribute_counters(card_idx, remaining_qty, current_distribution):
+                if len(options) >= limit: return
+                if card_idx == size:
+                    if remaining_qty == 0:
+                        resp_buf = bytearray()
+                        locs = []
+                        for i, count_val in enumerate(current_distribution):
+                            resp_buf.extend(struct.pack('H', count_val))
+                            if count_val > 0: locs.append(cards[i]['loc'])
+                        options.append({'bytes': bytes(resp_buf), 'locs': locs})
+                    return
+                
+                max_take = min(cards[card_idx]['avail'], remaining_qty)
+                for take in range(max_take, -1, -1):
+                    current_distribution.append(take)
+                    distribute_counters(card_idx + 1, remaining_qty - take, current_distribution)
+                    current_distribution.pop()
+            
+            distribute_counters(0, qty, [])
+            
+            if len(options) >= limit:
+                sample_names = [card_db.get_card_name(c['code']) for c in cards[:4]]
+                print(f"📡 [RuleBot 截断雷达] Type 22 (移除指示物) 组合超 {limit}，安全阻断。")
+                print(f"   -> 🎯 发动源头: {trigger_card}")
+                print(f"   -> 📊 引擎要求: 从 {size} 张卡中移除总计 {qty} 个指示物")
+                print(f"   -> 🃏 候选样本: {sample_names}...")
+
+        # 4. 排序卡片
         elif msg_type == 25: # MSG_SORT_CARD
             stream.read(1) # P
             count = struct.unpack('B', stream.read(1))[0]
             cards = []
             for i in range(count):
-                stream.read(4) # Code
+                code = struct.unpack('<I', stream.read(4))[0]
                 c = struct.unpack('B', stream.read(1))[0]
                 l = struct.unpack('B', stream.read(1))[0]
                 s = struct.unpack('B', stream.read(1))[0]
-                cards.append((i, LocationInfo.encode(c, l, s, 0)))
+                cards.append({'idx': i, 'loc': LocationInfo.encode(c, l, s, 0), 'code': code})
                 
-            # 利用 Python 自带工具瞬间求出所有排列组合
-            valid_solutions = list(itertools.permutations(cards))
-            valid_solutions.sort() # tuple 可以直接排
-            if len(valid_solutions) > 60: valid_solutions = valid_solutions[:60]
+            valid_solutions = []
+            for i, sol in enumerate(itertools.permutations(cards)):
+                valid_solutions.append(sol)
+                if i >= limit - 1:
+                    sample_names = [card_db.get_card_name(c['code']) for c in cards[:4]]
+                    print(f"📡 [RuleBot 截断雷达] Type 25 (排序) 选项组达到上限，触发安全阻断")
+                    print(f"   -> 🎯 发动源头: {trigger_card}")
+                    print(f"   -> 📊 需要排序的卡片总数: {count}")
+                    print(f"   -> 🃏 涉案卡片: {sample_names}...")
+                    break
             
             for sol in valid_solutions:
                 resp_buf = bytearray()
                 locs = []
-                for idx, loc in sol:
-                    resp_buf.append(idx)   # 原选项索引
-                    locs.append(loc)       # 映射用绝对位置
+                for cd in sol:
+                    resp_buf.append(cd['idx'])   
+                    locs.append(cd['loc'])
                 options.append({'bytes': bytes(resp_buf), 'locs': locs})
 
-        elif msg_type in [18, 24]: # MSG_SELECT_PLACE / DISFIELD
+        # 5. 格子/区域封锁
+        elif msg_type in [18, 24]: 
             stream.read(1) # P
             count = struct.unpack('B', stream.read(1))[0]
             mask = struct.unpack('<I', stream.read(4))[0]
-            req_player = msg_payload[0] # 提前往前取一个字节作为请求玩家
+            req_player = msg_payload[0] 
             
-            # 源码特例：如果 count 为 0，[0, 0, 0] 是合法的“跳过”指令
             if count == 0:
                 options.append({'bytes': bytes([0, 0, 0]), 'places': []})
             
             avail_zones = []
             for i in range(32):
-                if not (mask & (1 << i)): 
-                    avail_zones.append(i)
+                if not (mask & (1 << i)): avail_zones.append(i)
             
-            # 如果 count = 0，为了防止死锁，我们仍然算 1 个位置以备不时之需
             calc_count = max(1, count)
-            all_combos = list(itertools.combinations(avail_zones, calc_count))
-            all_combos.sort() # tuple 可以直接排
-            if len(all_combos) > 60: all_combos = all_combos[:60]
+            all_combos = []
+            for i, combo in enumerate(itertools.combinations(avail_zones, calc_count)):
+                all_combos.append(combo)
+                if i >= limit - 1:
+                    print(f"📡 [RuleBot 截断雷达] Type {msg_type} (格子选择) 达到上限阻断。")
+                    print(f"   -> 🎯 发动源头: {trigger_card}")
+                    print(f"   -> 📊 可用空余格子数: {len(avail_zones)}, 需选: {calc_count}")
+                    break
             
             for combo in all_combos:
                 resp_buf = bytearray()
                 places = []
                 for i in combo:
-                    # 完美还原 C++ 要求的 3 字节映射
                     p_flag = 1 if i >= 16 else 0
                     l = 0x08 if (i % 16) >= 8 else 0x04
                     s = i % 8
-                    
                     raw_p = req_player if p_flag == 0 else (1 - req_player)
                     final_p = 1 if raw_p == 1 else 0
-                    
                     resp_buf.extend([final_p, l, s])
                     places.append(i)
                 options.append({'bytes': bytes(resp_buf), 'places': places})
                 
     except Exception as e:
         print(f"⚠️ [参谋部] get_macro_options 解析错误: {e}")
+        import traceback
+        traceback.print_exc()
         
     return options

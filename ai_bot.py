@@ -104,56 +104,52 @@ class AiBot:
         return resp
 
     def _pack_response(self, action, msg_type=0, msg_args=None):
-        """
-        打包响应数据 (修复版 - 强制依赖 msg_type)
-        """
-        # 1. 必须返回 4 字节整数的消息类型
-        # 10: Battle, 11: Idle (召唤/发动), 16: Chain
-        if msg_type in [10, 11, 16]:
-            if msg_type == 16:
-                # 核心修复：必须加上 signed=True，否则 AI 选 -1 会直接抛出异常！
-                return int(action.index).to_bytes(4, byteorder='little', signed=True)
-            
-            val = (action.index << 16) | action.action_type
-            return int(val).to_bytes(4, byteorder='little')
-        
-        # 2. 选卡 (MSG_SELECT_CARD)
-        elif msg_type == 15:
-            if action.index < 0 or action.index > 255:
-                return int(-1).to_bytes(4, byteorder='little', signed=True)
-            return bytes([1, action.index])
-        
-        # =================================================================
-        # [阶段一追加] 宣言消息的精确打包 (严格遵照 C++ 源码)
-        # =================================================================
-        elif msg_type in [140, 141]:
-            # 140/141: 返回掩码位
-            return struct.pack('<I', action.desc_id)
-        elif msg_type == 142:
-            # 142: 返回真实卡密
-            return struct.pack('<I', action.desc_id)
-        elif msg_type == 143:
-            # 143: 必须返回数组索引！(陷阱)
-            return struct.pack('<I', action.index)
+        # ==========================================================
+        # 优先检查动作是否携带有物理外挂（宏动作包裹）
+        # 如果有 decision_bytes，说明这是经过 RuleBot 完美打包的套餐，直接透传
+        # ==========================================================
+        if hasattr(action, 'decision_bytes') and action.decision_bytes:
+            return action.decision_bytes
+        # ==========================================================
+        # 1. 整型槽类 (调用 C++ set_responsei) - 绝对不能返回 bytes
+        # 包含: 10(Battle), 11(Idle), 12(EffectYN), 13(YesNo), 
+        #       14(Option), 16(Chain), 140~143(各类宣言)
+        # ==========================================================
+        if msg_type in [10, 11, 12, 13, 14, 16, 140, 141, 142, 143]:
+            if msg_type in [10, 11]:
+                return int((action.index << 16) | action.action_type)
+            elif msg_type in [140, 141, 142]:
+                return int(action.desc_id)
+            else:
+                return int(action.index)
 
-        # 3. 其他单字节交互 (位置选择等)
-        else:
-            val = action.index
-            # 特殊处理 Place / Disfield
-            if msg_type in [18, 24]:
-                zone_id = val
-                p = 0; l = 0x04; s = 0
-                if zone_id & 16: p = 1
-                if zone_id & 8:  l = 0x08
-                s = zone_id & 0x7
-                
-                # 💡 修复：msg_args[0] 才是玩家 ID！
-                req_p = 0
-                if msg_args and len(msg_args) > 0: req_p = msg_args[0] 
-                
-                raw_p = req_p if p == 0 else (1 - req_p)
-                final_p = 1 if raw_p == 1 else 0
-                return bytes([final_p, l, s])
+        # ==========================================================
+        # 2. 字节槽类 (调用 C++ set_responseb) - 必须带 count 字节
+        # 包含: 15(SelectCard), 20(Tribute), 22(Counter), 26(Unselect)
+        # ==========================================================
+        elif msg_type in [15, 20, 22, 26]:
+            if action.index < 0 or action.index > 255:
+                # Cancel 指令 (-1)，转换为 4 字节的 0xFFFFFFFF
+                return int(-1).to_bytes(4, byteorder='little', signed=True)
+            # 兜底：数量(Count)=1, 后接选中的索引
+            return bytes([1, action.index]) 
+        
+        # ==========================================================
+        # 3. 物理格子类 (Place / Disfield) - 严格的 3 字节
+        # ==========================================================
+        elif msg_type in [18, 24]:
+            zone_id = action.index
+            p = 0; l = 0x04; s = 0
+            if zone_id & 16: p = 1
+            if zone_id & 8:  l = 0x08
+            s = zone_id & 0x7
             
-            # 默认返回单字节
-            return bytes([val])
+            req_p = 0
+            if msg_args and len(msg_args) > 0: req_p = msg_args[0] 
+            
+            raw_p = req_p if p == 0 else (1 - req_p)
+            final_p = 1 if raw_p == 1 else 0
+            return bytes([final_p, l, s])
+            
+        # 兜底防护：所有未知指令全部返回整数，防止字节野指针
+        return int(action.index)

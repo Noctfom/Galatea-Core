@@ -10,6 +10,7 @@ import struct
 import time
 import random
 import io
+import sys
 
 # --- OCGCore 常量 ---
 LOCATION_DECK = 0x01
@@ -19,6 +20,28 @@ LOCATION_SZONE = 0x08
 LOCATION_GRAVE = 0x10
 LOCATION_REMOVED = 0x20
 LOCATION_EXTRA = 0x40
+
+# 全局纯内存卡片数据库缓存
+_GLOBAL_CARD_CACHE = {}
+_GLOBAL_CACHE_INIT = False
+
+def _init_card_cache():
+    global _GLOBAL_CACHE_INIT, _GLOBAL_CARD_CACHE
+    if _GLOBAL_CACHE_INIT: return
+    try:
+        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'cards.cdb'))
+        # 🚀 修复 Windows URI 报错：直接使用原生连接，并给一个 10 秒的锁等待防争抢
+        conn = sqlite3.connect(db_path, timeout=10.0, check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM datas")
+        for row in cursor.fetchall():
+            _GLOBAL_CARD_CACHE[row[0]] = row
+        conn.close()
+        _GLOBAL_CACHE_INIT = True
+    except Exception as e:
+        # 换成这个醒目的打印，如果以后连不上数据库，终端会直接炸红字！
+        print(f"\n❌ [致命错误] 无法将 cards.cdb 载入内存: {e}\n")
+        
 
 # --- 结构体对齐 (基于 card_data.h 源码) ---
 class CardData(ctypes.Structure):
@@ -42,7 +65,10 @@ CARD_READER_FUNC = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_uint32, ctypes.POI
 MSG_HANDLER_FUNC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32)
 
 class GalateaEnv:
-    def __init__(self, dll_path='./ocgcore.dll', cdb_path='./cards.cdb', script_path='./script'):
+    # 动态判断默认核心文件名
+    default_core = './ocgcore.so' if sys.platform.startswith('linux') else './ocgcore.dll'
+    
+    def __init__(self, dll_path=default_core, cdb_path='./cards.cdb', script_path='./script'):
         # 路径标准化
         self.dll_path = os.path.abspath(dll_path)
         self.cdb_path = os.path.abspath(cdb_path)
@@ -62,6 +88,7 @@ class GalateaEnv:
         # 这一步至关重要：C++ 的 load_script 假设 buffer 一直有效
         # 如果这里不存，Python GC 会回收内存，导致 C++ 读到垃圾 -> RETRY 死循环
         self.script_buffers = {} 
+        self._preload_all_scripts()
         
         self.cb_script_reader = SCRIPT_READER_FUNC(self._on_read_script)
         self.cb_card_reader = CARD_READER_FUNC(self._on_read_card)
@@ -87,7 +114,7 @@ class GalateaEnv:
         self.lib.new_card.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]
         self.lib.process.argtypes = [ctypes.c_void_p]; self.lib.process.restype = ctypes.c_int32
         # set_responseb 签名验证
-        self.lib.set_responseb.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.lib.set_responseb.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 
         if hasattr(self.lib, 'get_message'):
             self.lib.get_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_byte)]
@@ -101,62 +128,59 @@ class GalateaEnv:
         # 确认使用 set_responsei
         self.lib.set_responsei.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
+    def _preload_all_scripts(self):
+        """[极致优化] 在环境启动时，将所有脚本一次性载入内存，彻底斩断磁盘 I/O"""
+        import glob
+        print(f"🚀 正在将 {self.script_path} 下的 Lua 脚本全量装载至内存...")
+        
+        # 扫描 script 目录及其 official 子目录下的所有 lua 文件
+        search_paths = [
+            os.path.join(self.script_path, "*.lua"),
+            os.path.join(self.script_path, "official", "*.lua")
+        ]
+        
+        count = 0
+        for pattern in search_paths:
+            for filepath in glob.glob(pattern):
+                basename = os.path.basename(filepath)
+                if basename not in self.script_buffers:
+                    with open(filepath, 'rb') as f:
+                        content = f.read()
+                        
+                    # 加上我们上一轮说的防弹 \0 截断
+                    content_with_null = content + b'\0'
+                    buf = (ctypes.c_byte * len(content_with_null)).from_buffer_copy(content_with_null)
+                    self.script_buffers[basename] = (buf, len(content)) # 存 buf 和真实长度
+                    count += 1
+                    
+        print(f"✅ 预加载完成，共吸入 {count} 个脚本，彻底告别磁盘 I/O！")
+
+    # 对应的 _on_read_script 修改为极速模式：
     def _on_read_script(self, name_ptr, len_ptr):
-        try:
-            # C++ 传过来可能是 "./script/c123.lua"
-            raw_name = name_ptr.decode('utf-8')
-            # 剥离路径，只取文件名 "c123.lua"
-            basename = os.path.basename(raw_name)
-            
-            # 1. 检查缓存 (内存保活)
-            if basename in self.script_buffers:
-                buf = self.script_buffers[basename]
-                len_ptr[0] = len(buf)
-                return ctypes.addressof(buf)
-            
-            # 2. 从磁盘读取
-            content = None
-            # 尝试多个常见路径
-            paths_to_try = [
-                os.path.join(self.script_path, basename),
-                os.path.join(self.script_path, "official", basename),
-                os.path.join(self.script_path, "c" + basename) # 应对只传ID的情况
-            ]
-            
-            for p in paths_to_try:
-                if os.path.exists(p):
-                    with open(p, 'rb') as f: content = f.read()
-                    break
-            
-            if content:
-                # [核心修复] 创建 ctypes buffer 并永久保存引用
-                # 这一行阻止了 Python 垃圾回收销毁这块内存
-                buf = (ctypes.c_byte * len(content)).from_buffer_copy(content)
-                self.script_buffers[basename] = buf 
-                
-                len_ptr[0] = len(content)
-                # print(f"📜 Loaded: {basename}") # 调试：确认脚本加载成功
-                return ctypes.addressof(buf)
-            
-            # 如果找不到 constant.lua，打印红色警告
-            if "constant" in basename or "utility" in basename:
-                print(f"\033[91m❌ [Script Error] 缺少核心脚本: {basename} (在 {self.script_path} 下找不到)\033[0m")
-            
-            return 0
-        except: return 0
+        raw_name = name_ptr.decode('utf-8')
+        basename = os.path.basename(raw_name)
+        
+        # O(1) 极速内存读取，如果没有就返回 0 (通常不可能，因为已经全量加载)
+        if basename in self.script_buffers:
+            buf, real_len = self.script_buffers[basename]
+            len_ptr[0] = real_len
+            return ctypes.addressof(buf)
+        print(f"⚠️ [致命警告] 内存未命中，引擎试图索要 {basename} 失败！AI 正在打白板牌！", flush=True)
+        return 0
 
     def _on_read_card(self, code, data_ptr):
         try:
-            cursor = self.cdb.cursor()
-            cursor.execute("SELECT * FROM datas WHERE id=?", (code,))
-            row = cursor.fetchone()
-            if not row: return 0 
+            _init_card_cache()
+            row = _GLOBAL_CARD_CACHE.get(code)
+            if not row: return 0
             
             data = data_ptr.contents
-            data.code = row[0]; data.alias = row[2]
             
-            # MDPro3 setcode 填充逻辑 (uint16 array)
-            setcode_val = row[3]
+            # 强转防呆，预防极端情况下的数据库 NULL 值
+            data.code = int(row[0] or 0)
+            data.alias = int(row[2] or 0)
+            
+            setcode_val = int(row[3] or 0)
             for i in range(16): data.setcode[i] = 0
             ctr = 0
             while setcode_val and ctr < 16:
@@ -165,15 +189,28 @@ class GalateaEnv:
                     ctr += 1
                 setcode_val >>= 16
             
-            data.type = row[4]; data.attack = row[5]; data.defense = row[6]
-            data.level = row[7] & 0xFF; data.race = row[8]; data.attribute = row[9]
-            data.lscale = (row[7] >> 24) & 0xFF; data.rscale = (row[7] >> 16) & 0xFF
-            return 1 
-        
+            data.type = int(row[4] or 0)
+            data.attack = int(row[5] or 0)
+            data.defense = int(row[6] or 0)
+            
+            level_val = int(row[7] or 0)
+            data.level = level_val & 0xFF
+            data.race = int(row[8] or 0)
+            data.attribute = int(row[9] or 0)
+            data.lscale = (level_val >> 24) & 0xFF
+            data.rscale = (level_val >> 16) & 0xFF
+            
+            # 兼容 Link 怪兽的额外字段填充 (确保 Link 值不串台)
+            if data.type & 0x4000000: # TYPE_LINK
+                data.link_marker = int(row[6] or 0)
+                data.defense = 0
+            
+            return 1
+            
         except Exception as e:
-            # 打印底层卡片读取错误，定位引发 C++ 崩溃的罪魁祸首
-            print(f"\n🚨 [底层致命错误] Python 无法读取卡片数据 (Code: {code}): {e}")
-            import traceback; traceback.print_exc()
+            print(f"⚠️ _on_read_card (C++底盘读卡) 处理异常: {e}")
+            import traceback
+            traceback.print_exc()
             return 0
 
     def query_card_state(self, player_id, location, sequence):
@@ -184,7 +221,7 @@ class GalateaEnv:
         # Atk(0x100) | Def(0x200) | Equip(0x4000) | Overlays(0x10000) | Counters(0x20000)
         # 叠加结果为: 0x343DA
         flags = 0x1 | 0x2 | 0x8 | 0x10 | 0x40 | 0x80 | 0x100 | 0x200 | 0x4000 | 0x10000 | 0x20000
-        buf = (ctypes.c_byte * 1024)()
+        buf = (ctypes.c_byte * 8192)()
         
         length = self.lib.query_card(self.pduel, player_id, location, sequence, flags, buf, 0)
         
@@ -216,6 +253,9 @@ class GalateaEnv:
             
             if actual_flag & 0x100: atk = struct.unpack('<i', stream.read(4))[0]
             if actual_flag & 0x200: defense = struct.unpack('<i', stream.read(4))[0]
+
+            if atk < 0: atk = 0
+            if defense < 0: defense = 0
 
             # [新增] 装备卡状态雷达
             if actual_flag & 0x4000:
@@ -255,8 +295,23 @@ class GalateaEnv:
     def dummy_card_reader(self, code, data): return 0
     def dummy_message_handler(self, ptr, msg_type): return 0
 
+    def __del__(self):
+        """析构函数：确保 Python 对象销毁时，C++ 端的内存也被彻底释放"""
+        self._close_duel()
+
+    def _close_duel(self):
+        """内部清理函数"""
+        if hasattr(self, 'pduel') and self.pduel is not None:
+            try:
+                # 显式通知 ocgcore 销毁这个决斗实例
+                self.lib.end_duel(self.pduel)
+                self.pduel = None
+            except Exception:
+                pass
+
     # 修改参数，增加 seed=None
     def reset(self, deck0, deck1, seed=None):
+        self._close_duel()
         if self.pduel:
             self.lib.end_duel(self.pduel)
             self.pduel = None
@@ -314,7 +369,6 @@ class GalateaEnv:
         print("⚠️ 警告：引擎运算超时（10万次循环未响应）")
         return None
 
-
     def send_action(self, response):
         if isinstance(response, int):
             self.lib.set_responsei(self.pduel, ctypes.c_uint32(response))
@@ -322,4 +376,4 @@ class GalateaEnv:
             resp_bytes = bytes(response)[:64].ljust(64, b'\x00')
             # 【关键修复】将它挂载到 self 上，确保它的寿命和环境实例一样长！
             self._lifeline_response = resp_bytes 
-            self.lib.set_responseb(self.pduel, ctypes.cast(self._lifeline_response, ctypes.c_void_p))
+            self.lib.set_responseb(self.pduel, self._lifeline_response)

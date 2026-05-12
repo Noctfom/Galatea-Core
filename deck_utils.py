@@ -3,6 +3,8 @@ Deck 相关的工具函数 (增强版)
 '''
 import random
 import os
+import json
+from card_reader import card_db
 
 class Deck:
     def __init__(self, name="Unknown"):
@@ -47,7 +49,8 @@ def load_deck(base_dir, deck_name):
                 continue
                 
             try:
-                code = int(line)
+                raw_code = int(line)
+                code = card_db.get_base_code(raw_code)
                 if current_section == 'main': d.main.append(code)
                 elif current_section == 'extra': d.extra.append(code)
             except Exception:
@@ -55,36 +58,68 @@ def load_deck(base_dir, deck_name):
             
     return d
 
-def get_random_deck_pair(ydk_dir='./decks'):
-    """
-    随机选两个卡组 (支持子文件夹环境隔离)
-    返回: (name1, deck1_obj, name2, deck2_obj)
-    """
-    if not os.path.exists(ydk_dir):
-        return None, None, None, None
+# --- 双通道零 IO 缓存系统 ---
+_cache_dict = {'global': {}, 'virtual': {}}
+_mtime_dict = {'global': 0, 'virtual': 0}
 
-    # 1. 寻找所有子文件夹 (代表不同的环境/卡池)
+def get_json_data(filepath, cache_key):
+    if not os.path.exists(filepath): return {}
+    try:
+        mtime = os.path.getmtime(filepath)
+        if mtime != _mtime_dict[cache_key]:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                _cache_dict[cache_key] = json.load(f)
+            _mtime_dict[cache_key] = mtime
+        return _cache_dict[cache_key]
+    except Exception: return _cache_dict[cache_key]
+
+def get_random_deck_pair(ydk_dir='./decks'):
+    if not os.path.exists(ydk_dir): return None, None, None, None
     subdirs = [os.path.join(ydk_dir, d) for d in os.listdir(ydk_dir) if os.path.isdir(os.path.join(ydk_dir, d))]
     
-    # 如果没有子文件夹，就把根目录当成默认环境
     if not subdirs:
-        subdirs = [ydk_dir]
+        names = list_decks(ydk_dir)
+        if len(names) < 2: return None, None, None, None
+        n1, n2 = random.choice(names), random.choice(names)
+        return "Root_Mix", n1, load_deck(ydk_dir, n1), n2, load_deck(ydk_dir, n2)
+
+    # 1. 分别加载全局权重与虚拟池配方
+    global_file = os.path.join(ydk_dir, 'global_weights.json')
+    virtual_file = os.path.join(ydk_dir, 'virtual_pools.json')
+    
+    global_weights = get_json_data(global_file, 'global')
+    virtual_pools = get_json_data(virtual_file, 'virtual')
+    
+    # 2. 候选名单 = 所有物理文件夹 + 所有虚拟池
+    subdir_names = [os.path.basename(os.path.normpath(d)) for d in subdirs]
+    env_choices = subdir_names + list(virtual_pools.keys())
+    
+    # 3. 提取全局权重 (如果没配，默认给 1.0)
+    weights = [float(global_weights.get(name, 1.0)) for name in env_choices]
+    if sum(weights) <= 0: weights = [1.0] * len(env_choices)
+    
+    chosen_env = random.choices(env_choices, weights=weights, k=1)[0]
+
+    # --- 路径 A：抽中了虚拟拼装池 ---
+    if chosen_env in virtual_pools:
+        pool_cfg = virtual_pools[chosen_env]
+        # 在虚拟池内，根据配方权重重新抽取物理池
+        v_weights = [float(pool_cfg.get(name, 0.0)) for name in subdir_names]
+        if sum(v_weights) <= 0: return None, None, None, None 
         
-    # 2. 随机选中一个环境 (比如 2024_meta)
-    chosen_env = random.choice(subdirs)
-    
-    # 3. 在该环境下抽取两个卡组
-    names = list_decks(chosen_env)
-    if len(names) < 1:
-        print(f"[Deck] ⚠️ 文件夹 {chosen_env} 下没有找到 .ydk 文件!")
-        return None, None, None, None
+        c_env1 = random.choices(subdirs, weights=v_weights, k=1)[0]
+        c_env2 = random.choices(subdirs, weights=v_weights, k=1)[0]
         
-    # 随机抽两个名字（允许同名，即镜像对局）
-    n1 = random.choice(names)
-    n2 = random.choice(names)
-    
-    d1 = load_deck(chosen_env, n1)
-    d2 = load_deck(chosen_env, n2)
-    env_name = os.path.basename(os.path.normpath(chosen_env))
-    
-    return env_name, n1, d1, n2, d2
+        names1, names2 = list_decks(c_env1), list_decks(c_env2)
+        if not names1 or not names2: return None, None, None, None
+        
+        n1, n2 = random.choice(names1), random.choice(names2)
+        return chosen_env, n1, load_deck(c_env1, n1), n2, load_deck(c_env2, n2)
+
+    # --- 路径 B：抽中了物理池 (内战) ---
+    else:
+        chosen_dir = os.path.join(ydk_dir, chosen_env)
+        names = list_decks(chosen_dir)
+        if len(names) < 1: return None, None, None, None
+        n1, n2 = random.choice(names), random.choice(names)
+        return chosen_env, n1, load_deck(chosen_dir, n1), n2, load_deck(chosen_dir, n2)

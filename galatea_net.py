@@ -83,7 +83,7 @@ class GalateaNet(nn.Module):
         # ==========================================================
         self.d_sem = 128 # 语义特征在融合前所在的子空间维度
         
-        # A. 主动作与 Hash (词表 4000，足以容纳目前 3415 个特殊效果)
+        # A. 主动作与 Hash (词表 4000，足以容纳目前的特殊效果)
         self.sem_cat_embed = nn.Embedding(4000, self.d_sem, padding_idx=0)
         # B. 发动条件与限制 (128维多热向量直接映射)
         self.sem_req_proj = nn.Linear(128, self.d_sem)
@@ -117,6 +117,9 @@ class GalateaNet(nn.Module):
         self.intent_proj = nn.Linear(self.d_model, self.d_model)
         self.option_proj = nn.Linear(self.d_model, self.d_model)
 
+        self.v_norm = nn.LayerNorm(self.d_model)
+        self.fusion_norm = nn.LayerNorm(self.d_model * 2) # 双塔拼接后是 d_model * 2
+
         self.policy_head = nn.Sequential(
             nn.Linear(self.d_model * 2, 256), # 双塔拼接，维度翻倍
             nn.ReLU(),
@@ -126,12 +129,21 @@ class GalateaNet(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(self.d_model, 256),
             nn.ReLU(),
-            nn.Linear(256, 1),
-            nn.Tanh()
+            nn.Linear(256, 1)
         )
 
-        self.rnd = RNDModule(input_dim=self.d_model)
+        #self.rnd = RNDModule(input_dim=self.d_model)
         self.overlay_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
+
+        for m in self.policy_head.modules():
+            if isinstance(m, nn.Linear) and m.out_features == 1:
+                nn.init.orthogonal_(m.weight, gain=0.01)
+                nn.init.constant_(m.bias, 0.0)
+                
+        for m in self.value_head.modules():
+            if isinstance(m, nn.Linear) and m.out_features == 1:
+                nn.init.orthogonal_(m.weight, gain=1.0)
+                nn.init.constant_(m.bias, 0.0)
 
     def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr):
         # 核心修复：将 int16 (Short) 强转为 long()，满足 PyTorch Embedding 的要求
@@ -249,6 +261,7 @@ class GalateaNet(nn.Module):
 
         # 大一统评分底蕴：加入历史记忆
         v_input = g_embed + pooled + deck_pooled + chain_pooled + history_pooled
+        v_input = self.v_norm(v_input)
         value = self.value_head(v_input.squeeze(1)) 
 
         # === Action Head (因果决策) ===
@@ -262,9 +275,14 @@ class GalateaNet(nn.Module):
         flat_idx = act_card_idx.view(B, A * M)
         # 2. 扩充最后一个维度对接 d_model -> [B, 400, 512]
         flat_idx_expanded = flat_idx.unsqueeze(-1).expand(-1, -1, D)
-        # 3. 直接从原始 memory [B, 120, 512] 中捞取，彻底规避 4D 梯度爆炸！
-        gathered_flat = torch.gather(memory, 1, flat_idx_expanded) # [B, 400, 512]
-        # 4. 重新捏回我们需要的形状 -> [B, 80, 5, 512]
+
+        # 原本 memory 是 [B, 120, 512]，现在变成 [B, 121, 512]
+        padding_vec = torch.zeros(B, 1, D, device=memory.device)
+        memory_padded = torch.cat([memory, padding_vec], dim=1)
+
+        # 3. 直接从原始 memory [B, 120, 512] 中捞取，彻底规避 4D 梯度爆炸
+        gathered_flat = torch.gather(memory_padded, 1, flat_idx_expanded) # [B, 400, 512]
+        # 4. 重新捏回需要的形状 -> [B, 80, 5, 512]
         gathered_vecs = gathered_flat.view(B, A, M, D)
         # =========================================================
 
@@ -297,6 +315,9 @@ class GalateaNet(nn.Module):
         
         # 3. 交汇：意图与选项碰撞
         combined_vecs = torch.cat([intent_vec, option_vec], dim=-1)
+
+        combined_vecs = self.fusion_norm(combined_vecs) # 双塔融合后的 LayerNorm
+
         logits = self.policy_head(combined_vecs).squeeze(-1) 
         logits = logits.masked_fill(~act_mask, -1e4)
 

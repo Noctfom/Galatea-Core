@@ -12,6 +12,9 @@ import json
 import shutil
 import streamlit.components.v1 as components
 import socket
+import time
+import sys    
+from collections import deque
 from card_reader import CardReader
 
 import warnings
@@ -21,6 +24,19 @@ warnings.filterwarnings("ignore")
 card_db_ui = CardReader(db_path=os.path.abspath(os.path.join(os.path.dirname(__file__), 'cards.cdb')))
 
 st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wide")
+
+CACHE_KEYS = {
+    't_steps': 5000, 't_batch': 4096, 't_mini': 256, 't_workers': 6, 't_timeout': 300,
+    't_gamma': 0.998, 't_lr': 0.0001, 't_entropy': 0.03, 't_gae': 0.95, 't_clip': 0.2,
+    't_device': 'cpu', 't_d_model': 256, 't_n_heads': 4, 't_n_layers': 2,
+    'sp_games': 100, 'sp_freq': 50
+}
+
+if 'ui_cache' not in st.session_state:
+    st.session_state.ui_cache = CACHE_KEYS.copy()
+
+def cache_val(key):
+    st.session_state.ui_cache[key] = st.session_state[f"widget_{key}"]
 
 # ==========================================
 # 🛠️ 进程管理辅助函数与状态初始化
@@ -39,8 +55,27 @@ def terminate_process(pid):
         print(f"终止进程错误: {e}")
         return False
 
+def is_process_alive(pid):
+    """精准判断进程是否存活，剔除僵尸进程"""
+    if not pid or not psutil.pid_exists(pid):
+        return False
+    try:
+        p = psutil.Process(pid)
+        if p.status() in [psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD]:
+            return False
+        return True
+    except psutil.NoSuchProcess:
+        return False
+
 if 'running_pid' not in st.session_state:
     st.session_state.running_pid = None
+if 'auto_refresh' not in st.session_state:
+    st.session_state.auto_refresh = False
+
+if st.session_state.running_pid:
+    if not is_process_alive(st.session_state.running_pid):
+        st.session_state.running_pid = None
+        st.session_state.auto_refresh = False # 进程结束，自动关闭刷新开关
 
 # ==========================================
 # 🧠 全局辅助：极速读取存档配置
@@ -88,7 +123,8 @@ menu = st.sidebar.radio(
         _("🔄 资源同步中枢", "🔄 Update Manager"),  
         _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"), 
         _("📁 存储与日志仓库", "📁 Storage & Logs"), 
-        _("👁️ 全息读心回放", "👁️ Holographic Replay")
+        _("👁️ 全息读心回放", "👁️ Holographic Replay"),
+        _("📦 模型部署与打包", "📦 Model Deployment")
     ],
     label_visibility="collapsed"
 )
@@ -103,151 +139,166 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
     if st.sidebar.button(_("🔄 刷新数据", "🔄 Refresh Data"), use_container_width=True):
         st.rerun()
 
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path)
-        min_iter, max_iter = int(df['iteration'].min()), int(df['iteration'].max())
-        selected_range = st.slider(
-            _("⏳ 选择分析的训练轮次范围", "⏳ Select Iteration Range"), 
-            min_value=min_iter, max_value=max_iter, value=(max(min_iter, max_iter-200), max_iter)
-        )
-        filtered_df = df[(df['iteration'] >= selected_range[0]) & (df['iteration'] <= selected_range[1])]
+    data_dir = "./web_data"
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
         
-        if filtered_df.empty:
-            st.warning(_("选定范围内无数据", "No data in selected range."))
-        else:
-            # 🌟 新增：将大盘分为“综合战报”和“卡组对比”两个主要标签页
-            main_tab_overview, main_tab_compare = st.tabs([_("📊 综合大盘战报", "📊 Overall Dashboard"), _("⚔️ 双卡组胜率对比", "⚔️ Deck Comparison")])
-            
-            with main_tab_overview:
-                env_pools = filtered_df['env'].unique().tolist()
-                sub_tabs = st.tabs(env_pools)
-                for tab, env in zip(sub_tabs, env_pools):
-                    with tab:
-                        env_df = filtered_df[filtered_df['env'] == env]
-                        st.markdown(_(f"### 📊 【{env}】卡池综合战报", f"### 📊 [{env}] Pool Overview"))
-                        
-                        stats = env_df.groupby('my_deck').agg(
-                            总场数=('is_win', 'count'),
-                            总胜场=('is_win', 'sum'),
-                            先手场数=('is_first', 'sum')
-                        ).reset_index()
-                        
-                        first_wins = env_df[env_df['is_first'] == True].groupby('my_deck')['is_win'].sum().reset_index(name='先手胜场')
-                        second_wins = env_df[env_df['is_first'] == False].groupby('my_deck')['is_win'].sum().reset_index(name='后手胜场')
-                        second_games = env_df[env_df['is_first'] == False].groupby('my_deck')['is_first'].count().reset_index(name='后手场数')
-                        
-                        stats = stats.merge(first_wins, on='my_deck', how='left').merge(second_wins, on='my_deck', how='left').merge(second_games, on='my_deck', how='left').fillna(0)
-                        stats['总胜率'] = stats['总胜场'] / stats['总场数']
-                        stats['先手胜率'] = stats['先手胜场'] / stats['先手场数'].replace(0, 1)
-                        stats['后手胜率'] = stats['后手胜场'] / stats['后手场数'].replace(0, 1)
-                        stats = stats[stats['总场数'] >= 5]
-                        
-                        if not stats.empty:
-                            col_a, col_b, col_c = st.columns(3)
-                            with col_a:
-                                st.caption(_("🏆 综合胜率榜", "🏆 Overall Win Rate"))
-                                df_overall = stats[['my_deck', '总场数', '总胜率']].sort_values(by='总胜率', ascending=False)
-                                st.dataframe(df_overall.style.format({'总胜率': "{:.1%}"}).background_gradient(cmap='RdYlGn', subset=['总胜率']), hide_index=True)
-                            with col_b:
-                                st.caption(_("🥇 先手胜率榜", "🥇 Going 1st Win Rate"))
-                                df_first = stats[['my_deck', '先手场数', '先手胜率']].sort_values(by='先手胜率', ascending=False)
-                                st.dataframe(df_first.style.format({'先手胜率': "{:.1%}"}).background_gradient(cmap='Greens', subset=['先手胜率']), hide_index=True)
-                            with col_c:
-                                st.caption(_("🥈 后手突破榜", "🥈 Going 2nd Win Rate"))
-                                df_second = stats[['my_deck', '后手场数', '后手胜率']].sort_values(by='后手胜率', ascending=False)
-                                st.dataframe(df_second.style.format({'后手胜率': "{:.1%}"}).background_gradient(cmap='Oranges', subset=['后手胜率']), hide_index=True)
-                            
-                            st.divider()
-                            st.markdown(_("#### ⚔️ 卡组克制矩阵 (行: 我方, 列: 敌方)", "#### ⚔️ Matchup Matrix (Row: My Deck, Col: Opponent)"))
-                            pivot_df = env_df.pivot_table(index='my_deck', columns='opp_deck', values='is_win', aggfunc='mean')
-                            st.dataframe(pivot_df.style.format("{:.1%}").background_gradient(cmap='RdYlGn', axis=None).highlight_null(color='lightgrey'))
-                        else:
-                            st.info(_("该池子有效对局数不足。", "Not enough valid games in this pool."))
-                            
-            # 🌟 优化：卡组对比模块逻辑 (增加环境池先置筛选)
-            with main_tab_compare:
-                st.markdown(_("### ⚔️ 双卡组核心指标 PK", "### ⚔️ Dual Deck PK"))
-                
-                # 1. 先提取所有可用的环境池
-                env_pools_compare = filtered_df['env'].unique().tolist()
-                
-                if not env_pools_compare:
-                    st.info(_("无可用的环境池数据。", "No environment pools available."))
-                else:
-                    # 2. 渲染环境池选择器
-                    selected_env = st.selectbox(_("1️⃣ 首先，选择要对比的环境池", "1️⃣ First, Select Environment Pool"), env_pools_compare, key="compare_env_select")
-                    
-                    # 3. 仅提取选中环境池内的对局数据和卡组
-                    compare_df = filtered_df[filtered_df['env'] == selected_env]
-                    all_decks_in_env = sorted(compare_df['my_deck'].unique().tolist())
-                    
-                    if len(all_decks_in_env) >= 2:
-                        st.markdown(_("### 2️⃣ 接下来，选择要对决的卡组", "### 2️⃣ Next, Select Decks"))
-                        col_pk1, col_pk2 = st.columns(2)
-                        with col_pk1:
-                            deck_a = st.selectbox(_("选择卡组 A (蓝方)", "Select Deck A (Blue)"), all_decks_in_env, index=0)
-                        with col_pk2:
-                            deck_b = st.selectbox(_("选择卡组 B (红方)", "Select Deck B (Red)"), all_decks_in_env, index=1 if len(all_decks_in_env) > 1 else 0)
-                            
-                        if deck_a and deck_b:
-                            # 提取 A 和 B 在该环境下的具体数据
-                            df_a = compare_df[compare_df['my_deck'] == deck_a]
-                            df_b = compare_df[compare_df['my_deck'] == deck_b]
-                            
-                            def calc_metrics(df_sub):
-                                total = len(df_sub)
-                                wins = df_sub['is_win'].sum()
-                                first_games = len(df_sub[df_sub['is_first'] == True])
-                                first_wins = df_sub[df_sub['is_first'] == True]['is_win'].sum()
-                                second_games = len(df_sub[df_sub['is_first'] == False])
-                                second_wins = df_sub[df_sub['is_first'] == False]['is_win'].sum()
-                                return {
-                                    "total": total,
-                                    "win_rate": (wins / total) if total > 0 else 0,
-                                    "first_wr": (first_wins / first_games) if first_games > 0 else 0,
-                                    "second_wr": (second_wins / second_games) if second_games > 0 else 0
-                                }
-                                
-                            metrics_a = calc_metrics(df_a)
-                            metrics_b = calc_metrics(df_b)
-                            
-                            # 渲染对比指标
-                            st.markdown("---")
-                            c1, c2, c3 = st.columns(3)
-                            
-                            c1.metric(label=_("总胜率对比", "Overall Win Rate"), 
-                                      value=f"{deck_a}: {metrics_a['win_rate']:.1%}", 
-                                      delta=f"{metrics_a['win_rate'] - metrics_b['win_rate']:.1%} (vs {deck_b})",
-                                      delta_color="normal" if metrics_a['win_rate'] >= metrics_b['win_rate'] else "inverse")
-                            c1.caption(f"{deck_b}: {metrics_b['win_rate']:.1%}")
-                            
-                            c2.metric(label=_("先手压制力对比", "Going 1st WR"), 
-                                      value=f"{deck_a}: {metrics_a['first_wr']:.1%}", 
-                                      delta=f"{metrics_a['first_wr'] - metrics_b['first_wr']:.1%} (vs {deck_b})",
-                                      delta_color="normal" if metrics_a['first_wr'] >= metrics_b['first_wr'] else "inverse")
-                            c2.caption(f"{deck_b}: {metrics_b['first_wr']:.1%}")
-                            
-                            c3.metric(label=_("后手突破力对比", "Going 2nd WR"), 
-                                      value=f"{deck_a}: {metrics_a['second_wr']:.1%}", 
-                                      delta=f"{metrics_a['second_wr'] - metrics_b['second_wr']:.1%} (vs {deck_b})",
-                                      delta_color="normal" if metrics_a['second_wr'] >= metrics_b['second_wr'] else "inverse")
-                            c3.caption(f"{deck_b}: {metrics_b['second_wr']:.1%}")
-                            
-                            # 直接交锋数据
-                            st.markdown("---")
-                            st.markdown(_("#### 🥊 直接交锋 (Head-to-Head)", "#### 🥊 Head-to-Head"))
-                            h2h_df = df_a[df_a['opp_deck'] == deck_b]
-                            h2h_games = len(h2h_df)
-                            if h2h_games > 0:
-                                h2h_wins = h2h_df['is_win'].sum()
-                                st.info(f"在限定轮次内，**{deck_a}** 与 **{deck_b}** 共交手 **{h2h_games}** 次。")
-                                st.success(f"**{deck_a}** 赢了 **{h2h_wins}** 次 (胜率: {h2h_wins/h2h_games:.1%})")
-                            else:
-                                st.info(_("在限定轮次内，这两个卡组没有直接交手记录。", "No direct matches between these two decks in the selected range."))
-                    else:
-                        st.info(_("所选环境池中卡组种类不足 2 个，无法进行对比。", "Not enough deck types in this pool for comparison."))
-    else:
+    csv_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.csv')], reverse=True)
+
+    if not csv_files:
         st.info(_("数据库为空，等待训练进程写入数据...", "Database is empty. Waiting for training process..."))
+    else:
+        # 🌟 新增：多选数据源
+        selected_csvs = st.multiselect(_("📂 选择要分析的对局数据源 (可多选对比)", "📂 Select Match Data Sources"), csv_files, default=[csv_files[0]] if csv_files else [])
+        
+        if not selected_csvs:
+            st.warning(_("请至少选择一个数据源进行分析。", "Please select at least one data source."))
+        else:
+            # 🌟 新增：合并多个 CSV，并打上来源标签
+            all_dfs = []
+            for f in selected_csvs:
+                temp_df = pd.read_csv(os.path.join(data_dir, f))
+                # 提取时间戳 run_id 作为唯一标识
+                run_id = f.replace("match_history_", "").replace(".csv", "")
+                temp_df['run_id'] = run_id
+                all_dfs.append(temp_df)
+            
+            df = pd.concat(all_dfs, ignore_index=True)
+
+            min_iter, max_iter = int(df['iteration'].min()), int(df['iteration'].max())
+            selected_range = st.slider(
+                _("⏳ 选择分析的训练轮次范围", "⏳ Select Iteration Range"), 
+                min_value=min_iter, max_value=max_iter, value=(max(min_iter, max_iter-200), max_iter)
+            )
+            filtered_df = df[(df['iteration'] >= selected_range[0]) & (df['iteration'] <= selected_range[1])]
+            
+            if filtered_df.empty:
+                st.warning(_("选定范围内无数据", "No data in selected range."))
+            else:
+                main_tab_overview, main_tab_compare= st.tabs([
+                    _("📊 综合大盘战报", "📊 Overall Dashboard"), 
+                    _("⚔️ 双卡组胜率对比", "⚔️ Deck Comparison")
+                ])
+                
+                with main_tab_overview:
+                    env_pools = filtered_df['env'].unique().tolist()
+                    sub_tabs = st.tabs(env_pools)
+                    for tab, env in zip(sub_tabs, env_pools):
+                        with tab:
+                            env_df = filtered_df[filtered_df['env'] == env]
+                            st.markdown(_(f"### 📊 【{env}】卡池综合战报", f"### 📊 [{env}] Pool Overview"))
+                            
+                            stats = env_df.groupby('my_deck').agg(
+                                总场数=('is_win', 'count'),
+                                总胜场=('is_win', 'sum'),
+                                先手场数=('is_first', 'sum')
+                            ).reset_index()
+                            
+                            first_wins = env_df[env_df['is_first'] == True].groupby('my_deck')['is_win'].sum().reset_index(name='先手胜场')
+                            second_wins = env_df[env_df['is_first'] == False].groupby('my_deck')['is_win'].sum().reset_index(name='后手胜场')
+                            second_games = env_df[env_df['is_first'] == False].groupby('my_deck')['is_first'].count().reset_index(name='后手场数')
+                            
+                            stats = stats.merge(first_wins, on='my_deck', how='left').merge(second_wins, on='my_deck', how='left').merge(second_games, on='my_deck', how='left').fillna(0)
+                            stats['总胜率'] = stats['总胜场'] / stats['总场数']
+                            stats['先手胜率'] = stats['先手胜场'] / stats['先手场数'].replace(0, 1)
+                            stats['后手胜率'] = stats['后手胜场'] / stats['后手场数'].replace(0, 1)
+                            stats = stats[stats['总场数'] >= 5]
+                            
+                            if not stats.empty:
+                                col_a, col_b, col_c = st.columns(3)
+                                with col_a:
+                                    st.caption(_("🏆 综合胜率榜", "🏆 Overall Win Rate"))
+                                    df_overall = stats[['my_deck', '总场数', '总胜率']].sort_values(by='总胜率', ascending=False)
+                                    st.dataframe(df_overall.style.format({'总胜率': "{:.1%}"}).background_gradient(cmap='RdYlGn', subset=['总胜率']), hide_index=True)
+                                with col_b:
+                                    st.caption(_("🥇 先手胜率榜", "🥇 Going 1st Win Rate"))
+                                    df_first = stats[['my_deck', '先手场数', '先手胜率']].sort_values(by='先手胜率', ascending=False)
+                                    st.dataframe(df_first.style.format({'先手胜率': "{:.1%}"}).background_gradient(cmap='Greens', subset=['先手胜率']), hide_index=True)
+                                with col_c:
+                                    st.caption(_("🥈 后手突破榜", "🥈 Going 2nd Win Rate"))
+                                    df_second = stats[['my_deck', '后手场数', '后手胜率']].sort_values(by='后手胜率', ascending=False)
+                                    st.dataframe(df_second.style.format({'后手胜率': "{:.1%}"}).background_gradient(cmap='Oranges', subset=['后手胜率']), hide_index=True)
+                                
+                                st.divider()
+                                st.markdown(_("#### ⚔️ 卡组克制矩阵 (行: 我方, 列: 敌方)", "#### ⚔️ Matchup Matrix (Row: My Deck, Col: Opponent)"))
+                                pivot_df = env_df.pivot_table(index='my_deck', columns='opp_deck', values='is_win', aggfunc='mean')
+                                st.dataframe(pivot_df.style.format("{:.1%}").background_gradient(cmap='RdYlGn', axis=None).highlight_null(color='lightgrey'))
+                            else:
+                                st.info(_("该池子有效对局数不足。", "Not enough valid games in this pool."))
+                                
+                with main_tab_compare:
+                    st.markdown(_("### ⚔️ 双卡组核心指标 PK", "### ⚔️ Dual Deck PK"))
+                    
+                    env_pools_compare = filtered_df['env'].unique().tolist()
+                    if not env_pools_compare:
+                        st.info(_("无可用的环境池数据。", "No environment pools available."))
+                    else:
+                        selected_env = st.selectbox(_("1️⃣ 首先，选择要对比的环境池", "1️⃣ First, Select Environment Pool"), env_pools_compare, key="compare_env_select")
+                        compare_df = filtered_df[filtered_df['env'] == selected_env]
+                        all_decks_in_env = sorted(compare_df['my_deck'].unique().tolist())
+                        
+                        if len(all_decks_in_env) >= 2:
+                            st.markdown(_("### 2️⃣ 接下来，选择要对决的卡组", "### 2️⃣ Next, Select Decks"))
+                            col_pk1, col_pk2 = st.columns(2)
+                            with col_pk1:
+                                deck_a = st.selectbox(_("选择卡组 A (蓝方)", "Select Deck A (Blue)"), all_decks_in_env, index=0)
+                            with col_pk2:
+                                deck_b = st.selectbox(_("选择卡组 B (红方)", "Select Deck B (Red)"), all_decks_in_env, index=1 if len(all_decks_in_env) > 1 else 0)
+                                
+                            if deck_a and deck_b:
+                                df_a = compare_df[compare_df['my_deck'] == deck_a]
+                                df_b = compare_df[compare_df['my_deck'] == deck_b]
+                                
+                                def calc_metrics(df_sub):
+                                    total = len(df_sub)
+                                    wins = df_sub['is_win'].sum()
+                                    first_games = len(df_sub[df_sub['is_first'] == True])
+                                    first_wins = df_sub[df_sub['is_first'] == True]['is_win'].sum()
+                                    second_games = len(df_sub[df_sub['is_first'] == False])
+                                    second_wins = df_sub[df_sub['is_first'] == False]['is_win'].sum()
+                                    return {
+                                        "total": total,
+                                        "win_rate": (wins / total) if total > 0 else 0,
+                                        "first_wr": (first_wins / first_games) if first_games > 0 else 0,
+                                        "second_wr": (second_wins / second_games) if second_games > 0 else 0
+                                    }
+                                    
+                                metrics_a = calc_metrics(df_a)
+                                metrics_b = calc_metrics(df_b)
+                                
+                                st.markdown("---")
+                                c1, c2, c3 = st.columns(3)
+                                
+                                c1.metric(label=_("总胜率对比", "Overall Win Rate"), 
+                                          value=f"{deck_a}: {metrics_a['win_rate']:.1%}", 
+                                          delta=f"{metrics_a['win_rate'] - metrics_b['win_rate']:.1%} (vs {deck_b})",
+                                          delta_color="normal" if metrics_a['win_rate'] >= metrics_b['win_rate'] else "inverse")
+                                c1.caption(f"{deck_b}: {metrics_b['win_rate']:.1%}")
+                                
+                                c2.metric(label=_("先手压制力对比", "Going 1st WR"), 
+                                          value=f"{deck_a}: {metrics_a['first_wr']:.1%}", 
+                                          delta=f"{metrics_a['first_wr'] - metrics_b['first_wr']:.1%} (vs {deck_b})",
+                                          delta_color="normal" if metrics_a['first_wr'] >= metrics_b['first_wr'] else "inverse")
+                                c2.caption(f"{deck_b}: {metrics_b['first_wr']:.1%}")
+                                
+                                c3.metric(label=_("后手突破力对比", "Going 2nd WR"), 
+                                          value=f"{deck_a}: {metrics_a['second_wr']:.1%}", 
+                                          delta=f"{metrics_a['second_wr'] - metrics_b['second_wr']:.1%} (vs {deck_b})",
+                                          delta_color="normal" if metrics_a['second_wr'] >= metrics_b['second_wr'] else "inverse")
+                                c3.caption(f"{deck_b}: {metrics_b['second_wr']:.1%}")
+                                
+                                st.markdown("---")
+                                st.markdown(_("#### 🥊 直接交锋 (Head-to-Head)", "#### 🥊 Head-to-Head"))
+                                h2h_df = df_a[df_a['opp_deck'] == deck_b]
+                                h2h_games = len(h2h_df)
+                                if h2h_games > 0:
+                                    h2h_wins = h2h_df['is_win'].sum()
+                                    st.info(f"在限定轮次内，**{deck_a}** 与 **{deck_b}** 共交手 **{h2h_games}** 次。")
+                                    st.success(f"**{deck_a}** 赢了 **{h2h_wins}** 次 (胜率: {h2h_wins/h2h_games:.1%})")
+                                else:
+                                    st.info(_("在限定轮次内，这两个卡组没有直接交手记录。", "No direct matches between these two decks in the selected range."))
+                        else:
+                            st.info(_("所选环境池中卡组种类不足 2 个，无法进行对比。", "Not enough deck types in this pool for comparison."))
 
 # ==========================================
 # ⚔️ 模块二：启动与监控中枢
@@ -291,7 +342,11 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 os.system("taskkill /F /IM python.exe") 
     st.divider()
     
-    tab_train, tab_duel = st.tabs([_("🔥 发起训练 (Train)", "🔥 Start Training"), _("🏟️ 发起竞技 (Duel)", "🏟️ Start Arena")])
+    tab_train, tab_duel, tab_selfcheck = st.tabs([
+        _("🔥 发起训练 (Train)", "🔥 Start Training"), 
+        _("🏟️ 发起竞技 (Duel)", "🏟️ Start Arena"),
+        _("🛠️ 规则自检压测 (Self-Check)", "🛠️ Rules Self-Check") # <--- 新增
+    ])
     models = ["None"] + sorted(glob.glob("./models/*.pth"), key=os.path.getmtime, reverse=True)
     
     # --- 🔥 训练控制台 ---
@@ -311,65 +366,123 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         default_n_heads = int(saved_cfg.get('n_heads', 4))
         default_n_layers = int(saved_cfg.get('n_layers', 2))
 
-        # 🌟 只有按下这个按钮才提交训练
-        with st.form("train_form"):
-            # --- 模型架构参数区 ---
-            with st.expander("🧠 " + _("模型架构参数 (Model Architecture)", "Model Architecture"), expanded=not is_resume):
-                if is_resume:
-                    st.success(_("🔒 已选择恢复存档，架构参数已自动读取并锁定！", "Architecture locked to the selected checkpoint."))
-                
-                m1, m2, m3 = st.columns(3)
-                with m1:
-                    t_d_model = st.number_input("d_model", value=default_d_model, step=64, disabled=is_resume, 
-                                                help=_("卡片向量的维度。越高越聪明，但计算越慢。必须能被 n_heads 整除。", "Feature dimension. Must be divisible by n_heads."))
-                with m2:
-                    t_n_heads = st.number_input("n_heads", value=default_n_heads, step=1, disabled=is_resume, 
-                                                help=_("注意力头数。AI同时观察局面的视角数量(例如有的头看手牌，有的头看墓地)。", "Num of attention heads."))
-                with m3:
-                    t_n_layers = st.number_input("n_layers", value=default_n_layers, step=1, disabled=is_resume, 
-                                                 help=_("神经网络的思考深度。2层适合简单尝试，6层适合复杂的长线战术推演。", "Num of Transformer layers."))
+        # 只有按下这个按钮才提交训练
+        # --- 模型架构参数区 ---
+        with st.expander("🧠 " + _("模型架构参数 (Model Architecture)", "Model Architecture"), expanded=not is_resume):
+            if is_resume:
+                st.success(_("🔒 已选择恢复存档，架构参数已自动读取并锁定！", "Architecture locked to the selected checkpoint."))
+            
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                t_d_model = st.number_input("d_model", value=default_d_model, step=64, disabled=is_resume, 
+                                            help=_("卡片向量的维度。越高越聪明，但计算越慢。必须能被 n_heads 整除。", "Feature dimension. Must be divisible by n_heads."))
+            with m2:
+                t_n_heads = st.number_input("n_heads", value=default_n_heads, step=1, disabled=is_resume, 
+                                            help=_("注意力头数。AI同时观察局面的视角数量(例如有的头看手牌，有的头看墓地)。", "Num of attention heads."))
+            with m3:
+                t_n_layers = st.number_input("n_layers", value=default_n_layers, step=1, disabled=is_resume, 
+                                                help=_("神经网络的思考深度。2层适合简单尝试，6层适合复杂的长线战术推演。", "Num of Transformer layers."))
 
-            st.markdown("---")
+        st.markdown("---")
+        
+        # --- 训练超参数区 ---
+        st.markdown("### ⚙️ " + _("训练环境配置", "Training Hyperparameters"))
+        # 1. 常规配置区 (恢复三列布局，把 device 加回来)
+        col_r1, col_r2, col_r3 = st.columns(3)
+        with col_r1:
+            t_steps = st.number_input(_("目标轮数 (Target Iterations)", "Target Iterations"), 
+                                    value=st.session_state.ui_cache['t_steps'], step=100, 
+                                    key="widget_t_steps", on_change=cache_val, args=('t_steps',),
+                                    help=_("打算练多少轮。如果是恢复训练，它会自动追加。", "Total iterations to reach."))
+            t_workers = st.number_input(_("进程数 (CPU Workers)", "CPU Workers"), 
+                                        value=st.session_state.ui_cache['t_workers'], min_value=1, max_value=32, 
+                                        key="widget_t_workers", on_change=cache_val, args=('t_workers',),
+                                        help=_("同时开启几个后台 YGOPro 环境。不要超过 CPU 物理核心数！", "Number of parallel environment processes."))
+        with col_r2:
+            t_batch = st.number_input(_("总经验池 (Batch Size)", "Batch Size"), 
+                                    value=st.session_state.ui_cache['t_batch'], step=512, 
+                                    key="widget_t_batch", on_change=cache_val, args=('t_batch',),
+                                    help=_("每次网络更新前收集的总步数。越大越稳定，但内存需求大。", "Total steps before updating policy."))
+            t_timeout = st.number_input(_("超时强杀 (Timeout/s)", "Collection Timeout"), 
+                                        value=st.session_state.ui_cache['t_timeout'], step=10, 
+                                        key="widget_t_timeout", on_change=cache_val, args=('t_timeout',),
+                                        help=_("单个 Worker 采集数据的最长等待时间，防止进程僵死。", "Max time to wait for a worker to collect data."))
+        with col_r3:
+            t_mini = st.number_input(_("切片大小 (Mini Batch)", "Mini Batch"), 
+                                    value=st.session_state.ui_cache['t_mini'], step=64, 
+                                    key="widget_t_mini", on_change=cache_val, args=('t_mini',),
+                                    help=_("PPO 梯度下降时每次送入 GPU 的数据量。", "Data slice size for GPU updates."))
+            # 🌟 补回丢失的 Device 选择
+            device_index = 0 if st.session_state.ui_cache['t_device'] == 'cpu' else 1
+            t_device = st.selectbox(_("推理设备 (Worker Device)", "Worker Device"), ["cpu", "cuda"], 
+                                    index=device_index, key="widget_t_device", on_change=cache_val, args=('t_device',),
+                                    help=_("Worker 自身的推理设备。开启异步推断(Async)时保持 cpu 即可。", "Device used by workers for local inference."))
+
+        # 高级超参数区 (完整找回 t_gae 和 t_clip)
+        with st.expander(_("🛠️ 深度学习核心超参数", "Advanced Hyperparameters")):
+            hc1, hc2, hc3 = st.columns(3)
+            with hc1:
+                t_gamma = st.number_input(_("折扣因子 (Gamma)", "Gamma"), 
+                                            value=float(st.session_state.ui_cache['t_gamma']), format="%.3f", step=0.001, 
+                                            key="widget_t_gamma", on_change=cache_val, args=('t_gamma',),
+                                            help=_("目光远视程度。推荐 0.998 以应对长盘对局。", "Discount factor for future rewards."))
+                t_clip = st.number_input(_("截断阈值 (Clip)", "PPO Clip"), 
+                                            value=float(st.session_state.ui_cache['t_clip']), format="%.2f", step=0.05, 
+                                            key="widget_t_clip", on_change=cache_val, args=('t_clip',),
+                                            help=_("限制单次更新的策略变动幅度，防止学‘飘’了。", "PPO policy clipping epsilon."))
+            with hc2:
+                t_lr = st.number_input(_("学习率 (LR)", "Learning Rate"), 
+                                        value=float(st.session_state.ui_cache['t_lr']), format="%.5f", step=0.00001, 
+                                        key="widget_t_lr", on_change=cache_val, args=('t_lr',),
+                                        help=_("大脑神经元重塑速度。太大会导致训练震荡。", "Adam optimizer learning rate."))
+                t_entropy = st.number_input(_("探索系数 (Entropy)", "Entropy Coef"), 
+                                            value=float(st.session_state.ui_cache['t_entropy']), format="%.3f", step=0.005, 
+                                            key="widget_t_entropy", on_change=cache_val, args=('t_entropy',),
+                                            help=_("鼓励 AI 尝试新操作。会自动随着训练轮数衰减。", "Coefficient for entropy regularization."))
+            with hc3:
+                t_gae = st.number_input(_("GAE Lambda", "GAE Lambda"), 
+                                        value=float(st.session_state.ui_cache['t_gae']), format="%.2f", step=0.01, 
+                                        key="widget_t_gae", on_change=cache_val, args=('t_gae',),
+                                        help=_("广义优势估计参数。用于平衡预测的偏差和方差。", "Generalized Advantage Estimation parameter."))
+        
+        # --- 高级开关 ---
+        st.write(_("⚡ 高级开关", "⚡ Advanced Toggles"))
+        c_async = st.checkbox(_("开启异步推断 (--async_infer)", "Enable Async Inference"), value=True, 
+                                help=_("【强烈推荐】让主进程开一个全局 GPU 服务端集中处理推理。能节省成倍的显存！", "Use central GPU server for fast inference."))
+        c_nocomp = st.checkbox(_("禁用模型编译 (--no_compile)", "Disable Torch Compile"), value=True, 
+                                help=_("Windows 系统下 PyTorch 2.0+ 的 compile 极易报错，勾选此项牺牲 5% 速度换取绝对稳定。", "Disable torch.compile for Windows compatibility."))
+        
+        if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
+            if is_running:
+                st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
+            else:
+                cmd = [
+                    sys.executable, "main.py", "train", 
+                    "--steps", str(t_steps), 
+                    "--batch_size", str(t_batch),
+                    "--mini_batch", str(t_mini),
+                    "--workers", str(t_workers),
+                    "--worker_device", str(t_device),                # 🌟 补回
+                    "--d_model", str(int(t_d_model)),                # 🌟 补回
+                    "--n_heads", str(int(t_n_heads)),                # 🌟 补回
+                    "--n_layers", str(int(t_n_layers)),              # 🌟 补回
+                    "--timeout", str(t_timeout),
+                    "--gamma", str(t_gamma),
+                    "--lr", str(t_lr),
+                    "--entropy", str(t_entropy),
+                    "--gae_lambda", str(t_gae),
+                    "--clip_eps", str(t_clip),
+                    "--async_infer"
+                ]
+                if t_resume != "None": cmd.extend(["--resume", t_resume])
+                if c_async: cmd.append("--async_infer")
+                if c_nocomp: cmd.append("--no_compile")
             
-            # --- 训练超参数区 ---
-            st.markdown("### ⚙️ " + _("训练环境配置", "Training Hyperparameters"))
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                t_steps = st.number_input(_("目标轮数 (Target Iterations)", "Target Iterations"), value=5000, step=100, 
-                                          help=_("打算练多少轮。如果是恢复训练，它会自动追加。例如当前是 500，设为 1000 就会再练 500 轮。", "Total iterations to reach."))
-            with col2:
-                t_batch = st.number_input(_("总经验池 (Batch Size)", "Batch Size"), value=4096, step=512, 
-                                          help=_("每次触发网络更新前，要求 Worker 们收集到的总对局步数。越大越稳定，但内存需求大。", "Total steps to collect before updating policy."))
-                t_mini = st.number_input(_("切片大小 (Mini Batch)", "Mini Batch"), value=512, step=128, 
-                                         help=_("PPO 梯度下降时每次送入 GPU 的数据量。根据您的显存大小调整（例如 8G显存设 512）。", "Size of data slices sent to GPU during update."))
-            with col3:
-                t_workers = st.number_input(_("进程数 (CPU Workers)", "CPU Workers"), value=4, min_value=1, max_value=32, 
-                                            help=_("同时开启几个后台 YGOPro 环境来收集数据。不要超过您的 CPU 物理核心数！", "Number of parallel environment processes."))
-                t_device = st.selectbox(_("推理设备 (Worker Device)", "Worker Device"), ["cpu", "cuda"], 
-                                        help=_("Worker 自身的推理设备。如果开启了异步推断(Async)，这里保持 cpu 即可。", "Device used by workers for local inference."))
-            
-            # --- 高级开关 ---
-            st.write(_("⚡ 高级开关", "⚡ Advanced Toggles"))
-            c_async = st.checkbox(_("开启异步推断 (--async_infer)", "Enable Async Inference"), value=True, 
-                                  help=_("【强烈推荐】让主进程开一个全局 GPU 服务端集中处理推理。能节省成倍的显存！", "Use central GPU server for fast inference."))
-            c_nocomp = st.checkbox(_("禁用模型编译 (--no_compile)", "Disable Torch Compile"), value=True, 
-                                   help=_("Windows 系统下 PyTorch 2.0+ 的 compile 极易报错，勾选此项牺牲 5% 速度换取绝对稳定。", "Disable torch.compile for Windows compatibility."))
-            
-            if st.form_submit_button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
-                if is_running:
-                    st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
-                else:
-                    cmd = ["python", "main.py", "train", "--steps", str(t_steps), "--batch_size", str(t_batch), 
-                        "--mini_batch", str(t_mini), "--workers", str(t_workers), "--worker_device", t_device,
-                        "--d_model", str(int(t_d_model)), "--n_heads", str(int(t_n_heads)), "--n_layers", str(int(t_n_layers))]
-                    if t_resume != "None": cmd.extend(["--resume", t_resume])
-                    if c_async: cmd.append("--async_infer")
-                    if c_nocomp: cmd.append("--no_compile")
-                
-                    p = subprocess.Popen(cmd) 
-                    st.session_state.running_pid = p.pid # 🌟 记录PID
-                    st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
-                    st.rerun()
+                p = subprocess.Popen(cmd) 
+                st.session_state.running_pid = p.pid # 🌟 记录PID
+                st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
+                time.sleep(0.5)
+                st.rerun()
 
     # --- 🏟️ 竞技场表单 ---
     with tab_duel:
@@ -401,9 +514,40 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         p = subprocess.Popen(cmd)
                         st.session_state.running_pid = p.pid # 🌟 记录PID
                         st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
+                        
+                        time.sleep(0.5)
                         st.rerun()
                     else:
                         st.error(_("请至少为 P0 选择一个有效的出战模型！", "Please select a valid P0 model!"))
+
+    # --- 🛠️ 规则自检测试舱 ---
+    with tab_selfcheck:
+        st.markdown("### 🛠️ 核心规则系统与环境压测")
+        st.info(_("通过让内置的纯规则 Bot (RuleBot) 进行超高频盲打，可以瞬间检验卡片脚本、底层 C++ 引擎以及消息解析队列是否存在死锁或崩溃 Bug。", 
+                  "Run high-speed RuleBot self-play to debug engine, Lua scripts, and message parsers without neural network overhead."))
+        
+        c_check, c_run = st.columns([1, 1])
+        with c_check:
+            st.markdown("**🔍 运行环境基准探测**")
+            import platform
+            dll_name = "ocgcore.dll" if platform.system() == "Windows" else "libocgcore.so"
+            st.write(f"⚙️ 核心引擎 (`{dll_name}`): ", "✅ 存在" if os.path.exists(f"./{dll_name}") else "❌ 缺失")
+            st.write("🗃️ 卡片数据库 (`cards.cdb`): ", "✅ 存在" if os.path.exists("./cards.cdb") else "❌ 缺失")
+            st.write("📜 脚本目录 (`./script/`): ", "✅ 存在" if os.path.exists("./script") else "❌ 缺失")
+        
+        with c_run:
+            with st.form("selfcheck_form"):
+                sc_num = st.number_input(_("极端压测局数", "Number of Games"), min_value=1, value=50, step=10)
+                if st.form_submit_button("🚀 " + _("启动 RuleBot 压测", "Start Self-Check"), type="primary", use_container_width=True):
+                    if is_running:
+                        st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
+                    else:
+                        cmd = ["python", "main.py", "play", "-n", str(sc_num)]
+                        p = subprocess.Popen(cmd)
+                        st.session_state.running_pid = p.pid
+                        st.success(_(f"自检压测启动 (PID: {p.pid})！", f"Self-Check started (PID: {p.pid})!"))
+                        time.sleep(0.5)
+                        st.rerun()
 
     st.divider()
     
@@ -420,25 +564,85 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
     with col_btn_auto:
         auto_refresh = st.toggle("⏱️ " + _("自动刷新", "Auto"), value=False)
 
-    # 🌟 修复：精准过滤，只抓取主控进程的日志，过滤掉 Worker 的杂音
-    log_files = glob.glob("./system_logs/Trainer_Main_*.log")
+    # 🌟 修改：抓取所有的 log 文件，不局限于 Trainer
+    log_files = glob.glob("./system_logs/*.log")
     if log_files:
         latest_log = max(log_files, key=os.path.getmtime)
-        st.caption(_(f"正在监视文件: `{latest_log}`", f"Monitoring: `{latest_log}`"))
+        
+        # 🌟 补回丢失的控制器栏位，定义 display_limit
+        c_info, c_limit = st.columns([8, 2])
+        with c_info:
+            st.caption(_(f"正在监视文件: `{latest_log}`", f"Monitoring: `{latest_log}`"))
+        with c_limit:
+            display_limit = st.selectbox(
+                _("左侧显示行数", "Display Lines"), 
+                [500, 1000, 3000, 5000, 10000], 
+                index=0, 
+                help=_("调大可看更早的完整上下文，但前端浏览器可能会变卡", "Increase to see older context, but may lag browser")
+            )
         
         try:
             with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
-                # 读取最后 200 行，而不是 40 行，给您充足的上下文
-                lines = f.readlines()
-                display_lines = lines[-200:] if len(lines) > 200 else lines
+                # 🚀 性能革命：绝对禁止用 readlines() 吞入动辄几十MB的整个文件！
+                # 使用 deque 在底层极速截取最后 30000 行
+                # 彻底解决 WebUI 刷新导致的 CPU 100% 卡死和 C++ 引擎内存越界问题！
+                lines = list(deque(f, maxlen=30000))
+                
+                # 根据用户在右上角的选择动态切片
+                display_lines = lines[-display_limit:] if len(lines) > display_limit else lines
                 log_text = "".join(display_lines)
+                
+                # --- 🚨 错误自动提纯引擎 (高性能优化版) ---
+                error_lines = []
+                # 转为元组，匹配速度更快
+                keywords = ("🚨", "❌", "Error", "Exception", "Traceback", "死循环", "熔断")
+                
+                # 🛡️ 防御性编程：只扫描最后 20000 行。
+                # 即使是老日志，也不会导致 while 循环把 CPU 撑爆
+                scan_lines = lines[-20000:] if len(lines) > 20000 else lines
+                scan_offset = len(lines) - len(scan_lines)
+                
+                i = 0
+                while i < len(scan_lines):
+                    # 高速匹配
+                    if any(kw in scan_lines[i] for kw in keywords):
+                        start = max(0, i - 5)
+                        end = min(len(scan_lines), i + 11)
+                        block = "".join(scan_lines[start:end])
+                        actual_line_num = scan_offset + i + 1
+                        error_lines.append(f"--- Line {actual_line_num} Context ---\n{block}")
+                        i = end
+                    else:
+                        i += 1
+                        
+                if len(error_lines) > 30:
+                    error_lines = ["... " + _("(错误过多，仅展示最近 30 个)", "(Too many errors, showing last 30)") + " ...\n"] + error_lines[-30:]
+                    
+                error_text = "\n\n".join(error_lines)
+                # --------------------------------
             
-            # 🌟 核心升级：放入固定高度的 Container，产生原生滚动条！
-            with st.container(height=400):
-                st.code(log_text, language="bash")
+            # 🌟 核心升级：日志双列视图 (左侧完整，右侧提纯)
+            log_col1, log_col2 = st.columns([6, 4])
+            
+            with log_col1:
+                # [修复 4] 添加中英双语切换
+                st.markdown("**📜 " + _("完整终端日志 (Full Logs)", "Full Terminal Logs") + "**")
+                with st.container(height=550):
+                    st.code(log_text, language="bash")
+                    
+            with log_col2:
+                # [修复 4] 添加中英双语切换
+                st.markdown("**🚨 " + _("异常警报分离器 (Alerts Extraction)", "Alerts Extraction") + "**")
+                with st.container(height=550):
+                    if error_lines:
+                        # 用红色醒目标注
+                        st.error(_("检测到严重的报错或异常！(已过滤常规 Retry)", "Critical errors detected! (Normal retries filtered)"))
+                        st.code(error_text, language="bash")
+                    else:
+                        st.success(_("✅ 全局扫描未检测到严重报错。一切平稳！", "✅ No critical errors detected in the entire log. All good!"))
                 
         except Exception as e:
-            st.error(f"读取日志失败: {e}")
+            st.error(_(f"读取日志失败: {e}", f"Failed to read logs: {e}"))
     else:
         st.info(_("暂无日志文件生成。请点击上方的启动按钮。", "No logs generated yet. Click start above."))
 
@@ -564,7 +768,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                 hash_keys = sorted(list(hash_data.keys()), key=lambda k: len(hash_data[k]["cards"]), reverse=True)
                 
                 # 提取格式供展示
-                display_options = [f"{k} (共用卡数: {len(hash_data[k]['cards'])})" for k in hash_keys]
+                display_options = [f"{k} ({_('共用卡数:', 'Shared Cards:')} {len(hash_data[k]['cards'])})" for k in hash_keys]
                 selected_idx = st.selectbox(_("选择降维 Hash 标签查看", "Select Custom Hash Tag"), range(len(display_options)), format_func=lambda x: display_options[x])
                 
                 if selected_idx is not None:
@@ -623,9 +827,12 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
 elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
     st.title(_("🗃️ 资产与卡组管理", "🗃️ Assets & Decks Manager"))
     
-    tab_staples, tab_decks = st.tabs([
+    tab_staples, tab_decks, tab_global, tab_virtual,tab_online= st.tabs([
         _("🃏 泛用卡池配置 (142 兜底)", "🃏 Meta Staples (142 Cache)"),
-        _("📂 卡组与环境管理", "📂 Deck & Pool Manager")
+        _("📂 卡组与环境管理", "📂 Deck & Pool Manager"),
+        _("⚖️ 动态环境权重调度", "⚖️ Dynamic Pool Weights"),
+        _("🧠 虚拟环境构建器", "🧠 Virtual Mix Pool Builder"),
+        _("🌐 在线动态环境构建", "🌐 Online Fetcher")
     ])
     
     # --- 1. 泛用卡池配置 ---
@@ -700,7 +907,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         pools = [d for d in os.listdir(deck_root) if os.path.isdir(os.path.join(deck_root, d))]
         pools.insert(0, ".") # 根目录
         
-        c_nav, c_new = st.columns([2, 1])
+        c_nav, c_new, c_del_pool = st.columns([2, 1, 1])
         with c_nav:
             sel_pool = st.selectbox(_("📂 选择目标文件夹 (环境池)", "📂 Select Target Folder (Pool)"), pools, help=_("'.' 代表根目录 ./decks", "'.' means root ./decks"))
             pool_path = deck_root if sel_pool == "." else os.path.join(deck_root, sel_pool)
@@ -711,6 +918,15 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                 if new_pool_name:
                     os.makedirs(os.path.join(deck_root, new_pool_name), exist_ok=True)
                     st.success(_("✅ 创建成功！", "✅ Created!"))
+                    st.rerun()
+                    
+        with c_del_pool:
+            st.write("") # 占位对齐
+            st.write("")
+            if sel_pool != ".": # 保护根目录不被删除
+                if st.button("🗑️ " + _("删除该池", "Delete Pool"), use_container_width=True, type="secondary"):
+                    shutil.rmtree(pool_path)
+                    st.success(_("✅ 环境池已彻底删除！", "✅ Pool deleted!"))
                     st.rerun()
                     
         st.divider()
@@ -803,6 +1019,387 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         else:
             st.info(_("此文件夹中暂无 `.ydk` 卡组文件。", "No `.ydk` decks in this folder."))
 
+    # --- 3. 全局环境调度 (Global Weights - 分类+大滑块版) ---
+    with tab_global:
+        st.markdown("### ⚖️ " + _("全局训练环境调度台", "Global Training Environment Weights"))
+        st.info(_("此面板控制 AI 最终遇到哪一个环境池。为了方便管理，已将环境按来源分类。上方的大滑块可一键覆盖同类别的所有权重。", "Control environment probabilities. Pools are grouped by source. Use master sliders to bulk apply weights."))
+        
+        deck_root = "./decks"
+        os.makedirs(deck_root, exist_ok=True)
+        subdirs = [os.path.basename(os.path.normpath(d)) for d in os.listdir(deck_root) if os.path.isdir(os.path.join(deck_root, d))]
+        
+        virtual_file = os.path.join(deck_root, "virtual_pools.json")
+        v_pools = []
+        if os.path.exists(virtual_file):
+            try:
+                with open(virtual_file, 'r') as f: v_pools = list(json.load(f).keys())
+            except: pass
+            
+        all_candidates = subdirs + v_pools
+        if not all_candidates:
+            st.warning(_("暂无任何环境池。", "No pools available."))
+        else:
+            global_file = os.path.join(deck_root, "global_weights.json")
+            current_g_weights = {}
+            if os.path.exists(global_file):
+                try:
+                    with open(global_file, 'r') as f: current_g_weights = json.load(f)
+                except: pass
+            
+            # 🌟 为池子分类
+            online_pools = [c for c in all_candidates if c.startswith("ygopd_")]
+            virtual_pools = [c for c in all_candidates if c in v_pools]
+            local_pools = [c for c in all_candidates if c not in online_pools and c not in virtual_pools]
+            
+            new_g_weights = {}
+            
+            with st.form("global_weights_form"):
+                # --- 分类 1: 在线抓取池 ---
+                if online_pools:
+                    with st.expander("🌐 " + _("在线动态抓取池 (Online Pools)", "Online Fetch Pools"), expanded=True):
+                        c_bulk, c_btn = st.columns([3, 1])
+                        bulk_val_online = c_bulk.number_input(_("批量设值 (Bulk Set)", "Bulk Set"), 0.0, 10.0, 1.0, 0.1, key="blk_on")
+                        apply_online = c_btn.form_submit_button(_("⬇️ 向下应用", "Apply Below"), key="btn_app_on")
+                        
+                        # 🌟 核心修复：直接覆写 session_state 内存状态
+                        if apply_online:
+                            for c_name in online_pools:
+                                st.session_state[f"g_w_{c_name}"] = bulk_val_online
+                                
+                        st.markdown("---")
+                        for c_name in online_pools:
+                            new_g_weights[c_name] = st.slider(f"☁️ {c_name}", 0.0, 10.0, float(current_g_weights.get(c_name, 1.0)), 0.1, key=f"g_w_{c_name}")
+                
+                # --- 分类 2: 虚拟拼装池 ---
+                if virtual_pools:
+                    with st.expander("🧬 " + _("虚拟拼装乱斗池 (Virtual Mix Pools)", "Virtual Mix Pools"), expanded=True):
+                        c_bulk, c_btn = st.columns([3, 1])
+                        bulk_val_virt = c_bulk.number_input(_("批量设值 (Bulk Set)", "Bulk Set"), 0.0, 10.0, 1.0, 0.1, key="blk_vi")
+                        apply_virt = c_btn.form_submit_button(_("⬇️ 向下应用", "Apply Below"), key="btn_app_vi")
+                        
+                        # 🌟 核心修复
+                        if apply_virt:
+                            for c_name in virtual_pools:
+                                st.session_state[f"g_w_{c_name}"] = bulk_val_virt
+                                
+                        st.markdown("---")
+                        for c_name in virtual_pools:
+                            new_g_weights[c_name] = st.slider(f"🧪 {c_name}", 0.0, 10.0, float(current_g_weights.get(c_name, 1.0)), 0.1, key=f"g_w_{c_name}")
+
+                # --- 分类 3: 本地管理池 ---
+                if local_pools:
+                    with st.expander("📂 " + _("本地环境管理池 (Local Pools)", "Local Pools"), expanded=True):
+                        c_bulk, c_btn = st.columns([3, 1])
+                        bulk_val_loc = c_bulk.number_input(_("批量设值 (Bulk Set)", "Bulk Set"), 0.0, 10.0, 1.0, 0.1, key="blk_lo")
+                        apply_loc = c_btn.form_submit_button(_("⬇️ 向下应用", "Apply Below"), key="btn_app_lo")
+                        
+                        # 🌟 核心修复
+                        if apply_loc:
+                            for c_name in local_pools:
+                                st.session_state[f"g_w_{c_name}"] = bulk_val_loc
+                                
+                        st.markdown("---")
+                        for c_name in local_pools:
+                            new_g_weights[c_name] = st.slider(f"📁 {c_name}", 0.0, 10.0, float(current_g_weights.get(c_name, 1.0)), 0.1, key=f"g_w_{c_name}")
+
+                st.write("")
+                # 最终保存按钮
+                if st.form_submit_button("💾 " + _("保存并应用全局权重", "Save Global Weights"), type="primary", use_container_width=True):
+                    with open(global_file, 'w', encoding='utf-8') as f:
+                        json.dump(new_g_weights, f, indent=4)
+                    st.toast(_("✅ 全局权重已更新！Worker 下局生效。", "✅ Global weights updated!"))
+
+    # --- 4. 虚拟拼装池构建 (Virtual Mix Pools) ---
+    with tab_virtual:
+        st.markdown("### 🧠 " + _("虚拟拼装池制药厂", "Virtual Mix Pool Builder"))
+        st.info(_("在这里配置特定的物理池混合配方。建好后，它会作为一个新环境出现在【全局环境权重】中供你调度！", 
+                  "Create recipes mixing different physical pools. They will appear in Global Weights."))
+        
+        deck_root = "./decks"
+        subdirs = [os.path.basename(os.path.normpath(d)) for d in os.listdir(deck_root) if os.path.isdir(os.path.join(deck_root, d))]
+        
+        if not subdirs:
+            st.warning(_("无物理文件夹，无法拼装。", "No subfolders found."))
+        else:
+            v_file = os.path.join(deck_root, "virtual_pools.json")
+            try:
+                with open(v_file, 'r', encoding='utf-8') as f: all_v_pools = json.load(f)
+            except: all_v_pools = {}
+
+            with st.expander(_("➕ 创建新的拼装池", "Create New Mix Pool")):
+                c_name, c_btn = st.columns([3, 1])
+                new_pool_name = c_name.text_input(_("拼装池名称", "Pool Name"), placeholder="e.g. Meta_VS_Fun")
+                if c_btn.button(_("创建配方", "Create Recipe"), use_container_width=True):
+                    if not new_pool_name.strip():
+                        idx = 1
+                        while f"Virtual_Mix_{idx}" in all_v_pools: idx += 1
+                        new_pool_name = f"Virtual_Mix_{idx}"
+                    
+                    if new_pool_name in all_v_pools: st.error("已存在！")
+                    else:
+                        all_v_pools[new_pool_name] = {name: 0.0 for name in subdirs}
+                        with open(v_file, 'w', encoding='utf-8') as f: json.dump(all_v_pools, f, indent=4)
+                        st.success(f"✅ 创建成功！快去下方调配它吧！")
+                        st.rerun()
+
+            st.divider()
+            
+            if not all_v_pools:
+                st.info(_("暂无虚拟拼装池。", "No virtual pools."))
+            else:
+                # 对所有物理池进行分类
+                online_subdirs = [c for c in subdirs if c.startswith("ygopd_")]
+                local_subdirs = [c for c in subdirs if not c.startswith("ygopd_")]
+                
+                for p_name in list(all_v_pools.keys()):
+                    with st.container(border=True):
+                        col_h, col_del = st.columns([8, 1])
+                        col_h.subheader(f"🧪 配方: {p_name}")
+                        if col_del.button(_("🗑️ 删除配方", "🗑️ Delete Recipe"), key=f"del_{p_name}"):
+                            del all_v_pools[p_name]
+                            with open(v_file, 'w', encoding='utf-8') as f: json.dump(all_v_pools, f, indent=4)
+                            st.rerun()
+                        
+                        p_cfg = all_v_pools[p_name]
+                        new_cfg = {}
+                        
+                        # --- 虚拟池配方分类: 在线池 ---
+                        if online_subdirs:
+                            with st.expander("🌐 " + _("混入在线抓取池", "Mix Online Pools"), expanded=True):
+                                c_bulk, c_btn = st.columns([3, 1])
+                                bulk_val_on = c_bulk.number_input(_("批量设值", "Bulk Set"), 0.0, 10.0, 0.0, 0.1, key=f"vb_on_{p_name}")
+                                apply_on = c_btn.button(_("⬇️ 向下应用", "Apply"), key=f"va_on_{p_name}")
+                                
+                                # 🌟 核心修复：修改底层 session_state
+                                if apply_on:
+                                    for s_name in online_subdirs:
+                                        st.session_state[f"vsld_{p_name}_{s_name}"] = bulk_val_on
+                                        
+                                st.markdown("---")
+                                cols = st.columns(2)
+                                for i, s_name in enumerate(online_subdirs):
+                                    with cols[i % 2]:
+                                        new_cfg[s_name] = st.slider(f"☁️ {s_name}", 0.0, 10.0, float(p_cfg.get(s_name, 0.0)), 0.1, key=f"vsld_{p_name}_{s_name}")
+                        
+                        # --- 虚拟池配方分类: 本地池 ---
+                        if local_subdirs:
+                            with st.expander("📂 " + _("混入本地环境池", "Mix Local Pools"), expanded=True):
+                                c_bulk, c_btn = st.columns([3, 1])
+                                bulk_val_loc = c_bulk.number_input(_("批量设值", "Bulk Set"), 0.0, 10.0, 0.0, 0.1, key=f"vb_lo_{p_name}")
+                                apply_loc = c_btn.button(_("⬇️ 向下应用", "Apply"), key=f"va_lo_{p_name}")
+                                
+                                # 🌟 核心修复
+                                if apply_loc:
+                                    for s_name in local_subdirs:
+                                        st.session_state[f"vsld_{p_name}_{s_name}"] = bulk_val_loc
+                                        
+                                st.markdown("---")
+                                cols = st.columns(2)
+                                for i, s_name in enumerate(local_subdirs):
+                                    with cols[i % 2]:
+                                        new_cfg[s_name] = st.slider(f"📁 {s_name}", 0.0, 10.0, float(p_cfg.get(s_name, 0.0)), 0.1, key=f"vsld_{p_name}_{s_name}")
+                        
+                        st.write("")
+                        if st.button("💾 " + _("保存此混合配方", "Save Mix Recipe"), key=f"vsave_{p_name}", type="primary", use_container_width=True):
+                            all_v_pools[p_name] = new_cfg
+                            with open(v_file, 'w', encoding='utf-8') as f: json.dump(all_v_pools, f, indent=4)
+                            st.toast(f"✅ 【{p_name}】 配方已保存！")
+    
+    # --- 5. 在线动态环境与抓取引擎 ---
+    with tab_online:
+        st.markdown("### 🌐 " + _("在线动态环境构建与同步", "Online Meta Builder"))
+        
+        import threading
+        tasks_file = "./decks/fetch_tasks.json"
+        daemon_status_file = "./decks/daemon_status.txt"
+        
+        # 🌟 UI 顶部：数据源声明与连通性测试
+        c_source, c_test = st.columns([3, 1])
+        with c_source:
+            source = st.selectbox(_("🔌 数据源声明 (鸣谢)", "Data Source"), ["YGOProDeck (海外最大卡组库)", "萌卡 MyCard (国内) [待开发]"], disabled=True)
+        with c_test:
+            st.write(""); st.write("")
+            if st.button("📡 " + _("探测数据源 API 状态", "Test Connection"), use_container_width=True):
+                import online_fetcher
+                fetcher = online_fetcher.YGOProDeckFetcher()
+                with st.spinner("正在发送探测封包..."):
+                    succ, msg = fetcher.test_connection()
+                    if succ: st.success(msg)
+                    else: st.error(msg)
+        
+        st.divider()
+        daemon_running = False
+        if os.path.exists(daemon_status_file):
+            with open(daemon_status_file, "r", encoding="utf-8") as f: d_status = f.read()
+            if d_status.startswith("RUNNING"):
+                daemon_running = True
+                st.success("🔄 " + d_status)
+        
+        # 🌟 核心：映射官方真实底层 API 标签 (全量豪华版)
+        api_tags = {
+            # --- 🏆 比赛上位 (Tournament) ---
+            "🏆 TCG 比赛上位 (Tournament TCG)": "Tournament Meta Decks",
+            "🏆 OCG 比赛上位 (Tournament OCG)": "Tournament Meta Decks OCG",
+            "🏆 OCG-CN 比赛上位 (Tournament OCG-CN)": "Tournament Meta Decks OCG-CN",
+            "🏆 世界赛上位 (Tournament Worlds)": "Tournament Meta Decks World Championship",
+            
+            # --- ⚔️ 竞技环境 (Competitive) ---
+            "⚔️ 竞技天梯 (Meta Decks)": "Meta Decks",
+            "⚔️ 历届世界赛构筑 (World Championship)": "World Championship Decks",
+            
+            # --- 🎉 休闲与娱乐 (Casual) ---
+            "🎉 非主流/绝活 (Non-Meta)": "Non-Meta Decks",
+            "📺 动漫主题卡组 (Anime Decks)": "Anime Decks",
+            "🎈 纯娱乐卡组 (Fun/Casual)": "Fun/Casual Decks",
+            "🧠 构筑研讨 (Theorycrafting)": "Theorycrafting Decks",
+            
+            # --- 🎮 其他游戏与特殊赛制 ---
+            "🎮 大师决斗 (Master Duel)": "Master Duel Decks",
+            "🕰️ Edison 环境 (Edison Format)": "Edison Format",
+            "🕰️ Goat 环境 (Goat Format)": "Goat Format",
+            "🕰️ 疾速决斗 (Speed Duel)": "Speed Duel Decks",
+            "🌍 全部分类无限制 (All)": "All"
+        }
+
+        # 1. 抓取与添加新卡池
+        with st.expander(_("➕ 初始化/拉取新卡池", "Fetch New Pool"), expanded=True):
+            f1, f2, f3 = st.columns([4, 3, 3])
+            with f1: fetch_label = st.selectbox(_("选择目标卡组池标签 (API 映射)", "Select Target Pool Label"), list(api_tags.keys()), key="ftag")
+            with f2: fetch_mode = st.radio(_("抓取深度模式", "Fetch Depth Mode"), [(_("🆕 最新顺序", "🆕 Latest"), _("🌌 历史随机", "🌌 Random"))], horizontal=True, key="fmode")
+            with f3: fetch_limit = st.number_input(_("抓取数量", "Fetch Quantity"), min_value=5, max_value=200, value=30, step=10, key="flimit")
+            
+            real_api_tag = api_tags[fetch_label]
+            mode_tag = "Latest" if "最新" in fetch_mode else "Rand"
+            auto_folder_name = f"ygopd_{real_api_tag.replace(' ', '')}_{mode_tag}"
+            
+            if st.button("📥 " + _(f"抓取并添加到订阅清单: {auto_folder_name}", "Fetch & Add to List"), type="primary", use_container_width=True):
+                with st.spinner("正在突破天梯拉取数据..."):
+                    import online_fetcher, random
+                    fetcher = online_fetcher.YGOProDeckFetcher()
+                    is_rand = "历史" in fetch_mode
+                    # 🌟 核心突破：强制将随机偏移量乘以 20，完美骗过 WordPress 的分页系统
+                    offset = random.randint(1, 100) * 20 if is_rand else 0
+                    
+                    succ, msg = fetcher.fetch_decks(limit=fetch_limit, target_dir=os.path.join("./decks", auto_folder_name), api_category=real_api_tag, offset=offset)
+                    
+                    if succ:
+                        try:
+                            with open(tasks_file, 'r', encoding='utf-8') as f: tasks = json.load(f)
+                        except: tasks = {}
+                        
+                        if auto_folder_name not in tasks:
+                            tasks[auto_folder_name] = {
+                                "api_category": real_api_tag, "is_rand": is_rand,
+                                "base_limit": fetch_limit, "update_limit": fetch_limit, "auto_update": False,
+                                "last_update": time.strftime("%m-%d %H:%M")
+                            }
+                        else: tasks[auto_folder_name]["last_update"] = time.strftime("%m-%d %H:%M")
+                        
+                        with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(tasks, f, indent=4)
+                        st.success(f"{msg} (偏移深度: {offset})")
+                        time.sleep(1.5)
+                        st.rerun()
+                    else: st.error(msg)
+        
+        # 2. 全局守护进程控制器
+        st.markdown("#### 🤖 " + _("后台自动更新守护进程", "Auto-Update Daemon"))
+        col_int, col_btn = st.columns([3, 1])
+        with col_int:
+            global_interval = st.number_input(_("全局循环间隔 (小时) | 建议 0.5 ~ 24", "Global Interval (Hours)"), min_value=0.5, max_value=72.0, value=12.0, step=0.25)
+            st.caption(_("守护进程会将下方【允许自动】的任务均匀分散到此时间段内执行，完美规避 API 封禁。", ""))
+        
+        with col_btn:
+            st.write(""); st.write("")
+            if daemon_running:
+                if st.button("🛑 " + _("停止守护", "Stop Daemon"), type="primary", use_container_width=True):
+                    with open(daemon_status_file, "w", encoding="utf-8") as f: f.write("STOPPED")
+                    st.rerun()
+            else:
+                if st.button("⚙️ " + _("启动后台守护", "Start Daemon"), type="secondary", use_container_width=True):
+                    with open(daemon_status_file, "w", encoding="utf-8") as f: f.write(f"RUNNING: 守护中 (全局间隔 {global_interval}H)")
+                    
+                    def bg_daemon_task(interval_hrs):
+                        import online_fetcher, random, time
+                        while True:
+                            try:
+                                with open(tasks_file, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                    tasks = json.loads(content) if content else {}
+                            except: tasks = {}
+                            
+                            active_tasks = [k for k, v in tasks.items() if v.get('auto_update', False)]
+                            if not active_tasks:
+                                for _ in range(60):
+                                    if os.path.exists(daemon_status_file) and open(daemon_status_file).read().strip() == "STOPPED":
+                                        os.remove(daemon_status_file); return
+                                    time.sleep(1)
+                                continue
+                                
+                            interval_sec = int(interval_hrs * 3600)
+                            gap_sec = max(10, interval_sec // len(active_tasks)) 
+                            
+                            for task_name in active_tasks:
+                                if os.path.exists(daemon_status_file) and open(daemon_status_file).read().strip() == "STOPPED":
+                                    os.remove(daemon_status_file); return
+                                
+                                cfg = tasks[task_name]
+                                try:
+                                    fetcher = online_fetcher.YGOProDeckFetcher()
+                                    offset = random.randint(1, 100) * 20 if cfg.get('is_rand') else 0
+                                    fetcher.fetch_decks(limit=cfg.get('update_limit', 10), target_dir=os.path.join("./decks", task_name), api_category=cfg.get('api_category'), offset=offset)
+                                    
+                                    tasks[task_name]['last_update'] = time.strftime("%m-%d %H:%M")
+                                    with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(tasks, f, indent=4)
+                                except: pass
+                                
+                                for _ in range(gap_sec):
+                                    if os.path.exists(daemon_status_file) and open(daemon_status_file).read().strip() == "STOPPED":
+                                        os.remove(daemon_status_file); return
+                                    time.sleep(1)
+                                    
+                    threading.Thread(target=bg_daemon_task, args=(global_interval,), daemon=True).start()
+                    st.rerun()
+
+        # 3. 缓存清单管理列表
+        st.markdown("#### 📋 " + _("卡池更新管理列表", "Subscription List"))
+        try:
+            with open(tasks_file, 'r', encoding='utf-8') as f: current_tasks = json.load(f)
+        except: current_tasks = {}
+        
+        if not current_tasks:
+            st.info("暂无抓取记录。请在上方执行首次抓取！")
+        else:
+            for t_name, t_cfg in current_tasks.items():
+                with st.container(border=True):
+                    col_name, col_lim, col_tog, col_man, col_del = st.columns([3, 2, 2, 2, 1])
+                    col_name.write(f"🏷️ **{t_name}**\n\n<small>{_('上次:', 'Last Updated')}: {t_cfg.get('last_update', 'N/A')}</small>", unsafe_allow_html=True)
+                    
+                    new_lim = col_lim.number_input(_("更新量", "Update Quantity"), min_value=5, max_value=t_cfg.get('base_limit', 50), value=t_cfg.get('update_limit', 10), step=5, key=f"ulim_{t_name}")
+                    st.write("")
+                    new_tog = col_tog.toggle(_("🔄 允许自动", "🔄 Allow Auto-Update"), value=t_cfg.get('auto_update', False), key=f"utog_{t_name}")
+                    
+                    if new_lim != t_cfg.get('update_limit') or new_tog != t_cfg.get('auto_update'):
+                        current_tasks[t_name]['update_limit'] = new_lim
+                        current_tasks[t_name]['auto_update'] = new_tog
+                        with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(current_tasks, f, indent=4)
+                    
+                    if col_man.button("⚡ " + _("立即覆盖更新", "Force Update"), key=f"uman_{t_name}"):
+                        import online_fetcher, random
+                        with st.spinner(f"正在更新 {t_name}..."):
+                            fetcher = online_fetcher.YGOProDeckFetcher()
+                            offset = random.randint(1, 100) * 20 if t_cfg.get('is_rand') else 0
+                            succ, msg = fetcher.fetch_decks(limit=new_lim, target_dir=os.path.join("./decks", t_name), api_category=t_cfg.get('api_category'), offset=offset)
+                            if succ:
+                                current_tasks[t_name]['last_update'] = time.strftime("%m-%d %H:%M")
+                                with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(current_tasks, f, indent=4)
+                                st.toast(f"✅ {t_name} 手动更新完毕！")
+                            else: st.error(msg)
+                            
+                    if col_del.button("🗑️ " + _("删除任务", "Delete Task"), key=f"udel_{t_name}"):
+                        del current_tasks[t_name]
+                        with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(current_tasks, f, indent=4)
+                        st.rerun()
+
 # ==========================================
 # 📁 模块六：存储与日志仓库
 # ==========================================
@@ -893,32 +1490,45 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         build_file_manager("./models", ".pth", _("模型 Checkpoint", "Model Checkpoints"), allow_view=False, allow_upload=True)
     with tab_data: # <--- 新增
         build_file_manager("./web_data", ".csv", _("天梯对局数据", "Match Data"), allow_view=True, allow_upload=False)
-    # 🌟 新增：TensorBoard 专属清空逻辑
+    # 🌟 修复：TensorBoard 专属多选删除与一键清空逻辑
     with tab_tb:
-        st.markdown("### 📉 TensorBoard 运行记录管理")
-        st.markdown(_("TensorBoard 日志为庞大的二进制流，此处仅提供容量监测与一键清理功能，用于释放硬盘空间。", 
-                      "Manage TensorBoard event files. Preview is disabled for binary files."))
+        st.markdown("### 📉 " + _("TensorBoard 运行记录管理", "TensorBoard Runs Management"))
+        st.markdown(_("TensorBoard 日志为庞大的二进制流，此处提供分文件夹批量删除与一键清理功能。", 
+                      "Manage TensorBoard event files. Support for batch deletion and one-click purging."))
         
         tb_dir = "./runs"
         os.makedirs(tb_dir, exist_ok=True)
         
-        # 计算文件夹大小
+        # 获取所有运行记录文件夹
+        run_folders = sorted([f for f in os.listdir(tb_dir) if os.path.isdir(os.path.join(tb_dir, f))], reverse=True)
+        
+        # 实时容量统计
         tb_size = sum(os.path.getsize(os.path.join(dirpath, f)) for dirpath, _, filenames in os.walk(tb_dir) for f in filenames)
-        tb_size_mb = tb_size / (1024 * 1024)
+        st.info(f"**{_('当前 ./runs 目录占用空间', 'Current Disk Usage')}:** {tb_size / (1024 * 1024):.2f} MB")
         
-        st.info(f"**当前 ./runs 目录占用空间:** {tb_size_mb:.2f} MB")
-        
-        with st.expander(_("🧨 危险操作区 (一键清空...)", "Danger Zone (Clear All...)")):
-            st.error(_(f"将彻底删除 `{tb_dir}` 下所有文件！注意：这会重置 TensorBoard 的所有历史训练曲线！", 
-                       f"Will completely delete all files in `{tb_dir}`!"))
-            confirm_tb = st.checkbox(_("我确认清空", "I confirm to clear"), key="chk_clr_runs")
-            
-            if st.button(_("彻底清空 TensorBoard 数据", "Clear ALL TensorBoard Data"), type="primary", disabled=not confirm_tb):
-                # 递归删除并重建空文件夹
-                shutil.rmtree(tb_dir)
-                os.makedirs(tb_dir, exist_ok=True)
-                st.success(_("✅ 已全部清空 TensorBoard 记录！", "✅ Cleared all!"))
+        if run_folders:
+            # 🌟 新增：批量多选删除区
+            st.markdown("#### 📂 " + _("记录列表", "Run Records"))
+            selected_runs = st.multiselect(_("选择要删除的特定记录", "Select specific runs to delete"), run_folders)
+            if st.button(_("🗑️ 删除选中记录", "Delete Selected Runs"), type="secondary", disabled=not selected_runs):
+                for folder in selected_runs:
+                    shutil.rmtree(os.path.join(tb_dir, folder))
+                st.success(_("✅ 指定记录已清理！", "✅ Selected runs cleared!"))
                 st.rerun()
+
+            # 原有的危险操作区
+            with st.expander(_("🧨 危险操作区 (一键清空...)", "Danger Zone (Clear All...)")):
+                st.error(_(f"将彻底删除 `{tb_dir}` 下所有文件！注意：这会重置所有历史训练曲线！", 
+                           f"Will completely delete all files in `{tb_dir}`!"))
+                confirm_tb = st.checkbox(_("我确认清空", "I confirm to clear"), key="chk_clr_runs")
+                
+                if st.button(_("彻底清空所有数据", "Clear ALL Data"), type="primary", disabled=not confirm_tb):
+                    shutil.rmtree(tb_dir)
+                    os.makedirs(tb_dir, exist_ok=True)
+                    st.success(_("✅ 已全部清空记录！", "✅ Cleared all!"))
+                    st.rerun()
+        else:
+            st.info(_("暂无运行记录", "No run records found."))
 
 # ==========================================
 # 👁️ 模块七：全息读心回放 (战术沙盘 V7.0)
@@ -1301,10 +1911,15 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
     col1, col2, col3 = st.columns([2, 2, 6])
     with col1:
         if not tb_running:
-            if st.button("🚀 启动 TensorBoard", type="primary"):
+            if st.button(_("🚀 启动 TensorBoard", "🚀 Start TensorBoard"), type="primary"):
                 # 🌟 修复 2: 后台静默启动，将标准输出和报错全部扔进黑洞，终端彻底清静！
                 subprocess.Popen(
-                    ["tensorboard", "--logdir", "./runs", "--port", "6006", "--host", "127.0.0.1"],
+                    [
+                        "tensorboard", "--logdir", "./runs", "--port", "6006", "--host", "127.0.0.1",
+                        "--samples_per_plugin", "scalars=500,images=0,audio=0", # 强制压缩采样率，抛弃无用的多媒体日志
+                        "--max_reload_threads", "1",                            # 限制为单线程读取，防止 CPU 瞬间飙升100%
+                        "--reload_interval", "60"                               # 把自动刷新间隔拉长到 60 秒
+                    ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
@@ -1312,7 +1927,7 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
                 time.sleep(2.5) # 给服务器 2.5 秒的启动时间
                 st.rerun()
         else:
-            if st.button("🛑 关闭 TensorBoard"):
+            if st.button(_("🛑 关闭 TensorBoard", "🛑 Stop TensorBoard")):
                 if os.name == 'nt':
                     os.system("taskkill /F /IM tensorboard.exe")
                 else:
@@ -1322,7 +1937,7 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
                 st.rerun()
     with col2:
         if tb_running:
-            if st.button("🔄 刷新图表"):
+            if st.button(_("🔄 刷新图表", "🔄 Refresh Charts")):
                 st.rerun()
 
     st.divider()
@@ -1339,3 +1954,202 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
         components.iframe("http://127.0.0.1:6006", height=850, scrolling=True)
     else:
         st.info(_("⚪ TensorBoard 尚未启动，请点击左上方按钮启动服务器。", "⚪ TensorBoard is not running. Click Start."))
+    
+# ==========================================
+# 📦 模块八：模型部署与打包 (Model Deployment V3.0.0 本地直连版)
+# ==========================================
+elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
+    import zipfile
+    import shutil
+    import time
+    import platform
+    import subprocess
+    
+    st.title(_("📦 模型打包与发布工厂", "📦 Model Deployment Factory"))
+    st.markdown(_("将训练好的模型与知识库打包为 `.gkg` 部署包。已启用纯本地原生 I/O 加速，彻底免除网页端大文件传输导致的卡顿与内存溢出。", 
+                  "Package models and knowledge bases into `.gkg` files. Native local I/O enabled to prevent browser freezing and OOM."))
+    
+    deploy_dir = os.path.abspath("./deploy_packages")
+    unpack_dir = os.path.join(deploy_dir, "unpacked")
+    os.makedirs(deploy_dir, exist_ok=True)
+    os.makedirs(unpack_dir, exist_ok=True)
+    
+    # 跨平台打开文件夹辅助函数
+    def open_local_folder(path):
+        try:
+            if platform.system() == "Windows": os.startfile(path)
+            elif platform.system() == "Darwin": subprocess.Popen(["open", path])
+            else: subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            st.error(f"无法打开文件夹: {e}")
+
+    tab_pack, tab_unpack = st.tabs([
+        _("📥 封装部署文件 (Export)", "📥 Export Package"), 
+        _("📤 解包与选择性导入 (Unpack & Import)", "📤 Unpack & Import")
+    ])
+    
+    # --- 1. 打包导出 ---
+    with tab_pack:
+        col_form, col_list = st.columns([6, 4])
+        
+        with col_form:
+            st.markdown("### 🔧 " + _("构建新的 .gkg 部署包", "Build new .gkg Package"))
+            models = [f for f in os.listdir("./models") if f.endswith(".pth")]
+            
+            with st.form("pack_form"):
+                st.markdown("##### 🤖 核心模型选择")
+                sel_models = st.multiselect(_("选择要打包的模型 (.pth，可多选)", "Select Core Models (.pth)"), models) if models else []
+                if not models: st.warning(_("暂无 .pth 模型文件。", "No .pth models found."))
+                
+                st.markdown("##### 🗂️ 附加数据组件")
+                c1, c2, c3 = st.columns(3)
+                with c1: inc_kb = st.checkbox("包含 知识库", value=True, help="knowledge_base.json")
+                with c2: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
+                with c3: inc_manifest = st.checkbox("生成 说明书", value=True, help="manifest.json")
+                
+                st.markdown("##### 🏷️ 包体信息")
+                pkg_name = st.text_input(_("自定义包名 (留空默认自动生成)", "Package Name"), placeholder="e.g. Galatea_V3_Full")
+                
+                if st.form_submit_button("🔨 " + _("原生极速打包 (.gkg)", "Generate .gkg Fast"), type="primary", use_container_width=True):
+                    missing = []
+                    if inc_kb and not os.path.exists("knowledge_base.json"): missing.append("knowledge_base.json")
+                    if inc_staples and not os.path.exists("meta_staples.json"): missing.append("meta_staples.json")
+                    
+                    if missing:
+                        st.error(_(f"缺少勾选的组件: {', '.join(missing)}。请先生成或取消勾选！", f"Missing files: {', '.join(missing)}."))
+                    elif not sel_models and not (inc_kb or inc_staples):
+                        st.error("包体不能为空，请至少选择一个模型或组件！")
+                    else:
+                        with st.spinner("正在本地进行高压封装，零内存泄露..."):
+                            final_name = pkg_name.strip() if pkg_name.strip() else f"Galatea_Pkg_{int(time.time())}"
+                            target_zip = os.path.join(deploy_dir, f"{final_name}.gkg")
+                            
+                            manifest = {
+                                "package_name": final_name, "version": "3.0.0",
+                                "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "models_included": sel_models, "includes_kb": inc_kb, "includes_staples": inc_staples
+                            }
+                            if inc_manifest:
+                                with open("manifest_temp.json", "w", encoding="utf-8") as f: json.dump(manifest, f, indent=4)
+                                    
+                            with zipfile.ZipFile(target_zip, 'w', zipfile.ZIP_DEFLATED) as gkg_zip:
+                                for m in sel_models: gkg_zip.write(os.path.join("./models", m), arcname=m)
+                                if inc_kb: gkg_zip.write("knowledge_base.json", arcname="knowledge_base.json")
+                                if inc_staples: gkg_zip.write("meta_staples.json", arcname="meta_staples.json")
+                                if inc_manifest: gkg_zip.write("manifest_temp.json", arcname="manifest.json")
+                                
+                            if inc_manifest: os.remove("manifest_temp.json")
+                            st.success(_(f"✅ 打包成功！文件位于 `{target_zip}`", f"✅ Successfully packaged to `{target_zip}`"))
+                            time.sleep(1)
+                            st.rerun()
+
+        with col_list:
+            st.markdown("### 🗄️ " + _("本地部署包仓库", "Local Packages"))
+            gkgs = sorted([f for f in os.listdir(deploy_dir) if f.endswith(".gkg")], reverse=True)
+            
+            if st.button("📂 " + _("打开本地部署包文件夹", "Open Local Folder"), use_container_width=True):
+                open_local_folder(deploy_dir)
+                
+            st.divider()
+            if gkgs:
+                for gm in gkgs:
+                    with st.container(border=True):
+                        st.markdown(f"📦 **{gm}** `({os.path.getsize(os.path.join(deploy_dir, gm)) // (1024*1024)} MB)`")
+                        if st.button("🗑️ " + _("删除该包", "Delete"), key=f"del_{gm}", use_container_width=True):
+                            os.remove(os.path.join(deploy_dir, gm))
+                            st.rerun()
+            else:
+                st.info("暂无生成的部署包。")
+
+    # --- 2. 解包与暂存库 ---
+    with tab_unpack:
+        col_up, col_mgr = st.columns([1, 1])
+
+        # 【左侧：从本地读取解包】
+        with col_up:
+            st.markdown("### 📥 " + _("从本地读取并解压", "Read & Unpack Locally"))
+            st.info("将外部获取的 `.gkg` 包拖入本地部署文件夹，然后在下方选择解压到暂存区。")
+            
+            if st.button("📂 " + _("打开本地文件夹放入 .gkg 包", "Drop .gkg here"), type="secondary", use_container_width=True):
+                open_local_folder(deploy_dir)
+            
+            st.write("")
+            local_gkgs = [f for f in os.listdir(deploy_dir) if f.endswith(".gkg")]
+            if not local_gkgs:
+                st.warning("⚠️ 本地仓库未检测到 `.gkg` 包。请先点击上方按钮拖入文件。")
+            else:
+                sel_gkg = st.selectbox("选择要解压的本地部署包：", local_gkgs)
+                if st.button("⚡ " + _("执行本地极速解包", "Unpack Fast"), type="primary", use_container_width=True):
+                    with st.spinner("正在进行本地原生解构，绕过所有上传限制..."):
+                        pkg_name_no_ext = sel_gkg.replace(".gkg", "")
+                        target_extract_dir = os.path.join(unpack_dir, f"{pkg_name_no_ext}_{int(time.time())}")
+                        os.makedirs(target_extract_dir, exist_ok=True)
+                        
+                        try:
+                            with zipfile.ZipFile(os.path.join(deploy_dir, sel_gkg), 'r') as gkg_zip:
+                                gkg_zip.extractall(target_extract_dir)
+                            st.success(f"✅ 解包成功！已存入暂存区：`{os.path.basename(target_extract_dir)}`")
+                        except Exception as e:
+                            st.error(f"解压失败，包体可能损坏: {str(e)}")
+                        time.sleep(1.5)
+                        st.rerun()
+
+        # 【右侧：暂存库与导入管理】
+        with col_mgr:
+            st.markdown("### 🚀 " + _("暂存库管理与导入", "Staging & Selective Import"))
+            st.info("浏览解包后的暂存区，精准勾选需要导入的文件。")
+            
+            staged_folders = sorted([d for d in os.listdir(unpack_dir) if os.path.isdir(os.path.join(unpack_dir, d))], reverse=True)
+            
+            if not staged_folders:
+                st.warning("暂存区为空。请先在左侧解压一个 `.gkg` 包。")
+            else:
+                sel_stage = st.selectbox("📂 选择解压暂存目录", staged_folders)
+                stage_path = os.path.join(unpack_dir, sel_stage)
+                staged_files = os.listdir(stage_path)
+                
+                if not staged_files:
+                    st.info("该暂存区为空。")
+                else:
+                    with st.form("import_form"):
+                        st.write("**勾选需要部署进当前系统的文件：**")
+                        
+                        models_in_stage = [f for f in staged_files if f.endswith(".pth")]
+                        jsons_in_stage = [f for f in staged_files if f.endswith(".json")]
+                        
+                        import_selections = []
+                        
+                        if models_in_stage:
+                            st.markdown("🤖 **模型文件 (将自动分发至 `./models/`)**")
+                            for m in models_in_stage:
+                                if st.checkbox(f"📄 {m}", value=True, key=f"chk_{sel_stage}_{m}"):
+                                    import_selections.append(("models", m))
+                        
+                        if jsons_in_stage:
+                            st.markdown("📝 **字典与配置文件 (将直接覆盖系统根目录文件！)**")
+                            for j in jsons_in_stage:
+                                is_manifest = "manifest" in j.lower()
+                                if st.checkbox(f"⚙️ {j}", value=not is_manifest, key=f"chk_{sel_stage}_{j}"):
+                                    import_selections.append(("root", j))
+                                    
+                        st.write("")
+                        if st.form_submit_button("📥 " + _("执行精准导入", "Execute Import"), type="primary", use_container_width=True):
+                            if not import_selections:
+                                st.warning("未勾选任何文件！")
+                            else:
+                                try:
+                                    os.makedirs("./models", exist_ok=True)
+                                    for target_type, fname in import_selections:
+                                        src_file = os.path.join(stage_path, fname)
+                                        if target_type == "models":
+                                            dest_file = os.path.join("./models", fname)
+                                        else:
+                                            dest_file = os.path.join(".", fname)
+                                        shutil.copy2(src_file, dest_file)
+                                    st.success("✅ 导入成功！系统环境已更新。")
+                                except Exception as e:
+                                    st.error(f"导入中途失败: {str(e)}")
+
+                if st.button("🗑️ " + _("清空此暂存目录", "Delete this Staged Folder"), use_container_width=True):
+                    shutil.rmtree(stage_path)
+                    st.rerun()

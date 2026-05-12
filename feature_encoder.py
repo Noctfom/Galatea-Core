@@ -75,11 +75,11 @@ class GalateaEncoder:
         for act in valid_actions[:MAX_ACTIONS]:
             # 1. 提取多目标实体/素材 (支持 5 张卡)
             if hasattr(act, 'macro_targets') and act.macro_targets:
-                t_idxs = [t for t in act.macro_targets if t >= 0][:MAX_MATERIALS]
-                t_idxs.extend([0] * (MAX_MATERIALS - len(t_idxs))) 
+                t_idxs = [t if (0 <= t < MAX_CARDS) else MAX_CARDS for t in act.macro_targets][:MAX_MATERIALS]
+                t_idxs.extend([MAX_CARDS] * (MAX_MATERIALS - len(t_idxs)))
             else:
-                t_idx = act.target_entity_idx if act.target_entity_idx >= 0 else 0
-                t_idxs = [t_idx] + [0] * (MAX_MATERIALS - 1)
+                t_idx = act.target_entity_idx if (0 <= act.target_entity_idx < MAX_CARDS) else MAX_CARDS
+                t_idxs = [t_idx] + [MAX_CARDS] * (MAX_MATERIALS - 1)
             act_card_idxs.append(t_idxs)
             
             # 2. 提取多重格子坐标 (支持同时锁 5 个格子)
@@ -108,7 +108,7 @@ class GalateaEncoder:
         # 4. 长度对齐 Padding
         pad_len = MAX_ACTIONS - len(act_card_idxs)
         if pad_len > 0:
-            act_card_idxs.extend([[0]*MAX_MATERIALS] * pad_len) # 二维 Padding
+            act_card_idxs.extend([[120]*MAX_MATERIALS] * pad_len) # 二维 Padding
             act_places.extend([[0]*MAX_MATERIALS] * pad_len)    # 二维 Padding
             act_types.extend([0] * pad_len)
             act_descs.extend([0] * pad_len)

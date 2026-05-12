@@ -116,9 +116,14 @@ except RuntimeError:
 
 
 def main():
-    setup_global_logger(prefix="Trainer_Main")
-    parser = argparse.ArgumentParser(description="Galatea AI 主控程序")
+    # 修改：根据输入命令动态切换日志前缀
+    cmd_name = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('-') else "Main"
+    prefix_mapping = {'train': 'Trainer', 'duel': 'Arena', 'play': 'SelfCheck', 'parse': 'Parser', 'update': 'Updater'}
+    log_prefix = prefix_mapping.get(cmd_name, 'System')
     
+    setup_global_logger(prefix=log_prefix)
+    
+    parser = argparse.ArgumentParser(description="Galatea AI 主控程序")
     subparsers = parser.add_subparsers(dest='command', help='可用指令')
     
     # --- 1. 训练模式 (Train) ---
@@ -137,10 +142,18 @@ def main():
     train_parser.add_argument('--mini_batch', type=int, default=512, help='GPU训练Batch')
     train_parser.add_argument('--workers', type=int, default=4, help='CPU进程数')
     train_parser.add_argument('--worker_device', type=str, default='cpu', choices=['cpu', 'cuda'], help="Worker 推理使用的设备 (cpu 或 cuda)")
-    # [新增] 异步推断开关
+    train_parser.add_argument('--timeout', type=int, default=300, help='Worker 数据采集的最高容忍时间(秒)')
+    # 异步推断开关
     train_parser.add_argument('--async_infer', action='store_true', help="启用异步推断服务器(大幅节省显存并提速)")
-    # [新增] 添加禁用编译的开关 (防止win/老旧环境报错)
+    # 添加禁用编译的开关 (防止win/老旧环境报错)
     train_parser.add_argument('--no_compile', action='store_true', help='禁用 torch.compile (兼容性模式)')
+
+    # RL 灵魂超参数
+    train_parser.add_argument('--gamma', type=float, default=0.998, help='目光长远度 (推荐0.998)')
+    train_parser.add_argument('--lr', type=float, default=1e-4, help='学习率 (大脑神经元重塑速度)')
+    train_parser.add_argument('--entropy', type=float, default=0.03, help='探索欲/好奇心系数')
+    train_parser.add_argument('--gae_lambda', type=float, default=0.95, help='经验平滑度')
+    train_parser.add_argument('--clip_eps', type=float, default=0.2, help='单次顿悟的上限')
 
     # ==========================================
     
@@ -207,24 +220,41 @@ def main():
         print(f"🚀 启动训练模式 (保存至 {args.dir})...")
         print(f"📂 读取卡组: {args.deck_dir}")
         print(f"⚙️ 模型架构: {net_config}")
-        # [修改] 传入 resume 参数
         trainer = PPOTrainer(
             save_dir=args.dir, 
             deck_dir=args.deck_dir, 
             net_config=net_config,
-            resume_path=args.resume,  # <--- 关键：把命令行参数传进去
-            update_timesteps=args.batch_size,  # [新增] 传参
+            resume_path=args.resume,  # 把命令行参数传进去
+            update_timesteps=args.batch_size,  # 传参
             mini_batch_size=args.mini_batch,
             num_workers=args.workers,
             worker_device=args.worker_device,
             async_infer=args.async_infer,
-            compile_model=not args.no_compile # [新增] 如果用户输入 --no_compile，这里就是 False
+            compile_model=not args.no_compile, # 如果用户输入 --no_compile，这里就是 False
+            worker_timeout=args.timeout,
+            gamma=args.gamma,         #RL 相关超参数
+            lr=args.lr,
+            entropy=args.entropy,
+            gae_lambda=args.gae_lambda,
+            clip_eps=args.clip_eps
         )
         trainer.run_training_loop(max_iterations=args.steps)
         
     elif args.command == 'play':
-        print(f"⚔️ 启动测试模式...")
-        run_self_play.main(total_games=args.num, deck_dir=args.deck_dir)
+        print(f"⚔️ 启动规则系统自检测压测 (Self-Check)...")
+        import platform
+        from duel_launcher import DuelManager
+        
+        # 自动探测不同系统的引擎核心库后缀
+        dll_name = "ocgcore.dll" if platform.system() == "Windows" else "libocgcore.so"
+        core_path = os.path.abspath(os.path.join(".", dll_name))
+        
+        if not os.path.exists(core_path):
+            print(f"❌ 致命错误: 找不到核心动态库 {core_path}。")
+            sys.exit(1)
+            
+        manager = DuelManager(core_path, args.deck_dir)
+        manager.run_tournament(args.num)
         
     elif args.command == 'duel':
         print(f"🏟️ 启动竞技场模式...")

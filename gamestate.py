@@ -649,26 +649,31 @@ class DuelState:
 
             # 2. MSG_SELECT_CHAIN (16)
             elif msg_type == 16:
-                stream.read(1) # P
+                player = struct.unpack('B', stream.read(1))[0]
                 count = struct.unpack('B', stream.read(1))[0]
-                stream.read(10) # Spe, Forced, H1, H2
+                spe_count = struct.unpack('B', stream.read(1))[0]
+                forced = struct.unpack('B', stream.read(1))[0]
+                stream.read(8) # 跳过 hint1 (4), hint2 (4)
                 
                 for i in range(count):
+                    # 【定界符】C++ 在多个项目之间会隐式插入一个 0x00
+                    if i > 0:
+                        stream.read(1) 
+                        
                     stream.read(1) # Flag
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     desc = struct.unpack('<I', stream.read(4))[0]
                     
-                    # [额外修复] 吞掉元素之间的 1 字节定界符
-                    if i < count - 1:
-                        stream.read(1)
+                    act = GameAction(action_type=16, index=i, target_entity_idx=loc_val, desc_id=desc, desc_str=f"Chain {code}")
+                    act.code = code 
+                    self.current_valid_actions.append(act)
                     
-                    self.current_valid_actions.append(
-                        GameAction(action_type=16, index=i, target_entity_idx=loc_val, desc_id=desc)
-                    )
+                # 只有非强制发动 (forced == 0) 时，才允许 AI 取消
+                if not forced:
+                    self.current_valid_actions.append(GameAction(action_type=16, index=-1, desc_str="Cancel"))
                 
-                # 连锁允许取消 (-1)
-                self.current_valid_actions.append(GameAction(action_type=16, index=-1, desc_str="Cancel"))
+                return True
 
             # 3. MSG_SELECT_CARD (15)
             # 结构: P + Cancelable + Min + Max + Count + List(Code4+Loc4)
@@ -682,9 +687,9 @@ class DuelState:
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     
-                    self.current_valid_actions.append(
-                        GameAction(action_type=15, index=i, target_entity_idx=loc_val)
-                    )
+                    act = GameAction(action_type=15, index=i, target_entity_idx=loc_val, desc_str=f"Select {code}")
+                    act.code = code
+                    self.current_valid_actions.append(act)
                 
                 if can_cancel or count == 0:
                     self.current_valid_actions.append(GameAction(action_type=15, index=-1, desc_str="Cancel"))
@@ -899,12 +904,13 @@ class DuelState:
                     
                     if not unique_codes: unique_codes = {14558127, 23434538}
 
-                    # 微型 RPN 逆波兰计算器
+                    # 微型 RPN 逆波兰计算器 (严格 C++ 协议版)
                     def evaluate_rpn(code_to_test):
                         if not opcodes: return True
                         try:
                             stats = card_db.get_full_stats(code_to_test)
-                            c_type = stats[0]; c_race = stats[1]; c_att = stats[2]; c_setcodes = stats[10]
+                            c_type = stats[0]; c_race = stats[1]; c_att = stats[2]
+                            c_level = stats[3]; c_link = stats[7]; c_setcodes = stats[10]
                         except:
                             return False
                         
@@ -918,14 +924,27 @@ class DuelState:
                                     stack.append(1 if code_to_test == stack.pop() else 0)
                                 elif op == 0x40000101: # ISSETCARD
                                     v = stack.pop()
-                                    match = 1 if any((sc & 0xffff) == (v & 0xffff) for sc in c_setcodes) else 0
+                                    match = 0
+                                    settype = v & 0xfff
+                                    setsubtype = v & 0xf000
+                                    for sc in c_setcodes:
+                                        if (sc & 0xfff) == settype and (sc & 0xf000 & setsubtype) == setsubtype:
+                                            match = 1
+                                            break
                                     stack.append(match)
                                 elif op == 0x40000102: # ISTYPE
-                                    stack.append(1 if (c_type & stack.pop()) else 0)
+                                    val = stack.pop()
+                                    stack.append(1 if (c_type & val) == val else 0) # 严格位包含
                                 elif op == 0x40000103: # ISRACE
-                                    stack.append(1 if (c_race & stack.pop()) else 0)
+                                    val = stack.pop()
+                                    stack.append(1 if (c_race & val) == val else 0)
                                 elif op == 0x40000104: # ISATTRIBUTE
-                                    stack.append(1 if (c_att & stack.pop()) else 0)
+                                    val = stack.pop()
+                                    stack.append(1 if (c_att & val) == val else 0)
+                                elif op == 0x40000105: # ISLEVEL (补全等级判定)
+                                    stack.append(1 if c_level == stack.pop() else 0)
+                                elif op == 0x40000107: # ISLINK (补全连接判定)
+                                    stack.append(1 if c_link == stack.pop() else 0)
                                 elif op == 0x40000004: # AND
                                     if len(stack) < 2: return False
                                     v2 = stack.pop(); v1 = stack.pop()
@@ -938,14 +957,50 @@ class DuelState:
                                     stack.append(0 if stack.pop() else 1)
                                 else:
                                     stack.append(0) # 兜底未知操作
-                        return bool(stack[0]) if stack else True
+                                    print(f"⚠️ [RPN VM] 未知操作码 {hex(op)}，已自动忽略")
+                        return bool(stack[-1]) if stack else True # 必须返回 stack[-1] (栈顶)
 
-                    # 批改返回卡池，只保留满足 RPN 条件的选项
-                    filtered_codes = [c for c in unique_codes if evaluate_rpn(c)]
+                    # 区分“纯白名单”和“RPN计算”
+                    def is_strictly_valid(c_test):
+                        if not opcodes: return True
+                        has_real_ops = any(op >= 0x40000000 for op in opcodes)
+                        if not has_real_ops:
+                            # 只发来纯卡密列表的，必须且只能在列表内
+                            return c_test in opcodes
+                        return evaluate_rpn(c_test)
+
+                    # 批改返回卡池，只保留满足条件的选项
+                    def is_really_valid(c_test):
+                        if not opcodes: return True
+                        # 检查 opcodes 是否包含任何真正的 RPN 操作符
+                        has_real_ops = any(op >= 0x40000000 for op in opcodes)
+                        if not has_real_ops:
+                            # 如果只是卡密列表（如抹杀指名者），必须在列表内才合法
+                            return c_test in opcodes
+                        # 否则走原本的虚拟机计算
+                        return evaluate_rpn(c_test)
+                    filtered_codes = [c for c in unique_codes if is_really_valid(c)]
                     
                     # 防御机制：如果 RPN 解析有瑕疵导致全灭，回退到全集交给 RuleBot 强行穷举
                     if not filtered_codes: 
+                        print(f"🚨 RPN 解析后没有合法选项，回退到全集穷举,请检查 opcodes 是否合理: {opcodes}")
                         filtered_codes = list(unique_codes)
+                    
+                    def get_priority_score(c):
+                        score = 0
+                        if c in my_cards: score += 100 # 自己卡组/额外里的卡最重要
+                        for p in [0, 1]:
+                            if c in self.known_hand_codes[p]: score += 50
+                            # 遍历所有区域，如果在场上/墓地/除外区出现过，权重提升
+                            for loc in [Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED]:
+                                for info in self.field_map[p].get(loc, {}).values():
+                                    pure_c = info.get('code', 0) & 0x7FFFFFFF
+                                    if pure_c == c: score += 50
+                        if c in _META_STAPLES: score += 10 # 泛用手坑保底分
+                        return score
+
+                    # 按得分从高到低排序，得分相同按卡密排序
+                    filtered_codes.sort(key=lambda x: (-get_priority_score(x), x))
                         
                     self.announce_card_candidates = list(filtered_codes)
                     
@@ -1075,20 +1130,24 @@ class DuelState:
             # 深拷贝一下，因为要修改
             new_act = GameAction(act.action_type, act.index, act.target_entity_idx, act.desc_str)
             
+            # 1. 继承基础标识 (用于宣言类和匹配)
+            if hasattr(act, 'desc_id'): new_act.desc_id = act.desc_id
+            if hasattr(act, 'code'): new_act.code = act.code
+            
+            # 2. 单目标指针映射 (绝对不能删！防止 GPU 越界 NaN 的核心)
             if new_act.target_entity_idx > 0 and new_act.index != -1:
                 c, l, s, _ = LocationInfo.decode(new_act.target_entity_idx)
-                # 查找 Map
                 if (c, l, s) in loc_to_idx_map:
                     new_act.target_entity_idx = loc_to_idx_map[(c, l, s)]
                 else:
-                    new_act.target_entity_idx = -1 # 没找到实体
+                    new_act.target_entity_idx = -1
             else:
                 new_act.target_entity_idx = -1
 
-            #  宏动作多重靶点映射
+            # 3. 宏动作多重靶点映射及字节继承
             if hasattr(act, 'macro_targets') and act.macro_targets:
                 setattr(new_act, 'macro_targets', [])
-                setattr(new_act, 'decision_bytes', act.decision_bytes) # 转移预计算包
+                setattr(new_act, 'decision_bytes', act.decision_bytes) 
                 for m_loc in act.macro_targets:
                     c, l, s, _ = LocationInfo.decode(m_loc)
                     if (c, l, s) in loc_to_idx_map:
@@ -1099,10 +1158,14 @@ class DuelState:
             elif hasattr(act, 'macro_places') and act.macro_places:
                 setattr(new_act, 'macro_places', act.macro_places)
                 setattr(new_act, 'decision_bytes', act.decision_bytes)
-            
+                
+            # 4. 兜底字节继承 (专门针对 Cancel 这类没有目标也没有格子的孤灵操作)
+            elif hasattr(act, 'decision_bytes'):
+                setattr(new_act, 'decision_bytes', act.decision_bytes)
+                
             final_actions.append(new_act)
 
-        # 找到 return GameSnapshot(...) 前面，用一个临时变量接住
+        # 用一个临时变量接住
         snap = GameSnapshot(
             global_data=global_feat,
             entities=entities,

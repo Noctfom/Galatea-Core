@@ -102,8 +102,8 @@ class ModelArena:
         # 替换为最全的常量集合
         STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
         INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
-        AI_MANAGED_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 130, 131, 132, 133, 140, 141, 142, 143}
-        DECISION_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 130, 131, 132, 133, 140, 141, 142, 143}
+        DECISION_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143}
+        AI_MANAGED_MSGS = DECISION_MSGS.copy()
 
         steps = 0
         # 增加步数上限到 5000，防止慢速卡组被误判
@@ -324,6 +324,8 @@ class ModelArena:
                         if isinstance(val, bytes):
                             if len(val)>=4: clean_ignore.append(struct.unpack('<I', val[:4])[0])
                             elif len(val)>=1: clean_ignore.append(val[0])
+
+                    rule_bot.sync_valid_actions(brain.current_valid_actions)
                     
                    # 直接传 msg
                     resp = rule_bot.get_rule_decision(player_to_act, msg_type, msg, brain, clean_ignore)

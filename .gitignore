@@ -14,15 +14,21 @@ replays/
 replay_data/
 system_logs/
 web_data/
-crash_report.txt
+crash_report.txts
+deploy_packages/
 
 # 卡组文件 
 decks/
 
-# Galatea 临时异步通讯文件 (硬盘 Drop Box)
+# Galatea 临时异步通讯文件
 tmp_rollout_*.pt
 tmp_weights_*.pt
 tmp_rollout_*.pt.tmp
 
+# python 打包环境
+python_env/
+一键包启动Webui.bat
+
 # --- 允许提交引擎核心 ---
 !ocgcore.dll
+!ocgcore.so

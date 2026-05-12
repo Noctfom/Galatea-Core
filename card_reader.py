@@ -24,6 +24,24 @@ class CardReader:
         else:
             print("⚠️ 未找到 cards.cdb")
 
+    def get_base_code(self, code):
+        """
+        [新增] 异画卡/马甲卡归一化
+        查询 cards.cdb，如果该卡有 alias（异画），则返回原版卡密；否则返回自身。
+        """
+        if not self.cursor: 
+            return code
+            
+        try:
+            # 在 YGOPro 数据库中，alias 字段如果不为 0，就代表它指向原版卡密
+            self.cursor.execute("SELECT alias FROM datas WHERE id=?", (code,))
+            row = self.cursor.fetchone()
+            if row and row[0] != 0:
+                return row[0] # 返回原版卡密
+            return code
+        except Exception:
+            return code
+
     def get_card_name(self, code):
         # ... (保持不变) ...
         if not self.cursor: return f"Code {code}"
@@ -64,6 +82,9 @@ class CardReader:
             if not row: return safe_fallback
             
             raw_type, race, attr, raw_level, atk, defense, raw_setcode = row
+
+            if atk < 0: atk = 0
+            if defense < 0: defense = 0
             
             level = raw_level & 0xFFFF
             rank = 0; link = 0; link_marker = 0; lscale = 0; rscale = 0

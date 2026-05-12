@@ -96,6 +96,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
         consecutive_retries = 0
         last_action_log = ""
         last_decision_value = None
+        last_interaction_msg = None
+        current_macro_pool = None
         current_step_ignore_list = []
         
         step = 0
@@ -122,6 +124,41 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                 except: pass
             
             brain = brain_0 if active_player == 0 else brain_1
+
+            # ================= [核心修复] 核心拒绝 (RETRY) 处理 =================
+            # 必须是独立的 if，且必须放在决策逻辑前面！
+            if msg_type == 1: 
+                consecutive_retries += 1
+                if last_decision_value is not None:
+                    current_step_ignore_list.append(last_decision_value)
+                
+                print(f"   ⚠️ [RETRY] 核心拒绝了操作 ({consecutive_retries}/15)")
+                
+                if consecutive_retries > 15:
+                    print(f"   🛑 [熔断] 连续失败的操作: {last_action_log}")
+                    print("   ☠️ 触发死循环保护，强制退出本局")
+                    break 
+                
+                # 🌟【时光倒流】🌟
+                if 'last_interaction_msg' in locals() and last_interaction_msg is not None:
+                    msg = last_interaction_msg
+                    msg_type = msg[0]
+                    msg_payload = msg[1:]
+                else:
+                    step += 1
+                    continue
+            # =================================================================
+
+            # --- 状态重置 ---
+            state_change_msgs = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
+            interaction_msgs = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143}
+            
+            if msg_type in state_change_msgs:
+                consecutive_retries = 0
+                current_step_ignore_list = []
+            elif msg_type in interaction_msgs:
+                if consecutive_retries == 0:
+                    current_step_ignore_list = []
             
             # ================= 🎙️ 详细战报 =================
             
@@ -169,7 +206,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
 
             # ================= [NEW] 交互决策逻辑修正 =================
             # 包含所有需要 Bot 决策的消息 ID
-            if msg_type in [10, 11, 16, 15, 12, 13, 14, 18, 19, 20, 22, 23, 26, 130, 131, 132, 133, 140, 141, 142, 143]:
+            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143]:
+                last_interaction_msg = msg
                 try: active_player = msg_payload[0]
                 except: pass
 
@@ -202,6 +240,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                 if consecutive_retries == 0:
                     current_step_ignore_list = []
 
+                rule_bot.sync_valid_actions(brain.current_valid_actions)
+
                 # [NEW] 将 ignore_actions 传入 Bot
                 resp = rule_bot.get_rule_decision(
                     active_player, msg_type, msg, brain, 
@@ -223,46 +263,7 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
 
                 env.send_action(resp)
                 msg_queue = [] # 发送动作后清空队列，等待新状态
-            
-            # ================= [最终修复] 核心拒绝 (RETRY) 处理 =================
-            elif msg_type == 1: # MSG_RETRY
-                consecutive_retries += 1
-                if last_decision_value is not None:
-                    current_step_ignore_list.append(last_decision_value)
-                
-                print(f"   ⚠️ [RETRY] 核心拒绝了操作 ({consecutive_retries}/10)")
-                
-                # 强力扰动 (Jitter)：针对顽固死锁
-                if consecutive_retries > 6:
-                    if "Idle操作: Cat=1" in last_action_log:
-                        print("   ⚡ [Jitter] 暴力拉黑特召，范围扩大至 100...")
-                        # [加固] 范围扩大到 100，确保覆盖所有可能的索引
-                        for i in range(100):
-                            current_step_ignore_list.append(f"1:{i}")
-                    
-                    elif "Type=18" in last_action_log:
-                        print("   ⚡ [Jitter] 注入位置干扰 (Bytes)...")
-                        # [绝对禁止] current_step_ignore_list.append(2)
-                        # [正确做法]
-                        current_step_ignore_list.append(b'\xFF\xFF\xFF')
-                        current_step_ignore_list.append(b'\x00\x00\x00')
-                        # 也可以注入一些可能合法的“盲猜”位置
-                        current_step_ignore_list.append(b'\x00\x08\x05') # 尝试选场地
-                    
-                    elif "位置选择: Val=" in last_action_log: # Type 19
-                        print("   ⚡ [Jitter] 检测到位置选择死锁，尝试随机扰动...")
-                        # 注入几个常见的 Position 值 (1=表攻, 4=表守, 8=里守)
-                        current_step_ignore_list.append(1)
-                        current_step_ignore_list.append(4)
-                        current_step_ignore_list.append(8)
 
-                if consecutive_retries > 15:
-                    print(f"   🛑 [熔断] 连续失败的操作: {last_action_log}")
-                    print("   🔍 打印熔断时的全息快照:")
-                    print_snapshot_inspection(brain.get_snapshot(env), active_player)
-                    print("   ☠️ 触发死循环保护，强制退出本局")
-                    break 
-                    
             else:
                 # [关键修复] 智能记忆保留
                 # 只有当游戏状态真正发生改变时，才清空“试错黑名单”。
