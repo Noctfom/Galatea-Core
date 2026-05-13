@@ -62,8 +62,17 @@ class YGOProDeckFetcher(BaseFetcher):
                 data = resp.json()
                 decks = data if isinstance(data, list) else data.get('decks', [])
                 
-                # 如果这一页空了，说明到底了，直接退出循环
-                if not decks: break 
+                if not decks:
+                    # 如果一开始就踩空了，说明该分类总数没那么大
+                    if success_count == 0 and current_offset > 0:
+                        # 偏移量减半，并向下取整对齐 20
+                        next_offset = current_offset // 2
+                        current_offset = (next_offset // 20) * 20
+                        time.sleep(0.5) # 给服务器一点喘息时间
+                        continue # 重新发起请求
+                    else:
+                        # 如果是已经抓了一部分后空了，或者 offset 已经是 0 依然为空，说明真到底了
+                        break
                 
                 for d in decks:
                     if success_count >= limit: break

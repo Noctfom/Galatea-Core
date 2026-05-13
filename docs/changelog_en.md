@@ -4,6 +4,25 @@
 
 ---
 
+## [v3.1.0] - 2026-05
+
+### ✨ New Features
+
+- **🆕 Auto Version Check**: WebUI automatically checks for new versions on startup and displays a notification when one is available
+
+### 🐛 Fixes
+
+- Fixed incompatibility where some cards "treated as a certain Level" failed in #23 message's level-matching logic
+- Added weight pre-filtering logic for #23 multi-select packaging
+- Fixed minor WebUI layout errors
+
+### 🔧 Optimizations
+
+- Revised project documentation
+- Improved Resource Sync Hub module layout
+
+---
+
 ## [v3.0] - 2026-05 (Major Release)
 
 ### ✨ Major Additions

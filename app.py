@@ -25,6 +25,41 @@ card_db_ui = CardReader(db_path=os.path.abspath(os.path.join(os.path.dirname(__f
 
 st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wide")
 
+# ==========================================
+# 🚀 全局版本控制与智能探测器
+# ==========================================
+LOCAL_VERSION = "3.1.0"  # 当前本地版本号 (每次更新时手动改一下这里)
+REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
+
+@st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
+def check_remote_version():
+    import requests
+    try:
+        # 设置极短的超时时间，防止断网时卡死
+        resp = requests.get(REMOTE_VERSION_URL, timeout=3)
+        if resp.status_code == 200:
+            return resp.text.strip()
+    except:
+        pass
+    return LOCAL_VERSION
+
+remote_version = check_remote_version()
+
+# 解析语义化版本号 X.Y.Z
+def parse_version(v_str):
+    try: return [int(x) for x in v_str.split(".")]
+    except: return [0, 0, 0]
+
+v_local = parse_version(LOCAL_VERSION)
+v_remote = parse_version(remote_version)
+
+has_critical_update = (v_remote[0] > v_local[0]) or (v_remote[0] == v_local[0] and v_remote[1] > v_local[1])
+has_patch_update = (not has_critical_update) and (v_remote[2] > v_local[2])
+
+# 初始化全局导航劫持状态
+if "jump_to_update" not in st.session_state:
+    st.session_state.jump_to_update = False
+
 CACHE_KEYS = {
     't_steps': 5000, 't_batch': 4096, 't_mini': 256, 't_workers': 6, 't_timeout': 300,
     't_gamma': 0.998, 't_lr': 0.0001, 't_entropy': 0.03, 't_gae': 0.95, 't_clip': 0.2,
@@ -112,24 +147,37 @@ footer {visibility: hidden !important;}
 lang = st.sidebar.radio("🌐 Language / 语言", ["🇨🇳 中文", "🇺🇸 English"])
 def _(zh, en): return zh if lang == "🇨🇳 中文" else en
 
+menu_options = [
+    _("📈 卡组生态大盘", "📈 Meta Dashboard"), 
+    _("📉 训练流形图", "📉 TensorBoard"), 
+    _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"),
+    _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"),  
+    _("🔄 资源同步中枢", "🔄 Update Manager"),  
+    _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"), 
+    _("📁 存储与日志仓库", "📁 Storage & Logs"), 
+    _("👁️ 全息读心回放", "👁️ Holographic Replay"),
+    _("📦 模型部署与打包", "📦 Model Deployment")
+]
+
+# 如果检测到跳转指令，强行覆盖当前菜单的 index
+if st.session_state.jump_to_update:
+    st.session_state.main_menu_radio = _("🔄 资源同步中枢", "🔄 Update Manager")
+    st.session_state.jump_to_update = False
+
 st.sidebar.title(_("🎛️ 司令塔菜单", "🎛️ Command Menu"))
-menu = st.sidebar.radio(
-    "Navigation", 
-    [
-        _("📈 卡组生态大盘", "📈 Meta Dashboard"), 
-        _("📉 训练流形图", "📉 TensorBoard"),   # <--- 新增这行！
-        _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"),
-        _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"),  
-        _("🔄 资源同步中枢", "🔄 Update Manager"),  
-        _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"), 
-        _("📁 存储与日志仓库", "📁 Storage & Logs"), 
-        _("👁️ 全息读心回放", "👁️ Holographic Replay"),
-        _("📦 模型部署与打包", "📦 Model Deployment")
-    ],
-    label_visibility="collapsed"
-)
+# 🌟 核心：绑定 key="main_menu_radio"
+menu = st.sidebar.radio("Navigation", menu_options, key="main_menu_radio", label_visibility="collapsed")
 
 csv_path = "./web_data/match_history.csv"
+
+if has_critical_update:
+    st.warning(f"🚀 **{_('发现重要核心更新！', 'Critical Update Available!')}** | {_('当前版本:', 'Current:')} `v{LOCAL_VERSION}` ➡️ {_('最新版本:', 'Latest:')} `v{remote_version}`", icon="✨")
+    if st.button("👉 " + _("立即前往同步中枢查看详情", "Go to Update Manager"), type="primary"):
+        st.session_state.jump_to_update = True
+        st.rerun()
+elif has_patch_update:
+    # 小修小补只给个极其轻量的提示
+    st.toast(f"ℹ️ {_('检测到小版本更新', 'Minor patch available')}: v{remote_version}", icon="🔧")
 
 # ==========================================
 # 📈 模块一：卡组生态大盘 (代码保持不变)
@@ -653,56 +701,89 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         st.rerun()
 
 # ==========================================
-# 🔄 模块三：资源同步中枢
+# 🔄 模块三：资源同步中枢 (带版本检测与日志阅读器)
 # ==========================================
 elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
     st.title(_("🌐 核心数据与代码同步", "🌐 Data & Core Sync"))
-    st.markdown(_("从官方与萌卡仓库拉取最新的环境依赖，确保您的 AI 掌握最新的卡片效果与规则。", 
-                  "Fetch latest databases and Lua scripts to keep your AI up to date."))
     
-    with st.form("update_form"):
-        st.subheader(_("选择同步目标", "Select Sync Targets"))
-        c_core = st.checkbox(_("🔄 更新 Galatea 核心代码 (Git Pull)", "Sync Core Code (Git Pull)"), value=False, 
-                             help=_("从 GitHub 拉取最新的框架 Python 代码。", "Pull the latest framework Python code from GitHub."))
-        c_data = st.checkbox(_("🃏 更新 CDB卡库与官方 Lua 脚本", "Sync CDB & Scripts"), value=True, 
-                             help=_("从萌卡拉取最新的 cards.cdb，并从官方仓库同步 script 文件夹。", "Fetch the latest cards.cdb from MyCard and sync the script folder from the official repo."))
+    # 顶部状态栏
+    c_ver1, c_ver2 = st.columns(2)
+    c_ver1.info(f"📌 **{_('本地当前版本', 'Local Version')}**: `v{LOCAL_VERSION}`")
+    if has_critical_update: c_ver2.error(f"✨ **{_('云端最新版本', 'Remote Version')}**: `v{remote_version}` ({_('强烈建议更新', 'Update Recommended')})")
+    elif has_patch_update: c_ver2.warning(f"🔧 **{_('云端最新版本', 'Remote Version')}**: `v{remote_version}` ({_('可选热修复', 'Optional Patch')})")
+    else: c_ver2.success(f"✅ **{_('云端最新版本', 'Remote Version')}**: `v{remote_version}` ({_('已是最新', 'Up to date')})")
+
+    st.write("")
+    
+    tab_sync, tab_changelog = st.tabs([
+        _("🔄 同步控制台", "🔄 Sync Dashboard"), 
+        _("📜 更新日志", "📜 Changelog")
+    ])
+    
+    with tab_sync:
+        st.markdown(_("从官方与萌卡仓库拉取最新的环境依赖，确保您的 AI 掌握最新的卡片效果与规则。", 
+                      "Fetch latest databases and Lua scripts to keep your AI up to date."))
         
-        st.subheader(_("高级选项", "Advanced Options"))
-        t_repo = st.text_input(_("脚本仓库源 (留空为官方)", "Script Repo Source"), value="default")
-        c_force = st.checkbox(_("⚠️ 覆盖模式 (强制覆盖本地修改)", "Force Overwrite"), value=False)
+        with st.form("update_form"):
+            st.subheader(_("选择同步目标", "Select Sync Targets"))
+            c_core = st.checkbox(_("🔄 更新 Galatea 核心代码 (Git Pull)", "Sync Core Code (Git Pull)"), value=has_critical_update, 
+                                 help=_("从 GitHub 拉取最新的框架 Python 代码。", "Pull the latest framework Python code from GitHub."))
+            c_data = st.checkbox(_("🃏 更新 CDB卡库与官方 Lua 脚本", "Sync CDB & Scripts"), value=True, 
+                                 help=_("从萌卡拉取最新的 cards.cdb，并从官方仓库同步 script 文件夹。", "Fetch the latest cards.cdb from MyCard and sync the script folder from the official repo."))
+            
+            st.subheader(_("高级选项", "Advanced Options"))
+            t_repo = st.text_input(_("脚本仓库源 (留空为官方)", "Script Repo Source"), value="default")
+            c_force = st.checkbox(_("⚠️ 覆盖模式 (强制覆盖本地修改)", "Force Overwrite"), value=False)
+            
+            if st.form_submit_button("🚀 " + _("立即开始同步", "Start Synchronization"), type="primary", use_container_width=True):
+                if not c_core and not c_data:
+                    st.warning(_("请至少勾选一个同步目标！", "Please select at least one target!"))
+                else:
+                    cmd = ["python", "main.py", "update"]
+                    if c_core: cmd.append("--core")
+                    if c_data: cmd.append("--data")
+                    if t_repo != "default": cmd.extend(["--repo", t_repo])
+                    if c_force: cmd.append("--force")
+                    
+                    with st.spinner(_("⏳ 正在全力同步中，这可能需要几分钟时间，请勿刷新页面...", "⏳ Syncing... Please wait.")):
+                        try:
+                            custom_env = os.environ.copy()
+                            custom_env["PYTHONIOENCODING"] = "utf-8"
+                            result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8', env=custom_env)
+                            
+                            if result.returncode == 0:
+                                st.success(_("✅ 同步完成！建议重启整个系统以加载最新代码。", "✅ Synchronization Complete! Restart recommended."))
+                            else:
+                                st.error(_("⚠️ 同步遇到问题，请查看下方日志：", "⚠️ Sync encountered issues:"))
+                            
+                            import re
+                            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                            clean_log = ansi_escape.sub('', result.stdout + "\n" + result.stderr)
+                            st.code(clean_log, language="bash")
+                            
+                        except Exception as e:
+                            st.error(f"执行失败: {e}")
+
+    with tab_changelog:
+        st.markdown("### " + _("📝 版本更新日志", "📝 Release Notes"))
         
-        if st.form_submit_button("🚀 " + _("立即开始同步", "Start Synchronization"), use_container_width=True):
-            if not c_core and not c_data:
-                st.warning(_("请至少勾选一个同步目标！", "Please select at least one target!"))
-            else:
-                cmd = ["python", "main.py", "update"]
-                if c_core: cmd.append("--core")
-                if c_data: cmd.append("--data")
-                if t_repo != "default": cmd.extend(["--repo", t_repo])
-                if c_force: cmd.append("--force")
+        # 智能判定读取中文还是英文文档
+        doc_filename = "changelog.md" if lang == "🇨🇳 中文" else "changelog_en.md"
+        doc_path = os.path.join(".", "docs", doc_filename)
+        
+        if os.path.exists(doc_path):
+            try:
+                with open(doc_path, 'r', encoding='utf-8') as f:
+                    markdown_content = f.read()
                 
-                with st.spinner(_("⏳ 正在全力同步中，这可能需要几分钟时间，请勿刷新页面...", "⏳ Syncing... Please wait.")):
-                    try:
-                        # 核心修复：强制注入环境变量，让 Windows 的 Python 子进程使用 UTF-8 打印 Emoji
-                        custom_env = os.environ.copy()
-                        custom_env["PYTHONIOENCODING"] = "utf-8"
-                        
-                        # 使用 run 阻塞执行，并明确声明抓取的文本编码为 utf-8
-                        result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8', env=custom_env)
-                        
-                        if result.returncode == 0:
-                            st.success(_("✅ 同步完成！", "✅ Synchronization Complete!"))
-                        else:
-                            st.error(_("⚠️ 同步遇到问题，请查看下方日志：", "⚠️ Sync encountered issues:"))
-                        
-                        # 在网页上直接打印出终端的彩色日志 (去掉 ANSI 转义字符)
-                        import re
-                        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-                        clean_log = ansi_escape.sub('', result.stdout + "\n" + result.stderr)
-                        st.code(clean_log, language="bash")
-                        
-                    except Exception as e:
-                        st.error(f"执行失败: {e}")
+                # 用一个带边框的容器装起来，显得更正式
+                with st.container(border=True):
+                    st.markdown(markdown_content, unsafe_allow_html=True)
+            except Exception as e:
+                st.error(_(f"读取日志文件失败: {e}", f"Failed to read changelog: {e}"))
+        else:
+            st.info(_(f"未找到日志文件: `{doc_path}`。您可以去 GitHub 仓库查看最新变更。", 
+                      f"Changelog file not found: `{doc_path}`. Please check the GitHub repository."))
 
 # ==========================================
 # 🧠 模块四：语义知识库引擎
@@ -1265,18 +1346,18 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         with st.expander(_("➕ 初始化/拉取新卡池", "Fetch New Pool"), expanded=True):
             f1, f2, f3 = st.columns([4, 3, 3])
             with f1: fetch_label = st.selectbox(_("选择目标卡组池标签 (API 映射)", "Select Target Pool Label"), list(api_tags.keys()), key="ftag")
-            with f2: fetch_mode = st.radio(_("抓取深度模式", "Fetch Depth Mode"), [(_("🆕 最新顺序", "🆕 Latest"), _("🌌 历史随机", "🌌 Random"))], horizontal=True, key="fmode")
+            with f2: fetch_mode = st.radio(_("抓取深度模式", "Fetch Depth Mode"), [_("🆕 最新顺序", "🆕 Latest"), _("🌌 历史随机", "🌌 Random")], horizontal=True, key="fmode")
             with f3: fetch_limit = st.number_input(_("抓取数量", "Fetch Quantity"), min_value=5, max_value=200, value=30, step=10, key="flimit")
             
             real_api_tag = api_tags[fetch_label]
-            mode_tag = "Latest" if "最新" in fetch_mode else "Rand"
+            is_rand = "🌌" in fetch_mode
+            mode_tag = "Rand" if is_rand else "Latest"
             auto_folder_name = f"ygopd_{real_api_tag.replace(' ', '')}_{mode_tag}"
             
             if st.button("📥 " + _(f"抓取并添加到订阅清单: {auto_folder_name}", "Fetch & Add to List"), type="primary", use_container_width=True):
                 with st.spinner("正在突破天梯拉取数据..."):
                     import online_fetcher, random
                     fetcher = online_fetcher.YGOProDeckFetcher()
-                    is_rand = "历史" in fetch_mode
                     # 🌟 核心突破：强制将随机偏移量乘以 20，完美骗过 WordPress 的分页系统
                     offset = random.randint(1, 100) * 20 if is_rand else 0
                     

@@ -480,11 +480,10 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     decision = struct.pack('<i', 0)
 
         # =================================================================
-        # 严格修正：MSG_SELECT_SUM (23)
+        # 严格修正：MSG_SELECT_SUM (23) - 支持动态双重数值与 DFS 提取
         # =================================================================
         elif msg_type == MSG_SELECT_SUM:
-            if len(payload) < 10:
-                return bytes([0])
+            if len(payload) < 10: return bytes([0])
             try:
                 stream = io.BytesIO(payload)
                 mode = struct.unpack('B', stream.read(1))[0]
@@ -494,13 +493,11 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 max_c = struct.unpack('B', stream.read(1))[0]
                 
                 must_count = struct.unpack('B', stream.read(1))[0]
-                must_sum = 0
+                must_vals = []
                 for _ in range(must_count):
                     stream.read(7)
                     v = struct.unpack('<I', stream.read(4))[0]
-                    must_sum += (v & 0xffff) # 提取低16位基础星级
-                
-                target_val = total_acc - must_sum
+                    must_vals.append(v)
                 
                 count_b = stream.read(1)
                 if not count_b: return bytes([0])
@@ -512,63 +509,61 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     val = struct.unpack('<I', stream.read(4))[0]
                     candidates.append({'index': i, 'val': val})
                 
-                # [终极数学求解器] DFS 拆解双重星级，必定求出正确解
                 valid_solutions = []
                 real_max = max_c if max_c > 0 else count
                 
-                def backtrack(start, k, current_sum, path, min_v):
-                    if len(valid_solutions) >= 100: return # 防内存爆炸
+                def check_sum(vals, current_idx, current_sum, current_min):
+                    if current_idx == len(vals):
+                        if mode == 0: return current_sum == total_acc
+                        else: return current_sum >= total_acc and (current_sum - current_min) < total_acc
+                    
+                    v = vals[current_idx]
+                    v1 = v & 0xffff
+                    v2 = v >> 16
+                    
+                    n_min1 = min(current_min, v1) if current_min != -1 else v1
+                    if check_sum(vals, current_idx + 1, current_sum + v1, n_min1): return True
+                    
+                    if v2 > 0 and v2 != v1:
+                        n_min2 = min(current_min, v2) if current_min != -1 else v2
+                        if check_sum(vals, current_idx + 1, current_sum + v2, n_min2): return True
+                    return False
+
+                def backtrack(start, k, path):
+                    if len(valid_solutions) >= 200: return # 规则机器人不需要穷尽，找200个够用了
                     if k >= min_c:
-                        # Mode 0: 同步召唤 (绝对相等)
-                        if mode == 0 and current_sum == target_val:
-                            valid_solutions.append(list(path))
-                        # Mode 1: 仪式召唤等 (大于等于，但去掉最小者必须小于目标)
-                        elif mode == 1 and current_sum >= target_val and (current_sum - min_v) < target_val:
+                        combined_vals = must_vals + [x['val'] for x in path]
+                        if check_sum(combined_vals, 0, 0, -1):
                             valid_solutions.append(list(path))
                     
-                    if k == real_max or start == count:
-                        return
+                    if k == real_max or start == count: return
                         
                     for i in range(start, count):
-                        c = candidates[i]
-                        # 核心：拆解 YGOPro 的双重星级参数
-                        v1 = c['val'] & 0xffff
-                        v2 = c['val'] >> 16
-                        
-                        path.append(c['index'])
-                        
-                        # 尝试使用第一星级
-                        n_min1 = min(min_v, v1) if min_v != -1 else v1
-                        backtrack(i + 1, k + 1, current_sum + v1, path, n_min1)
-                        
-                        # 如果存在第二星级，尝试使用第二星级
-                        if v2 > 0 and v2 != v1:
-                            n_min2 = min(min_v, v2) if min_v != -1 else v2
-                            backtrack(i + 1, k + 1, current_sum + v2, path, n_min2)
-                            
+                        path.append(candidates[i])
+                        backtrack(i + 1, k + 1, path)
                         path.pop()
 
-                backtrack(0, 0, 0, [], -1)
+                backtrack(0, 0, [])
                 
                 ignored_set = set(b for b in ignore_actions if isinstance(b, bytes))
                 decision = bytes([0])
                 
                 if valid_solutions:
-                    random.shuffle(valid_solutions) # 洗牌以增加 AI 对局的多样性
+                    random.shuffle(valid_solutions) # 洗牌增加盲打多样性
                     for sol in valid_solutions:
-                        resp_buf = bytearray([must_count + len(sol)])
+                        sol_sorted = sorted(sol, key=lambda x: x['index'])
+                        resp_buf = bytearray([must_count + len(sol_sorted)])
                         for _ in range(must_count): resp_buf.append(0)
-                        for idx in sol: resp_buf.append(idx)
+                        for cd in sol_sorted: resp_buf.append(cd['index'])
                         
                         candidate_bytes = bytes(resp_buf)
                         if candidate_bytes not in ignored_set:
                             decision = candidate_bytes
                             break
                 else:
-                    # [新增报警]
-                    print("🚨 [RuleBot 警报] Type 23 (凑星计算) DFS 算法无解！")
-                    print(f"   -> Mode={mode}, 目标星数={target_val}, 必选={must_sum}, 候选池={candidates}，尝试发送-1取消操作.....")
-                    decision = struct.pack('<i', -1)
+                    print("🚨 [RuleBot 警报] Type 23 (凑星计算) DFS 算法在必须选取的情况下无解！")
+                    print(f"   -> 目标={total_acc}, Mode={mode}, Must={must_vals}, 候选池={[c['val'] for c in candidates]}")
+                    decision = struct.pack('<i', -1) # 只能尝试发送取消指令
                             
                 return decision
             except Exception as e:
@@ -854,7 +849,7 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
             if cancelable:
                 options.append({'bytes': struct.pack('<i', -1), 'locs': []})
                 
-        # 2. 星级凑数求和 (同调, 仪式)
+        # 2. 星级凑数求和 (同调, 仪式, 以及械刀等特殊SumEqual卡)
         elif msg_type == MSG_SELECT_SUM:
             mode = struct.unpack('B', stream.read(1))[0]
             stream.read(1) # P
@@ -863,7 +858,7 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
             max_c = struct.unpack('B', stream.read(1))[0]
             must_count = struct.unpack('B', stream.read(1))[0]
             
-            must_sum = 0
+            must_vals = []
             must_locs = []
             for _ in range(must_count):
                 stream.read(4) # Code
@@ -872,9 +867,8 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 s = struct.unpack('B', stream.read(1))[0]
                 must_locs.append(LocationInfo.encode(c, l, s, 0))
                 v = struct.unpack('<I', stream.read(4))[0]
-                must_sum += (v & 0xffff)
+                must_vals.append(v)
             
-            target_val = total_acc - must_sum
             count = struct.unpack('B', stream.read(1))[0]
             
             candidates = []
@@ -886,47 +880,85 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 val = struct.unpack('<I', stream.read(4))[0]
                 candidates.append({'index': i, 'val': val, 'code': code, 'loc': LocationInfo.encode(c, l, s, 0)})
             
+            # 神经网络动态赋权排序 (最聪明的选择排前面)
+            candidates.sort(key=lambda x: pref_weights.get(x['code'], 0.0), reverse=True)
+            
+            # 引入 Type 15 同名卡聚类去重算法
+            groups = {}
+            for cd in candidates:
+                c, l, s, _ = LocationInfo.decode(cd['loc'])
+                if l == 0x04 or l == 0x08: 
+                    key = ('FIELD', cd['index']) # 场上怪兽牵涉到具体格子，绝对不去重
+                else: 
+                    key = ('NON_FIELD', cd['code'], l) # 手牌/墓地/额外里的同名卡直接打包合并
+                    
+                if key not in groups: groups[key] = []
+                groups[key].append(cd)
+                
+            group_lists = list(groups.values())
+            
             valid_solutions = []
             real_max = max_c if max_c > 0 else count
             
-            def backtrack(start, k, current_sum, path, min_v):
+            # 完美兼容双重数值的算法
+            def check_sum(vals, current_idx, current_sum, current_min):
+                if current_idx == len(vals):
+                    if mode == 0: return current_sum == total_acc
+                    else: return current_sum >= total_acc and (current_sum - current_min) < total_acc
+                
+                v = vals[current_idx]
+                v1 = v & 0xffff
+                v2 = v >> 16
+                
+                n_min1 = min(current_min, v1) if current_min != -1 else v1
+                if check_sum(vals, current_idx + 1, current_sum + v1, n_min1): return True
+                
+                # 如果真的是多重星级（v2>0），才走第二个分支
+                if v2 > 0 and v2 != v1:
+                    n_min2 = min(current_min, v2) if current_min != -1 else v2
+                    if check_sum(vals, current_idx + 1, current_sum + v2, n_min2): return True
+                return False
+
+            # 分组 DFS 遍历 (彻底根除 5000 溢出)
+            def backtrack(group_idx, k, path):
                 if len(valid_solutions) >= limit: 
                     if len(valid_solutions) == limit: # 只报一次警
-                        sample_names = [card_db.get_card_name(c['code']) for c in candidates[:4]]
-                        print(f"📡 [RuleBot 截断雷达] Type 23 (凑星) DFS 搜满 {limit} 种，触发阻断")
+                        sample_names = [card_db.get_card_name(cd['code']) for cd in candidates[:4]]
+                        print(f"📡 [RuleBot 截断雷达] Type 23 (凑星/分值计算) 组合超 {limit}，安全阻断。")
                         print(f"   -> 🎯 发动源头: {trigger_card}")
-                        print(f"   -> 📊 目标星数: {target_val}, 必选={must_sum}, 可用素材: {len(candidates)} 张")
+                        print(f"   -> 📊 目标总值: {total_acc}, 必选={len(must_vals)}张, 候选池: {len(candidates)} 张")
                         print(f"   -> 🃏 候选样本: {sample_names}...")
-                        valid_solutions.append([]) # 占个位防止反复触发
+                        valid_solutions.append([]) # 占位防狂刷
                     return
-                if k >= min_c:
-                    if mode == 0 and current_sum == target_val: valid_solutions.append(list(path))
-                    elif mode == 1 and current_sum >= target_val and (current_sum - min_v) < target_val: valid_solutions.append(list(path))
-                if k == real_max or start == count: return
-                for i in range(start, count):
-                    cd = candidates[i]
-                    v1 = cd['val'] & 0xffff
-                    v2 = cd['val'] >> 16
-                    path.append(cd)
-                    n_min1 = min(min_v, v1) if min_v != -1 else v1
-                    backtrack(i + 1, k + 1, current_sum + v1, path, n_min1)
-                    if v2 > 0 and v2 != v1:
-                        n_min2 = min(min_v, v2) if min_v != -1 else v2
-                        backtrack(i + 1, k + 1, current_sum + v2, path, n_min2)
-                    path.pop()
-            
-            backtrack(0, 0, 0, [], -1)
-            valid_solutions.sort(key=lambda sol: [x['index'] for x in sol])
-            if len(valid_solutions) > limit: valid_solutions = valid_solutions[:limit]
                 
+                if k >= min_c:
+                    combined_vals = must_vals + [x['val'] for x in path]
+                    if check_sum(combined_vals, 0, 0, -1):
+                        valid_solutions.append(list(path))
+                        
+                if k == real_max or group_idx >= len(group_lists): return
+                
+                # 从聚类的同名卡堆里，一次性抽走 i 张，极大地修剪递归分支
+                group = group_lists[group_idx]
+                max_pick = min(len(group), real_max - k)
+                
+                for i in range(max_pick, -1, -1):
+                    backtrack(group_idx + 1, k + i, path + group[:i])
+            
+            backtrack(0, 0, [])
+            valid_solutions = [sol for sol in valid_solutions if sol] # 移除报警占位符
+            
             for sol in valid_solutions:
-                resp_buf = bytearray([must_count + len(sol)])
+                # 必须严格恢复原始 Index 的大小顺序，否则 C++ 引擎会抛错
+                sol_sorted = sorted(sol, key=lambda x: x['index'])
+                resp_buf = bytearray([must_count + len(sol_sorted)])
                 for _ in range(must_count): resp_buf.append(0)
                 locs = list(must_locs)
-                for cd in sol:
+                for cd in sol_sorted:
                     resp_buf.append(cd['index'])
                     locs.append(cd['loc'])
                 options.append({'bytes': bytes(resp_buf), 'locs': locs})
+                
             options.append({'bytes': struct.pack('<i', -1), 'locs': []})
 
         # 3. 移除指示物大一统解析
