@@ -1,6 +1,6 @@
 <div align="center">
 
-![Galatea Logo](docs/图片/logo.png)
+<img src="docs/图片/logo.png" alt="Galatea Logo" width="50%">
 
 # 🌟 Galatea-Core
 
@@ -81,7 +81,9 @@ streamlit run app.py
 | 🗃️ **资产与卡组管理** | 卡组上传、泛用卡池、权重调度、在线抓取 |
 | 🔄 **资源同步中枢** | 自动更新卡库 |
 | 🧠 **语义知识库引擎** | Lua 脚本解析 |
+| 📁 **存储与日志仓库** | 处理项目各类文件 |
 | 👁️ **全息读心回放** | AI 决策可视化 |
+| 📦 **模型部署与打包** | 导入导出模型包 |
 
 ---
 

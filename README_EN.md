@@ -1,6 +1,6 @@
 <div align="center">
 
-![Galatea Logo](docs/图片/logo.png)
+<img src="docs/图片/logo.png" alt="Galatea Logo" width="50%">
 
 # 🌟 Galatea-Core
 
@@ -67,7 +67,7 @@ python main.py update --data
 streamlit run app.py
 ```
 
-📖 **Detailed Tutorial**: [Quick Start Guide](docs/quickstart.md) (Chinese)
+📖 **Detailed Tutorial**: [Quick Start Guide](docs/quickstart_en.md)
 
 ---
 
@@ -81,6 +81,8 @@ streamlit run app.py
 | 🗃️ **Assets & Deck Management** | Deck upload, staple pool, weight scheduling, online fetching |
 | 🔄 **Resource Sync Hub** | Auto-update card database |
 | 🧠 **Semantic Knowledge Engine** | Lua script parsing |
+| 📁 **Storage & Log Repository** | Manage project files |
+| 📦 **Model Deploy & Packaging** | Import/Export model packages |
 | 👁️ **Holographic Replay** | AI decision visualization |
 
 ---
@@ -89,13 +91,11 @@ streamlit run app.py
 
 | Document | Description |
 |----------|-------------|
-| [🚀 Quick Start](docs/quickstart.md) | Installation and first training in 5 minutes (Chinese) |
-| [📚 Feature Guide](docs/features.md) | Complete WebUI and CLI guide (Chinese) |
-| [🔧 Architecture](docs/architecture.md) | Technical principles and core algorithms (Chinese) |
-| [🧬 Special Handling](docs/special_handling.md) | Implementation details of unique features (Chinese) |
-| [📝 Changelog](docs/changelog.md) | Version history (Chinese) |
-
-> 💡 Documentation is currently available in Chinese only. English translations are in progress. Contributions are welcome!
+| [🚀 Quick Start](docs/quickstart_en.md) | Installation and first training in 5 minutes |
+| [📚 Feature Guide](docs/features_en.md) | Complete WebUI and CLI guide |
+| [🔧 Architecture](docs/architecture_en.md) | Technical principles and core algorithms |
+| [🧬 Special Handling](docs/special_handling_en.md) | Implementation details of unique features |
+| [📝 Changelog](docs/changelog_en.md) | Version history |
 
 ---
 
