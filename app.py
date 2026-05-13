@@ -28,7 +28,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.1.0"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.1.1"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -557,7 +557,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
                 elif d_p0 != "None":
                     if d_p0 != "None":
-                        cmd = ["python", "main.py", "duel", "--p0", d_p0, "--num", str(d_num), "--thought_freq", str(d_freq)]
+                        cmd = [sys.executable, "main.py", "duel", "--p0", d_p0, "--num", str(d_num), "--thought_freq", str(d_freq)]
                         if d_p1 != "None": cmd.extend(["--p1", d_p1])
                         p = subprocess.Popen(cmd)
                         st.session_state.running_pid = p.pid # 🌟 记录PID
@@ -590,7 +590,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     if is_running:
                         st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
                     else:
-                        cmd = ["python", "main.py", "play", "-n", str(sc_num)]
+                        cmd = [sys.executable, "main.py", "play", "-n", str(sc_num)]
                         p = subprocess.Popen(cmd)
                         st.session_state.running_pid = p.pid
                         st.success(_(f"自检压测启动 (PID: {p.pid})！", f"Self-Check started (PID: {p.pid})!"))
@@ -739,7 +739,7 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
                 if not c_core and not c_data:
                     st.warning(_("请至少勾选一个同步目标！", "Please select at least one target!"))
                 else:
-                    cmd = ["python", "main.py", "update"]
+                    cmd = [sys.executable, "main.py", "update"]
                     if c_core: cmd.append("--core")
                     if c_data: cmd.append("--data")
                     if t_repo != "default": cmd.extend(["--repo", t_repo])
@@ -809,10 +809,10 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                                   help=_("彻底删除本地的知识库与映射表，重新全量解析。", "Delete local JSON files and re-parse everything."))
             p_sync = st.checkbox(_("🌐 从 Github 拉取基础卡库同步 (--sync)", "Sync Base KB from Github"), value=False,
                                  help=_("以主仓库的知识库作为基础字典，跳过已有的卡片，大幅加快本地解析速度。", "Use remote KB as baseline to skip existing cards and speed up parsing."))
-            p_url = st.text_input(_("远程基座 URL (可选)", "Remote Base URL (Optional)"), value="https://raw.githubusercontent.com/Noctfom/astrbot-plugin-duel-galatea/main/knowledge_base.json")
+            p_url = st.text_input(_("远程基座 URL (可选)", "Remote Base URL (Optional)"), value="https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json")
             
             if st.form_submit_button("🧠 " + _("开始提取卡片语义", "Start Semantic Parsing"), use_container_width=True):
-                cmd = ["python", "main.py", "parse"]
+                cmd = [sys.executable, "main.py", "parse"]
                 if p_clear: cmd.append("--clear")
                 if p_sync: 
                     cmd.append("--sync")
