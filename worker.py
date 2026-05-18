@@ -562,8 +562,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             if current_turn > 20:
                                 step_reward -= 0.0001
 
-                            if turn_steps > 100:
-                                step_reward -= 0.0005 # 如果单回合超过100步，说明可能卡在某个阶段了，施加额外惩罚
+                            if turn_steps > 200:
+                                step_reward -= 0.0005 # 如果单回合超过200步，说明可能卡在某个阶段了，施加额外惩罚
                                 
                             # 2. 哈希查重：如果你当前的合法动作列表和上次一模一样，说明局势根本没推进
                             current_hash = "|".join([f"{a.action_type}_{a.index}" for a in snap.valid_actions])

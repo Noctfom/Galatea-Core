@@ -28,7 +28,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.1.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.1.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -973,132 +973,158 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         display_list = [f"- **{card_db_ui.get_card_name(code)}** (`{code}`)" for code in staples_list]
         st.markdown("\n".join(display_list))
 
-    # --- 2. 卡组与环境管理 ---
+    # --- 2. 资产与卡组管理：全息构筑与环境池中枢 ---
     with tab_decks:
-        st.markdown(_("上传 `.ydk` 卡组，或建立子文件夹作为不同的“环境池” (例如 `meta`, `fun`)供竞技场和训练场读取。", 
-                      "Upload `.ydk` decks or create subfolders as different 'Pools' for training and arenas."))
-        
-        # 引入deck_utils 读取器
         import deck_utils 
-        
         deck_root = "./decks"
         os.makedirs(deck_root, exist_ok=True)
         
-        # 扫描现有目录
+        # 1. 环境池基础导航
         pools = [d for d in os.listdir(deck_root) if os.path.isdir(os.path.join(deck_root, d))]
-        pools.insert(0, ".") # 根目录
+        pools.insert(0, ".") 
         
-        c_nav, c_new, c_del_pool = st.columns([2, 1, 1])
+        c_nav, c_del_pool = st.columns([3, 1])
         with c_nav:
-            sel_pool = st.selectbox(_("📂 选择目标文件夹 (环境池)", "📂 Select Target Folder (Pool)"), pools, help=_("'.' 代表根目录 ./decks", "'.' means root ./decks"))
+            sel_pool = st.selectbox(_("📂 当前操作环境池 (文件夹)", "📂 Current Meta Pool"), pools, key="sel_p_nav")
             pool_path = deck_root if sel_pool == "." else os.path.join(deck_root, sel_pool)
         
-        with c_new:
-            new_pool_name = st.text_input(_("新建子文件夹", "Create Subfolder"), placeholder="e.g. tier1_decks")
-            if st.button(_("创建文件夹", "Create Folder"), use_container_width=True):
-                if new_pool_name:
-                    os.makedirs(os.path.join(deck_root, new_pool_name), exist_ok=True)
-                    st.success(_("✅ 创建成功！", "✅ Created!"))
-                    st.rerun()
-                    
         with c_del_pool:
-            st.write("") # 占位对齐
-            st.write("")
-            if sel_pool != ".": # 保护根目录不被删除
-                if st.button("🗑️ " + _("删除该池", "Delete Pool"), use_container_width=True, type="secondary"):
+            st.write(""); st.write("")
+            if sel_pool != ".":
+                if st.button("🗑️ " + _("删除环境池", "Delete Pool"), use_container_width=True, help=_("注意：将删除该文件夹下所有卡组！", "Warning: This will delete all decks in this folder!")):
                     shutil.rmtree(pool_path)
-                    st.success(_("✅ 环境池已彻底删除！", "✅ Pool deleted!"))
+                    st.toast(_("环境池已移除", "Pool removed"))
                     st.rerun()
-                    
-        st.divider()
-        
-        # 文件上传区
-        uploaded_files = st.file_uploader(_(f"📥 将 .ydk 上传至 `{sel_pool}`", f"📥 Upload .ydk to `{sel_pool}`"), accept_multiple_files=True, type=['ydk'])
-        if uploaded_files:
-            if st.button(_("💾 保存上传的卡组", "Save Uploaded Decks"), use_container_width=True):
+
+        # 2. 快捷创建与上传区 (收纳进折叠面板)
+        with st.expander(_("🛠️ 快速新建与上传", "🛠️ Quick Create & Upload")):
+            m1, m2 = st.columns(2)
+            with m1:
+                st.caption(_("新建子环境池 (文件夹)", "Create Sub-Pool Folder"))
+                new_p_name = st.text_input("Folder Name", placeholder="e.g. tier_1", label_visibility="collapsed", key="in_new_p")
+                if st.button(_("确认创建文件夹", "Confirm Create Folder"), use_container_width=True):
+                    if new_p_name:
+                        os.makedirs(os.path.join(deck_root, new_p_name), exist_ok=True)
+                        st.success(_("文件夹创建成功", "Folder Created"))
+                        st.rerun()
+            with m2:
+                st.caption(_("在此池中新建空白卡组 (.ydk)", "Create Empty Deck in this Pool"))
+                new_d_name = st.text_input("Deck Name", placeholder="e.g. MyNewDeck", label_visibility="collapsed", key="in_new_d")
+                if st.button(_("确认创建空白卡组", "Confirm Create Deck"), use_container_width=True):
+                    if new_d_name:
+                        new_f_path = os.path.join(pool_path, f"{new_d_name}.ydk")
+                        if not os.path.exists(new_f_path):
+                            with open(new_f_path, 'w', encoding='utf-8') as f:
+                                f.write("#main\n#extra\n!side\n")
+                            st.success(_("空白卡组已就绪", "Empty Deck Created"))
+                            st.rerun()
+                        else:
+                            st.error(_("卡组已存在", "Deck already exists"))
+            
+            st.divider()
+            uploaded_files = st.file_uploader(_("📤 上传本地 .ydk 文件", "📤 Upload local .ydk"), accept_multiple_files=True, type=['ydk'])
+            if uploaded_files and st.button(_("💾 执行保存", "Execute Save"), use_container_width=True):
                 for f in uploaded_files:
                     with open(os.path.join(pool_path, f.name), "wb") as out_f:
                         out_f.write(f.read())
-                st.success(_("✅ 卡组保存成功！", "✅ Decks saved!"))
-                st.rerun()
-                
-        # 🌟 获取目录下的所有 .ydk 文件 (对齐本地)
+                st.success(_("上传成功", "Upload successful")); st.rerun()
+
+        st.divider()
+
+        # 3. 核心：全息构筑编辑器
         files = deck_utils.list_decks(pool_path)
-        
         if files:
-            # === [新功能] 全息卡组可视化浏览 ===
-            st.markdown(_("### 👁️ 全息卡组阅览室", "### 👁️ Holographic Deck Viewer"))
-            view_deck_name = st.selectbox(_("选择卡组以阅览", "Select deck to view"), ["None"] + files)
+            st.subheader(_("👁️ 全息预览与构筑", "👁️ Holographic Editor"))
+            view_deck_name = st.selectbox(_("选择要编辑/预览的卡组", "Select deck to edit/view"), ["None"] + files, key="sb_edit_deck")
             
             if view_deck_name != "None":
-                # 加载卡组对象
-                d_obj = deck_utils.load_deck(pool_path, view_deck_name)
+                deck_full_path = os.path.join(pool_path, f"{view_deck_name}.ydk")
                 
-                if d_obj:
-                    # 确定 CDN 语言参数
-                    api_lang = "sc" if lang == "🇨🇳 中文" else "en"
-                    
-                    def render_card_grid(card_list, title):
-                        st.write(f"**{title} (Total: {len(card_list)})**")
-                        if not card_list: return
-                        
-                        # 每行显示 10 张卡
-                        cols_per_row = 10 
-                        for i in range(0, len(card_list), cols_per_row):
-                            cols = st.columns(cols_per_row)
-                            for j in range(cols_per_row):
-                                if i + j < len(card_list):
-                                    code = card_list[i + j]
-                                    # 拼装百鸽 API (使用 !half 获取适中分辨率)
-                                    img_url = f"https://cdn.233.momobako.com/ygoimg/{api_lang}/{code}.webp!half"
-                                    
-                                    # 利用 Streamlit 的 HTML 渲染去除空隙，做成卡组堆叠感
-                                    # 🌟 新增：包裹 <a> 标签直达百鸽，并加上 hover 放大动画
-                                    card_html = f"""
-                                    <div style="margin-bottom: 5px; text-align: center; transition: transform 0.2s;" 
-                                         onmouseover="this.style.transform='scale(1.05)'" 
-                                         onmouseout="this.style.transform='scale(1)'">
-                                        <a href="https://ygocdb.com/card/{code}" target="_blank">
-                                            <img src="{img_url}" title="{card_db_ui.get_card_name(code)} ({code})" 
-                                                 style="width: 100%; border-radius: 4px; box-shadow: 2px 2px 5px rgba(0,0,0,0.5);">
-                                        </a>
-                                    </div>
-                                    """
-                                    cols[j].markdown(card_html, unsafe_allow_html=True)
+                # 初始化/同步缓存
+                if 'editor_content' not in st.session_state or st.session_state.get('active_deck_path') != deck_full_path:
+                    try:
+                        with open(deck_full_path, 'r', encoding='utf-8') as f:
+                            st.session_state.editor_content = f.read()
+                        st.session_state.active_deck_path = deck_full_path
+                    except: st.error("File Error")
 
-                    # 渲染主卡组和额外卡组
-                    render_card_grid(d_obj.main, _("📜 主卡组", "📜 Main Deck"))
-                    st.write("") # 间距
-                    render_card_grid(d_obj.extra, _("🎴 额外卡组", "🎴 Extra Deck"))
-            
+                # YDK 解析
+                def parse_ydk_fast(txt):
+                    m, e, s = [], [], []
+                    curr = None
+                    for line in txt.split('\n'):
+                        l = line.strip()
+                        if l == '#main': curr = m
+                        elif l == '#extra': curr = e
+                        elif l == '!side': curr = s
+                        elif l.isdigit() and curr is not None: curr.append(l)
+                    return m, e, s
+
+                main_list, extra_list, side_list = parse_ydk_fast(st.session_state.editor_content)
+
+                # 快速操作区
+                op_c1, op_c2 = st.columns([1, 1])
+                with op_c1:
+                    st.write(_("➕ **添加卡片 (输入卡密)**", "➕ **Quick Add**"))
+                    new_code = st.text_input("Passcode", placeholder="8位卡片密码", label_visibility="collapsed", key="ed_add")
+                    if new_code and new_code.isdigit():
+                        c_name = card_db_ui.get_card_name(int(new_code))
+                        st.caption(f"✨ 识别: **{c_name}**" if c_name != "Unknown" else "❌ 未知卡片")
+                        btn_c = st.columns(3)
+                        if btn_c[0].button(_("主卡", "Main"), use_container_width=True): main_list.append(new_code)
+                        if btn_c[1].button(_("额外", "Extra"), use_container_width=True): extra_list.append(new_code)
+                        if btn_c[2].button(_("副卡", "Side"), use_container_width=True): side_list.append(new_code)
+                        st.session_state.editor_content = f"#main\n" + "\n".join(main_list) + f"\n#extra\n" + "\n".join(extra_list) + f"\n!side\n" + "\n".join(side_list)
+
+                with op_c2:
+                    st.write(_("💾 **保存修改**", "💾 **Save Config**"))
+                    st.write("")
+                    if st.button("🚀 " + _("将构筑写入 .ydk 文件", "Save to YDK File"), type="primary", use_container_width=True):
+                        with open(deck_full_path, 'w', encoding='utf-8') as f:
+                            f.write(st.session_state.editor_content)
+                        st.success(_("✅ 构筑已持久化保存！", "✅ Saved successfully!"))
+
+                # 渲染卡组网格
+                api_lang = "sc" if lang == "🇨🇳 中文" else "en"
+                def render_deck_grid(card_list, title):
+                    st.markdown(f"**{title} ({len(card_list)})**")
+                    if not card_list: return
+                    cols = st.columns(10)
+                    for i, code in enumerate(card_list):
+                        with cols[i % 10]:
+                            img_url = f"https://cdn.233.momobako.com/ygoimg/{api_lang}/{code}.webp!half"
+                            # 图片带查卡链接
+                            st.markdown(f'<a href="https://ygocdb.com/card/{code}" target="_blank"><img src="{img_url}" style="width:100%; border-radius:3px; border: 1px solid #444;"></a>', unsafe_allow_html=True)
+                            # 删除小按钮
+                            if st.button("🗑️", key=f"d_{title}_{i}_{code}", help=_("移除", "Remove")):
+                                card_list.pop(i)
+                                st.session_state.editor_content = f"#main\n" + "\n".join(main_list) + f"\n#extra\n" + "\n".join(extra_list) + f"\n!side\n" + "\n".join(side_list)
+                                st.rerun()
+
+                render_deck_grid(main_list, _("📜 主卡组", "📜 Main"))
+                render_deck_grid(extra_list, _("🎴 额外卡组", "🎴 Extra"))
+                render_deck_grid(side_list, _("🃏 副卡组", "🃏 Side"))
+
             st.divider()
+
+            # 4. 批量管理 (原功能保持)
+            st.write(_(f"📑 批量管理 `{sel_pool}` 中的文件：", f"📑 Batch Manage in `{sel_pool}`:"))
+            sel_files = st.multiselect(_("选择文件", "Select Files"), [f"{n}.ydk" for n in files])
             
-            # === 文件管理区 (移动 / 删除) ===
-            st.write(_(f"📑 `{sel_pool}` 中的卡组列表：", f"📑 Decks in `{sel_pool}`:"))
-            # 用户选择时补上 .ydk 后缀方便后台处理
-            sel_files = st.multiselect(_("勾选进行批量操作", "Select for batch actions"), [f"{n}.ydk" for n in files])
-            
-            c_move, c_del = st.columns(2)
-            with c_move:
-                target_pool = st.selectbox(_("移动到...", "Move to..."), pools, key="move_dest")
-                if st.button(_("➡️ 移动选中卡组", "Move Selected"), use_container_width=True):
-                    if sel_files and target_pool != sel_pool:
-                        dest_path = deck_root if target_pool == "." else os.path.join(deck_root, target_pool)
-                        for f in sel_files:
-                            shutil.move(os.path.join(pool_path, f), os.path.join(dest_path, f))
-                        st.success(_("✅ 移动成功！", "✅ Moved!"))
-                        st.rerun()
-            with c_del:
-                st.write("") # 占位对齐
-                st.write("")
-                if st.button(_("🗑️ 删除选中卡组", "Delete Selected"), type="primary", use_container_width=True):
-                    if sel_files:
-                        for f in sel_files:
-                            os.remove(os.path.join(pool_path, f))
-                        st.success(_("✅ 删除成功！", "✅ Deleted!"))
-                        st.rerun()
+            bm1, bm2 = st.columns(2)
+            with bm1:
+                target_p = st.selectbox(_("移动到...", "Move to..."), pools, key="mv_dest")
+                if st.button(_("➡️ 执行移动", "Move Selected"), use_container_width=True) and sel_files:
+                    dest = deck_root if target_p == "." else os.path.join(deck_root, target_p)
+                    for f in sel_files: shutil.move(os.path.join(pool_path, f), os.path.join(dest, f))
+                    st.rerun()
+            with bm2:
+                st.write(""); st.write("")
+                if st.button(_("🗑️ 批量删除选中卡组", "Delete Selected"), type="primary", use_container_width=True) and sel_files:
+                    for f in sel_files: os.remove(os.path.join(pool_path, f))
+                    st.rerun()
         else:
-            st.info(_("此文件夹中暂无 `.ydk` 卡组文件。", "No `.ydk` decks in this folder."))
+            st.info(_("此文件夹暂无卡组，请使用上方面板新建或上传。", "No decks. Use the panel above to create or upload."))
 
     # --- 3. 全局环境调度 (Global Weights - 分类+大滑块版) ---
     with tab_global:
