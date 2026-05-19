@@ -149,7 +149,7 @@ This project is licensed under the [GNU General Public License v3.0](LICENSE).
 - [YGOPro Official Scripts](https://github.com/Fluorohydride/ygopro-scripts) - Official Lua script repository, basis for card effect parsing
 - [MyCard](https://github.com/mycard/ygopro-database) - cards.cdb card database source
 - [YGOCDB](https://ygocdb.com/) - Card image rendering API and data query
-- [YGOProDecks](https://ygoprodecks.com/) - Online deck data fetching source
+- [YGOProDeck](https://ygoprodeck.com/) - Online deck data fetching source
 
 ---
 

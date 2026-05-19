@@ -28,7 +28,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.1.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.1.3"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1437,7 +1437,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                             active_tasks = [k for k, v in tasks.items() if v.get('auto_update', False)]
                             if not active_tasks:
                                 for _ in range(60):
-                                    if os.path.exists(daemon_status_file) and open(daemon_status_file).read().strip() == "STOPPED":
+                                    if os.path.exists(daemon_status_file) and open(daemon_status_file, "r", encoding="utf-8").read().strip() == "STOPPED":
                                         os.remove(daemon_status_file); return
                                     time.sleep(1)
                                 continue
@@ -1446,7 +1446,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                             gap_sec = max(10, interval_sec // len(active_tasks)) 
                             
                             for task_name in active_tasks:
-                                if os.path.exists(daemon_status_file) and open(daemon_status_file).read().strip() == "STOPPED":
+                                if os.path.exists(daemon_status_file) and open(daemon_status_file, "r", encoding="utf-8").read().strip() == "STOPPED":
                                     os.remove(daemon_status_file); return
                                 
                                 cfg = tasks[task_name]
@@ -1460,7 +1460,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                                 except: pass
                                 
                                 for _ in range(gap_sec):
-                                    if os.path.exists(daemon_status_file) and open(daemon_status_file).read().strip() == "STOPPED":
+                                    if os.path.exists(daemon_status_file) and open(daemon_status_file, "r", encoding="utf-8").read().strip() == "STOPPED":
                                         os.remove(daemon_status_file); return
                                     time.sleep(1)
                                     

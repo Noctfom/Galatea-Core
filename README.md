@@ -149,7 +149,7 @@ python main.py parse --script_dir ./script
 - [YGOPro 官方脚本库](https://github.com/Fluorohydride/ygopro-scripts) - 官方 Lua 脚本仓库，卡片效果解析的基础
 - [萌卡 MyCard](https://github.com/mycard/ygopro-database) - cards.cdb 卡片数据库来源
 - [百鸽 YGOCDB](https://ygocdb.com/) - 卡片图片渲染 API 与数据查询
-- [YGOProDecks](https://ygoprodecks.com/) - 在线卡组数据爬取来源
+- [YGOProDeck](https://ygoprodeck.com/) - 在线卡组数据爬取来源
 
 ---
 
