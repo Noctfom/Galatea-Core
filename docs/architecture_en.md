@@ -86,7 +86,7 @@ Galatea-Core adopts a modular design consisting of the following core subsystems
 
 ### GalateaNet Structure
 
-GalateaNet is a Transformer Encoder-based policy-value network:
+GalateaNet is a Transformer Encoder-based policy-value network, with FiLM global modulation and SwiGLU gated FFN introduced in v3.2.0:
 
 ```python
 class GalateaNet(nn.Module):
@@ -102,14 +102,66 @@ class GalateaNet(nn.Module):
         self.sem_cat_embed = nn.Embedding(4000, d_sem)            # Effect type embedding
         self.sem_req_proj = nn.Linear(128, d_sem)                 # Condition projection
         self.sem_fusion_proj = nn.Sequential(...)                 # Semantic fusion
+
+        # 3. FiLM global modulator
+        self.film_gen = FiLMGenerator(condition_dim=15, d_model=d_model)
+
+        # 4. Transformer Encoder (each layer with FiLM modulation + SwiGLU gating)
+        self.transformer = GalateaTransformerStack(d_model, n_heads, n_layers)
+
+        # 5. Position encodings
+        self.chain_pos_embed = nn.Parameter(...)                  # Chain stack position embed (12 slots)
+        self.history_pos_embed = nn.Parameter(...)                # History action position embed (8 slots)
+        self.place_weights = buffer([1.0, 0.8, 0.6, 0.4, 0.2])   # Sort operation weighting
         
-        # 3. Transformer Encoder
-        self.transformer = nn.TransformerEncoder(...)
-        
-        # 4. Output heads
-        self.policy_head = nn.Sequential(...)                     # Policy head
-        self.value_head = nn.Sequential(...)                      # Value head
+        # 6. Output heads (SwiGLU gated)
+        self.policy_head = SwiGLU(d_model*2) → Linear(1)         # Policy head
+        self.value_head = SwiGLU(d_model) → Linear(1)            # Value head
 ```
+
+### FiLM Global State Modulation (new in v3.2.0)
+
+FiLM (Feature-wise Linear Modulation) dynamically adjusts the inference tendency of each Transformer layer based on global signals like current phase/turn/LP:
+
+```python
+class FiLMGenerator(nn.Module):
+    def __init__(self, condition_dim, d_model):
+        self.proj = nn.Linear(condition_dim, 2 * d_model)  # Outputs γ and β
+        nn.init.zeros_(self.proj.weight)  # Zero-init ensures no interference early in training
+
+    def forward(self, condition):
+        out = self.proj(condition)
+        gamma, beta = out.chunk(2, dim=-1)  # Split in half
+        return gamma.unsqueeze(1), beta.unsqueeze(1)
+
+# Applied in Transformer Block:
+x = x * (1.0 + gamma) + beta  # LayerNorm first, then FiLM modulation
+```
+
+**Design Philosophy**: Decision logic differs drastically across game phases (opening combos vs. mid-game skirmishes vs. lethal calculations). FiLM allows a single network to automatically switch "thinking modes" based on global state, without adding separate branch networks.
+
+### SwiGLU Gated Feed-Forward Network (new in v3.2.0)
+
+All traditional MLPs (Linear→ReLU→Linear) have been replaced with SwiGLU gated linear units:
+
+```python
+class SwiGLU(nn.Module):
+    def __init__(self, in_features, hidden_features, out_features, multiple_of=64):
+        # Auto-pad to multiples of 64, aligned to Tensor Core hardware
+        hidden_features = multiple_of * ((hidden_features + multiple_of - 1) // multiple_of)
+        self.gate_proj = nn.Linear(in_features, hidden_features, bias=False)
+        self.up_proj = nn.Linear(in_features, hidden_features, bias=False)
+        self.down_proj = nn.Linear(hidden_features, out_features, bias=False)
+
+    def forward(self, x):
+        # SiLU(Gate) × Up → Down
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+```
+
+**Key Advantages**:
+- **Gating Mechanism**: SiLU-activated Gate branch performs element-wise filtering on the Up branch, letting the network decide which features pass through
+- **Bias-Free Design**: All Linear layers remove bias, reducing parameter count and improving training stability
+- **Tensor Core 64 Alignment**: `hidden_features` auto-pads to multiples of 64 for full GPU hardware utilization
 
 ### Dual-Tower Matching Mechanism
 
@@ -401,6 +453,47 @@ if torch.cuda.get_device_capability()[0] >= 8:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 ```
+
+### 5. ZMQ Zero-Copy IPC (new in v3.2.0)
+
+Replaced old pipe-based communication with ZeroMQ ROUTER micro-batching architecture for drastically reduced collection latency:
+
+```python
+context = zmq.Context()
+socket = context.socket(zmq.ROUTER)  # ROUTER mode enables routed micro-batching
+socket.setsockopt(zmq.ROUTER_HANDOVER, 1)  # Auto load balancing
+```
+
+**Key Advantages**:
+- **Micro-Batching**: Multiple worker inference requests are aggregated into a single batch submitted to GPU at once, reducing scheduling overhead
+- **Pinned Memory DMA**: Data pre-allocated in pinned memory (`tensor.pin_memory()`), asynchronous CPU↔GPU transfers via `non_blocking=True` without blocking main thread
+- **Collection Time Halved**: Overall data collection time reduced by approximately 50% compared to the old pipe-based approach
+
+### 6. ONNX Inference Acceleration (new in v3.2.0)
+
+PyTorch model automatically exported to ONNX computation graph during training, Workers use ONNX Runtime for high-speed inference:
+
+```python
+# Main process exports ONNX synchronously
+class ONNXWrapper(torch.nn.Module):
+    def __init__(self, net, keys):
+        super().__init__()
+        self.net = net
+        self.keys = keys
+
+    def forward(self, *args):
+        # Reassemble flattened inputs into dictionary, pass to original network
+        batch_dict = {k: v for k, v in zip(self.keys, args)}
+        logits, values, _ = self.net(batch_dict)
+        return logits, values
+
+# Worker loads ONNX model for inference, no need to import PyTorch model
+```
+
+**Key Advantages**:
+- **Zero VRAM Inference**: Workers use ONNX Runtime for CPU inference, consuming no GPU VRAM at all
+- **Graph Optimization**: Computation graph-level fusion optimization during ONNX export eliminates redundant operators
+- **Significant Speedup**: Data collection throughput improved by 30%+ on mid-range GPUs
 
 ---
 

@@ -19,6 +19,7 @@ import glob
 import pandas as pd
 import zmq
 import shutil
+import psutil
 
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
@@ -353,7 +354,7 @@ class PPOTrainer:
         del raw_weights
         import gc; gc.collect()
 
-        # --- 新增：联盟训练对手选择逻辑 ---
+        # --- 联盟训练对手选择逻辑 ---
         # 扫描 models 文件夹下的所有历史存档
         historical_models = glob.glob(os.path.join(self.save_dir, "galatea_iter_*.pth"))
         
@@ -422,11 +423,32 @@ class PPOTrainer:
             if p.is_alive():
                 print(f"⏳ [Trainer] 经过 {self.worker_timeout} 秒仍有 Worker 未完成采集。触发安全超时截断机制，终止冗余进程。")
                 p.terminate() 
-            p.join(timeout=1.0)
+            p.join(timeout=5.0)  # 增加等待时间，让系统有足够时间回收内存
             try: 
                 p.close() # 强制释放 Windows 进程句柄
             except Exception as e: 
                 print(f"[trainer]⚠️ 无法关闭 Worker 进程 (可能已被系统回收): {e}")
+
+        # =========================================================================
+        # [内存安全回收] 强制等待系统回收 Worker 进程的内存
+        # =========================================================================
+        gc.collect()
+        
+        # 检查系统可用内存，如果过低则等待更长时间
+        try:
+            mem = psutil.virtual_memory()
+            available_gb = mem.available / (1024**3)
+            if available_gb < 1.0:  # 如果可用内存小于 1GB
+                print(f"⚠️ [内存警告] 系统可用内存较低 ({available_gb:.1f}GB)，等待内存回收...")
+                time.sleep(5.0)  # 额外等待 5 秒
+                gc.collect()
+                # 再次检查
+                mem = psutil.virtual_memory()
+                available_gb = mem.available / (1024**3)
+                if available_gb < 1.0:
+                    print(f"🚨 [内存危机] 可用内存仍然不足 ({available_gb:.1f}GB)，建议减少 Worker 数量或增加系统内存！")
+        except Exception as mem_check_err:
+            print(f"⚠️ 内存检查失败: {mem_check_err}")
 
         # 把权重文件删掉
         try: os.remove(weight_file)
@@ -679,7 +701,7 @@ class PPOTrainer:
                             shared_logits[wid].copy_(logits[i].cpu().float())
                             
                         socket.send_multipart([addresses[wid], b'', b'OK'])
-                    del logits, values, v_input, batch_obs
+                    #del logits, values, v_input, batch_obs
 
             except Exception as e:
                 print(f"\n🚨 [Server ZeroMQ 熔断] 核心推推演异常已拦截: {e}")
@@ -765,7 +787,7 @@ class PPOTrainer:
                     surr1 = ratio * gpu_advs
                     surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * gpu_advs
                     
-                    # 拆解 Loss，方便我们在图表里监控
+                    # 拆解 Loss，方便在图表里监控
                     policy_loss = -torch.min(surr1, surr2).mean()
                     value_loss_fn = nn.SmoothL1Loss()
                     value_loss = value_loss_fn(values, gpu_returns)
@@ -893,13 +915,13 @@ class PPOTrainer:
             wrapper_net = ONNXWrapper(export_net, keys).eval()
             onnx_archive = os.path.join(self.save_dir, f"galatea_iter_{current_iter}.onnx")
             
-            # 执行极度稳定的 Opset 14 同步导出
+            # 执行同步导出
             torch.onnx.export(
                 wrapper_net,
                 flat_inputs,        
                 onnx_archive,
                 export_params=True,
-                opset_version=14,   
+                opset_version=18,   
                 do_constant_folding=True, 
                 input_names=keys,   
                 output_names=['action_logits', 'values']

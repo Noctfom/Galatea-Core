@@ -360,6 +360,7 @@ python main.py train [选项]
 | `--workers` | 并行进程数 | 4 |
 | `--worker_device` | Worker 设备 | cpu |
 | `--async_infer` | 启用异步推断 | - |
+| `--use_onnx` | 启用 ONNX 推理加速 | - |
 | `--no_compile` | 禁用编译 | - |
 
 **示例**：
@@ -503,6 +504,7 @@ python deploy_tool.py
 | `workers` | 并行进程数 | ⬆️ **内存**（主要）—— 根据 CPU 核心数调整，通常 4-12 |
 | `timeout` | Worker 单次采集超时 | 防止进程僵死，默认 300s，大型卡组可设 600s |
 | `async_infer` | 异步推断 | ⬇️ **显存**（大幅节省）—— GPU 集中推理，Worker 不加载模型 |
+| `use_onnx` | ONNX 推理加速 | ⬆️ **采集速度**（提升 30%+）—— Worker 端使用 ONNX Runtime 进行极速推理 |
 | `no_compile` | 禁用编译 | Windows 或老旧环境建议启用 |
 
 #### RL 灵魂超参数（深层调优）

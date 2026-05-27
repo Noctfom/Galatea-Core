@@ -361,6 +361,7 @@ python main.py train [options]
 | `--workers` | Parallel processes | 4 |
 | `--worker_device` | Worker device | cpu |
 | `--async_infer` | Enable async inference | - |
+| `--use_onnx` | Enable ONNX inference acceleration | - |
 | `--no_compile` | Disable compilation | - |
 
 **Examples**:
@@ -504,6 +505,7 @@ Extract `.gkg` packages and import into current system:
 | `workers` | Parallel processes | ⬆️ **RAM** (primary) — adjust by CPU cores, typically 4-12 |
 | `timeout` | Worker single-collection timeout | Prevents zombie processes, default 300s, large decks can use 600s |
 | `async_infer` | Async inference | ⬇️ **VRAM** (significant savings) — GPU centralized inference, workers don't load model |
+| `use_onnx` | ONNX inference acceleration | ⬆️ **Collection Speed** (30%+ faster) — Workers use ONNX Runtime for high-speed inference |
 | `no_compile` | Disable compilation | Recommended for Windows or legacy environments |
 
 #### RL Soul Hyperparameters (Deep Tuning)

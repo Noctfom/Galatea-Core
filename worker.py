@@ -1040,8 +1040,58 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         return
     
     finally:
-        socket.setsockopt(zmq.LINGER, 0) 
-        socket.close(linger=0)
-        context.term()
+        # =========================================================================
+        # [内存安全清理] 显式释放所有大型张量，防止 Windows 内存泄漏
+        # =========================================================================
+        try:
+            # 1. 清理静态内存池 columns
+            if 'columns' in dir():
+                if columns is not None:
+                    # 先清理 obs 字典内的所有张量
+                    if 'obs' in columns and columns['obs']:
+                        for k in list(columns['obs'].keys()):
+                            columns['obs'][k] = None
+                        columns['obs'].clear()
+                    # 清理外层张量
+                    for k in list(columns.keys()):
+                        columns[k] = None
+                    columns.clear()
+            
+            # 2. 清理 game_buffer
+            if 'game_buffer' in dir() and game_buffer is not None:
+                for k in list(game_buffer.keys()):
+                    if game_buffer[k]:
+                        game_buffer[k].clear()
+                game_buffer.clear()
+            
+            # 3. 清理 batch_data (如果存在)
+            if 'batch_data' in dir() and batch_data is not None:
+                if 'obs' in batch_data:
+                    for k in list(batch_data['obs'].keys()):
+                        batch_data['obs'][k] = None
+                for k in list(batch_data.keys()):
+                    batch_data[k] = None
+                batch_data = None
+            
+            # 4. 清理 AI 代理
+            if 'agent' in dir() and agent is not None:
+                agent = None
+            if 'opp_agent' in dir() and opp_agent is not None:
+                opp_agent = None
+            
+            # 5. 强制垃圾回收
+            gc.collect()
+            
+        except Exception as cleanup_err:
+            print(f"⚠️ [Worker {worker_id}] 内存清理时发生异常 (已忽略): {cleanup_err}")
+        
+        # 关闭 ZMQ 连接
+        try:
+            socket.setsockopt(zmq.LINGER, 0) 
+            socket.close(linger=0)
+            context.term()
+        except Exception:
+            pass
+        
         print(f"👋 Worker {worker_id} 任务圆满完成，强制释放内存...")
         os._exit(0)

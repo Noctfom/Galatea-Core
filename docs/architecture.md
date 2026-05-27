@@ -86,7 +86,7 @@ Galatea-Core 采用模块化设计，由以下核心子系统构成：
 
 ### GalateaNet 结构
 
-GalateaNet 是一个基于 Transformer Encoder 的策略-价值网络：
+GalateaNet 是一个基于 Transformer Encoder 的策略-价值网络，v3.2.0 引入了 FiLM 全局调制与 SwiGLU 门控前馈：
 
 ```python
 class GalateaNet(nn.Module):
@@ -102,14 +102,66 @@ class GalateaNet(nn.Module):
         self.sem_cat_embed = nn.Embedding(4000, d_sem)            # 效果类型嵌入
         self.sem_req_proj = nn.Linear(128, d_sem)                 # 发动条件投影
         self.sem_fusion_proj = nn.Sequential(...)                 # 语义融合
+
+        # 3. FiLM 全局调制器
+        self.film_gen = FiLMGenerator(condition_dim=15, d_model=d_model)
+
+        # 4. Transformer Encoder (每层含 FiLM 调制 + SwiGLU 门控)
+        self.transformer = GalateaTransformerStack(d_model, n_heads, n_layers)
+
+        # 5. 位置编码
+        self.chain_pos_embed = nn.Parameter(...)                  # 连锁堆栈位置编码(12槽)
+        self.history_pos_embed = nn.Parameter(...)                # 历史动作位置编码(8槽)
+        self.place_weights = buffer([1.0, 0.8, 0.6, 0.4, 0.2])   # 排序操作加权
         
-        # 3. Transformer Encoder
-        self.transformer = nn.TransformerEncoder(...)
-        
-        # 4. 输出头
-        self.policy_head = nn.Sequential(...)                     # 策略头
-        self.value_head = nn.Sequential(...)                      # 价值头
+        # 6. 输出头 (SwiGLU 门控)
+        self.policy_head = SwiGLU(d_model*2) → Linear(1)         # 策略头
+        self.value_head = SwiGLU(d_model) → Linear(1)            # 价值头
 ```
+
+### FiLM 全局状态调制 (v3.2.0 新增)
+
+FiLM (Feature-wise Linear Modulation) 根据当前游戏阶段/回合/LP 等全局信号，动态调整 Transformer 每层的推理倾向：
+
+```python
+class FiLMGenerator(nn.Module):
+    def __init__(self, condition_dim, d_model):
+        self.proj = nn.Linear(condition_dim, 2 * d_model)  # 输出 γ 和 β
+        nn.init.zeros_(self.proj.weight)  # 零初始化确保训练初期不干扰
+
+    def forward(self, condition):
+        out = self.proj(condition)
+        gamma, beta = out.chunk(2, dim=-1)  # 各取一半
+        return gamma.unsqueeze(1), beta.unsqueeze(1)
+
+# 在 Transformer Block 中的应用：
+x = x * (1.0 + gamma) + beta  # 先做 LayerNorm 再进行 FiLM 调制
+```
+
+**设计思想**：不同游戏阶段的决策逻辑截然不同（起手展开 vs 中盘拉扯 vs 斩杀计算），FiLM 让同一个网络能根据全局状态自动切换"思考模式"，无需增加额外的分支网络。
+
+### SwiGLU 门控前馈网络 (v3.2.0 新增)
+
+传统 MLP (Linear→ReLU→Linear) 被全面替换为 SwiGLU 门控线性单元：
+
+```python
+class SwiGLU(nn.Module):
+    def __init__(self, in_features, hidden_features, out_features, multiple_of=64):
+        # 自动补齐至 64 的倍数，对齐 Tensor Core 硬件
+        hidden_features = multiple_of * ((hidden_features + multiple_of - 1) // multiple_of)
+        self.gate_proj = nn.Linear(in_features, hidden_features, bias=False)
+        self.up_proj = nn.Linear(in_features, hidden_features, bias=False)
+        self.down_proj = nn.Linear(hidden_features, out_features, bias=False)
+
+    def forward(self, x):
+        # SiLU(Gate) × Up → Down
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+```
+
+**核心优势**：
+- **门控机制**：SiLU 激活的 Gate 分支对 Up 分支进行逐元素筛选，让网络自行决定哪些特征通过
+- **无偏置设计**：所有 Linear 层去除 bias，减少参数量并提升训练稳定性
+- **Tensor Core 64 对齐**：`hidden_features` 自动补齐至 64 倍数，充分利用 GPU 硬件算力
 
 ### 双塔匹配机制
 
@@ -401,6 +453,47 @@ if torch.cuda.get_device_capability()[0] >= 8:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 ```
+
+### 5. ZMQ 零拷贝进程通信 (v3.2.0 新增)
+
+使用 ZeroMQ ROUTER 微批处理架构替换原有管道通信，大幅降低采集延迟：
+
+```python
+context = zmq.Context()
+socket = context.socket(zmq.ROUTER)  # ROUTER 模式支持路由式微批处理
+socket.setsockopt(zmq.ROUTER_HANDOVER, 1)  # 自动负载均衡
+```
+
+**核心优势**：
+- **微批处理**：多个 Worker 的推理请求被聚合为一个批次，一次性送入 GPU，减少调度开销
+- **锁页内存 DMA**：数据预置于 pinned memory (`tensor.pin_memory()`)，通过 `non_blocking=True` 实现 CPU↔GPU 异步搬运，不阻塞主线程
+- **采集时间减半**：相比旧管道方案，整体数据采集耗时减少约 50%
+
+### 6. ONNX 推理加速 (v3.2.0 新增)
+
+训练时自动将 PyTorch 模型导出为 ONNX 计算图，Worker 端通过 ONNX Runtime 进行极速推理：
+
+```python
+# 训练主进程同步导出 ONNX
+class ONNXWrapper(torch.nn.Module):
+    def __init__(self, net, keys):
+        super().__init__()
+        self.net = net
+        self.keys = keys
+
+    def forward(self, *args):
+        # 将展平输入重组为字典，传给原网络
+        batch_dict = {k: v for k, v in zip(self.keys, args)}
+        logits, values, _ = self.net(batch_dict)
+        return logits, values
+
+# Worker 端加载 ONNX 模型进行推理，无需导入 PyTorch 模型
+```
+
+**核心优势**：
+- **零显存推理**：Worker 使用 ONNX Runtime 进行 CPU 推理，完全不占用 GPU 显存
+- **图优化**：ONNX 导出时进行计算图级融合优化，消除冗余算子
+- **提速显著**：在中低端 GPU 上，数据采集阶段整体吞吐量提升 30%+
 
 ---
 

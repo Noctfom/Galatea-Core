@@ -4,6 +4,55 @@
 
 ---
 
+## [v3.2.0] - 2026-05
+
+### ✨ Major Architecture Upgrades
+
+- **🧬 FiLM Global State Modulation**: New FiLM Generator dynamically produces per-layer scale (γ) and shift (β) parameters from global signals like current phase/turn/LP, enabling the network to have different inference tendencies at different game stages
+- **🔀 SwiGLU Gated Feed-Forward Network**: Replaced all traditional MLPs (Linear→ReLU→Linear) with SwiGLU gated linear units, using bias-free design with Tensor Core 64 alignment, significantly improving non-linear modeling capability
+- **⚡ ZMQ Zero-Copy IPC**: Replaced old pipe-based communication with ZeroMQ ROUTER micro-batching architecture, combined with pinned memory for extreme-speed DMA async transfers, cutting collection time in half
+- **📦 ONNX Inference Acceleration**: Added `--use_onnx` option, automatically exports ONNX computation graph during training sync, Workers use ONNX Runtime for high-speed inference, drastically accelerating data collection
+
+### 🔧 Functional Enhancements
+
+- **🧵 Worker Thread Auto-Adaptation**: Dynamically adjusts worker behavior based on real-time system CPU/memory status
+- **🔗 Chain Stack Learning**: Chain stack ordering and semantic information now included in training (chain_pos_embed + chain semantic slots), enabling AI to truly understand reverse chain resolution
+- **📍 Position Sorting Learning**: Fixed the issue where card position sorting was not included in learning for #25 operations; now uses weighted position embeddings
+
+### 🔧 Optimizations
+
+- **⏱️ Worker Timing Audit Report**: Added detailed per-step timing statistics (inference/encoding/communication) for each Worker, with real-time performance bottleneck diagnostics in terminal output
+- **📡 Read/Write Staggered Scheduling**: Data collection and storage phases are now stagger-scheduled to avoid I/O congestion causing frame drops
+- **📚 KB Single-Injection**: Knowledge base data is injected only on first load, with subsequent iterations reusing cache directly to reduce memory thrashing
+- Other underlying stability and detail optimizations
+
+### 📦 New Dependencies
+
+- `pyzmq` - ZeroMQ process communication
+- `onnxruntime` - ONNX inference acceleration
+
+---
+
+## [v3.1.1] ~ [v3.1.3] - 2026-05
+
+### 🐛 Fixes
+
+- Fixed incompatibility where some cards "treated as a certain Level" failed in #23 message's level-matching logic
+- Added weight pre-filtering logic for #23 multi-select packaging
+- Fixed minor WebUI layout errors
+- Fixed multiple hardcoded `"python"` calls in app.py causing one-click package environment failures, unified to use `sys.executable`
+
+### ✨ New Features
+
+- Auto version check: WebUI automatically compares remote version on startup and shows notification when a new version is available
+
+### 🔧 Optimizations
+
+- Revised project documentation (README CN/EN, acknowledgments section completed)
+- Optimized Resource Sync Hub module layout
+
+---
+
 ## [v3.1.0] - 2026-05
 
 ### ✨ New Features

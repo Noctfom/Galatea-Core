@@ -58,7 +58,7 @@ cd Galatea-Core
 
 # Install dependencies
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install streamlit tensorboard numpy pandas psutil rich
+pip install streamlit tensorboard numpy pandas psutil rich pyzmq onnxruntime
 
 # Prepare resource files
 python main.py update --data
@@ -150,6 +150,8 @@ This project is licensed under the [GNU General Public License v3.0](LICENSE).
 - [MyCard](https://github.com/mycard/ygopro-database) - cards.cdb card database source
 - [YGOCDB](https://ygocdb.com/) - Card image rendering API and data query
 - [YGOProDeck](https://ygoprodeck.com/) - Online deck data fetching source
+- [YugiohAi](https://github.com/crispy-chiken/YugiohAi) - Tribute to fellow developers on the same path; referenced for post-v1.0 iteration optimizations
+- [ygo-agent](https://github.com/sbl1996/ygo-agent) - Tribute to fellow developers on the same path; referenced for post-v1.0 iteration optimizations
 
 ---
 

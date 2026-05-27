@@ -58,7 +58,7 @@ cd Galatea-Core
 
 # 安装依赖
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install streamlit tensorboard numpy pandas psutil rich
+pip install streamlit tensorboard numpy pandas psutil rich pyzmq onnxruntime
 
 # 准备资源文件
 python main.py update --data
@@ -150,6 +150,8 @@ python main.py parse --script_dir ./script
 - [萌卡 MyCard](https://github.com/mycard/ygopro-database) - cards.cdb 卡片数据库来源
 - [百鸽 YGOCDB](https://ygocdb.com/) - 卡片图片渲染 API 与数据查询
 - [YGOProDeck](https://ygoprodeck.com/) - 在线卡组数据爬取来源
+- [YugiohAi](https://github.com/crispy-chiken/YugiohAi) - 致敬同路线开发者，在正式版后的迭代优化中参考了该项目
+- [ygo-agent](https://github.com/sbl1996/ygo-agent) - 致敬同路线开发者，在正式版后的迭代优化中参考了该项目
 
 ---
 
