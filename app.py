@@ -214,10 +214,14 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
             df = pd.concat(all_dfs, ignore_index=True)
 
             min_iter, max_iter = int(df['iteration'].min()), int(df['iteration'].max())
-            selected_range = st.slider(
-                _("⏳ 选择分析的训练轮次范围", "⏳ Select Iteration Range"), 
-                min_value=min_iter, max_value=max_iter, value=(max(min_iter, max_iter-200), max_iter)
-            )
+            if min_iter == max_iter:
+                st.info(_("当前数据仅包含一个迭代轮次，无法选择范围。", "Only one iteration available, range selection disabled."))
+                selected_range = (min_iter, max_iter)   # 单点范围
+            else:
+                selected_range = st.slider(
+                    _("⏳ 选择分析的训练轮次范围", "⏳ Select Iteration Range"),
+                    min_value=min_iter, max_value=max_iter, value=(max(min_iter, max_iter-200), max_iter)
+                )
             filtered_df = df[(df['iteration'] >= selected_range[0]) & (df['iteration'] <= selected_range[1])]
             
             if filtered_df.empty:
@@ -499,6 +503,9 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                                 help=_("【强烈推荐】让主进程开一个全局 GPU 服务端集中处理推理。能节省成倍的显存！", "Use central GPU server for fast inference."))
         c_nocomp = st.checkbox(_("禁用模型编译 (--no_compile)", "Disable Torch Compile"), value=True, 
                                 help=_("Windows 系统下 PyTorch 2.0+ 的 compile 极易报错，勾选此项牺牲 5% 速度换取绝对稳定。", "Disable torch.compile for Windows compatibility."))
+        c_onnx = st.checkbox(_("同时导出 ONNX 静态模型 (--use_onnx)", "Export ONNX Model (--use_onnx)"), value=True, 
+                             help=_("开启后会在保存 Checkpoint 时同步导出优化后的 .onnx 文件，大幅加速老模型对打和自决斗时的 CPU 推理速度。", 
+                                   "Export .onnx graphs synchronously to accelerate CPU inference during arena duels."))
         
         if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
             if is_running:
@@ -525,6 +532,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if t_resume != "None": cmd.extend(["--resume", t_resume])
                 if c_async: cmd.append("--async_infer")
                 if c_nocomp: cmd.append("--no_compile")
+                if c_onnx: cmd.append("--use_onnx")
             
                 p = subprocess.Popen(cmd) 
                 st.session_state.running_pid = p.pid # 🌟 记录PID
@@ -2101,7 +2109,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
         
         with col_form:
             st.markdown("### 🔧 " + _("构建新的 .gkg 部署包", "Build new .gkg Package"))
-            models = [f for f in os.listdir("./models") if f.endswith(".pth")]
+            models = [f for f in os.listdir("./models") if f.endswith(".pth") or f.endswith(".onnx")]
             
             with st.form("pack_form"):
                 st.markdown("##### 🤖 核心模型选择")
@@ -2221,7 +2229,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                     with st.form("import_form"):
                         st.write("**勾选需要部署进当前系统的文件：**")
                         
-                        models_in_stage = [f for f in staged_files if f.endswith(".pth")]
+                        models_in_stage = [f for f in staged_files if f.endswith(".pth") or f.endswith(".onnx")]
                         jsons_in_stage = [f for f in staged_files if f.endswith(".json")]
                         
                         import_selections = []

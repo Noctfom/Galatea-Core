@@ -781,29 +781,28 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
             
             cards = []
             for i in range(count):
-                code = struct.unpack('<I', stream.read(4))[0] # 提取真实卡密
+                code = struct.unpack('<I', stream.read(4))[0] 
                 c = struct.unpack('B', stream.read(1))[0]
                 l = struct.unpack('B', stream.read(1))[0]
                 s = struct.unpack('B', stream.read(1))[0]
-                stream.read(1) # Skip desc
+                stream.read(1) 
                 loc_raw = LocationInfo.encode(c, l, s, 0)
                 cards.append({'idx': i, 'loc': loc_raw, 'code': code})
             
-            # 权重越高的卡片，在 DFS 穷举时越先被组合，完美确保前 5000 个必定包含最优解
+            # 保持网络意志：权重越高的卡片在 DFS 穷举时越先被组合
             cards.sort(key=lambda x: pref_weights.get(x['code'], 0.0), reverse=True)
 
             real_max = min(max_c, count)
             real_min = min(min_c, count)
             if real_min > real_max: real_min = real_max
             
-            # [聚类 DFS 算法] 先区域去重，后按需分配，零内存泄漏
             groups = {}
             for cd in cards:
                 c, l, s, _ = LocationInfo.decode(cd['loc'])
                 if l == 0x04 or l == 0x08: 
-                    key = ('FIELD', cd['idx']) # 场上卡片绝对不去重
+                    key = ('FIELD', cd['idx']) 
                 else: 
-                    key = ('NON_FIELD', cd['code'], l) # 区域 + 卡密 独立去重
+                    key = ('NON_FIELD', cd['code'], l) 
                     
                 if key not in groups: groups[key] = []
                 groups[key].append(cd)
@@ -811,33 +810,38 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
             group_lists = list(groups.values())
             all_combos = []
             
+            # 定义局部异常用于瞬间震碎递归堆栈
+            class LimitUnwindException(Exception): pass
+
             def dfs(group_idx, current_combo, needed):
                 if needed == 0:
                     all_combos.append(current_combo)
                     return
                 if group_idx >= len(group_lists): return
-                if len(all_combos) >= limit: return
+                
+                #  核心修复：一旦大池子蓄满 5000 个，立刻打印雷达，直接高空抛出异常抛出，全栈强行落地
+                if len(all_combos) >= limit: 
+                    sample_names = [card_db.get_card_name(c['code']) for c in cards[:4]]
+                    print(f"📡 [RuleBot 截断雷达] Type {msg_type} (选卡/祭品) 组合超 {limit}，触发全栈强力熔断成功。")
+                    print(f"   -> 🎯 发动源头: {trigger_card}")
+                    print(f"   -> 📊 引擎要求: 从 {len(cards)} 张备选卡中挑选 {real_min} ~ {real_max} 张")
+                    print(f"   -> 🃏 候选样本: {sample_names}...")
+                    raise LimitUnwindException()
                 
                 group = group_lists[group_idx]
                 max_pick = min(needed, len(group))
                 
-                # 完美覆盖挑选 0 到 N 张同名卡的情况
                 for i in range(max_pick, -1, -1):
                     dfs(group_idx + 1, current_combo + group[:i], needed - i)
-                    if len(all_combos) >= limit: return
 
-            for r in range(real_min, real_max + 1):
-                dfs(0, [], r)
-                if len(all_combos) >= limit: 
-                    sample_names = [card_db.get_card_name(c['code']) for c in cards[:4]]
-                    # 高级版雷达日志
-                    print(f"📡 [RuleBot 截断雷达] Type {msg_type} (选卡/祭品) 组合超 {limit}，安全阻断。")
-                    print(f"   -> 🎯 发动源头: {trigger_card}")
-                    print(f"   -> 📊 引擎要求: 从 {len(cards)} 张备选卡中挑选 {real_min} ~ {real_max} 张")
-                    print(f"   -> 🃏 候选样本: {sample_names}...")
-                    break
-            
-            # 打包组合
+            # 安全执行外层循环，用 try-except 瞬间截断
+            try:
+                for r in range(real_min, real_max + 1):
+                    dfs(0, [], r)
+            except LimitUnwindException:
+                pass # 优雅承接，all_combos 此时完美停留在 5000 组
+
+            # 打包组合给 Worker
             for combo in all_combos:
                 resp_buf = bytearray([len(combo)])
                 locs = []
@@ -880,27 +884,25 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 val = struct.unpack('<I', stream.read(4))[0]
                 candidates.append({'index': i, 'val': val, 'code': code, 'loc': LocationInfo.encode(c, l, s, 0)})
             
-            # 神经网络动态赋权排序 (最聪明的选择排前面)
+            # 保持网络意志预筛选
             candidates.sort(key=lambda x: pref_weights.get(x['code'], 0.0), reverse=True)
             
-            # 引入 Type 15 同名卡聚类去重算法
             groups = {}
             for cd in candidates:
                 c, l, s, _ = LocationInfo.decode(cd['loc'])
                 if l == 0x04 or l == 0x08: 
-                    key = ('FIELD', cd['index']) # 场上怪兽牵涉到具体格子，绝对不去重
+                    key = ('FIELD', cd['index']) 
                 else: 
-                    key = ('NON_FIELD', cd['code'], l) # 手牌/墓地/额外里的同名卡直接打包合并
+                    key = ('NON_FIELD', cd['code'], l) 
                     
                 if key not in groups: groups[key] = []
                 groups[key].append(cd)
                 
             group_lists = list(groups.values())
-            
             valid_solutions = []
             real_max = max_c if max_c > 0 else count
             
-            # 完美兼容双重数值的算法
+            # 原版双重星级动态解包校验算法
             def check_sum(vals, current_idx, current_sum, current_min):
                 if current_idx == len(vals):
                     if mode == 0: return current_sum == total_acc
@@ -913,23 +915,23 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 n_min1 = min(current_min, v1) if current_min != -1 else v1
                 if check_sum(vals, current_idx + 1, current_sum + v1, n_min1): return True
                 
-                # 如果真的是多重星级（v2>0），才走第二个分支
                 if v2 > 0 and v2 != v1:
                     n_min2 = min(current_min, v2) if current_min != -1 else v2
                     if check_sum(vals, current_idx + 1, current_sum + v2, n_min2): return True
                 return False
 
-            # 分组 DFS 遍历 (彻底根除 5000 溢出)
+            # 定义局部异常用于瞬间震碎星级递归堆栈
+            class LimitUnwindException(Exception): pass
+
             def backtrack(group_idx, k, path):
+                # 核心修复：星级池满 5000，瞬间强力熔断
                 if len(valid_solutions) >= limit: 
-                    if len(valid_solutions) == limit: # 只报一次警
-                        sample_names = [card_db.get_card_name(cd['code']) for cd in candidates[:4]]
-                        print(f"📡 [RuleBot 截断雷达] Type 23 (凑星/分值计算) 组合超 {limit}，安全阻断。")
-                        print(f"   -> 🎯 发动源头: {trigger_card}")
-                        print(f"   -> 📊 目标总值: {total_acc}, 必选={len(must_vals)}张, 候选池: {len(candidates)} 张")
-                        print(f"   -> 🃏 候选样本: {sample_names}...")
-                        valid_solutions.append([]) # 占位防狂刷
-                    return
+                    sample_names = [card_db.get_card_name(cd['code']) for cd in candidates[:4]]
+                    print(f"📡 [RuleBot 截断雷达] Type 23 (凑星/分值计算) 组合超 {limit}，触发全栈强力熔断成功。")
+                    print(f"   -> 🎯 发动源头: {trigger_card}")
+                    print(f"   -> 📊 目标总值: {total_acc}, 必选={len(must_vals)}张, 候选池: {len(candidates)} 张")
+                    print(f"   -> 🃏 候选样本: {sample_names}...")
+                    raise LimitUnwindException()
                 
                 if k >= min_c:
                     combined_vals = must_vals + [x['val'] for x in path]
@@ -938,18 +940,31 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                         
                 if k == real_max or group_idx >= len(group_lists): return
                 
-                # 从聚类的同名卡堆里，一次性抽走 i 张，极大地修剪递归分支
                 group = group_lists[group_idx]
                 max_pick = min(len(group), real_max - k)
                 
                 for i in range(max_pick, -1, -1):
                     backtrack(group_idx + 1, k + i, path + group[:i])
             
-            backtrack(0, 0, [])
-            valid_solutions = [sol for sol in valid_solutions if sol] # 移除报警占位符
+            # 安全包裹执行
+            try:
+                backtrack(0, 0, [])
+            except LimitUnwindException:
+                pass 
             
+            # [针对性暴露] 全息 RPN 崩溃诊断雷达
+            # 如果全面穷举完之后，没有触及 5000 次熔断，且 valid_solutions 完完全全为空，说明规则陷入不可解死锁
+            if not valid_solutions:
+                sample_names = [card_db.get_card_name(cd['code']) for cd in candidates[:6]]
+                print("❌ [RuleBot 崩溃雷达] Type 23 (凑星/分值计算) DFS 穷举后完全无解！")
+                print(f"   -> 🎯 罪魁祸首(发动源头卡片): {trigger_card}")
+                print(f"   -> 📊 需求总值(total_acc): {total_acc} | 判定模式(Mode): {mode}")
+                print(f"   -> 🔒 强制必选星级(must_vals): {must_vals}")
+                print(f"   -> 🃏 备选卡片池总数: {len(candidates)} 张")
+                print(f"   -> 📝 备选池样本卡名: {sample_names}")
+                print(f"   -> 🔍 备选池对应的所有 RPN 分值明细: {[c['val'] for c in candidates]}")
+
             for sol in valid_solutions:
-                # 必须严格恢复原始 Index 的大小顺序，否则 C++ 引擎会抛错
                 sol_sorted = sorted(sol, key=lambda x: x['index'])
                 resp_buf = bytearray([must_count + len(sol_sorted)])
                 for _ in range(must_count): resp_buf.append(0)

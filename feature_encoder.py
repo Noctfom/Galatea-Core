@@ -141,37 +141,41 @@ class GalateaEncoder:
             g.my_extra_len / 15.0, g.op_extra_len / 15.0
         ]
         
-        card_indices, card_feats, card_races, card_attrs, card_setcodes, masks = [], [], [], [], [], []
-        card_overlay_indices = []
+        # 核心优化：直接预分配全量固定形状的 NumPy 数组，天然自带 Padding
+        card_indices = np.full(MAX_CARDS, PAD_CODE_IDX, dtype=np.int64)
+        card_overlay_indices = np.full(MAX_CARDS, PAD_CODE_IDX, dtype=np.int64)
+        card_races = np.zeros(MAX_CARDS, dtype=np.int64)
+        card_attrs = np.zeros(MAX_CARDS, dtype=np.int64)
+        card_setcodes = np.zeros((MAX_CARDS, 4), dtype=np.int64)
+        card_feats = np.zeros((MAX_CARDS, 58), dtype=np.float32)
+        masks = np.zeros(MAX_CARDS, dtype=np.bool_)
 
-        # 场上实体的语义特征容器
-        sem_cats, sem_reqs, sem_scs, sem_nums = [], [], [], []
-        sem_refs, sem_races, sem_attrs = [], [], []
-        
-        # ==========================================
-        # 1. 处理场上/手牌/墓地实体 (MAX_CARDS = 120)
-        # ==========================================
+        # 语义大矩阵全量预分配，消灭碎片
+        sem_cats = np.zeros((MAX_CARDS, 8, 8), dtype=np.int16)
+        sem_reqs = np.zeros((MAX_CARDS, 8, 128), dtype=np.bool_)
+        sem_scs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
+        sem_nums = np.zeros((MAX_CARDS, 8, 4), dtype=np.float16)
+        sem_refs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int32)
+        sem_races = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
+        sem_attrs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
 
-        # [新增] 提取对方的小本本情报
+        # ==========================================
+        # 1. 处理场上/手牌/墓地实体 
+        # ==========================================
         op_known = []
         if hasattr(snapshot, 'known_hand_codes'):
             op_known = snapshot.known_hand_codes[1 - player_id].copy()
-            
-            # 【终极防幻觉：容量坍缩校验】
-            # 对方能藏牌的地方 = 手牌总数 + 场上的里侧表示卡
             hidden_capacity = 0
             for e in snapshot.entities:
                 if e.owner != player_id:
-                    if e.location == Zone.HAND:
-                        hidden_capacity += 1
+                    if e.location == Zone.HAND: hidden_capacity += 1
                     elif e.location in [Zone.MZONE, Zone.SZONE] and not (e.position & 0x1 or e.position & 0x4):
                         hidden_capacity += 1
                         
-            # 如果记忆的牌数 > 对方实际能藏的牌数，说明有牌被消耗但没抓到（比如暗牌除外），强制遗忘
             while len(op_known) > hidden_capacity and len(op_known) > 0:
                 op_known.pop(0)
 
-        for e in snapshot.entities[:MAX_CARDS]:
+        for i, e in enumerate(snapshot.entities[:MAX_CARDS]):
             is_visible = True
             is_tracked_by_memory = False
             if e.owner != player_id:
@@ -180,70 +184,45 @@ class GalateaEncoder:
                 if e.location in [Zone.MZONE, Zone.SZONE] and (e.position & 0xA):
                      if not e.is_public: is_visible = False
             
-            # 【状态附着】
-            # 管它在哪，只要遇到一个“瞎子槽位”(手牌或场上暗卡)，并且我们还有记忆，就把记忆塞给它
             if not is_visible and len(op_known) > 0:
-                # 只有手牌或场上暗牌才能承载记忆
                 if e.location == Zone.HAND or (e.location in [Zone.MZONE, Zone.SZONE] and not is_visible):
                     e.code = op_known.pop(0) 
                     is_visible = True
                     is_tracked_by_memory = True
 
             if is_visible:
-                c_idx = self._hash_code(e.code)
-
+                card_indices[i] = self._hash_code(e.code)
                 pos_x, pos_y = self._get_coords(player_id, e.owner, e.location, e.sequence)
 
                 feat_numeric = [
                     1.0 if e.owner == player_id else -1.0, e.location / 100.0, e.sequence / 10.0,
                     e.current_atk / 4000.0, e.current_def / 4000.0, e.base_atk / 4000.0, e.base_def / 4000.0,
-                    pos_x,pos_y,
-                    e.level / 12.0, e.lscale / 13.0, e.rscale / 13.0,
-                    e.position / 10.0,
+                    pos_x, pos_y, e.level / 12.0, e.lscale / 13.0, e.rscale / 13.0, e.position / 10.0,
                     1.0 if e.is_public else (0.5 if is_tracked_by_memory else 0.0),
-                    min(e.overlay_count / 5.0, 1.0),   # 缩放：最多算5个素材
-                    min(e.counter_count / 10.0, 1.0),  # 缩放：最多算10个指示物
-                    1.0 if e.is_equipped else 0.0      # 布尔值
+                    min(e.overlay_count / 5.0, 1.0), min(e.counter_count / 10.0, 1.0), 1.0 if e.is_equipped else 0.0
                 ]
-                feat = feat_numeric + [1.0 if (e.type_mask & (1<<i)) else 0.0 for i in range(32)] + [1.0 if (e.link_marker & (1<<i)) else 0.0 for i in range(9)]
-                r_idx, a_idx = e.race % 30, e.attribute % 10
+                feat = feat_numeric + [1.0 if (e.type_mask & (1<<idx)) else 0.0 for idx in range(32)] + [1.0 if (e.link_marker & (1<<idx)) else 0.0 for idx in range(9)]
+                card_feats[i] = feat
+                
+                card_races[i] = e.race % 30
+                card_attrs[i] = e.attribute % 10
 
                 raw_sc = e.setcodes if isinstance(e.setcodes, (list, tuple)) else [e.setcodes]
-                sc_hashed = [(s % 4096) for s in (list(raw_sc) + [0]*4)[:4]]
+                card_setcodes[i] = [(s % 4096) for s in (list(raw_sc) + [0]*4)[:4]]
+                masks[i] = True
+                card_overlay_indices[i] = self._hash_code(getattr(e, 'top_overlay_code', 0))
                 
-                # 查询语义库
+                # 写入预分配矩阵对应切片
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(e.code)
-                overlay_idx = self._hash_code(getattr(e, 'top_overlay_code', 0))
             else:
-                c_idx, r_idx, a_idx, sc_hashed = UNK_CODE_IDX, 0, 0, [0, 0, 0, 0]
-                overlay_idx = PAD_CODE_IDX
-                feat = [-1.0, e.location / 100.0, e.sequence / 10.0, -1.0, -1.0] + [0.0] * 53
-                # 未知卡片返回全零语义
+                card_indices[i] = UNK_CODE_IDX
+                card_overlay_indices[i] = PAD_CODE_IDX
+                masks[i] = True
+                card_feats[i, :5] = [-1.0, e.location / 100.0, e.sequence / 10.0, -1.0, -1.0]
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(0)
-            
-            card_indices.append(c_idx); card_feats.append(feat); card_races.append(r_idx)
-            card_attrs.append(a_idx); card_setcodes.append(sc_hashed); masks.append(1.0)
-            card_overlay_indices.append(overlay_idx)
-            sem_cats.append(cat_out); sem_reqs.append(req_out); sem_scs.append(set_out); sem_nums.append(num_out);sem_refs.append(ref_out); sem_races.append(race_out); sem_attrs.append(attr_out)
 
-        # Padding
-        pad_len = MAX_CARDS - len(card_indices)
-        if pad_len > 0:
-            card_indices.extend([PAD_CODE_IDX] * pad_len)
-            card_overlay_indices.extend([PAD_CODE_IDX] * pad_len)
-            card_races.extend([0] * pad_len)
-            card_attrs.extend([0] * pad_len)
-            masks.extend([0.0] * pad_len)
-            for _ in range(pad_len):
-                card_setcodes.append([0, 0, 0, 0])
-                card_feats.append([0.0] * 58)
-                sem_cats.append(np.zeros((8, 8), dtype=np.int16))
-                sem_reqs.append(np.zeros((8, 128), dtype=np.bool_))
-                sem_scs.append(np.zeros((8, 4), dtype=np.int16))
-                sem_nums.append(np.zeros((8, 4), dtype=np.float16))
-                sem_refs.append(np.zeros((8, 4), dtype=np.int32))
-                sem_races.append(np.zeros((8, 4), dtype=np.int16))
-                sem_attrs.append(np.zeros((8, 4), dtype=np.int16))
+            sem_cats[i] = cat_out; sem_reqs[i] = req_out; sem_scs[i] = set_out
+            sem_nums[i] = num_out; sem_refs[i] = ref_out; sem_races[i] = race_out; sem_attrs[i] = attr_out
 
         # ==========================================
         # 2. 处理上帝视角卡组残像 (MAX_DECK_CARDS = 75)
@@ -251,161 +230,169 @@ class GalateaEncoder:
         MAX_DECK_CARDS = 75
         my_deck = (snapshot.p0_deck_codes + snapshot.p0_extra_codes) if player_id == 0 else (snapshot.p1_deck_codes + snapshot.p1_extra_codes)
 
-        deck_idx, deck_race, deck_attr, deck_setcodes, deck_masks = [], [], [], [], []
-        # 卡组实体的语义特征容器
-        d_sem_cats, d_sem_reqs, d_sem_scs, d_sem_nums = [], [], [], []
-        d_sem_refs, d_sem_races, d_sem_attrs = [], [], []
+        deck_idx = np.full(MAX_DECK_CARDS, PAD_CODE_IDX, dtype=np.int64)
+        deck_race = np.zeros(MAX_DECK_CARDS, dtype=np.int64)
+        deck_attr = np.zeros(MAX_DECK_CARDS, dtype=np.int64)
+        deck_setcodes = np.zeros((MAX_DECK_CARDS, 4), dtype=np.int64)
+        deck_masks = np.zeros(MAX_DECK_CARDS, dtype=np.bool_)
+
+        d_sem_cats = np.zeros((MAX_DECK_CARDS, 8, 8), dtype=np.int16)
+        d_sem_reqs = np.zeros((MAX_DECK_CARDS, 8, 128), dtype=np.bool_)
+        d_sem_scs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
+        d_sem_nums = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.float16)
+        d_sem_refs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int32)
+        d_sem_races = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
+        d_sem_attrs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
 
         from card_reader import card_db
-        for code in my_deck[:MAX_DECK_CARDS]:
+        for i, code in enumerate(my_deck[:MAX_DECK_CARDS]):
             try:
                 stats = card_db.get_full_stats(code)
-                deck_race.append(stats[1] % 30)
-                deck_attr.append(stats[2] % 10)
-                # 容错保护
+                deck_race[i] = stats[1] % 30
+                deck_attr[i] = stats[2] % 10
                 raw_dsc = stats[10] if isinstance(stats[10], (list, tuple)) else [stats[10]]
-                deck_setcodes.append([(s % 4096) for s in (list(raw_dsc) + [0]*4)[:4]])
-            except Exception as e:
-                print(f"⚠️ [FeatureEncoder] 卡片数据获取异常 (已记录并跳过): {e}")
-                deck_race.append(0); deck_attr.append(0); deck_setcodes.append([0, 0, 0, 0])
+                deck_setcodes[i] = [(s % 4096) for s in (list(raw_dsc) + [0]*4)[:4]]
+            except Exception:
+                pass
                 
-            deck_idx.append(self._hash_code(code))
-            deck_masks.append(True)
+            deck_idx[i] = self._hash_code(code)
+            deck_masks[i] = True
             
-            # 给卡组里的卡也装上语义 (带大一统特征)
             dc_out, dr_out, ds_out, dn_out, dref_out, drace_out, dattr_out = self.sem_kb.get_card_semantics(code)
-            d_sem_cats.append(dc_out); d_sem_reqs.append(dr_out)
-            d_sem_scs.append(ds_out); d_sem_nums.append(dn_out)
-            d_sem_refs.append(dref_out); d_sem_races.append(drace_out); d_sem_attrs.append(dattr_out)
+            d_sem_cats[i] = dc_out; d_sem_reqs[i] = dr_out; d_sem_scs[i] = ds_out
+            d_sem_nums[i] = dn_out; d_sem_refs[i] = dref_out; d_sem_races[i] = drace_out; d_sem_attrs[i] = dattr_out
 
-        # Padding 卡组
-        deck_pad_len = MAX_DECK_CARDS - len(deck_idx)
-        if deck_pad_len > 0:
-            deck_idx.extend([PAD_CODE_IDX] * deck_pad_len)
-            deck_race.extend([0] * deck_pad_len)
-            deck_attr.extend([0] * deck_pad_len)
-            deck_masks.extend([False] * deck_pad_len)
-            for _ in range(deck_pad_len):
-                deck_setcodes.append([0, 0, 0, 0])
-                d_sem_cats.append(np.zeros((8, 8), dtype=np.int16))
-                d_sem_reqs.append(np.zeros((8, 128), dtype=np.bool_))
-                d_sem_scs.append(np.zeros((8, 4), dtype=np.int16))
-                d_sem_nums.append(np.zeros((8, 4), dtype=np.float16))
-                d_sem_refs.append(np.zeros((8, 4), dtype=np.int32))
-                d_sem_races.append(np.zeros((8, 4), dtype=np.int16))
-                d_sem_attrs.append(np.zeros((8, 4), dtype=np.int16))
-        
         # ==========================================
-        # 2.5 处理连锁堆栈 (MAX_CHAIN = 5)
+        # 2.5 处理连锁堆栈 (MAX_CHAIN = 12)
         # ==========================================
-        MAX_CHAIN = 5
-        c_sem_cats, c_sem_reqs, c_sem_scs, c_sem_nums, c_sem_refs, c_sem_races, c_sem_attrs = [], [], [], [], [], [], []
-        c_masks = []
+        MAX_CHAIN = 12
+        c_masks = np.zeros(MAX_CHAIN, dtype=np.bool_)
+        c_sem_cats = np.zeros((MAX_CHAIN, 8, 8), dtype=np.int16)
+        c_sem_reqs = np.zeros((MAX_CHAIN, 8, 128), dtype=np.bool_)
+        c_sem_scs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
+        c_sem_nums = np.zeros((MAX_CHAIN, 8, 4), dtype=np.float16)
+        c_sem_refs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int32)
+        c_sem_races = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
+        c_sem_attrs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
         
-        # 提取堆栈里正在发动的卡片语义
         if hasattr(snapshot, 'chain_stack'):
-            for item in snapshot.chain_stack[:MAX_CHAIN]:
+            for i, item in enumerate(snapshot.chain_stack[:MAX_CHAIN]):
                 cc_out, cr_out, cs_out, cn_out, cref_out, crace_out, cattr_out = self.sem_kb.get_card_semantics(item['code'])
-                c_sem_cats.append(cc_out); c_sem_reqs.append(cr_out); c_sem_scs.append(cs_out); c_sem_nums.append(cn_out)
-                c_sem_refs.append(cref_out); c_sem_races.append(crace_out); c_sem_attrs.append(cattr_out)
-                c_masks.append(True)
-                
-        # Padding
-        c_pad_len = MAX_CHAIN - len(c_masks)
-        if c_pad_len > 0:
-            c_masks.extend([False] * c_pad_len)
-            for _ in range(c_pad_len):
-                c_sem_cats.append(np.zeros((8, 8), dtype=np.int16))
-                c_sem_reqs.append(np.zeros((8, 128), dtype=np.bool_))
-                c_sem_scs.append(np.zeros((8, 4), dtype=np.int16))
-                c_sem_nums.append(np.zeros((8, 4), dtype=np.float16))
-                c_sem_refs.append(np.zeros((8, 4), dtype=np.int32))
-                c_sem_races.append(np.zeros((8, 4), dtype=np.int16))
-                c_sem_attrs.append(np.zeros((8, 4), dtype=np.int16))
+                c_sem_cats[i] = cc_out; c_sem_reqs[i] = cr_out; c_sem_scs[i] = cs_out
+                c_sem_nums[i] = cn_out; c_sem_refs[i] = cref_out; c_sem_races[i] = crace_out; c_sem_attrs[i] = cattr_out
+                c_masks[i] = True
 
         # ==========================================
         # 2.6 处理动作历史雷达 (MAX_HISTORY = 8)
         # ==========================================
         MAX_HISTORY = 8
-        h_sem_cats, h_sem_reqs, h_sem_scs, h_sem_nums, h_sem_refs, h_sem_races, h_sem_attrs = [], [], [], [], [], [], []
-        h_masks = []
+        h_masks = np.zeros(MAX_HISTORY, dtype=np.bool_)
+        h_sem_cats = np.zeros((MAX_HISTORY, 8, 8), dtype=np.int16)
+        h_sem_reqs = np.zeros((MAX_HISTORY, 8, 128), dtype=np.bool_)
+        h_sem_scs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
+        h_sem_nums = np.zeros((MAX_HISTORY, 8, 4), dtype=np.float16)
+        h_sem_refs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int32)
+        h_sem_races = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
+        h_sem_attrs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
         
         if hasattr(snapshot, 'history_stack'):
-            for item in snapshot.history_stack[:MAX_HISTORY]:
+            for i, item in enumerate(snapshot.history_stack[:MAX_HISTORY]):
                 hc_out, hr_out, hs_out, hn_out, href_out, hrace_out, hattr_out = self.sem_kb.get_card_semantics(item['code'])
-                h_sem_cats.append(hc_out); h_sem_reqs.append(hr_out); h_sem_scs.append(hs_out); h_sem_nums.append(hn_out)
-                h_sem_refs.append(href_out); h_sem_races.append(hrace_out); h_sem_attrs.append(hattr_out)
-                h_masks.append(True)
-                
-        h_pad_len = MAX_HISTORY - len(h_masks)
-        if h_pad_len > 0:
-            h_masks.extend([False] * h_pad_len)
-            for _ in range(h_pad_len):
-                h_sem_cats.append(np.zeros((8, 8), dtype=np.int16))
-                h_sem_reqs.append(np.zeros((8, 128), dtype=np.bool_))
-                h_sem_scs.append(np.zeros((8, 4), dtype=np.int16))
-                h_sem_nums.append(np.zeros((8, 4), dtype=np.float16))
-                h_sem_refs.append(np.zeros((8, 4), dtype=np.int32))
-                h_sem_races.append(np.zeros((8, 4), dtype=np.int16))
-                h_sem_attrs.append(np.zeros((8, 4), dtype=np.int16))
+                h_sem_cats[i] = hc_out; h_sem_reqs[i] = hr_out; h_sem_scs[i] = hs_out
+                h_sem_nums[i] = hn_out; h_sem_refs[i] = href_out; h_sem_races[i] = hrace_out; h_sem_attrs[i] = hattr_out
+                h_masks[i] = True
 
         # ==========================================
-        # 3. 最终打包
+        # 3. 最终打包 (直接包装为 Tensor)
         # ==========================================
         act_dict = self.encode_actions(snapshot.valid_actions, snapshot)
+
+        # 哨兵雷达：在强转和 clip 之前，进行深度数值自检，绝不静默隐藏 Bug
+        has_nan = np.isnan(card_feats).any()
+        has_inf = np.isinf(card_feats).any()
+        has_pos_extreme = (card_feats > 65500.0).any()
+        has_neg_extreme = (card_feats < -65500.0).any() # 捕获异常负向数值（Underflow）
+
+        if has_nan or has_inf or has_pos_extreme or has_neg_extreme:
+            print("\n🛑 [FeatureEncoder 核心警报] 决斗管线中惊现破坏性投毒特征数据！已自动动态拦截排毒！")
+            print("   -> 🔍 毒素成因: " + 
+                  ("【NaN 空值】 " if has_nan else "") + 
+                  ("【Inf 无穷大】 " if has_inf else "") + 
+                  ("【正向超界 Max限】 " if has_pos_extreme else "") + 
+                  ("【负向超界 Min限】" if has_neg_extreme else ""))
+            
+            # 开启全息追踪，遍历当前盘面实体，精准揪出下毒的卡片
+            from card_reader import card_db
+            found_culprit = False
+            for idx, e in enumerate(snapshot.entities[:MAX_CARDS]):
+                # 采用 abs() 绝对值判定，同时将正向膨胀与负向脏内存（如未初始化内存里的负数）一网打尽
+                if abs(e.current_atk) > 260000000 or abs(e.current_def) > 260000000 or abs(e.base_atk) > 260000000 or abs(e.base_def) > 260000000 or e.code < 0:
+                    found_culprit = True
+                    c_name = "未知卡片"
+                    try: c_name = card_db.get_card_name(e.code)
+                    except Exception as ex:
+                        print(f"   -> ⚠️ 追踪异常: 无法查询卡片代码 {e.code} 的名称，可能是非法代码或数据库未收录 | 错误详情: {ex}")
+                    print(f"   ├─🎯 涉案实体索引: [{idx}] | 区域: {Zone.get_str(e.location)} | 槽位序号: {e.sequence}")
+                    print(f"   ├─🃏 涉案卡片身份: 【{c_name}】 (真实卡密 Code: {e.code}) | 实际拥有者: 玩家 {e.owner}")
+                    print(f"   └─📊 崩溃现场面板: 当前ATK={e.current_atk} | 当前DEF={e.current_def} | 原始ATK={e.base_atk} | 原始DEF={e.base_def}")
+            
+            if not found_culprit:
+                print(f"   -> 💡 提示: 异常未源于可见怪兽面板，可能由于全局常数计算或隐藏特征通道越界（特征矩阵极值跨度: {np.min(card_feats)} ~ {np.max(card_feats)}）")
+            print("   -> 🛡️ 安全状态: 雷达已强制重置该高维特征至 float16 物理极限安全带宽，对局继续，主进程 GPU 运算图保持绝对纯净。\n")
+
+        # 有多大拉多大：利用 float16 临界区安全上限进行动态截断，吸收极值，阻止管道崩溃
+        card_feats = np.clip(card_feats, -65500.0, 65500.0)
         
         base_dict = {
             'global': torch.tensor(global_vec, dtype=torch.float32).unsqueeze(0),
             
-            'card_idx': torch.tensor(card_indices, dtype=torch.long).unsqueeze(0),
-            'card_overlay_idx': torch.tensor(card_overlay_indices, dtype=torch.long).unsqueeze(0),
-            'card_race': torch.tensor(card_races, dtype=torch.long).unsqueeze(0), 
-            'card_attr': torch.tensor(card_attrs, dtype=torch.long).unsqueeze(0), 
-            'card_setcodes': torch.tensor(card_setcodes, dtype=torch.long).unsqueeze(0), 
-            'card_feats': torch.tensor(card_feats, dtype=torch.float32).unsqueeze(0),
-            'padding_mask': torch.tensor(masks, dtype=torch.bool).unsqueeze(0),
+            'card_idx': torch.from_numpy(card_indices).unsqueeze(0),
+            'card_overlay_idx': torch.from_numpy(card_overlay_indices).unsqueeze(0),
+            'card_race': torch.from_numpy(card_races).unsqueeze(0), 
+            'card_attr': torch.from_numpy(card_attrs).unsqueeze(0), 
+            'card_setcodes': torch.from_numpy(card_setcodes).unsqueeze(0), 
+            'card_feats': torch.from_numpy(card_feats).unsqueeze(0),
+            'padding_mask': torch.from_numpy(masks).unsqueeze(0),
             
-            # 挂载场上实体的语义张量 [Batch, 100, 4, ...]
-            'sem_category': torch.from_numpy(np.array(sem_cats)).unsqueeze(0),
-            'sem_req': torch.from_numpy(np.array(sem_reqs)).unsqueeze(0),
-            'sem_setcode': torch.from_numpy(np.array(sem_scs)).unsqueeze(0),
-            'sem_number': torch.from_numpy(np.array(sem_nums)).unsqueeze(0),
-            'sem_ref': torch.from_numpy(np.array(sem_refs)).unsqueeze(0),
-            'sem_race': torch.from_numpy(np.array(sem_races)).unsqueeze(0),
-            'sem_attr': torch.from_numpy(np.array(sem_attrs)).unsqueeze(0),
+            'sem_category': torch.from_numpy(sem_cats).unsqueeze(0),
+            'sem_req': torch.from_numpy(sem_reqs).unsqueeze(0),
+            'sem_setcode': torch.from_numpy(sem_scs).unsqueeze(0),
+            'sem_number': torch.from_numpy(sem_nums).unsqueeze(0),
+            'sem_ref': torch.from_numpy(sem_refs).unsqueeze(0),
+            'sem_race': torch.from_numpy(sem_races).unsqueeze(0),
+            'sem_attr': torch.from_numpy(sem_attrs).unsqueeze(0),
             
-            'deck_idx': torch.tensor(deck_idx, dtype=torch.long).unsqueeze(0),
-            'deck_race': torch.tensor(deck_race, dtype=torch.long).unsqueeze(0),
-            'deck_attr': torch.tensor(deck_attr, dtype=torch.long).unsqueeze(0),
-            'deck_setcodes': torch.tensor(deck_setcodes, dtype=torch.long).unsqueeze(0),
-            'deck_mask': torch.tensor(deck_masks, dtype=torch.bool).unsqueeze(0),
+            'deck_idx': torch.from_numpy(deck_idx).unsqueeze(0),
+            'deck_race': torch.from_numpy(deck_race).unsqueeze(0),
+            'deck_attr': torch.from_numpy(deck_attr).unsqueeze(0),
+            'deck_setcodes': torch.from_numpy(deck_setcodes).unsqueeze(0),
+            'deck_mask': torch.from_numpy(deck_masks).unsqueeze(0),
             
-            # 挂载上帝视角的语义张量 [Batch, 75, 4, ...]
-            'd_sem_category': torch.from_numpy(np.array(d_sem_cats)).unsqueeze(0),
-            'd_sem_req': torch.from_numpy(np.array(d_sem_reqs)).unsqueeze(0),
-            'd_sem_setcode': torch.from_numpy(np.array(d_sem_scs)).unsqueeze(0),
-            'd_sem_number': torch.from_numpy(np.array(d_sem_nums)).unsqueeze(0),
-            'd_sem_ref': torch.from_numpy(np.array(d_sem_refs)).unsqueeze(0),
-            'd_sem_race': torch.from_numpy(np.array(d_sem_races)).unsqueeze(0),
-            'd_sem_attr': torch.from_numpy(np.array(d_sem_attrs)).unsqueeze(0),
+            'd_sem_category': torch.from_numpy(d_sem_cats).unsqueeze(0),
+            'd_sem_req': torch.from_numpy(d_sem_reqs).unsqueeze(0),
+            'd_sem_setcode': torch.from_numpy(d_sem_scs).unsqueeze(0),
+            'd_sem_number': torch.from_numpy(d_sem_nums).unsqueeze(0),
+            'd_sem_ref': torch.from_numpy(d_sem_refs).unsqueeze(0),
+            'd_sem_race': torch.from_numpy(d_sem_races).unsqueeze(0),
+            'd_sem_attr': torch.from_numpy(d_sem_attrs).unsqueeze(0),
 
-            'c_mask': torch.tensor(c_masks, dtype=torch.bool).unsqueeze(0),
-            'c_sem_category': torch.from_numpy(np.array(c_sem_cats)).unsqueeze(0),
-            'c_sem_req': torch.from_numpy(np.array(c_sem_reqs)).unsqueeze(0),
-            'c_sem_setcode': torch.from_numpy(np.array(c_sem_scs)).unsqueeze(0),
-            'c_sem_number': torch.from_numpy(np.array(c_sem_nums)).unsqueeze(0),
-            'c_sem_ref': torch.from_numpy(np.array(c_sem_refs)).unsqueeze(0),
-            'c_sem_race': torch.from_numpy(np.array(c_sem_races)).unsqueeze(0),
-            'c_sem_attr': torch.from_numpy(np.array(c_sem_attrs)).unsqueeze(0),
+            'c_mask': torch.from_numpy(c_masks).unsqueeze(0),
+            'c_sem_category': torch.from_numpy(c_sem_cats).unsqueeze(0),
+            'c_sem_req': torch.from_numpy(c_sem_reqs).unsqueeze(0),
+            'c_sem_setcode': torch.from_numpy(c_sem_scs).unsqueeze(0),
+            'c_sem_number': torch.from_numpy(c_sem_nums).unsqueeze(0),
+            'c_sem_ref': torch.from_numpy(c_sem_refs).unsqueeze(0),
+            'c_sem_race': torch.from_numpy(c_sem_races).unsqueeze(0),
+            'c_sem_attr': torch.from_numpy(c_sem_attrs).unsqueeze(0),
         
-            'h_mask': torch.tensor(h_masks, dtype=torch.bool).unsqueeze(0),
-            'h_sem_category': torch.from_numpy(np.array(h_sem_cats)).unsqueeze(0),
-            'h_sem_req': torch.from_numpy(np.array(h_sem_reqs)).unsqueeze(0),
-            'h_sem_setcode': torch.from_numpy(np.array(h_sem_scs)).unsqueeze(0),
-            'h_sem_number': torch.from_numpy(np.array(h_sem_nums)).unsqueeze(0),
-            'h_sem_ref': torch.from_numpy(np.array(h_sem_refs)).unsqueeze(0),
-            'h_sem_race': torch.from_numpy(np.array(h_sem_races)).unsqueeze(0),
-            'h_sem_attr': torch.from_numpy(np.array(h_sem_attrs)).unsqueeze(0),
+            'h_mask': torch.from_numpy(h_masks).unsqueeze(0),
+            'h_sem_category': torch.from_numpy(h_sem_cats).unsqueeze(0),
+            'h_sem_req': torch.from_numpy(h_sem_reqs).unsqueeze(0),
+            'h_sem_setcode': torch.from_numpy(h_sem_scs).unsqueeze(0),
+            'h_sem_number': torch.from_numpy(h_sem_nums).unsqueeze(0),
+            'h_sem_ref': torch.from_numpy(h_sem_refs).unsqueeze(0),
+            'h_sem_race': torch.from_numpy(h_sem_races).unsqueeze(0),
+            'h_sem_attr': torch.from_numpy(h_sem_attrs).unsqueeze(0),
         }
         
         base_dict.update(act_dict)

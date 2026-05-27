@@ -90,15 +90,19 @@ except RuntimeError:
 #    - 含义: 是否禁用 PyTorch 的 torch.compile 功能。
 #    - 调整建议: 如果你遇到了与 torch.compile 相关的兼容性问题，可以启用这个选项来禁用模型编译。虽然会牺牲一部分性能，但能确保程序正常运行。
 #          注意:windows用户请务必启用此选项。
+# 11. use_onnx (默认 False) -> [ONNX 极速推理/算力剥离]
+#    - 含义: 是否开启 ONNX 后台导出与 Worker 本地极速推理功能。
+#    - 类比: AI 是否有一个专门的"引擎剥离器"，在后台将最新的模型转换成一个轻量级的推理引擎，供实习生们快速使用。
+#    - 调整建议: 启用后可以显著提升采集速度，尤其是在 CPU 上，强烈建议开启。需要安装 onnxruntime 包
 
 
 #  tensorboard --logdir=runs    查看训练过程
 
 #  训练示例命令:
-#  python main.py train --dir ./models --batch_size 16384 --mini_batch 256 --workers 6 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile
+#  python main.py train --dir ./models --batch_size 16384 --mini_batch 256 --workers 6 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile --use_onnx 
 
 #  恢复训练命令示例:  从第 100 轮存档继续，目标是练到第 5000 轮
-#  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 16384 --mini_batch 256 --workers 6 --steps 5000 --async_infer --no_compile
+#  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 16384 --mini_batch 256 --workers 6 --steps 5000 --async_infer --no_compile --use_onnx 
 
 #  测试示例命令(每隔 5 局保存一次心声):
 #  python main.py duel --p0 ./models/galatea_iter_100.pth --thought_freq 5 --num 100
@@ -147,6 +151,8 @@ def main():
     train_parser.add_argument('--async_infer', action='store_true', help="启用异步推断服务器(大幅节省显存并提速)")
     # 添加禁用编译的开关 (防止win/老旧环境报错)
     train_parser.add_argument('--no_compile', action='store_true', help='禁用 torch.compile (兼容性模式)')
+
+    train_parser.add_argument('--use_onnx', action='store_true', help='开启 ONNX 后台导出与 Worker 本地极速推理')
 
     # RL 灵魂超参数
     train_parser.add_argument('--gamma', type=float, default=0.998, help='目光长远度 (推荐0.998)')
@@ -236,7 +242,8 @@ def main():
             lr=args.lr,
             entropy=args.entropy,
             gae_lambda=args.gae_lambda,
-            clip_eps=args.clip_eps
+            clip_eps=args.clip_eps,
+            use_onnx=args.use_onnx
         )
         trainer.run_training_loop(max_iterations=args.steps)
         

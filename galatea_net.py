@@ -5,6 +5,8 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 class RunningMeanStd(nn.Module):
     # 动态记录输入的均值和方差，用于 RND 归一化
@@ -29,18 +31,112 @@ class RunningMeanStd(nn.Module):
         self.var = M2 / tot_count
         self.count = tot_count
 
-class RNDModule(nn.Module):
-    def __init__(self, input_dim=512, hidden_dim=256): 
+class SwiGLU(nn.Module):
+    """
+    现代化 SwiGLU 门控前馈网络 (取代传统 Linear->GELU->Linear)
+    采用无偏置设计与 Tensor Core 硬件对齐优化
+    """
+    def __init__(self, in_features, hidden_features=None, out_features=None, multiple_of=64):
         super().__init__()
-        # 挂载滚动统计器
-        self.obs_norm = RunningMeanStd(shape=(input_dim,))
+        out_features = out_features or in_features
+        # 如果未指定，采用业界标准的 8/3 缩放比例
+        hidden_features = hidden_features or int(8 * in_features / 3)
         
-        # Target network (永远冻结，不参与更新)
+        # 硬件级优化：自动向上补齐至 multiple_of (默认64) 的倍数，榨干显卡算力
+        hidden_features = multiple_of * ((hidden_features + multiple_of - 1) // multiple_of)
+
+        self.gate_proj = nn.Linear(in_features, hidden_features, bias=False)
+        self.up_proj = nn.Linear(in_features, hidden_features, bias=False)
+        self.down_proj = nn.Linear(hidden_features, out_features, bias=False)
+
+    def forward(self, x):
+        # 核心逻辑：SiLU(Gate) * Up -> Down
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+class FiLMGenerator(nn.Module):
+    """全局状态调制器：根据当前阶段/回合生成 Transformer 的缩放与偏移参数"""
+    def __init__(self, condition_dim, d_model):
+        super().__init__()
+        # 输出 2 倍的 d_model，一半用于乘法缩放(gamma)，一半用于加法偏移(beta)
+        self.proj = nn.Linear(condition_dim, 2 * d_model)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, condition):
+        out = self.proj(condition)
+        gamma, beta = out.chunk(2, dim=-1)
+        return gamma.unsqueeze(1), beta.unsqueeze(1) # [B, 1, d_model] 方便广播
+
+class GalateaTransformerBlock(nn.Module):
+    """单层游戏王思考核心：融合 FiLM 宏观调控、SwiGLU 门控逻辑 与 极速 SDPA"""
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        
+        # 将 Q, K, V 合并为一个线性层，提速
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = SwiGLU(in_features=d_model, multiple_of=64)
+
+    def forward(self, x, padding_mask, gamma, beta):
+        # --- 1. 意图调制 + 极速 SDPA (FlashAttention) ---
+        residual = x
+        x = self.norm1(x)
+        x = x * (1.0 + gamma) + beta  # FiLM
+        
+        B, L, D = x.shape
+        # 生成 QKV 并拆分
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        
+        # PyTorch SDPA 需要的 mask 是 True 代表保留，False 代表屏蔽
+        # 你的 padding_mask 是 True 代表填充物(需屏蔽)，所以要取反 `~`
+        attn_mask = (~padding_mask).unsqueeze(1).unsqueeze(2) if padding_mask is not None else None
+        
+        # 底层级加速调用
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        x = x.transpose(1, 2).reshape(B, L, D)
+        x = self.proj(x)
+        x = residual + x
+
+        # --- 2. 意图调制 + 深度门控前馈 ---
+        residual = x
+        x = self.norm2(x)
+        x = x * (1.0 + gamma) + beta  # FiLM
+        x = self.ffn(x)
+        x = residual + x
+        return x
+
+class GalateaTransformerStack(nn.Module):
+    """全层 Transformer 堆叠容器：用于完美承接 PyTorch 的 checkpoint 机制"""
+    def __init__(self, d_model, n_heads, n_layers):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            GalateaTransformerBlock(d_model, n_heads) 
+            for _ in range(n_layers)
+        ])
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def forward(self, x, padding_mask, gamma, beta):
+        for layer in self.layers:
+            x = layer(x, padding_mask, gamma, beta)
+        return self.final_norm(x)
+
+class RNDModule(nn.Module): # 内在奖励模块：随机网络蒸馏 (RND),暂时不使用了，先留着代码
+    def __init__(self, input_dim=512, hidden_dim=256, out_dim=128): 
+        super().__init__()
+        # Target 网络保持普通 MLP 且冻结，作为固定的随机指纹
         self.target = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.LeakyReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
+            nn.GELU(),
+            nn.Linear(hidden_dim, out_dim)
         )
+        # Predictor 网络升级为 SwiGLU，加速追赶 target
+        self.predictor = SwiGLU(input_features=input_dim, hidden_features=hidden_dim, out_features=out_dim)
         for param in self.target.parameters():
             param.requires_grad = False
 
@@ -103,37 +199,49 @@ class GalateaNet(nn.Module):
         # ==========================================================
 
         # --- 3. Transformer Encoder (逻辑推演引擎) ---
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.d_model, nhead=self.n_heads, 
-            dim_feedforward=self.d_model * 4, batch_first=True, dropout=0.1
+        # 1. 挂载全局环境信号发生器
+        self.film_gen = FiLMGenerator(condition_dim=15, d_model=self.d_model)
+        
+        # 2. 实例化定制的堆叠主干 (利用 config 字典解包)
+        self.transformer = GalateaTransformerStack(
+            d_model=self.d_model,
+            n_heads=config['n_heads'],
+            n_layers=config['n_layers']
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.n_layers)
 
         # --- 4. Action Head (动作评估中枢) ---
         self.act_type_embed = nn.Embedding(256, self.d_model) 
         self.desc_embed = nn.Embedding(1024, self.d_model) 
         self.place_embed = nn.Embedding(33, self.d_model, padding_idx=0)
         
-        self.intent_proj = nn.Linear(self.d_model, self.d_model)
+        # 使用 SwiGLU 将 15 维的全局状态精准升维
+        self.intent_proj = SwiGLU(in_features=self.d_model, hidden_features=512, out_features=self.d_model)
         self.option_proj = nn.Linear(self.d_model, self.d_model)
 
         self.v_norm = nn.LayerNorm(self.d_model)
         self.fusion_norm = nn.LayerNorm(self.d_model * 2) # 双塔拼接后是 d_model * 2
+        # 链式效果位置编码，最大长度 12 (需要与 feature_encoder.py 里的常量保持绝对一致)
+        self.chain_pos_embed = nn.Parameter(torch.randn(1, 12, self.d_model) * 0.02)
+        # 设定为 MAX_HISTORY = 8 (需要与 feature_encoder.py 里的常量保持绝对一致)
+        self.history_pos_embed = nn.Parameter(torch.randn(1, 8, self.d_model) * 0.02)
 
+        self.register_buffer("place_weights", torch.tensor([1.0, 0.8, 0.6, 0.4, 0.2]).view(1, 1, 5, 1))
+
+        # 新代码：处理拼接后的两倍特征 (d_model * 2)，执行更深度的逻辑门控
         self.policy_head = nn.Sequential(
-            nn.Linear(self.d_model * 2, 256), # 双塔拼接，维度翻倍
-            nn.ReLU(),
-            nn.Linear(256, 1) 
+            SwiGLU(in_features=self.d_model * 2, hidden_features=512, out_features=256),
+            nn.Linear(256, 1)
         )
 
+        # 新代码：SwiGLU 过滤无效特征，再接一个 Linear 映射为单个估值标量
         self.value_head = nn.Sequential(
-            nn.Linear(self.d_model, 256),
-            nn.ReLU(),
+            SwiGLU(in_features=self.d_model, hidden_features=512, out_features=256),
             nn.Linear(256, 1)
         )
 
         #self.rnd = RNDModule(input_dim=self.d_model)
         self.overlay_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
+        self.pos_embed = nn.Parameter(torch.randn(1, 120, self.d_model) * 0.02) # 最大卡片数(SeqLen)是120
 
         for m in self.policy_head.modules():
             if isinstance(m, nn.Linear) and m.out_features == 1:
@@ -161,7 +269,8 @@ class GalateaNet(nn.Module):
         sem_base_512 = self.sem_fusion_proj(sem_base) # [B, S, 槽数, 512]
         
         # 3. 提取物理共鸣特征 (已经是 512 维了！)
-        ref_v = self.card_embed(sem_ref.long()).sum(dim=-2)
+        safe_sem_ref = torch.clamp(sem_ref.long(), 0, self.vocab_size - 1)
+        ref_v = self.card_embed(safe_sem_ref).sum(dim=-2)
         race_v = self.race_embed(sem_race.long()).sum(dim=-2)
         attr_v = self.attr_embed(sem_attr.long()).sum(dim=-2)
         
@@ -173,6 +282,9 @@ class GalateaNet(nn.Module):
         return self.final_slot_norm(card_sem_v)
 
     def forward(self, batch_dict):
+        # --- 全局状态调制器 ---
+        gamma, beta = self.film_gen(batch_dict['global'])
+
         # 物理基础感知
         x_code = self.card_embed(batch_dict['card_idx'])
         x_overlay = self.overlay_embed(batch_dict['card_overlay_idx'])
@@ -186,17 +298,24 @@ class GalateaNet(nn.Module):
             x_sem = self.process_semantics(
                 batch_dict['sem_category'], batch_dict['sem_req'], 
                 batch_dict['sem_setcode'], batch_dict['sem_number'],
-                batch_dict['sem_ref'], batch_dict['sem_race'], batch_dict['sem_attr'] # 🌟 补上这行！
+                batch_dict['sem_ref'], batch_dict['sem_race'], batch_dict['sem_attr']
             )
         else:
-            x_sem = 0
+            x_sem = 0.0
 
         # 全息物理与语义的大一统！
         x = x_code + x_overlay + x_feat + x_race + x_attr + x_setcode + x_sem
+        seq_len = x.shape[1]
+        x = x + self.pos_embed[:, :seq_len, :]
         
         # --- Transformer 局势推演 ---
         src_mask = ~batch_dict['padding_mask'] 
-        memory = self.transformer(x, src_key_padding_mask=src_mask)
+        
+        if self.training:
+            # 强行向 PyTorch 声明这是一个需要计算梯度的连续隐空间，同时带入控制信号
+            memory = checkpoint(self.transformer, x, src_mask, gamma, beta, use_reentrant=False)
+        else:
+            memory = self.transformer(x, src_mask, gamma, beta)
         
         # --- 全局局面掌控 ---
         g_embed = self.global_proj(batch_dict['global']).unsqueeze(1) 
@@ -236,6 +355,9 @@ class GalateaNet(nn.Module):
                 batch_dict['c_sem_ref'], batch_dict['c_sem_race'], batch_dict['c_sem_attr']
             ) # [B, 5, 512]
             
+            seq_len = c_sem.shape[1]
+            c_sem = c_sem + self.chain_pos_embed[:, :seq_len, :]
+
             # 使用 mask 求平均
             c_mask_f = batch_dict['c_mask'].float().unsqueeze(-1)
             c_sem_sum = (c_sem * c_mask_f).sum(dim=1)
@@ -251,6 +373,10 @@ class GalateaNet(nn.Module):
                 batch_dict['h_sem_setcode'], batch_dict['h_sem_number'],
                 batch_dict['h_sem_ref'], batch_dict['h_sem_race'], batch_dict['h_sem_attr']
             ) # [B, 8, 512]
+
+            # 注入历史时序 (近期发生的在前面，远期发生的在后面)
+            seq_len = h_sem.shape[1] 
+            h_sem = h_sem + self.history_pos_embed[:, :seq_len, :]
             
             h_mask_f = batch_dict['h_mask'].float().unsqueeze(-1)
             h_sem_sum = (h_sem * h_mask_f).sum(dim=1)
@@ -288,7 +414,7 @@ class GalateaNet(nn.Module):
 
         is_sort = (batch_dict['act_type'] == 25).unsqueeze(-1).unsqueeze(-1).float() # [B, 80, 1, 1]
         # 创建衰减权重阵：1.0, 0.8, 0.6, 0.4, 0.2
-        weights = torch.tensor([1.0, 0.8, 0.6, 0.4, 0.2], device=gathered_vecs.device).view(1, 1, 5, 1)
+        weights = self.place_weights
         # 巧妙融合：如果是 25，应用权重；如果不是，全部按 1.0 (等价于 Sum Pooling)
         w = is_sort * weights + (1.0 - is_sort) * 1.0
         

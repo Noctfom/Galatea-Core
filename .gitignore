@@ -16,6 +16,7 @@ system_logs/
 web_data/
 crash_report.txts
 deploy_packages/
+debug.log
 
 # 卡组文件 
 decks/

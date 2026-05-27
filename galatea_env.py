@@ -97,6 +97,7 @@ class GalateaEnv:
         self._setup_lib()
 
         self.msg_buf = (ctypes.c_byte * 65536)()
+        self.query_buf = (ctypes.c_byte * 8192)()
         
         # 注册回调
         self.lib.set_script_reader(self.cb_script_reader)
@@ -147,7 +148,7 @@ class GalateaEnv:
                     with open(filepath, 'rb') as f:
                         content = f.read()
                         
-                    # 加上我们上一轮说的防弹 \0 截断
+                    # 加上防弹 \0 截断
                     content_with_null = content + b'\0'
                     buf = (ctypes.c_byte * len(content_with_null)).from_buffer_copy(content_with_null)
                     self.script_buffers[basename] = (buf, len(content)) # 存 buf 和真实长度
@@ -221,13 +222,11 @@ class GalateaEnv:
         # Atk(0x100) | Def(0x200) | Equip(0x4000) | Overlays(0x10000) | Counters(0x20000)
         # 叠加结果为: 0x343DA
         flags = 0x1 | 0x2 | 0x8 | 0x10 | 0x40 | 0x80 | 0x100 | 0x200 | 0x4000 | 0x10000 | 0x20000
-        buf = (ctypes.c_byte * 8192)()
-        
-        length = self.lib.query_card(self.pduel, player_id, location, sequence, flags, buf, 0)
+        length = self.lib.query_card(self.pduel, player_id, location, sequence, flags, self.query_buf, 0)
         
         if length <= 8: return None
 
-        stream = io.BytesIO(bytearray(buf)[:length])
+        stream = io.BytesIO(bytearray(self.query_buf)[:length])
         try:
             data_len = struct.unpack('<I', stream.read(4))[0]
             actual_flag = struct.unpack('<I', stream.read(4))[0]

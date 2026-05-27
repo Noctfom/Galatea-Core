@@ -12,6 +12,8 @@ import random
 import os
 import gc
 import struct
+import zmq
+import psutil
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
@@ -30,7 +32,23 @@ DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130
 # GAE 参数 (和 Trainer 保持一致)
 GAMMA = 0.998
 GAE_LAMBDA = 0.95
-MAX_EPISODE_STEPS = 2000
+MAX_EPISODE_STEPS = 1500
+
+def setup_optimal_cpu_threads():
+    # 获取物理核心数
+    physical_cores = psutil.cpu_count(logical=False) or 1
+    # 获取逻辑线程数
+    logical_threads = psutil.cpu_count(logical=True) or 1
+    
+    # 计算超线程倍率 (通常是 2)
+    ht_ratio = logical_threads // physical_cores
+    
+    threads_per_worker = ht_ratio 
+    
+    torch.set_num_threads(threads_per_worker)
+    torch.set_num_interop_threads(1)
+    
+    return threads_per_worker
 
 def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
     """独立的跨进程安全黑匣子：只写入专用文件，绝不干涉主进程日志"""
@@ -69,7 +87,7 @@ def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
         # 哪怕发生极端情况的并发踩踏，也静默吞下异常，保证 Worker 能够顺利走完后续的销毁流程
         pass
 
-def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu', req_q=None, resp_q=None, opp_config=None, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4):
+def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu',zmq_port=55555,opp_config=None, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4,shared_buffers=None, shared_outputs=None, worker_events=None, use_onnx=False,shared_logits=None):
     
     # =========================================================================
     #  [防卡死] 禁用 Windows 崩溃弹窗
@@ -80,8 +98,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
     # =========================================================================
     
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
+    setup_optimal_cpu_threads()
 
     seed = (int(time.time() * 1000) % (2**31)) + (os.getpid() * 100) + worker_id
     random.seed(seed)
@@ -90,8 +107,22 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+    # [新增 ZMQ 连接初始化]
+    context = zmq.Context()
+    socket = context.socket(zmq.REQ)
+    
+    # 极速超时配置（防死锁），单位为毫秒
+    socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
+    socket.setsockopt(zmq.RCVTIMEO, 15000)
+    socket.setsockopt(zmq.SNDTIMEO, 5000)
+    socket.connect(f"tcp://127.0.0.1:{zmq_port}")
+
+    use_onnx_p1 = False
+    ort_session_p1 = None
+
     try:
         agent = AiBot(device=device, net_config=net_config)
+
         #  从硬盘读取权重，斩断 Windows IPC 共享内存污染
         if weight_file and isinstance(weight_file, str) and os.path.exists(weight_file):
             weights = torch.load(weight_file, map_location=device, weights_only=False)
@@ -101,19 +132,16 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         # --- 新增：对手代理 P1 初始化 ---
         opp_agent = None
         if opp_config["mode"] == "ai":
-            opp_agent = AiBot(device=device, net_config=net_config)
+            opp_agent = AiBot(device='cpu', net_config=net_config)
             opp_path = opp_config["path"]
             if opp_path and os.path.exists(opp_path):
-                opp_weights = torch.load(opp_path, map_location=device, weights_only=False)
-                # 处理保存的 checkpoint 字典或纯 state_dict
-                sd = opp_weights['model_state_dict'] if isinstance(opp_weights, dict) and 'model_state_dict' in opp_weights else opp_weights
-                opp_agent.net.load_state_dict(sd, strict=False)
-                opp_agent.net.eval()
+                opp_agent.load_model(opp_path)
             else:
-                # 如果是自对局且路径是 weight_file，直接共享内存或再次加载
-                opp_agent.net.load_state_dict(agent.net.state_dict())
+                cpu_state_dict = {k: v.cpu() for k, v in agent.net.state_dict().items()}
+                opp_agent.net.load_state_dict(cpu_state_dict, strict=False)
                 opp_agent.net.eval()
 
+        time.sleep(worker_id * 0.4) # 让 0~N 号工人错开 0.4 秒启动
         env = GalateaEnv()
         collected_steps = 0
         
@@ -138,11 +166,56 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
         deck_records = []
 
+        #提前拉起绝对连续的静态内存池
+        max_len = target_steps + MAX_EPISODE_STEPS + 100
+        columns = {
+            'obs': {}, 
+            'action': torch.zeros(max_len, dtype=torch.long),
+            'log_prob': torch.zeros(max_len, dtype=torch.float32),
+            'return': torch.zeros(max_len, dtype=torch.float32),
+            'advantage': torch.zeros(max_len, dtype=torch.float32)
+        }
+        global_ptr = 0      # 全局写入指针
+        ep_start_ptr = 0    # 当前对局的起始指针
+
+        gc.collect()
+        
+        for k, v in shared_buffers[worker_id].items():
+            shape = (max_len,) + v.shape 
+            columns['obs'][k] = torch.empty(shape, dtype=v.dtype)
+
         # print(f"👷 Worker {worker_id} 启动 | 目标: {target_steps} 步")
 
         while collected_steps < target_steps:
             if time.time() - worker_start_time > max_worker_uptime:
                 break
+
+            # --- [挂载对手引擎] 解决历史模型穿越的 Bug ---
+            if use_onnx and not use_onnx_p1:
+                if opp_config.get("type") == "hist" and opp_config.get("path"):
+                    # 如果是打历史模型，精准定位那个轮次的 .onnx
+                    hist_onnx_path = opp_config["path"].replace(".pth", ".onnx")
+                    if os.path.exists(hist_onnx_path):
+                        try:
+                            import onnxruntime as ort
+                            sess_options = ort.SessionOptions()
+                            sess_options.intra_op_num_threads = torch.get_num_threads()
+                            ort_session_p1 = ort.InferenceSession(hist_onnx_path, sess_options, providers=['CPUExecutionProvider'])
+                            use_onnx_p1 = True
+                            print(f"🕰️ [Worker {worker_id}] 历史对手 ONNX 引擎 ({os.path.basename(hist_onnx_path)}) 挂载成功！")
+                        except Exception:
+                            pass
+
+            perf_ledger = {
+                'steps': 0,
+                't_cpp_env': 0.0,    # C++ OCGCore 执行与 ctypes 格子解包 (含 get_snapshot 内部的 sync_active_field)
+                't_encoder': 0.0,    # FeatureEncoder.encode 矩阵转换耗时
+                't_zmq_p0': 0.0,    
+                't_cpu_p1': 0.0,     
+                't_pass1_cpu': 0.0, 
+                't_rule_bot': 0.0    # RuleBot 穷举多选套餐与本地打分耗时
+            }
+
             # --- 每局开始前随机摇号决定座位 ---
             train_p_id = random.choice([0, 1]) 
             opp_p_id = 1 - train_p_id
@@ -235,7 +308,12 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 # 消息泵
                 if not msg_queue:
                     try:
+                        t_start = time.time() # 计时器1
                         raw_data = env.step()
+                        perf_ledger['t_cpp_env'] += (time.time() - t_start) # 计时器1
+                        if raw_data and len(raw_data) > 500 * 1024: 
+                            print(f"🚨 [防爆截断] Worker {worker_id} 引擎吐出畸形海量数据({len(raw_data)/1024:.1f}KB)，强行摧毁对局防止 RAM 溢出！")
+                            break
                     except OSError as e: 
                         print(f"⚠️ [Worker {worker_id}] OCGCore 引擎底层崩溃: {e}")
                         break 
@@ -319,8 +397,12 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         break
 
                     # 获取当前行动玩家
-                    snap = brain.get_snapshot(env)
-                    player = snap.global_data.to_play
+                    t_start = time.time()  #计时器1
+
+                    current_snap = brain.get_snapshot(env)
+                    player = current_snap.global_data.to_play
+
+                    perf_ledger['t_cpp_env'] += (time.time() - t_start) # 计时器1
                     
                     # --- 通过身份判断使用哪个脑子 ---
                     is_training_agent = (player == train_p_id)
@@ -334,59 +416,110 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     is_macro_supported = msg_type in [15, 18, 20, 22, 23, 24, 25]
                     if current_agent and msg_type in AI_MANAGED_MSGS and (brain.current_valid_actions or is_macro_supported):
                         
-                        # ========================================================
-                        # [Two-Pass 架构] 拦截多选/排序等复杂指令，进行意图打分与降维
-                        # ========================================================
-                        # 严格限定只有 RuleBot 真实支持的 6 个组合指令
+                        # ==================================================================================
+                        # [Two-Pass 架构] 拦截多选/排序等复杂指令，进行意图打分与降维 (NumPy 极限向量化版)
+                        # ==================================================================================
                         if msg_type in [15, 18, 20, 22, 23, 24, 25]:
-                            # 只有在非重试阶段（或缓存为空时），才去生成新的 100 个套餐
                             if current_macro_pool is None:
-                                # [前置意图感知] 在生成 5000 套餐前，先问问网络喜欢哪张卡
+                                # [前置意图感知] 先问问网络喜欢哪张卡
                                 code_preferences = {}
                                 try:
-                                    with torch.no_grad():
-                                        snap_pass1 = brain.get_snapshot(env)
-                                        dict_pass1 = current_agent.encoder.encode(snap_pass1, player_id=player)
-                                        v_input = {k: v.to(current_agent.device) for k, v in dict_pass1.items() if isinstance(v, torch.Tensor)}
-                                        action_logits, _, _ = current_agent.net(v_input)
-                                        probs = torch.softmax(action_logits, dim=-1).squeeze(0).cpu().numpy()
+                                    # 📍 桩点 B1：精准分离 Pass 1 的表征生成耗时
+                                    t_enc_p1 = time.time()
+                                    dict_pass1 = current_agent.encoder.encode(current_snap, player_id=player)
+                                    perf_ledger['t_encoder'] += (time.time() - t_enc_p1)
+                                    
+                                    # 📍 桩点 C1：精准分离 Pass 1 的本地推理耗时
+                                    t_infer_p1 = time.time()
+                                    # 【大一统分流点 A】判断此轮推演是否具备全实时训练资格
+                                    # 如果当前是主特工在操作（P0），或者是自对局模式下的对手（P1 Self），一律走 ZMQ 绑定 GPU 中枢
+                                    if is_training_agent or opp_config["mode"] == "ai" and opp_config["type"] == "self":
+                                        # 零拷贝填入超导通道
+                                        for k, v in dict_pass1.items():
+                                            if k in shared_buffers[worker_id]:
+                                                shared_buffers[worker_id][k].copy_(v.squeeze(0))
                                         
-                                        # 将单卡概率映射到卡密上
-                                        for i, act in enumerate(brain.current_valid_actions):
-                                            if hasattr(act, 'code'):
-                                                # 如果同一个卡密出现多次，取最高权重
-                                                code_preferences[act.code] = max(code_preferences.get(act.code, 0), probs[i])
+                                        # 激活操作系统级信号量，呼叫服务端批处理
+                                        try:
+                                            socket.send(str(worker_id).encode('utf-8'))
+                                            socket.recv()
+                                        except zmq.error.Again:
+                                            print(f"🛰️ [ZeroMQ 断联] Worker {worker_id} Pass1 超时，重建连接...")
+                                            socket.close(linger=0)
+                                            socket = context.socket(zmq.REQ)
+                                            socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
+                                            socket.setsockopt(zmq.RCVTIMEO, 15000)
+                                            socket.setsockopt(zmq.SNDTIMEO, 5000)
+                                            socket.connect(f"tcp://127.0.0.1:{zmq_port}")
+                                            raise RuntimeError("Pass1 ZMQ 首次通讯超时")
+                                        
+                                        # 极限极速：直接从 120 维超广阔共享大矩阵中捞取全量 Logits 并激活 Softmax
+                                        raw_logits = shared_logits[worker_id].numpy()
+                                        probs = torch.softmax(torch.tensor(raw_logits), dim=-1).numpy()
+                                        perf_ledger['t_zmq_p0'] += (time.time() - t_infer_p1)
+                                        
+                                    # 如果是历史存档老模型（P1 Hist），执行宿主本地独立剥离推演（ONNX 优先，CPU 兜底）
+                                    else:
+                                        if use_onnx_p1 and ort_session_p1 is not None:
+                                            ort_inputs = {k: v.numpy() for k, v in dict_pass1.items() if isinstance(v, torch.Tensor)}
+                                            ort_outs = ort_session_p1.run(None, ort_inputs) 
+                                            probs = torch.softmax(torch.tensor(ort_outs[0]), dim=-1).squeeze(0).numpy()
+                                        else:
+                                            with torch.no_grad():
+                                                v_input = {k: v.to(current_agent.device) for k, v in dict_pass1.items() if isinstance(v, torch.Tensor)}
+                                                action_logits, _, _ = current_agent.net(v_input)
+                                                probs = torch.softmax(action_logits, dim=-1).squeeze(0).cpu().numpy()
+                                        perf_ledger['t_pass1_cpu'] += (time.time() - t_infer_p1)
+                                        
+                                    for i, act in enumerate(brain.current_valid_actions):
+                                        if hasattr(act, 'code'):
+                                            code_preferences[act.code] = max(code_preferences.get(act.code, 0), probs[i])
                                 except Exception as e:
-                                    pass # 如果前置感知失败，静默降级为无偏好生成
+                                    print(f"⚠️ [Worker {worker_id}] 意图感知阶段发生错误，跳过打分: {e}")
                                 
-                                # 将主将的偏好字典传给参谋部
+                                t_rule_anchor = time.time()# 计时器4
                                 large_options = rule_bot.get_macro_options(msg_type, msg[1:], brain, limit=5000, pref_weights=code_preferences)
                                 
                                 if large_options:
-                                    idx_to_action_idx = {act.index: i for i, act in enumerate(brain.current_valid_actions)}
-                                    
-                                    # 为大池子打分
+                                    # 构建 256 宽度的 NumPy 极速查表，彻底消灭字典 Lookup 损耗
+                                    action_prob_map = np.zeros(256, dtype=np.float64)
+                                    for i, act in enumerate(brain.current_valid_actions):
+                                        if 0 <= act.index < 256:
+                                            action_prob_map[act.index] = float(probs[i])
+                                            
                                     scored_options = []
+                                    is_place_msg = msg_type in [18, 24]
+                                    
+                                    # 斩断纯 Python 嵌套循环，全面转为 C 层次向量化运算
                                     for opt in large_options:
-                                        score = 1e-4 # 基础探索分
-                                        if len(opt['bytes']) == 4 and struct.unpack('<i', opt['bytes'])[0] == -1:
-                                            score += 0.05 # 取消键额外权重
-                                        elif msg_type in [18, 24]:
-                                            for p in opt.get('places', []):
-                                                if p in idx_to_action_idx: score += probs[idx_to_action_idx[p]]
+                                        score = 1e-4  # 基础探索分
+                                        opt_bytes = opt['bytes']
+                                        
+                                        # 消除 struct.unpack：小端 -1 等价于 b'\xff\xff\xff\xff'
+                                        if len(opt_bytes) == 4 and opt_bytes == b'\xff\xff\xff\xff':
+                                            score += 0.05
+                                        elif is_place_msg:
+                                            # 物理格子类：直接利用 NumPy 批量求和
+                                            places = opt.get('places', [])
+                                            if places:
+                                                score += action_prob_map[places].sum()
                                         else:
-                                            if len(opt['bytes']) > 1:
-                                                for idx in opt['bytes'][1:]:
-                                                    if idx in idx_to_action_idx: score += probs[idx_to_action_idx[idx]]
+                                            # 卡片/素材选择类：用 np.frombuffer 零拷贝转为 uint8 数组批量求和
+                                            if len(opt_bytes) > 1:
+                                                card_idxs = np.frombuffer(opt_bytes, dtype=np.uint8, offset=1)
+                                                score += action_prob_map[card_idxs].sum()
+                                                
                                         opt['weight'] = score
                                         scored_options.append(opt)
                                         
-                                    # 倾向性采样: 大池 -> 小池 100
-                                    sample_size = min(100, len(scored_options))
+                                    # 扩容到 120，完美饱和特征编码器最大深度，提供更广阔的 RL 探索视野
+                                    sample_size = min(120, len(scored_options))
                                     weights = np.array([o['weight'] for o in scored_options], dtype=np.float64)
                                     weights_sum = weights.sum()
-                                    if weights_sum > 0: weights /= weights_sum
-                                    else: weights = np.ones_like(weights) / len(weights)
+                                    if weights_sum > 0: 
+                                        weights /= weights_sum
+                                    else: 
+                                        weights = np.ones_like(weights) / len(weights)
                                     
                                     sampled_indices = np.random.choice(len(scored_options), size=sample_size, replace=False, p=weights)
                                     
@@ -396,7 +529,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     for i, idx in enumerate(sampled_indices):
                                         opt = scored_options[idx]
                                         desc = f"Macro Action {i}"
-                                        if len(opt['bytes']) == 4 and struct.unpack('<i', opt['bytes'])[0] == -1: desc = "Cancel"
+                                        if len(opt['bytes']) == 4 and opt['bytes'] == b'\xff\xff\xff\xff': 
+                                            desc = "Cancel"
                                         act = GameAction(action_type=msg_type, index=i, desc_str=desc)
                                         if 'locs' in opt: setattr(act, 'macro_targets', opt['locs'])
                                         if 'places' in opt: setattr(act, 'macro_places', opt['places'])
@@ -406,19 +540,21 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     current_macro_pool = new_valid_actions
                                 else:
                                     current_macro_pool = brain.current_valid_actions
+
+                                perf_ledger['t_rule_bot'] += (time.time() - t_rule_anchor) # 计时器4
                             
-                            # 覆盖环境的合法选项 (保证 Retry 时池子永远不变)
                             brain.current_valid_actions = current_macro_pool
+                            current_snap.valid_actions = current_macro_pool
+
 
                         # [防死锁强力干预] 获取网络专属的数字错题本
                         clean_ignore_idx_list = [idx for idx in current_step_ignore_idx_list if 0 <= idx < len(brain.current_valid_actions)]
                         
                         try:
-                            # Pass 2: 正式编码 (带着 100 个优质套餐，或者普通单选题)
-                            snap = brain.get_snapshot(env)
-                            player = snap.global_data.to_play
+                            t_enc_anchor = time.time()# 计时器2
                             # 修复旧版错写成 agent.encoder 的 Bug，确保能兼容不同权重的对手
-                            tensor_dict = current_agent.encoder.encode(snap, player_id=player) 
+                            tensor_dict = current_agent.encoder.encode(current_snap, player_id=player)
+                            perf_ledger['t_encoder'] += (time.time() - t_enc_anchor) # 计时器2
                             
                             # 核心防死锁：把在错题本里的选项强制 Mask 掉，迫使 AI 在下次重试时选择“备胎”
                             for bad_idx in clean_ignore_idx_list:
@@ -472,70 +608,84 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             tensor_dict['act_type'] = torch.clamp(tensor_dict['act_type'], 0, 255)
                             tensor_dict['act_desc'] = torch.clamp(tensor_dict['act_desc'], 0, 1023)
                             
-                            # 是否异步模式分流
-                            # [核心修复]：混合推理架构
-                            # 只有 P0 才能使用异步推断服务器（因为服务器只有最新权重）。
-                            # P1（历史模型）直接在 Worker 本地进行推理
-                            if req_q is not None and resp_q is not None and is_training_agent:
-                                # --- 模式 A: 真正的异步 Server 推理 (仅限 P0) ---
-                                import queue
-                                numpy_dict = {}
+                            # 混合推理架构
+                            t_ipc_anchor = time.time()
+                            
+                            # 【大一统分流点 B】主特工回合或自对局对手，全部绑上超导通道
+                            if is_training_agent or opp_config["mode"] == "ai" and opp_config["type"] == "self":
+                                t_zmq_anchor = time.time()
                                 for k, v in tensor_dict.items():
-                                    arr = v.cpu().numpy()
-                                    # 极致压缩防止 Windows 管道爆炸
-                                    if arr.dtype == np.float32: arr = arr.astype(np.float16)
-                                    elif arr.dtype == np.bool_: pass 
-                                    else: arr = arr.astype(np.int16) 
-                                    numpy_dict[k] = arr
-                                    
+                                    if k in shared_buffers[worker_id]:
+                                        shared_buffers[worker_id][k].copy_(v.squeeze(0))
                                 try:
-                                    # 如果 Server 死掉导致队列满，Worker 等 2 秒就直接自毁
-                                    req_q.put((worker_id, iteration, numpy_dict), timeout=2.0)
-                                except queue.Full:
-                                    raise RuntimeError("请求队列已满/Server可能已崩溃，触发 Worker 上行熔断")
+                                    socket.send(str(worker_id).encode('utf-8'))
+                                    reply = socket.recv()
+                                except zmq.error.Again:
+                                    print(f"🛰️ [ZeroMQ 断联] Worker {worker_id} 超时，正在执行神经连接重建...")
+                                    # [核心修复] 必须彻底销毁并重建 Socket，否则 REQ 状态机会永久锁死
+                                    socket.close(linger=0)
+                                    socket = context.socket(zmq.REQ)
+                                    socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
+                                    socket.setsockopt(zmq.RCVTIMEO, 15000)
+                                    socket.setsockopt(zmq.SNDTIMEO, 5000)
+                                    socket.connect(f"tcp://127.0.0.1:{zmq_port}")
+                                    
+                                    raise RuntimeError("ZMQ 首次通讯超时，已强制重启连接")
                                 
-                                try:
-                                    res_array = resp_q.get(timeout=15.0)
-                                except queue.Empty:
-                                    raise RuntimeError("推断服务器无响应，触发超时熔断机制")
-                                    
-                                packed_res = torch.from_numpy(res_array)
-                                action_idx = packed_res[0].to(torch.long)
-                                log_prob = packed_res[1]
-                                value = packed_res[2]
-                                rnd_reward = packed_res[3].item()
-                                infer_dict = {k: v.cpu() for k, v in tensor_dict.items()}
-                            else:
-                                # --- 模式 B: 纯本地推理 (未开启 Server，或当前是 P1 行动) ---
-                                with torch.no_grad():
-                                    infer_dict = {k: v.to(device) for k, v in tensor_dict.items()}
-                                    
-                                    # 修复：使用 current_agent，而非定死 agent
-                                    action_idx, log_prob, _, value, v_input = current_agent.get_action_and_value_from_tensor(infer_dict, snap.valid_actions)
-                                    
-                                    '''
-                                    if is_training_agent:
-                                        rnd_reward = current_agent.net.rnd(v_input.to(device)).item()
-                                        current_agent.net.update_rnd_stats(v_input.to(device))
-                                    else:
-                                        rnd_reward = 0.0
-                                    '''
+                                # 从 4 维基础槽中拉取采样出的动作面包屑
+                                res_array = shared_outputs[worker_id].numpy()
+                                action_idx = torch.tensor(int(res_array[0]), dtype=torch.long)
+                                log_prob = torch.tensor(res_array[1], dtype=torch.float32)
+                                value = torch.tensor(res_array[2], dtype=torch.float32)
+                                infer_dict = {k: v.detach().cpu() for k, v in tensor_dict.items()}
+                                
+                                # 精细化分账统计
+                                if is_training_agent:
+                                    perf_ledger['t_zmq_p0'] += (time.time() - t_zmq_anchor)
+                                else:
+                                    perf_ledger['t_cpu_p1'] += (time.time() - t_zmq_anchor)
 
-                                # 新增 .detach()，确保放入字典的张量干干净净
+                            # 历史老模型独立推演流
+                            else:
+                                t_p1_anchor = time.time() 
+                                with torch.no_grad():
+                                    if use_onnx_p1 and ort_session_p1 is not None:
+                                        ort_inputs = {k: v.numpy() for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)}
+                                        ort_outs = ort_session_p1.run(None, ort_inputs) 
+                                        
+                                        action_logits = torch.tensor(ort_outs[0]).squeeze(0)
+                                        value = torch.tensor(ort_outs[1]).squeeze(0)
+                                        
+                                        # 严格在局部执行非法动作遮罩隔离
+                                        act_mask_tensor = tensor_dict['act_mask'].squeeze(0)
+                                        action_logits[~act_mask_tensor] = -1e4
+                                        
+                                        dist = torch.distributions.Categorical(logits=action_logits)
+                                        action_idx = dist.sample()
+                                        log_prob = dist.log_prob(action_idx)
+                                    else:
+                                        infer_dict = {k: v.detach().to(current_agent.device) for k, v in tensor_dict.items()}
+                                        action_idx, log_prob, _, value, _ = current_agent.get_action_and_value_from_tensor(infer_dict, current_snap.valid_actions)
+                                        action_idx = action_idx.squeeze(0)
+                                        log_prob = log_prob.squeeze(0)
+                                        value = value.squeeze(0)
+                                
                                 action_idx = action_idx.detach().cpu()
                                 log_prob = log_prob.detach().cpu()
                                 value = value.detach().cpu()
                                 infer_dict = {k: v.detach().cpu() for k, v in tensor_dict.items()}
                                 
-                            if not snap.valid_actions:
+                                perf_ledger['t_cpu_p1'] += (time.time() - t_p1_anchor) # 只记录 P1 耗时
+
+                            if not current_snap.valid_actions:
                                 raise RuntimeError("AI面临空选项池，主动放弃决策请求RuleBot兜底")
                             
                             step_reward = 0.0
 
                             sel_idx = action_idx.item()
                             last_decision_index = sel_idx
-                            if sel_idx < len(snap.valid_actions):
-                                chosen = snap.valid_actions[sel_idx]
+                            if sel_idx < len(current_snap.valid_actions):
+                                chosen = current_snap.valid_actions[sel_idx]
                             else:
                                 trigger_card = "未知时点/阶段"
                                 from card_reader import card_db
@@ -544,16 +694,16 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 elif brain.history_stack:
                                     trigger_card = f"上一动 -> 【{card_db.get_card_name(brain.history_stack[0]['code'])}】"
                                 
-                                print(f"⚠️ [网络幻觉] 源头: {trigger_card} | 引擎需要 {len(snap.valid_actions)} 个选项，网络却强行越界点选了槽位 [{sel_idx}]。已拦截并施加惩罚。")
-                                chosen = snap.valid_actions[0] # 保底使用第一个选项
+                                print(f"⚠️ [网络幻觉] 源头: {trigger_card} | 引擎需要 {len(current_snap.valid_actions)} 个选项，网络却强行越界点选了槽位 [{sel_idx}]。已拦截并施加惩罚。")
+                                chosen = current_snap.valid_actions[0] # 保底使用第一个选项
                                 step_reward -= 0.005 # 告诉网络不要做梦
                                 ai_is_broken[player] = True
                                 # 强制修正送入 PPO 内存的标记，确保梯度的因果关系一致
                                 action_idx = torch.tensor(0, dtype=torch.long) 
                                 # (log_prob 会有略微偏差，但在 PPO 中会被容忍)
 
-                            if snap.global_data.turn_count != current_turn:
-                                current_turn = snap.global_data.turn_count
+                            if current_snap.global_data.turn_count != current_turn:
+                                current_turn = current_snap.global_data.turn_count
                                 turn_steps = 0 # 切换回合，步数清零！
                             turn_steps += 1
 
@@ -566,7 +716,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 step_reward -= 0.0005 # 如果单回合超过200步，说明可能卡在某个阶段了，施加额外惩罚
                                 
                             # 2. 哈希查重：如果你当前的合法动作列表和上次一模一样，说明局势根本没推进
-                            current_hash = "|".join([f"{a.action_type}_{a.index}" for a in snap.valid_actions])
+                            current_hash = "|".join([f"{a.action_type}_{a.index}" for a in current_snap.valid_actions])
                             if current_hash != last_valid_hash:
                                 last_valid_hash = current_hash
                                 loop_tracker.clear() # 局势变了，重置嫌疑
@@ -594,34 +744,29 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             last_decision_idx = sel_idx 
                             msg_queue = [] 
                             
-                            # 内存脱水压缩：彻底抛弃 Tensor，转化为极其轻量的 Numpy 数组
-                            compressed_obs = {}
-                            for k, v in infer_dict.items():
-                                cpu_v = v.cpu()
-                                if cpu_v.dtype in [torch.long, torch.int64, torch.int32]:
-                                    compressed_obs[k] = cpu_v.numpy().astype(np.int16)
-                                elif cpu_v.dtype == torch.float32:
-                                    compressed_obs[k] = cpu_v.numpy().astype(np.float16)
-                                elif cpu_v.dtype == torch.bool:
-                                    compressed_obs[k] = cpu_v.numpy().astype(np.bool_)
-                                else:
-                                    compressed_obs[k] = cpu_v.numpy()
-                            
-                            # 注意：只有训练代理的数据才需要放入 game_buffer 供学习
+                            # 仅当训练代理操作时才录入数据，绝对防止指针错位与重复
                             if is_training_agent and not ai_is_broken[player]:
+                                # 内存直写：把特征直接强行塞进连续的静态池坑位里
+                                for k, v in infer_dict.items():
+                                    columns['obs'][k][global_ptr] = v.squeeze(0)
+
+                                # game_buffer 极速瘦身：只存最轻量的 Python 原生数字！
                                 game_buffer[player].append({
-                                    'obs': compressed_obs,
-                                    # 核心修复：连同外层变量一起切断 Tensor 关联
-                                    'action': action_idx.cpu().numpy().astype(np.int16),
-                                    'log_prob': log_prob.cpu().numpy().astype(np.float16),
-                                    'value': value.cpu().numpy().astype(np.float16),
-                                    'step_reward': step_reward
+                                    'action': int(action_idx.item() if isinstance(action_idx, torch.Tensor) else action_idx),
+                                    'log_prob': float(log_prob.item() if isinstance(log_prob, torch.Tensor) else log_prob),
+                                    'value': float(value.item() if isinstance(value, torch.Tensor) else value),
+                                    'step_reward': float(step_reward)
                                 })
+                                
+                                global_ptr += 1  # 只有有效训练步才推针
                                 collected_steps += 1
                             
                             ep_steps += 1
                             ai_handled = True
                             last_act_time = time.time()
+
+                            perf_ledger['steps'] += 1 #计时器总步数加一
+
                         except OSError as e:
                             last_msg_type = msg_type
                             last_resp = resp
@@ -770,10 +915,22 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         stats['draws'] += 1
                         final_reward = 0.0
                     
-                    episode_rewards.append(final_reward)
+                    total_t = perf_ledger['t_cpp_env'] + perf_ledger['t_encoder'] + perf_ledger['t_zmq_p0'] + perf_ledger['t_cpu_p1'] + perf_ledger['t_pass1_cpu'] + perf_ledger['t_rule_bot']
+                    safe_t = max(0.0001, total_t)
+                    print(f"\n📊 [Worker {worker_id} 审计报告] 单局步数: {perf_ledger['steps']} | 交互总耗时: {total_t:.2f}s")
+                    print(f"对手类型: {opp_type} | 胜负结果: {'胜' if winner == train_p_id else '负' if winner == opp_p_id else '平'} | 最终奖励: {final_reward:.2f}")
+                    print(f"   ├── 🧱 [环境/底盘] C++执行与解包: {perf_ledger['t_cpp_env']:.2f}s ({perf_ledger['t_cpp_env']/safe_t*100:.1f}%)")
+                    print(f"   ├── 📐 [表征/特征] Encoder 矩阵生成: {perf_ledger['t_encoder']:.2f}s ({perf_ledger['t_encoder']/safe_t*100:.1f}%)")
+                    print(f"   ├── 📡 [多进程管道] ZMQ+GPU推理(P0): {perf_ledger['t_zmq_p0']:.2f}s ({perf_ledger['t_zmq_p0']/safe_t*100:.1f}%)")
+                    print(f"   ├── 💻 [本地推理] P1对手CPU推演 : {perf_ledger['t_cpu_p1']:.2f}s ({perf_ledger['t_cpu_p1']/safe_t*100:.1f}%)")
+                    print(f"   ├── 👁️ [意图感知] Pass1 预查表耗时 : {perf_ledger['t_pass1_cpu']:.2f}s ({perf_ledger['t_pass1_cpu']/safe_t*100:.1f}%)")
+                    print(f"   └── 🧠 [参谋部/规则] RuleBot 穷举打分: {perf_ledger['t_rule_bot']:.2f}s ({perf_ledger['t_rule_bot']/safe_t*100:.1f}%)")
 
                     rewards = [0] * len(traj)
                     if rewards: rewards[-1] = final_reward
+
+                    ep_total_reward = sum(item.get('step_reward', 0.0) for item in traj) + final_reward
+                    episode_rewards.append(ep_total_reward)
                     
                     advantages = []
                     last_gae_lam = 0
@@ -781,11 +938,9 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     next_value = 0.0
                     if ep_steps >= MAX_EPISODE_STEPS: # 如果是超时被强行截断的
                         # 使用最后一步的价值网络预测值作为未来收益的保底，而不是直接视为 0，这样可以让模型学会在超时前尽可能积累价值，而不是放弃抵抗
-                        next_value = traj[-1]['value'].item()
+                        next_value = traj[-1]['value']
 
-                    # ==========================================
                     # 终极内存防爆：预分配连续内存，告别 list 与 torch.cat
-                    # ==========================================
                     if 'columns' not in locals():
                         # 预先分配足够的空间 (目标步数 + 最大单局步数容错)
                         max_len = target_steps + MAX_EPISODE_STEPS + 100
@@ -798,60 +953,56 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         }
                         ptr = 0 # 内存写入指针
                     
-                    # 替换为这套融合了步进奖励的新逻辑：
+                    # 逆序计算 GAE，从后往前填充预分配的内存池
                     for t in reversed(range(len(traj))):
                         # 获取这一步的面包屑奖励
                         s_rew = traj[t].get('step_reward', 0.0)
                         # 只有最后一步才加上胜负大奖 (rewards[t] 就是 final_reward)
                         actual_rew = s_rew + (rewards[t] if t == len(traj) - 1 else 0.0)
                         
-                        delta = actual_rew + gamma * next_value - traj[t]['value'].item()
+                        delta = actual_rew + gamma * next_value - traj[t]['value']
                         last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
-                        advantages.insert(0, last_gae_lam)
-                        next_value = traj[t]['value'].item()
+                        traj[t]['advantage'] = last_gae_lam
+                        traj[t]['return'] = last_gae_lam + traj[t]['value']
+                        
+                        next_value = traj[t]['value']
                     
-                    # 动态初始化 obs 的预分配空间
-                    if not columns['obs'] and len(traj) > 0:
-                        for k, v in traj[0]['obs'].items():
-                            pt_dtype = torch.from_numpy(v).dtype
-                            columns['obs'][k] = torch.zeros((max_len,) + v.shape[1:], dtype=pt_dtype)
+                    for i, t_data in enumerate(traj):
+                        idx = ep_start_ptr + i
+                        columns['action'][idx] = t_data['action']
+                        columns['log_prob'][idx] = t_data['log_prob']
+                        columns['return'][idx] = t_data['return']
+                        columns['advantage'][idx] = t_data['advantage']
                     
-                    # 极限内存优化：流式填入数据，并立刻弹出销毁历史记录
-                    for t in range(len(traj)):
-                        obs_dict = traj[t].pop('obs') # 弹出并销毁，边填边释放历史数据，杜绝双重占用！
-                        for k, v in obs_dict.items():
-                            columns['obs'][k][ptr] = torch.from_numpy(v[0])
-                        del obs_dict
-                        
-                        columns['action'][ptr] = torch.as_tensor(traj[t]['action'])
-                        columns['log_prob'][ptr] = torch.as_tensor(traj[t]['log_prob'])
-                        
-                        ret_val = advantages[t] + traj[t]['value'].item()
-                        columns['return'][ptr] = ret_val
-                        columns['advantage'][ptr] = advantages[t]
-                        
-                        ptr += 1
+                    game_buffer[train_p_id].clear()
+                    ep_start_ptr = global_ptr
 
         # 死锁保护
         tmp_file = f"tmp_rollout_iter_{iteration}_worker_{worker_id}.pt"
-        if 'columns' not in locals() or ptr < (target_steps * 0.6):
-            print(f"❌ [Worker {worker_id}] 数据严重残缺 ({ptr}/{target_steps})，拒绝生成诈尸 PT！")
+        if 'columns' not in locals() or ep_start_ptr < (target_steps * 0.6):
+            print(f"❌ [Worker {worker_id}] 数据严重残缺 ({ep_start_ptr}/{target_steps})，拒绝生成诈尸 PT！")
             return
 
         batch_data = {'obs': {}}
 
-        # 1. 逐个切片提取 obs 特征，提取完立刻焚毁原件，节省一半内存
-        for k in list(columns['obs'].keys()):
-            batch_data['obs'][k] = columns['obs'][k][:ptr].clone()
-            del columns['obs'][k] # 切完立刻抹杀旧数据的这部分
-
-        # 2. 提取外层特征并立即销毁
+        # 提取外层特征
         for k in ['action', 'log_prob', 'return', 'advantage']:
-            batch_data[k] = columns[k][:ptr].clone()
-            del columns[k]
-
-        # 释放只剩空壳的内存池字典
-        del columns
+            batch_data[k] = columns[k][:ep_start_ptr].clone()
+            columns[k] = None
+            
+        # 提取 obs 内部特征
+        for k in shared_buffers[worker_id].keys():
+            if k in columns['obs']:
+                batch_data['obs'][k] = columns['obs'][k][:ep_start_ptr].clone()
+                columns['obs'][k] = None
+            else:
+                # 这一局压根没触发过这个特征，用 zeros 安全补齐
+                ref_tensor = shared_buffers[worker_id][k]
+                shape = list(ref_tensor.shape)
+                shape[0] = ep_start_ptr
+                batch_data['obs'][k] = torch.zeros(shape, dtype=ref_tensor.dtype)
+            
+        columns.clear()
         gc.collect()
         
         avg_rew = np.mean(episode_rewards) if episode_rewards else 0.0
@@ -887,3 +1038,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         import traceback
         traceback.print_exc()
         return
+    
+    finally:
+        socket.setsockopt(zmq.LINGER, 0) 
+        socket.close(linger=0)
+        context.term()
+        print(f"👋 Worker {worker_id} 任务圆满完成，强制释放内存...")
+        os._exit(0)

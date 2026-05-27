@@ -17,6 +17,8 @@ import threading
 import queue
 import glob
 import pandas as pd
+import zmq
+import shutil
 
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
@@ -44,7 +46,7 @@ MINIBATCH_SIZE = 128    # Mini-batch: 梯度下降时的切片大小
 CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
-MAX_EPISODE_STEPS = 2000 # 单局最大步数，防止死循环
+MAX_EPISODE_STEPS = 1500 # 单局最大步数，防止死循环
     
 def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, result_q, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4):
     """用于原生 Process 的安全包装器，防止 DLL 崩溃导致主进程死锁"""
@@ -58,7 +60,7 @@ def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, devic
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None, 
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cuda', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2): # <--- 新增
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cpu', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -66,7 +68,8 @@ class PPOTrainer:
         self.num_workers = num_workers
         self.worker_device = worker_device
         self.async_infer = async_infer
-        self.scaler = torch.cuda.amp.GradScaler()
+        self.use_onnx = use_onnx
+        self.server_stop_event = threading.Event()
         os.makedirs(save_dir, exist_ok=True)
 
         # 默认配置
@@ -91,6 +94,7 @@ class PPOTrainer:
             if torch.cuda.get_device_capability()[0] >= 8:
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
+                torch.backends.cudnn.benchmark = True
                 print("⚡ [Auto] Ampere+ 架构: 已开启 TF32 加速")
             
             # 2. 开启 BF16 (5070Ti 杀手锏)
@@ -157,23 +161,118 @@ class PPOTrainer:
         except RuntimeError:
             pass # 已经设置过了就算了
 
-        if self.async_infer:
-            # 只创建一次
-            self.req_q = mp.Queue(maxsize=self.num_workers * 4)
-            self.resp_qs = [mp.Queue(maxsize=4) for _ in range(self.num_workers)]
-            self.server_stop_event = threading.Event()
-            # 增加一个当前轮次的标记，用于过滤过期请求
-            self.current_iter_id = mp.Value('i', 0) 
+        # 根据 feature_encoder.py 的最大常数，精准定义共享内存规格
+        self.shared_buffers = []
+        self.shared_outputs = []
+        self.shared_logits = []
+        self.worker_events = [mp.Event() for _ in range(self.num_workers)]
+        
+        # 严密对齐特工的观测维度 specs
+        input_specs = {
+            'global': ((15,), torch.float32),
+            'card_idx': ((120,), torch.long),
+            'card_overlay_idx': ((120,), torch.long),
+            'card_race': ((120,), torch.long),
+            'card_attr': ((120,), torch.long),
+            'card_setcodes': ((120, 4), torch.long),
+            'card_feats': ((120, 58), torch.float32),
+            'padding_mask': ((120,), torch.bool),
             
+            # ---前场/后场/手牌 语义大脑皮层槽位 ---
+            'sem_category': ((120, 8, 8), torch.int16),
+            'sem_req': ((120, 8, 128), torch.bool),
+            'sem_setcode': ((120, 8, 4), torch.int16),
+            'sem_number': ((120, 8, 4), torch.float16),
+            'sem_ref': ((120, 8, 4), torch.int32),
+            'sem_race': ((120, 8, 4), torch.int16),
+            'sem_attr': ((120, 8, 4), torch.int16),
+            
+            'deck_idx': ((75,), torch.long),
+            'deck_race': ((75,), torch.long),
+            'deck_attr': ((75,), torch.long),
+            'deck_setcodes': ((75, 4), torch.long),
+            'deck_mask': ((75,), torch.bool),
+            
+            # --- 上帝视角卡组残像 语义槽位 ---
+            'd_sem_category': ((75, 8, 8), torch.int16),
+            'd_sem_req': ((75, 8, 128), torch.bool),
+            'd_sem_setcode': ((75, 8, 4), torch.int16),
+            'd_sem_number': ((75, 8, 4), torch.float16),
+            'd_sem_ref': ((75, 8, 4), torch.int32),
+            'd_sem_race': ((75, 8, 4), torch.int16),
+            'd_sem_attr': ((75, 8, 4), torch.int16),
+            
+            'c_mask': ((12,), torch.bool),
+            
+            # --- 瞬间时点连锁堆栈 语义槽位 ---
+            'c_sem_category': ((12, 8, 8), torch.int16),
+            'c_sem_req': ((12, 8, 128), torch.bool),
+            'c_sem_setcode': ((12, 8, 4), torch.int16),
+            'c_sem_number': ((12, 8, 4), torch.float16),
+            'c_sem_ref': ((12, 8, 4), torch.int32),
+            'c_sem_race': ((12, 8, 4), torch.int16),
+            'c_sem_attr': ((12, 8, 4), torch.int16),
+            
+            'h_mask': ((8,), torch.bool),
+            
+            # --- 历史施法雷达 语义槽位 ---
+            'h_sem_category': ((8, 8, 8), torch.int16),
+            'h_sem_req': ((8, 8, 128), torch.bool),
+            'h_sem_setcode': ((8, 8, 4), torch.int16),
+            'h_sem_number': ((8, 8, 4), torch.float16),
+            'h_sem_ref': ((8, 8, 4), torch.int32),
+            'h_sem_race': ((8, 8, 4), torch.int16),
+            'h_sem_attr': ((8, 8, 4), torch.int16),
+            
+            'act_card_idx': ((120, 5), torch.long),
+            'act_type': ((120,), torch.long),
+            'act_desc': ((120,), torch.long),
+            'act_mask': ((120,), torch.bool),
+            'act_race': ((120,), torch.long),
+            'act_attr': ((120,), torch.long),
+            'act_code': ((120,), torch.long),
+            'act_place': ((120, 5), torch.long),
+        }
+
+        print("🧠 [Shared Memory] 正在开辟高带宽零拷贝多进程超导通道...")
+        for _ in range(self.num_workers):
+            # 输入槽
+            buf = {}
+            for k, (shape, dtype) in input_specs.items():
+                t = torch.zeros(shape, dtype=dtype)
+                t.share_memory_() # 赋予跨进程起死回生之力
+                buf[k] = t
+            self.shared_buffers.append(buf)
+            
+            # 输出槽 (包含: action, log_prob, value, rnd_reward 占位)
+            out_t = torch.zeros((4,), dtype=torch.float32)
+            out_t.share_memory_()
+            self.shared_outputs.append(out_t)
+
+            # 开辟 120 维全量动作分数共享内存，专为降维套餐设计
+            logits_t = torch.zeros((120,), dtype=torch.float32)
+            logits_t.share_memory_()
+            self.shared_logits.append(logits_t)
+
+        self.pinned_batch_buffers = {}
+        print("📌 [Pinned Memory] 正在为主进程注入高效锁页多路聚合批处理器...")
+        for k, (shape, dtype) in input_specs.items():
+            # 一次性开辟物理连续、支持极速 DMA 异步搬运的 (num_workers, *dims) 锁页张量
+            self.pinned_batch_buffers[k] = torch.zeros((self.num_workers, *shape), dtype=dtype).pin_memory()
+
+        # [新增 ZMQ 配置]
+        self.zmq_port = 55555  # 固定一个端口
+
+        if self.async_infer:
+            # 启动服务器，传入端口号
             self.infer_thread = threading.Thread(
                 target=self.inference_server, 
-                args=(self.req_q, self.resp_qs, self.server_stop_event, self.current_iter_id),
+                args=(self.shared_buffers, self.shared_outputs, self.server_stop_event, self.zmq_port),
                 daemon=True
             )
             self.infer_thread.start()
         else:
             self.req_q = None
-            self.resp_qs = [None] * self.num_workers
 
         # 恢复训练逻辑简化为调用函数
         if resume_path and os.path.exists(resume_path):
@@ -203,7 +302,7 @@ class PPOTrainer:
                     # 如果启用了编译，重建后需要再次编译
                     if self.enable_compile and self.device.type == 'cuda':
                          try: 
-                             self.agent.net = torch.compile(self.agent.net, mode='reduce-overhead')
+                             self.agent.net = torch.compile(self.agent.net, mode='default', dynamic=True)
                          except Exception as e:
                              print(f"[trainer]⚠️ 编译跳过: {e}")
                     
@@ -275,14 +374,8 @@ class PPOTrainer:
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
 
         if self.async_infer:
-            self.current_iter_id.value = self.iteration  # 更新当前轮次标记，供服务器过滤过期请求
-            for q in self.resp_qs:
-                while not q.empty():
-                    try: 
-                        q.get_nowait()
-                    # 过滤掉过期的响应
-                    except(queue.Empty, EOFError, OSError, ValueError):
-                        pass
+            pass # 异步模式不需要额外的标记机制，服务器会根据 ZMQ 请求自动识别和处理最新的权重文件
+            #self.current_iter_id.value = self.iteration  # 更新当前轮次标记，供服务器过滤过期请求
 
         # 🚀 启动工人
         processes = []
@@ -297,12 +390,17 @@ class PPOTrainer:
                 self.deck_dir, 
                 steps_per_worker,
                 self.worker_device,
-                self.req_q, self.resp_qs[i],        # 恢复队列传参
+                self.zmq_port,
                 worker_opp_configs[i],
                 self.worker_timeout,
                 self.gamma,
                 self.gae_lambda,
-                self.num_workers
+                self.num_workers,
+                self.shared_buffers,  # 新增直传
+                self.shared_outputs,  
+                self.worker_events,
+                self.use_onnx,
+                self.shared_logits
             ))
             p.daemon = True
             p.start()
@@ -324,7 +422,7 @@ class PPOTrainer:
             if p.is_alive():
                 print(f"⏳ [Trainer] 经过 {self.worker_timeout} 秒仍有 Worker 未完成采集。触发安全超时截断机制，终止冗余进程。")
                 p.terminate() 
-                p.join()
+            p.join(timeout=1.0)
             try: 
                 p.close() # 强制释放 Windows 进程句柄
             except Exception as e: 
@@ -503,98 +601,92 @@ class PPOTrainer:
 
         self.global_step += cursor
         
-        return cursor # 核心改动：不再返回内存大字典，而是返回有效步数！
-    
-    def inference_server(self, req_q, resp_qs, stop_event,iter_tracker):
-        """
-        [封包极速版] 接收压平的 Tensor，在 GPU 显存内进行光速切片
-        """
-        print("🚀 [Server] 异步推断服务器已启动，等待 Worker 请求...")
+        return cursor # 核心改动：不再返回内存大字典，而是返回有效步数
+
+    def inference_server(self, shared_buffers, shared_outputs, stop_event, zmq_port, shared_logits=None):
+        print(f" [Server] ZeroMQ ROUTER 硬件级微批处理中枢启动 (Port: {zmq_port})")
+        
+        context = zmq.Context()
+        socket = context.socket(zmq.ROUTER)
+        socket.setsockopt(zmq.ROUTER_HANDOVER, 1)
+        socket.setsockopt(zmq.SNDHWM, 100)
+        socket.setsockopt(zmq.RCVHWM, 100)
+        socket.bind(f"tcp://127.0.0.1:{zmq_port}")
+        
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
+        
         self.agent.net.eval()
+        
         while not stop_event.is_set():
             try:
-                requests = []
-                try:
-                    # 1. 尝试获取第一个请求
-                    item = req_q.get(timeout=0.05)
-                    # 解包：现在是 3 个元素
-                    wid, msg_iter, numpy_dict = item
+                socks = dict(poller.poll(100))
+                if socket in socks:
+                    requests = []
+                    addresses = {}
                     
-                    # 防污染安检：如果请求轮次落后于主线程轮次，直接丢弃
-                    if msg_iter >= iter_tracker.value:
-                        requests.append((wid, numpy_dict)) # 安检通过，剥离 iter_id 放入处理列表
-                    
-                    # 2. 尝试凑齐这批次的其它请求
-                    while len(requests) < self.num_workers:
+                    while True:
                         try:
-                            item = req_q.get_nowait()
-                            wid, msg_iter, numpy_dict = item
-                            
-                            # 同样进行防污染安检
-                            if msg_iter >= iter_tracker.value:
-                                requests.append((wid, numpy_dict))
-                        except queue.Empty:
+                            addr, empty, payload = socket.recv_multipart(flags=zmq.NOBLOCK)
+                            wid = int(payload.decode('utf-8'))
+                            requests.append(wid)
+                            addresses[wid] = addr
+                        except zmq.Again:
                             break
-                except queue.Empty:
-                    pass
-                
-                if not requests:
-                    continue
                     
-                # --- 1. 光速解包并恢复张量 ---
-                worker_ids = [r[0] for r in requests]
-                batch_obs = {}
-                for k in requests[0][1].keys():
-                    #把 np.stack 换成 np.concatenate，并且指定 axis=0
-                    stacked = np.concatenate([r[1][k] for r in requests], axis=0)
+                    start_wait = time.perf_counter()
+                    while len(requests) < self.num_workers and (time.perf_counter() - start_wait) < 0.003:
+                        if poller.poll(0):
+                            try:
+                                addr, empty, payload = socket.recv_multipart(flags=zmq.NOBLOCK)
+                                wid = int(payload.decode('utf-8'))
+                                if wid not in requests:
+                                    requests.append(wid)
+                                    addresses[wid] = addr
+                            except zmq.Again:
+                                pass
+                    
+                    if not requests:
+                        continue
 
-                    # [ Fail-Fast 安检哨卡 ] 不洗白数据，一旦发现 NaN 或 Inf，当场抓出内鬼
-                    if stacked.dtype in [np.float16, np.float32]:
-                        if np.isnan(stacked).any() or np.isinf(stacked).any():
-                            # 找出到底是哪个 Worker 传来的毒药
-                            poisoned_workers = [req[0] for req in requests if np.isnan(req[1][k]).any() or np.isinf(req[1][k]).any()]
-                            # 直接抛出异常，触发底下的 except 熔断
-                            raise ValueError(f"🛑 发现致命毒素！Worker {poisoned_workers} 传输了包含 NaN/Inf 的极端超界特征 '{k}'！")
+                    # --- 4. GPU 极限推推演 (动态切片) ---
+                    for k in self.pinned_batch_buffers.keys():
+                        for wid in requests:
+                            self.pinned_batch_buffers[k][wid].copy_(shared_buffers[wid][k])
                     
-                    # 按原样恢复成 PyTorch 认识的类型
-                    if stacked.dtype == np.bool_:
-                        tensor = torch.from_numpy(stacked).to(torch.bool)
-                    elif stacked.dtype == np.float16:
-                        tensor = torch.from_numpy(stacked).to(torch.float32) # 网络计算需要 fp32
-                    else:
-                        tensor = torch.from_numpy(stacked).to(torch.long)
+                    active_indices = torch.tensor(requests, dtype=torch.long)
+                    batch_obs = {k: v[active_indices].to(self.device, non_blocking=True).detach() for k, v in self.pinned_batch_buffers.items()}
+                    
+                    # 核心大一统前向前向图计算
+                    with torch.amp.autocast('cuda', dtype=self.amp_dtype):
+                        with torch.no_grad():
+                            logits, values, v_input = self.agent.net(batch_obs)
+                            
+                            # 统一复刻决策采样（Action Head 模型规范）
+                            dist = torch.distributions.Categorical(logits=logits)
+                            actions = dist.sample()
+                            log_probs = dist.log_prob(actions)
+                    
+                    # 5. 精准解包回写：单次前向输出同时灌入两个共享切片
+                    for i, wid in enumerate(requests):
+                        # A. 基础槽（供 Pass 2 或 自对局决策流抽样消费）
+                        shared_outputs[wid][0] = actions[i].cpu().float()
+                        shared_outputs[wid][1] = log_probs[i].cpu().float()
+                        shared_outputs[wid][2] = values[i].squeeze(-1).cpu().float()
                         
-                    batch_obs[k] = tensor.to(self.device, non_blocking=True)
-                
-                with torch.amp.autocast('cuda', dtype=self.amp_dtype):
-                    with torch.no_grad():
-                        # 加上 v_inputs，接收第5个返回值
-                        actions, log_probs, _, values, v_inputs = self.agent.get_action_and_value_from_tensor(batch_obs, None)
-                        # 直接在 GPU 服务端计算出 RND 奖励(暂时舍弃)
-                        #rnd_rewards = self.agent.net.rnd(v_inputs)
-                        #self.agent.net.update_rnd_stats(v_inputs)
-                
-                # --- 4. 组装回传封包 ---
-                # 新增 .detach()，彻底斩断与 GPU 计算图的最后一点阴阳联系
-                packed_returns = torch.stack([
-                    actions.to(torch.float32), 
-                    log_probs.to(torch.float32), 
-                    values.squeeze(-1).to(torch.float32),
-                    torch.zeros_like(actions, dtype=torch.float32) #暂时舍弃rnd,用0占位
-                ], dim=1).detach().cpu()
-                
-                for i, wid in enumerate(worker_ids):
-                    # 转为 numpy 数组发回给 Worker
-                    try:
-                        resp_qs[wid].put(packed_returns[i].numpy(), timeout=1.0)
-                    except queue.Full:
-                        pass # 忽略死掉的 Worker
+                        # B. [精细新增] 分数槽（供 Pass 1 意图感知大矩阵查表消费）
+                        if shared_logits is not None:
+                            shared_logits[wid].copy_(logits[i].cpu().float())
+                            
+                        socket.send_multipart([addresses[wid], b'', b'OK'])
+                    del logits, values, v_input, batch_obs
 
             except Exception as e:
-                # 当批次中出现毒药数据(如 NaN)，拦截异常，仅抛弃这一批次
-                print(f"\n🚨 [Server 局部熔断] 推断批次出现异常，已自动丢弃并恢复服务: {e}")
-                # import traceback; traceback.print_exc() # 嫌吵可以注释掉堆栈打印
-                time.sleep(0.1) # 稍微缓一下继续服务
+                print(f"\n🚨 [Server ZeroMQ 熔断] 核心推推演异常已拦截: {e}")
+                time.sleep(0.01)
+                
+        socket.close()
+        context.term()
 
     def update_policy(self, total_steps):
         """
@@ -610,7 +702,7 @@ class PPOTrainer:
         cpu_returns = self.merged_memory['return'][:total_steps]
         cpu_advantages = self.merged_memory['advantage'][:total_steps]
 
-        # [优化 1] 全局优势归一化，稳定训练方向
+        # 全局优势归一化，稳定训练方向
         if len(cpu_advantages) > 1:
             adv_mean = cpu_advantages.mean()
             adv_std = cpu_advantages.std()
@@ -624,50 +716,59 @@ class PPOTrainer:
         
         batch_size = cpu_actions.shape[0]
 
+        gpu_mb_obs = {}
+        for k, v in cpu_obs.items():
+            dummy_slice = v[:self.mini_batch_size]
+            if dummy_slice.is_floating_point():
+                gpu_mb_obs[k] = torch.zeros_like(dummy_slice, device=self.device, dtype=torch.float32)
+            elif dummy_slice.dtype == torch.bool:
+                gpu_mb_obs[k] = torch.zeros_like(dummy_slice, device=self.device, dtype=torch.bool)
+            else:
+                gpu_mb_obs[k] = torch.zeros_like(dummy_slice, device=self.device, dtype=torch.long)
+        
+        # 其他零散张量也预分配
+        gpu_actions = torch.zeros(self.mini_batch_size, dtype=torch.long, device=self.device)
+        gpu_old_log_probs = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
+        gpu_returns = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
+        gpu_advs = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
+
         for _ in range(EPOCHS):
             indices = torch.randperm(batch_size)
-            
-            # 每次只循环处理 mini_batch (比如 1024 个)
             for start in range(0, batch_size, self.mini_batch_size):
                 end = start + self.mini_batch_size
+                if end > batch_size:
+                    break
                 mb_idx = indices[start:end]
                 
-                # 只有切出来的这 1024 个数据，才 .to(self.device) 上 GPU！
-                mb_obs = {}
+                #循环内：使用 .copy_() 零拷贝写入，绝对不改变内存指针
                 for k, v in cpu_obs.items():
-                    cpu_t = v[mb_idx]
-                    if cpu_t.is_floating_point():
-                        mb_obs[k] = cpu_t.to(device=self.device, dtype=torch.float32, non_blocking=True)
-                    elif 'mask' in k:
-                        mb_obs[k] = cpu_t.to(device=self.device, dtype=torch.bool, non_blocking=True)
-                    else:
-                        mb_obs[k] = cpu_t.to(device=self.device, dtype=torch.long, non_blocking=True)
+                    gpu_mb_obs[k].copy_(v[mb_idx], non_blocking=True)
                 
-                mb_actions = cpu_actions[mb_idx].to(self.device, dtype=torch.long, non_blocking=True)
-                mb_old_log_probs = cpu_log_probs[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
-                mb_returns = cpu_returns[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
-                mb_advs = cpu_advantages[mb_idx].to(self.device, dtype=torch.float32, non_blocking=True)
+                gpu_actions.copy_(cpu_actions[mb_idx], non_blocking=True)
+                gpu_old_log_probs.copy_(cpu_log_probs[mb_idx], non_blocking=True)
+                gpu_returns.copy_(cpu_returns[mb_idx], non_blocking=True)
+                gpu_advs.copy_(cpu_advantages[mb_idx], non_blocking=True)
                 
 
                 # --- 网络前向传播与反向传播 (完全保持原样) ---
                 with torch.amp.autocast('cuda', dtype=self.amp_dtype):
-                    logits, values, v_input = self.agent.net(mb_obs)
+                    logits, values, v_input = self.agent.net(gpu_mb_obs)
                     values = values.squeeze(1)
 
                     # 计算 RND 预测误差损失，让 Predictor 学习当前状态(暂时舍弃)
                     #rnd_loss = self.agent.net.rnd(v_input.detach()).mean()
 
                     dist = torch.distributions.Categorical(logits=logits)
-                    new_log_probs = dist.log_prob(mb_actions)
+                    new_log_probs = dist.log_prob(gpu_actions)
                     entropy = dist.entropy()
-                    ratio = torch.exp(new_log_probs - mb_old_log_probs)
-                    surr1 = ratio * mb_advs
-                    surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * mb_advs
+                    ratio = torch.exp(new_log_probs - gpu_old_log_probs)
+                    surr1 = ratio * gpu_advs
+                    surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * gpu_advs
                     
                     # 拆解 Loss，方便我们在图表里监控
                     policy_loss = -torch.min(surr1, surr2).mean()
                     value_loss_fn = nn.SmoothL1Loss()
-                    value_loss = value_loss_fn(values, mb_returns)
+                    value_loss = value_loss_fn(values, gpu_returns)
                     entropy_loss = -entropy.mean()
                     
                     loss = policy_loss + VALUE_LOSS_COEF * value_loss + self.entropy * entropy_loss # + rnd_loss 暂时舍弃
@@ -691,7 +792,7 @@ class PPOTrainer:
                 self.scaler.update()
 
     def run_training_loop(self, max_iterations=1000):
-        print(f"🚦 Starting PPO Training Loop...")
+        print("🚦 Starting PPO Training Loop...")
         # 如果是恢复训练，max_iterations 应该是“再练多少轮”或者“练到多少轮”
         # 这里假设是“总轮数”，所以如果恢复时已经是 1000，需要把目标设大一点
         target_iter = max_iterations
@@ -709,14 +810,13 @@ class PPOTrainer:
             # 2. 优化 (只有当样本足够时才更新)
             if total_steps is not None and total_steps >= self.mini_batch_size:
                 self.update_policy(total_steps)
-                # 单轮训练结束，清理主进程15GB 的静态内存池
-                print("🧹 [内存调度] 训练完成，摧毁主进程内存池...")
-                if self.merged_memory is not None:
-                    self.merged_memory.clear()
-                    del self.merged_memory
+                print("🧹 [内存调度] 训练完成，正在彻底销毁主进程 PPO 静态内存池，为下一轮 Worker 腾出系统资源")
                 
+                # 物理清空高达 10GB+ 的巨型经验池，把内存还给系统，防止下一轮加载 DLL 时 WinError 1455
                 self.merged_memory = None
-                self.buffer_allocated = False  # 让下一轮 collect_rollouts 重新申请
+                
+                # 重置标志位，告诉系统下一轮重新用 empty 申请，否则会报 NoneType 错误
+                self.buffer_allocated = False
                 
                 # 强制呼叫系统底层的垃圾车
                 import gc
@@ -742,8 +842,8 @@ class PPOTrainer:
                     'scaler_state_dict': self.scaler.state_dict(),
                     'net_config': self.net_config, 
                     'iteration': self.iteration,
-                    'train_step': self.train_step,   # [新增] TensorBoard 的 X 轴坐标
-                    'global_step': self.global_step,  # [新增] 环境交互总步数
+                    'train_step': self.train_step,   # TensorBoard 的 X 轴坐标
+                    'global_step': self.global_step,  # 环境交互总步数
                     'gamma': self.gamma,
                     'lr': self.lr,
                     'entropy': self.entropy,
@@ -751,12 +851,66 @@ class PPOTrainer:
                     'clip_eps': self.clip_eps
                 }
                 torch.save(checkpoint, path)
+                # 触发 ONNX 同步导出
+                if self.use_onnx:
+                    # 因为是同步的，主网络此时处于停滞状态，不需要克隆，直接传干净的字典即可
+                    self._export_onnx_sync(clean_state, self.iteration)
                 print(f"💾 Model saved: {path}")
             
             dt = time.time() - iter_start
             print(f"⏱️ Iteration {self.iteration} finished in {dt:.1f}s")
 
         print("🏁 训练结束！")
+    
+    def _export_onnx_sync(self, clean_state, current_iter):
+        """[极简稳健版] 主线程同步导出 ONNX，牺牲 3 秒换取 100% 稳定"""
+        try:
+            import torch.onnx
+            print(f"⏳ [ONNX] 正在主线程同步导出第 {current_iter} 轮引擎，这大约需要 3 秒钟...")
+            
+            # 建立临时的 CPU 感知皮层
+            from galatea_net import GalateaNet
+            export_net = GalateaNet(self.net_config).cpu().eval()
+            export_net.load_state_dict(clean_state, strict=False)
+            
+            # 提取 Dummy Dict 
+            dummy_dict = {k: v[0:1].clone().cpu() for k, v in self.pinned_batch_buffers.items()}
+            keys = list(dummy_dict.keys())
+            flat_inputs = tuple(dummy_dict[k] for k in keys)
+            
+            # 建立展平包装器
+            class ONNXWrapper(torch.nn.Module):
+                def __init__(self, net, keys):
+                    super().__init__()
+                    self.net = net
+                    self.keys = keys
+                    
+                def forward(self, *args):
+                    batch_dict = {k: v for k, v in zip(self.keys, args)}
+                    logits, values, _ = self.net(batch_dict)
+                    return logits, values
+            
+            wrapper_net = ONNXWrapper(export_net, keys).eval()
+            onnx_archive = os.path.join(self.save_dir, f"galatea_iter_{current_iter}.onnx")
+            
+            # 执行极度稳定的 Opset 14 同步导出
+            torch.onnx.export(
+                wrapper_net,
+                flat_inputs,        
+                onnx_archive,
+                export_params=True,
+                opset_version=14,   
+                do_constant_folding=True, 
+                input_names=keys,   
+                output_names=['action_logits', 'values']
+            )
+            
+            print(f"✅ [ONNX] 纯净无损静态计算图导出成功！历史引擎 {os.path.basename(onnx_archive)} 已就绪！")
+            
+        except Exception as e:
+            print(f"⚠️ [ONNX] 同步导出失败: {e}")
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     trainer = PPOTrainer()

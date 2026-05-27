@@ -11,6 +11,7 @@ ATTR_MAP = {'ATTRIBUTE_EARTH': 0x01, 'ATTRIBUTE_WATER': 0x02, 'ATTRIBUTE_FIRE': 
 
 class SemanticKnowledgeBase:
     def __init__(self, kb_path='knowledge_base.json', vocab_size=20000):
+        self._cache = {}
         self.vocab_size = vocab_size
         self.reserved_ids = 10 
         #print(f"🧠 正在连接卡片效果语义知识库...")
@@ -38,6 +39,9 @@ class SemanticKnowledgeBase:
         #print(f"✅ 知识库加载完毕！包含 {self.num_cats} 种动作，已实现表征大一统！")
 
     def get_card_semantics(self, card_id):
+        if card_id in self._cache:
+            return self._cache[card_id]
+        
         # 压缩：动作词表不到4000，int16(2字节)足够
         cat_out = np.zeros((8, 8), dtype=np.int16)
         # 压缩：掩码只有 0/1，必须用 bool_(1字节)
@@ -96,4 +100,6 @@ class SemanticKnowledgeBase:
                 except Exception as e: 
                     print(f"[semantic_kb]⚠️ custom_number解析异常: {e} (cnum={cnum})")
                     
-        return cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out
+        result = (cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out)
+        self._cache[card_id] = result # 算完直接存下来
+        return result

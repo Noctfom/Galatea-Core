@@ -983,7 +983,24 @@ class DuelState:
                     
                     # 防御机制：如果 RPN 解析有瑕疵导致全灭，回退到全集交给 RuleBot 强行穷举
                     if not filtered_codes: 
-                        print(f"🚨 RPN 解析后没有合法选项，回退到全集穷举,请检查 opcodes 是否合理: {opcodes}")
+                        trigger_card = "未知卡片/时点动作"
+                        try:
+                            # 借助状态机自带的堆栈，直接抓出幕后黑手
+                            if hasattr(self, 'chain_stack') and self.chain_stack:
+                                top_code = self.chain_stack[-1]['code']
+                                trigger_card = f"连锁中 -> 【{card_db.get_card_name(top_code)}】({top_code})"
+                            elif hasattr(self, 'history_stack') and self.history_stack:
+                                top_code = self.history_stack[0]['code']
+                                trigger_card = f"最近动向 -> 【{card_db.get_card_name(top_code)}】({top_code})"
+                        except Exception:
+                            pass
+
+                        print("❌ [Gamestate RPN雷达] Type 142 (卡名宣言) 过滤后选项集全空！")
+                        print(f"   -> 🎯 触发源头: {trigger_card}")
+                        print(f"   -> 📊 原始 Opcodes 数量(Count): {count}")
+                        print(f"   -> 🔒 原始 Opcodes 编码流: {opcodes}")
+                        print("   -> 💡 状态: 已安全启动兜底回退，开放 unique_codes 全集，防止 AI 无处点选导致死锁。")
+
                         filtered_codes = list(unique_codes)
                     
                     def get_priority_score(c):

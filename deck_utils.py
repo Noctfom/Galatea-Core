@@ -4,7 +4,10 @@ Deck 相关的工具函数 (增强版)
 import random
 import os
 import json
+import time
 from card_reader import card_db
+
+_last_io_check = {'global': 0, 'virtual': 0}
 
 class Deck:
     def __init__(self, name="Unknown"):
@@ -65,13 +68,18 @@ _mtime_dict = {'global': 0, 'virtual': 0}
 def get_json_data(filepath, cache_key):
     if not os.path.exists(filepath): return {}
     try:
-        mtime = os.path.getmtime(filepath)
-        if mtime != _mtime_dict[cache_key]:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                _cache_dict[cache_key] = json.load(f)
-            _mtime_dict[cache_key] = mtime
+        now = time.time()
+        # 冷却时间：10秒内绝不重新查询硬盘文件状态
+        if now - _last_io_check[cache_key] > 10.0:
+            mtime = os.path.getmtime(filepath)
+            _last_io_check[cache_key] = now
+            if mtime != _mtime_dict[cache_key]:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    _cache_dict[cache_key] = json.load(f)
+                _mtime_dict[cache_key] = mtime
         return _cache_dict[cache_key]
-    except Exception: return _cache_dict[cache_key]
+    except Exception: 
+        return _cache_dict[cache_key]
 
 def get_random_deck_pair(ydk_dir='./decks'):
     if not os.path.exists(ydk_dir): return None, None, None, None
