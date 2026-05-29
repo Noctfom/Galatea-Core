@@ -1,0 +1,40 @@
+# ========================================================
+# Galatea-Core v3.2.0 Dependencies
+# ========================================================
+# Install: pip install -r requirements.txt
+# PyTorch with CUDA 12.1 (adjust index-url for your CUDA version)
+# ========================================================
+
+# -- Core ML Framework --
+# Install PyTorch separately based on your CUDA version:
+# CUDA 12.1: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# CUDA 11.8: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# CPU Only:  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+
+# -- WebUI --
+streamlit>=1.28.0
+
+# -- Training Monitoring --
+tensorboard>=2.14.0
+
+# -- Math / Data Processing --
+numpy>=1.24.0
+pandas>=2.0.0
+
+# -- Inter-Process Communication --
+pyzmq>=25.0.0
+
+# -- ONNX Inference Acceleration (optional, for --use_onnx) --
+onnxruntime>=1.16.0
+
+# -- System Monitoring --
+psutil>=5.9.0
+
+# -- CLI Rich Output --
+rich>=13.0.0
+
+# -- Online Deck Fetching --
+requests>=2.31.0

@@ -43,27 +43,51 @@
 
 ## 🚀 快速开始
 
-### 一键包用户（推荐）
+### Windows 用户
+
+#### 一键包（推荐，无需配置 Python 环境）
 
 1. 下载整合包并解压
 2. 双击 `一键包启动Webui.bat`
 3. 浏览器自动打开 WebUI 界面
 
-### 开发者
+#### 手动安装（开发者）
 
 ```bash
 # 克隆仓库
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# 安装依赖
+# 安装依赖（根据 CUDA 版本调整 PyTorch index-url）
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install streamlit tensorboard numpy pandas psutil rich pyzmq onnxruntime
+pip install -r requirements.txt
 
 # 准备资源文件
 python main.py update --data
 
 # 启动 WebUI
+streamlit run app.py
+```
+
+### Linux 用户
+
+```bash
+# 克隆仓库
+git clone https://github.com/Noctfom/Galatea-Core.git
+cd Galatea-Core
+
+# 一键环境安装 + 启动（自动检测 GPU/CUDA、创建虚拟环境）
+chmod +x setup.sh
+./setup.sh               # 安装依赖 & 启动 WebUI
+./setup.sh --train       # 安装依赖 & 启动 CLI 训练
+./setup.sh --duel        # 安装依赖 & 启动竞技场
+
+# 或手动安装
+python3 -m venv venv
+source venv/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+python main.py update --data
 streamlit run app.py
 ```
 

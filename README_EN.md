@@ -43,27 +43,51 @@ English | [简体中文](README.md)
 
 ## 🚀 Quick Start
 
-### One-Click Package Users (Recommended)
+### Windows Users
+
+#### One-Click Package (Recommended, no Python setup required)
 
 1. Download and extract the integrated package
 2. Double-click `一键包启动Webui.bat`
 3. Browser automatically opens the WebUI
 
-### Developers
+#### Manual Install (Developers)
 
 ```bash
 # Clone repository
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# Install dependencies
+# Install dependencies (adjust PyTorch index-url for your CUDA version)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-pip install streamlit tensorboard numpy pandas psutil rich pyzmq onnxruntime
+pip install -r requirements.txt
 
 # Prepare resource files
 python main.py update --data
 
 # Start WebUI
+streamlit run app.py
+```
+
+### Linux Users
+
+```bash
+# Clone repository
+git clone https://github.com/Noctfom/Galatea-Core.git
+cd Galatea-Core
+
+# One-click setup + launch (auto-detects GPU/CUDA, creates virtual environment)
+chmod +x setup.sh
+./setup.sh               # Install deps & launch WebUI
+./setup.sh --train       # Install deps & launch CLI training
+./setup.sh --duel        # Install deps & launch Arena
+
+# Or manual install
+python3 -m venv venv
+source venv/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+python main.py update --data
 streamlit run app.py
 ```
 
