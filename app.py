@@ -28,7 +28,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.2.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.2.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -586,7 +586,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         with c_check:
             st.markdown("**🔍 运行环境基准探测**")
             import platform
-            dll_name = "ocgcore.dll" if platform.system() == "Windows" else "libocgcore.so"
+            dll_name = "ocgcore.dll" if platform.system() == "Windows" else "ocgcore.so"
             st.write(f"⚙️ 核心引擎 (`{dll_name}`): ", "✅ 存在" if os.path.exists(f"./{dll_name}") else "❌ 缺失")
             st.write("🗃️ 卡片数据库 (`cards.cdb`): ", "✅ 存在" if os.path.exists("./cards.cdb") else "❌ 缺失")
             st.write("📜 脚本目录 (`./script/`): ", "✅ 存在" if os.path.exists("./script") else "❌ 缺失")

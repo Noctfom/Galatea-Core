@@ -189,7 +189,7 @@ def main():
     
     parse_parser.add_argument('--sync', action='store_true', help='从主仓库拉取最新知识库作为基座') 
     parse_parser.add_argument('--remote_url', type=str, 
-                              default='https://raw.githubusercontent.com/Noctfom/astrbot-plugin-duel-galatea/main/knowledge_base.json', 
+                              default='https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json', 
                               help='指定其他的 Github Raw URL')
 
     # --- 5. 更新同步模式 (Update) ---
@@ -253,7 +253,7 @@ def main():
         from duel_launcher import DuelManager
         
         # 自动探测不同系统的引擎核心库后缀
-        dll_name = "ocgcore.dll" if platform.system() == "Windows" else "libocgcore.so"
+        dll_name = "ocgcore.dll" if platform.system() == "Windows" else "ocgcore.so"
         core_path = os.path.abspath(os.path.join(".", dll_name))
         
         if not os.path.exists(core_path):

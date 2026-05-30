@@ -8,9 +8,12 @@ import subprocess
 import urllib.request
 import shutil
 import tempfile
+import zipfile
+import io
+import re
 
 # 仓库地址（仅用于更新 Python 逻辑代码）
-MY_REPO_URL = "https://github.com/Noctfom/astrbot-plugin-duel-galatea.git"
+MY_REPO_URL = "https://github.com/Noctfom/Galatea-Core.git"
 
 # 萌卡官方卡片数据库 (zh-CN 中文版)
 # 路径：locales/zh-CN/cards.cdb
@@ -50,32 +53,64 @@ def update_data_and_scripts(repo_type='default', force=False):
     except Exception as e:
         print(f"❌ 卡库下载失败 (请检查网络): {e}")
 
-    # --- 2. 更新 Script 文件夹 (Git 浅克隆) ---
-    script_url = OFFICIAL_SCRIPT_REPO if repo_type == 'default' else repo_type
-    print(f"📥 正在拉取最新的官方 Lua 脚本库...")
+    # --- 2. 更新 Script 文件夹 (GitHub ZIP Archive，不走 git clone) ---
+    script_repo_url = OFFICIAL_SCRIPT_REPO if repo_type == 'default' else repo_type
+    # 将 git URL 转换为 ZIP Archive 下载链接
+    # 形如 https://github.com/owner/repo.git → https://github.com/owner/repo/archive/refs/heads/master.zip
+    zip_url = _git_url_to_zip_url(script_repo_url)
+    print(f"📥 正在拉取最新的官方 Lua 脚本库 (ZIP Archive)...")
     
     try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            # --depth 1 极速拉取
-            subprocess.run(["git", "clone", "--depth", "1", script_url, tmp_dir], 
-                           capture_output=True, text=True, check=True)
+        req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            zip_data = response.read()
+        
+        # 内存中直接解压
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            # 获取仓库内第一层目录前缀（如 ygopro-scripts-master/）
+            root_prefix = _find_zip_root_prefix(zf)
             
             target_script_dir = "./script"
             if force and os.path.exists(target_script_dir):
                 shutil.rmtree(target_script_dir)
-            
             if not os.path.exists(target_script_dir):
                 os.makedirs(target_script_dir)
 
             moved_count = 0
-            for root, _, files in os.walk(tmp_dir):
-                if '.git' in root: continue 
-                for file in files:
-                    if file.endswith('.lua'):
-                        shutil.copy2(os.path.join(root, file), os.path.join(target_script_dir, file))
-                        moved_count += 1
+            for member in zf.namelist():
+                if not member.endswith('.lua'):
+                    continue
+                # 去掉仓库根目录前缀
+                rel_path = member[len(root_prefix):] if root_prefix else member
+                # 只用文件名（官方脚本库的 lua 文件都在根目录）
+                filename = os.path.basename(rel_path)
+                if filename:
+                    with zf.open(member) as src:
+                        with open(os.path.join(target_script_dir, filename), 'wb') as dst:
+                            dst.write(src.read())
+                    moved_count += 1
                         
             print(f"✅ 脚本库同步完成！共合并了 {moved_count} 个 Lua 文件。")
             
     except Exception as e:
         print(f"❌ 脚本更新失败: {e}")
+
+
+def _git_url_to_zip_url(git_url):
+    """将 Git 仓库 URL 转为 GitHub Archive ZIP 下载链接"""
+    # 匹配 https://github.com/owner/repo.git 或 https://github.com/owner/repo
+    match = re.match(r'https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$', git_url)
+    if match:
+        owner, repo = match.groups()
+        return f"https://github.com/{owner}/{repo}/archive/refs/heads/master.zip"
+    # 如果已经是 ZIP 链接或其他格式，直接返回
+    return git_url
+
+
+def _find_zip_root_prefix(zf):
+    """找到 ZIP 中仓库的根目录前缀，如 'ygopro-scripts-master/' """
+    # 取第一个文件路径，提取其顶层目录名
+    for name in zf.namelist():
+        if '/' in name:
+            return name.split('/')[0] + '/'
+    return ''

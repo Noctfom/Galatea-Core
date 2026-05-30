@@ -20,6 +20,7 @@ import pandas as pd
 import zmq
 import shutil
 import psutil
+import sys
 
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
@@ -36,6 +37,13 @@ from feature_encoder import MAX_CARDS as MAX_SEQ_LEN
 # [新增] 头部
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning) # 屏蔽 PyTorch 2.0 啰嗦的警告
+
+if sys.platform == 'win32':
+    # Windows 不完全支持 IPC，使用 TCP
+    ZMQ_ADDR = "tcp://127.0.0.1:" 
+else:
+    # Linux 完美支持 IPC，走 /tmp 内存盘极速通信
+    ZMQ_ADDR = "ipc:///tmp/galatea_zmq_"
 
 # === 超参数配置 ===
 LR = 1e-4               # Learning Rate: 步长，决定学得有多快（太快容易震荡）
@@ -633,7 +641,7 @@ class PPOTrainer:
         socket.setsockopt(zmq.ROUTER_HANDOVER, 1)
         socket.setsockopt(zmq.SNDHWM, 100)
         socket.setsockopt(zmq.RCVHWM, 100)
-        socket.bind(f"tcp://127.0.0.1:{zmq_port}")
+        socket.bind(f"{ZMQ_ADDR}{zmq_port}")
         
         poller = zmq.Poller()
         poller.register(socket, zmq.POLLIN)

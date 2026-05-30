@@ -272,34 +272,30 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         # 这类消息如果不处理，遇到《抹杀之指名者》等卡会直接卡死
         
         # =================================================================
-        # [终极修正] 10. 种族/属性宣言 (位掩码处理)
+        # 10. 种族/属性宣言 (位掩码处理)
         # =================================================================
         elif msg_type in [MSG_ANNOUNCE_RACE, MSG_ANNOUNCE_ATTRIB]:
             stream.read(1) # Player
             count = struct.unpack('B', stream.read(1))[0] # 需要选几个
             available = struct.unpack('<I', stream.read(4))[0] # 可选掩码
             
-            # 1. 解析掩码，找出所有可用的位 (Races/Attributes)
             options = []
             for i in range(32): # 遍历 32 位
                 bit = 1 << i
                 if available & bit:
                     options.append(bit)
             
-            # 2. 随机选择 count 个
-            # 如果 options 不够选，就全选
             if len(options) <= count:
                 selected = options
             else:
                 selected = random.sample(options, count)
             
-            # 3. 计算结果掩码 (求和/按位或)
             result_mask = 0
             for bit in selected:
                 result_mask |= bit
             
-            # 4. 发送 4 字节整数
-            decision = struct.pack('<I', result_mask)
+            # 修复：直接返回整数，不再使用 struct.pack 打包为 bytes
+            decision = result_mask
 
         # =================================================================
         #  卡片/数字宣言 
@@ -309,20 +305,13 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             count = struct.unpack('B', stream.read(1))[0]
             for _ in range(count): stream.read(4)
             
-            # 彻底抛弃原来愚蠢的“盲猜灰流丽”逻辑
-            # 直接从 gamestate 传过来的完美选项池里提取合法的卡密
             valid_codes = [act.desc_id for act in _shared_valid_actions if act.action_type == 142]
             
-            # 过滤掉已经被引擎拒绝的卡（防死锁保护）
-            safe_codes = []
-            for code in valid_codes:
-                packed = struct.pack('<I', code)
-                if packed not in ignore_actions:
-                    safe_codes.append(packed)
+            # 修复：保持整数对比，不再将 ignore_actions 和 code 视为 bytes
+            safe_codes = [code for code in valid_codes if code not in ignore_actions]
             
             if safe_codes:
-                # 完美过关
-                decision = random.choice(safe_codes)
+                decision = random.choice(safe_codes) # 完美过关，返回整数
             else:
                 print("🚨 [RuleBot 警报] Type 142 (宣言卡片) 没有合法选项可选！")
 
@@ -331,14 +320,10 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             count = struct.unpack('B', stream.read(1))[0]
             for _ in range(count): stream.read(4) 
             
-            ignored_set = set(b for b in ignore_actions if isinstance(b, bytes))
-            decision = struct.pack('<I', 0)
-            
+            decision = 0
             if count > 0:
-                valid_indices = []
-                for i in range(count):
-                    cand = struct.pack('<I', i)
-                    if cand not in ignored_set: valid_indices.append(cand)
+                # 修复：直接使用整数索引过滤
+                valid_indices = [i for i in range(count) if i not in ignore_actions]
                 if valid_indices:
                     decision = random.choice(valid_indices)
 

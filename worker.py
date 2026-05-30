@@ -14,6 +14,8 @@ import gc
 import struct
 import zmq
 import psutil
+import sys
+
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
@@ -22,6 +24,13 @@ import rule_bot
 import warnings # [新增]
 # [新增] 屏蔽 PyTorch 的 Nested Tensor 警告
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.transformer")
+
+if sys.platform == 'win32':
+    # Windows 不完全支持 IPC，使用 TCP
+    ZMQ_ADDR = "tcp://127.0.0.1:" 
+else:
+    # Linux 完美支持 IPC，走 /tmp 内存盘极速通信
+    ZMQ_ADDR = "ipc:///tmp/galatea_zmq_"
 
 # 状态与消息定义
 STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
@@ -115,7 +124,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
     socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
     socket.setsockopt(zmq.RCVTIMEO, 15000)
     socket.setsockopt(zmq.SNDTIMEO, 5000)
-    socket.connect(f"tcp://127.0.0.1:{zmq_port}")
+    socket.connect(f"{ZMQ_ADDR}{zmq_port}")
 
     use_onnx_p1 = False
     ort_session_p1 = None
@@ -450,7 +459,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                             socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
                                             socket.setsockopt(zmq.RCVTIMEO, 15000)
                                             socket.setsockopt(zmq.SNDTIMEO, 5000)
-                                            socket.connect(f"tcp://127.0.0.1:{zmq_port}")
+                                            socket.connect(f"{ZMQ_ADDR}{zmq_port}")
                                             raise RuntimeError("Pass1 ZMQ 首次通讯超时")
                                         
                                         # 极限极速：直接从 120 维超广阔共享大矩阵中捞取全量 Logits 并激活 Softmax
@@ -628,7 +637,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
                                     socket.setsockopt(zmq.RCVTIMEO, 15000)
                                     socket.setsockopt(zmq.SNDTIMEO, 5000)
-                                    socket.connect(f"tcp://127.0.0.1:{zmq_port}")
+                                    socket.connect(f"{ZMQ_ADDR}{zmq_port}")
                                     
                                     raise RuntimeError("ZMQ 首次通讯超时，已强制重启连接")
                                 

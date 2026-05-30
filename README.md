@@ -149,6 +149,7 @@ python main.py parse --script_dir ./script
 | GPU | GTX 1060 6GB | RTX 3060 12GB+ |
 | RAM | 16GB | 32GB+ |
 | 硬盘 | 10GB | SSD |
+| Linux | GLIBC ≥ 2.38（Ubuntu 22.04+） | — |
 
 ---
 

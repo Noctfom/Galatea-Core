@@ -114,17 +114,50 @@ pip install -r "$PROJECT_DIR/requirements.txt" --quiet
 echo -e "${GREEN}  ✓ All dependencies installed${NC}"
 
 # -------------------------------------------------------
-# 5. Check for OCGCore library
+# 5. Check OCGCore library & GLIBC compatibility
 # -------------------------------------------------------
 echo -e "${YELLOW}[5/5] Checking OCGCore library...${NC}"
 
-if [ -f "$PROJECT_DIR/ocgcore.so" ]; then
-    echo -e "${GREEN}  ✓ ocgcore.so found${NC}"
-else
+if [ ! -f "$PROJECT_DIR/ocgcore.so" ]; then
     echo -e "${RED}[ERROR] ocgcore.so not found in project root!${NC}"
-    echo "Make sure you have the OCGCore shared library for Linux."
-    echo "You may need to compile it from source:"
-    echo "  https://github.com/Fluorohydride/ygopro-core"
+    echo "Make sure you cloned the full repository including the prebuilt .so file."
+    exit 1
+fi
+
+# Quick Python ctypes load test to catch GLIBC version mismatch
+GLIBC_CHECK=$("$PYTHON_CMD" -c "
+import ctypes, sys, re
+try:
+    lib = ctypes.cdll.LoadLibrary('$PROJECT_DIR/ocgcore.so')
+    print('OK')
+except OSError as e:
+    msg = str(e)
+    # Extract required GLIBC version from error message
+    m = re.search(r'GLIBC_(\d+\.\d+)', msg)
+    if m:
+        print('GLIBC:' + m.group(1))
+    else:
+        print('FAIL:' + msg)
+" 2>&1)
+
+if [ "$GLIBC_CHECK" = "OK" ]; then
+    echo -e "${GREEN}  ✓ ocgcore.so found and GLIBC-compatible${NC}"
+elif echo "$GLIBC_CHECK" | grep -q "^GLIBC:"; then
+    REQUIRED_VER=$(echo "$GLIBC_CHECK" | cut -d: -f2)
+    CURRENT_VER=$(/lib/x86_64-linux-gnu/libc.so.6 --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+' | head -1 || ldd --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+' | head -1 || echo "unknown")
+    echo -e "${RED}[ERROR] GLIBC version mismatch!${NC}"
+    echo -e "  ocgcore.so requires: ${YELLOW}GLIBC >= $REQUIRED_VER${NC}"
+    echo -e "  Your system has:      ${YELLOW}GLIBC $CURRENT_VER${NC}"
+    echo ""
+    echo "To fix this, upgrade your system's GLIBC or use a newer Linux distro:"
+    echo "  Ubuntu 22.04: sudo apt update && sudo apt upgrade libc6"
+    echo "  Ubuntu 20.04: Consider upgrading to 22.04+ or use Docker"
+    echo "  CentOS 7:     Consider migrating to Rocky Linux 9 / Ubuntu 22.04"
+    echo "  Docker (any): docker run -it --gpus all ubuntu:22.04 bash"
+    exit 1
+else
+    echo -e "${RED}[ERROR] ocgcore.so failed to load:${NC}"
+    echo -e "  $GLIBC_CHECK"
     exit 1
 fi
 
