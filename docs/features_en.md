@@ -363,7 +363,7 @@ python main.py train [options]
 | `--async_infer` | Enable async inference | - |
 | `--use_onnx` | Enable ONNX inference acceleration | - |
 | `--no_compile` | Disable compilation | - |
-
+| `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
 **Examples**:
 
 ```bash
@@ -404,7 +404,7 @@ python main.py duel [options]
 | `--device` | Inference device | cpu |
 | `--deck_dir` | Deck directory | `./decks` |
 | `--thought_freq` | Thought log save frequency | 0 |
-
+| `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
 **Examples**:
 
 ```bash
@@ -428,6 +428,7 @@ python main.py play [options]
 |--------|-------------|---------|
 | `-n, --num` | Game count | 10 |
 | `--deck_dir` | Deck directory | `./decks` |
+| `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
 
 ### Update Command
 

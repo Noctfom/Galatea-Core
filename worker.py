@@ -96,8 +96,22 @@ def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
         # 哪怕发生极端情况的并发踩踏，也静默吞下异常，保证 Worker 能够顺利走完后续的销毁流程
         pass
 
-def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu',zmq_port=55555,opp_config=None, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4,shared_buffers=None, shared_outputs=None, worker_events=None, use_onnx=False,shared_logits=None):
+def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu',zmq_port=55555,opp_config=None, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4,shared_buffers=None, shared_outputs=None, worker_events=None, use_onnx=False,shared_logits=None, standard_core=False):
     
+    try:
+        from system_logger import setup_global_logger
+        # 让每个 Worker 生成自己专属的日志文件，比如 worker_0_2023xxxx.log
+        setup_global_logger(prefix=f"worker_{worker_id}")
+    except ImportError:
+        pass
+
+    import gamestate
+    if standard_core:
+        gamestate.CORE_HAS_GHOST_BYTE = False
+        print(f"🔧 [Worker {worker_id}] 协议自适应：已关闭幽灵定界符 (Standard Core Mode)")
+    else:
+        gamestate.CORE_HAS_GHOST_BYTE = True
+
     # =========================================================================
     #  [防卡死] 禁用 Windows 崩溃弹窗
     # 告诉操作系统：如果 OCGCore 发生致命写越界(Segfault)，直接静默杀死进程，不要弹窗也不要生成错误报告，以免训练被打断导致堆砌死锁
@@ -157,7 +171,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         consecutive_ai_fails = 0 # 死亡熔断计数器
 
         worker_start_time = time.time()
-        max_worker_uptime = float(worker_timeout) - 10.0
+        # 给 Worker 留出充足的保存时间 (至少 30s)，防止 torch.save 大文件时被 p.terminate() 抢先杀掉
+        max_worker_uptime = float(worker_timeout) - 30.0
         
         # 统计数据
         episode_rewards = []
@@ -306,6 +321,13 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             loop_tracker = {}
             last_valid_hash = ""
 
+            oscillation_memory_idx = {}
+            oscillation_memory_val = {}
+            last_main_hash = ""
+            last_main_action_idx = None
+            last_main_action_val = None
+            last_msg_type = -1
+
             while ep_steps < MAX_EPISODE_STEPS:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
                 # 超时保护
@@ -410,6 +432,37 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
                     current_snap = brain.get_snapshot(env)
                     player = current_snap.global_data.to_play
+
+                    # 生成当前可选项的哈希值，用于检测局势是否发生了实质性变化
+                    current_hash = "|".join([f"{a.action_type}_{a.index}" for a in current_snap.valid_actions])
+                    
+                    if msg_type in [10, 11]:
+                        if current_hash != last_main_hash:
+                            # 真正的局势推进！当前可选项变了，清空旧的震荡记忆，防止跨回合误伤
+                            oscillation_memory_idx.clear()
+                            oscillation_memory_val.clear()
+                            last_main_hash = current_hash
+                            
+                        # 局势没变，且是从【选卡/祭品/对象等子菜单】退回来的 -> 发生死胡同回档！
+                        elif last_msg_type in [14, 15, 18, 20, 22, 23, 24, 26]:
+                            if last_main_action_idx is not None:
+                                oscillation_memory_idx[last_main_action_idx] = oscillation_memory_idx.get(last_main_action_idx, 0) + 1
+                                oscillation_memory_val[last_main_action_val] = oscillation_memory_val.get(last_main_action_val, 0) + 1
+                                
+                                # 只有当同一个选项连续导致 5 次回档时，才触发警报
+                                fail_count = oscillation_memory_idx[last_main_action_idx]
+                                if fail_count == 5:
+                                    print(f"⚠️ [Worker {worker_id}] 捕捉到状态回档 ({last_msg_type}->{msg_type})！选项 [{last_main_action_idx}] 连续 5 次死胡同，已正式记入黑名单。")
+
+                        # 将黑名单注入到当前的短期错题本 (只有失败 5 次及以上的才会被真正拉黑)
+                        for bad_idx, fails in oscillation_memory_idx.items():
+                            if fails >= 5 and bad_idx not in current_step_ignore_idx_list:
+                                current_step_ignore_idx_list.append(bad_idx)
+                        for bad_val, fails in oscillation_memory_val.items():
+                            if fails >= 5 and bad_val not in current_step_ignore_list:
+                                current_step_ignore_list.append(bad_val)
+
+                    last_msg_type = msg_type
 
                     perf_ledger['t_cpp_env'] += (time.time() - t_start) # 计时器1
                     
@@ -607,7 +660,9 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     f"   -> 已被错题本拉黑的选项: {rejected_samples}...\n"
                                     f"   -> 诊断: 选项已被全数屏蔽 (Mask 全黑)。请检查 gamestate 是否生成了乱序列表导致 Mask 错位，或 C++ 引擎是否根本不接受这些选项。"
                                 )
-                                raise RuntimeError(error_msg)
+                                print(error_msg)
+                                winner = 1 - player
+                                break
 
                             # 防止嵌入层越界崩溃
                             max_idx = tensor_dict['act_card_idx'].shape[-1] if len(tensor_dict['act_card_idx'].shape) > 2 else 119
@@ -751,6 +806,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             env.send_action(resp)
                             last_decision_value = resp
                             last_decision_idx = sel_idx 
+
+                            if msg_type in [10, 11]:
+                                last_main_action_idx = sel_idx
+                                last_main_action_val = resp
+
                             msg_queue = [] 
                             
                             # 仅当训练代理操作时才录入数据，绝对防止指针错位与重复
@@ -986,11 +1046,13 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     game_buffer[train_p_id].clear()
                     ep_start_ptr = global_ptr
 
-        # 死锁保护
+        # 死锁保护 - 只要有数据就保存，宁可少也要有
         tmp_file = f"tmp_rollout_iter_{iteration}_worker_{worker_id}.pt"
-        if 'columns' not in locals() or ep_start_ptr < (target_steps * 0.6):
-            print(f"❌ [Worker {worker_id}] 数据严重残缺 ({ep_start_ptr}/{target_steps})，拒绝生成诈尸 PT！")
+        if 'columns' not in locals() or ep_start_ptr < 10:
+            print(f"❌ [Worker {worker_id}] 数据几乎为空 ({ep_start_ptr}/{target_steps})，跳过保存")
             return
+        if ep_start_ptr < (target_steps * 0.6):
+            print(f"⚠️ [Worker {worker_id}] 数据仅收集了 {ep_start_ptr}/{target_steps} 步 (<60%)，但仍然保存以便训练继续")
 
         batch_data = {'obs': {}}
 

@@ -115,7 +115,7 @@ class GalateaEnv:
         self.lib.new_card.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]
         self.lib.process.argtypes = [ctypes.c_void_p]; self.lib.process.restype = ctypes.c_int32
         # set_responseb 签名验证
-        self.lib.set_responseb.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        self.lib.set_responseb.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 
         if hasattr(self.lib, 'get_message'):
             self.lib.get_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_byte)]
@@ -374,5 +374,5 @@ class GalateaEnv:
         elif isinstance(response, (bytes, bytearray)):
             resp_bytes = bytes(response)[:64].ljust(64, b'\x00')
 
-            self._lifeline_response = (ctypes.c_byte * 64).from_buffer_copy(resp_bytes)
-            self.lib.set_responseb(self.pduel, ctypes.cast(self._lifeline_response, ctypes.c_void_p))
+            self._lifeline_response = resp_bytes 
+            self.lib.set_responseb(self.pduel, self._lifeline_response)

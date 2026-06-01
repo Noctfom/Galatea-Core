@@ -32,19 +32,8 @@
 
 ### Linux 用户
 
-使用一键包内置的 Python 环境启动 WebUI：
+Linux 用户请参考 [README.md](../README.md#linux-用户) 中的自动化安装教程，使用 `setup.sh` 一键配置环境，或手动使用requirements.txt安装完整环境
 
-```bash
-# 进入项目目录
-cd Galatea-Core
-
-# 使用内置 python_env 中的 Python 启动 Streamlit
-./python_env/bin/python -m streamlit run app.py --server.headless=true --browser.gatherUsageStats=false
-```
-
-> ⚠️ Linux 版 `ocgcore.so` 尚未充分测试，如遇引擎问题请在 GitHub Issues 反馈。
-
----
 
 ## 同步资源与卡库
 

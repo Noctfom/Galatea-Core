@@ -170,7 +170,7 @@ This project is licensed under the [GNU General Public License v3.0](LICENSE).
 ## 🙏 Acknowledgements
 
 - [OCGCore](https://github.com/Fluorohydride/ygopro-core) - YGOPRO core engine, the foundation of everything
-- [MDPro3](https://code.moenext.com/sherry_chaos/MDPro3) - MDPro3, the currently preferred client and core used
+- [MDPro3](https://code.moenext.com/sherry_chaos/MDPro3) - MDPro3, the currently preferred client
 - [YGOPro Official Scripts](https://github.com/Fluorohydride/ygopro-scripts) - Official Lua script repository, basis for card effect parsing
 - [MyCard](https://github.com/mycard/ygopro-database) - cards.cdb card database source
 - [YGOCDB](https://ygocdb.com/) - Card image rendering API and data query

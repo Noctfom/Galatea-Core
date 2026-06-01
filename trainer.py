@@ -69,7 +69,7 @@ def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, devic
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None, 
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cpu', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cpu', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -92,6 +92,7 @@ class PPOTrainer:
         self.entropy = entropy
         self.gae_lambda = gae_lambda
         self.clip_eps = clip_eps
+        self.standard_core = standard_core
 
         # 硬件检查与黑科技自动配置
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -162,6 +163,7 @@ class PPOTrainer:
         time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.writer = SummaryWriter(log_dir=f"./runs/galatea_{time_str}")
         self.run_id = time_str
+        os.environ['GALATEA_RUN_ID'] = self.run_id
         print(f"📊 TensorBoard 日志将保存至: ./runs/galatea_{time_str}")
 
         # Windows 必须设置
@@ -409,7 +411,8 @@ class PPOTrainer:
                 self.shared_outputs,  
                 self.worker_events,
                 self.use_onnx,
-                self.shared_logits
+                self.shared_logits,
+                self.standard_core
             ))
             p.daemon = True
             p.start()
@@ -436,6 +439,14 @@ class PPOTrainer:
                 p.close() # 强制释放 Windows 进程句柄
             except Exception as e: 
                 print(f"[trainer]⚠️ 无法关闭 Worker 进程 (可能已被系统回收): {e}")
+        
+        orphan_tmps = glob.glob(f"tmp_rollout_iter_{self.iteration}_worker_*.pt.tmp")
+        for f in orphan_tmps:
+            try:
+                os.remove(f)
+                print(f"🧹 [清理] 已回收被强制截断的临时残骸: {f}")
+            except Exception as e:
+                print(f"⚠️ [清理] 无法删除临时残骸 {f}: {e}")
 
         # =========================================================================
         # [内存安全回收] 强制等待系统回收 Worker 进程的内存
@@ -545,6 +556,10 @@ class PPOTrainer:
                     s = self.max_buffer_steps - cursor
                     if s <= 0: 
                         del data
+                        for remain_f in file_list[i:]:
+                            try: os.remove(remain_f)
+                            except Exception as e: 
+                                print(f"[trainer]⚠️ 清理残余文件 {remain_f} 失败: {e}")
                         break
 
                 # 5. 零拷贝游标注入

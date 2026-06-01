@@ -10,8 +10,17 @@ import deck_utils
 import run_self_play # 引入刚才改好的 worker
 
 class DuelManager:
-    def __init__(self, core_dir, deck_dir):
+    def __init__(self, core_dir, deck_dir, standard_core=False):
         self.deck_dir = deck_dir
+        self.standard_core = standard_core
+
+        import gamestate
+        if standard_core:
+            gamestate.CORE_HAS_GHOST_BYTE = False
+            print("🔧 [DuelManager] 协议自适应：已关闭幽灵定界符 (Standard Core Mode)")
+        else:
+            gamestate.CORE_HAS_GHOST_BYTE = True
+
         print(f"🔧 初始化核心环境: {core_dir}")
         # 如果是相对路径，转换为绝对路径防止 cdb 加载错位
         import os

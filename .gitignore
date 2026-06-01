@@ -2,6 +2,10 @@
 cards.cdb
 script/
 MDPro3-master-Tools-YGO Classes-ocgcore/
+ygopro-core-master/
+ygopro_linux_build/
+ygopro_windows_build/
+ocgcore_linux_build/
 
 # 模型与训练日志
 models/

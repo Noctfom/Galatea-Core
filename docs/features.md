@@ -362,7 +362,7 @@ python main.py train [选项]
 | `--async_infer` | 启用异步推断 | - |
 | `--use_onnx` | 启用 ONNX 推理加速 | - |
 | `--no_compile` | 禁用编译 | - |
-
+| `--standard_core` | 关闭幽灵字节解析（自编译内核用） | - |
 **示例**：
 
 ```bash
@@ -403,7 +403,7 @@ python main.py duel [选项]
 | `--device` | 推理设备 | cpu |
 | `--deck_dir` | 卡组目录 | `./decks` |
 | `--thought_freq` | 心声保存频率 | 0 |
-
+| `--standard_core` | 关闭幽灵字节解析（自编译内核用） | - |
 **示例**：
 
 ```bash
@@ -427,6 +427,7 @@ python main.py play [选项]
 |------|------|--------|
 | `-n, --num` | 对局数量 | 10 |
 | `--deck_dir` | 卡组目录 | `./decks` |
+| `--standard_core` | 关闭幽灵字节解析（自编译内核用） | - |
 
 ### 更新命令
 

@@ -4,6 +4,26 @@
 
 ---
 
+## [v3.3.0] - 2026-06
+
+### 🔧 Linux Platform Compatibility
+
+- **🖥️ Linux build support**: Recompiled `ocgcore.so` with the latest YGOPro kernel, fully fixing GLIBC version mismatch load crashes
+- **🐚 One-click setup script**: Added `setup.sh` — auto-detects CUDA, creates venv, installs deps. Supports `--train`, `--duel` modes
+- **⬇️ Enhanced update tool**: `update_core_code()` now falls back to GitHub ZIP Archive when `.git` is absent (one-click package scenario)
+- **🔧 GLIBC compatibility check**: `setup.sh` auto-detects the GLIBC version required by `ocgcore.so` and prints upgrade instructions on mismatch
+
+### ✨ New Features
+
+- **👻 Ghost byte parsing toggle (`--standard_core`)**: Both WebUI and CLI now have a "Disable Ghost Byte" option, unchecked by default (ghost byte parsing enabled). For self-compiled standard cores that experience parsing errors/corruption on messages 16/31, toggle this on to fix
+
+### 🐛 Fixes
+
+- Fixed `update_core_code()` failing on Linux when `.git` directory is missing
+- Fixed default repo URL in `update_tools.py` pointing to wrong repository
+
+---
+
 ## [v3.2.0] - 2026-05
 
 ### ✨ Major Architecture Upgrades

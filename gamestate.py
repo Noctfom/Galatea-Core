@@ -15,6 +15,9 @@ from data_types import GameSnapshot, GlobalFeature, CardEntity, GameAction
 
 _META_STAPLES = None
 
+# 内核协议开关：默认为 True (读取16/31幽灵字节)
+CORE_HAS_GHOST_BYTE = True
+
 class MessageParser:
     # 基于源码的精确长度定义 (Payload长度)
     # -1: 变长消息，进入 calculate_dynamic_length
@@ -84,7 +87,7 @@ class MessageParser:
                 stream.read(1); length += 1 # P
                 for i in range(6): 
                     b = stream.read(1); length += 1
-                    count = struct.unpack('B', b)[0]
+                    count = struct.unpack('<B', b)[0]
                     item_len = 11 if i == 5 else 7
                     stream.read(count * item_len); length += count * item_len
                 stream.read(3); length += 3
@@ -93,10 +96,10 @@ class MessageParser:
             elif msg_type == 10:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1
-                c = struct.unpack('B', b)[0]
+                c = struct.unpack('<B', b)[0]
                 stream.read(c * 11); length += c * 11
                 b = stream.read(1); length += 1
-                c = struct.unpack('B', b)[0]
+                c = struct.unpack('<B', b)[0]
                 stream.read(c * 8); length += c * 8
                 stream.read(2); length += 2
 
@@ -104,25 +107,25 @@ class MessageParser:
             elif msg_type == 14:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 4); length += count * 4
 
             # 15/20: SELECT_CARD / TRIBUTE
             elif msg_type in [15, 20]:
                 stream.read(4); length += 4 # P, Cancel, Min, Max
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 8); length += count * 8
 
             # 16: SELECT_CHAIN
             elif msg_type == 16:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(10); length += 10 # Spe, forced, h1, h2
                 
                 # [额外修复] 元素之间有 1 个字节的定界符 (共 count-1 个)
-                extra_bytes = max(0, count - 1)
+                extra_bytes = max(0, count - 1) if CORE_HAS_GHOST_BYTE else 0
                 stream.read(count * 13 + extra_bytes); length += count * 13 + extra_bytes
 
             # 18/24: PLACE / DISFIELD
@@ -133,91 +136,92 @@ class MessageParser:
             elif msg_type == 21:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 7); length += count * 7
 
             # 22: SELECT_COUNTER
             elif msg_type == 22:
                 stream.read(5); length += 5 # P, type(2), qty(2)
                 b = stream.read(1); length += 1 # Size
-                size = struct.unpack('B', b)[0]
+                size = struct.unpack('<B', b)[0]
                 stream.read(size * 9); length += size * 9
 
             # 23: SELECT_SUM 
             elif msg_type == 23:
                 stream.read(8); length += 8 # Header
                 b = stream.read(1); length += 1 # Must_count
-                must_c = struct.unpack('B', b)[0]
+                must_c = struct.unpack('<B', b)[0]
                 stream.read(must_c * 11); length += must_c * 11
                 b = stream.read(1); length += 1 # Sel_count
-                sel_c = struct.unpack('B', b)[0]
+                sel_c = struct.unpack('<B', b)[0]
                 stream.read(sel_c * 11); length += sel_c * 11
 
             # 25: SORT_CARD
             elif msg_type == 25:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 7); length += count * 7
 
             # 26: SELECT_UNSELECT
             elif msg_type == 26:
                 stream.read(5); length += 5 # Header 5 bytes
                 b = stream.read(1); length += 1 # Size_A
-                size_a = struct.unpack('B', b)[0]
+                size_a = struct.unpack('<B', b)[0]
                 stream.read(size_a * 8); length += size_a * 8
                 b = stream.read(1); length += 1 # Size_B
-                size_b = struct.unpack('B', b)[0]
+                size_b = struct.unpack('<B', b)[0]
                 stream.read(size_b * 8); length += size_b * 8
 
             # 30/34/42: CONFIRM
             elif msg_type in [30, 34, 42]:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 7); length += count * 7
 
             # 31: CONFIRM_CARDS
             elif msg_type == 31:
                 stream.read(1); length += 1 # P
                 # [额外修复] 吞掉强制插入的未知幽灵字节
-                stream.read(1); length += 1 
+                if CORE_HAS_GHOST_BYTE:
+                    stream.read(1); length += 1
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 7); length += count * 7
 
             # 36: SHUFFLE_SET_CARD
             elif msg_type == 36:
                 stream.read(1); length += 1 # Loc
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 8); length += count * 8
 
             # 33/39/81/90/142/143: 1P + 1Count + Count*4
             elif msg_type in [33, 39, 81, 90, 142, 143]:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 4); length += count * 4
 
             # 83: BECOME_TARGET
             elif msg_type == 83:
                 b = stream.read(1); length += 1 # Count (无 P 字节)
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 4); length += count * 4
 
             # 130/131: TOSS_COIN/DICE
             elif msg_type in [130, 131]:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
-                count = struct.unpack('B', b)[0]
+                count = struct.unpack('<B', b)[0]
                 stream.read(count * 1); length += count * 1
 
             # 161: TAG_SWAP
             elif msg_type == 161:
                 stream.read(1); length += 1 # P
                 b = stream.read(4); length += 4 # main, extra, extra_p, hand
-                _, extra_len, _, hand_len = struct.unpack('BBBB', b)
+                _, extra_len, _, hand_len = struct.unpack('<BBBB', b)
                 stream.read(4); length += 4 # Deck top
                 stream.read(hand_len * 4); length += hand_len * 4
                 stream.read(extra_len * 4); length += extra_len * 4
@@ -225,27 +229,27 @@ class MessageParser:
             # 162: RELOAD_FIELD
             elif msg_type == 162:
                 b = stream.read(1); length += 1
-                rule = struct.unpack('B', b)[0]
+                rule = struct.unpack('<B', b)[0]
                 mzone_size = 7 if rule >= 4 else 5
                 for _ in range(2):
                     stream.read(4); length += 4 
                     for _ in range(mzone_size):
                         b = stream.read(1); length += 1
-                        if struct.unpack('B', b)[0] != 0:
+                        if struct.unpack('<B', b)[0] != 0:
                             stream.read(2); length += 2 
                     for _ in range(8):
                         b = stream.read(1); length += 1
-                        if struct.unpack('B', b)[0] != 0:
+                        if struct.unpack('<B', b)[0] != 0:
                             stream.read(1); length += 1 
                     stream.read(6); length += 6 
                 b = stream.read(1); length += 1
-                chain_size = struct.unpack('B', b)[0]
+                chain_size = struct.unpack('<B', b)[0]
                 stream.read(chain_size * 15); length += chain_size * 15
 
             # 163/164: STRING MESSAGES
             elif msg_type in [163, 164]:
                 b = stream.read(2); length += 2
-                str_len = struct.unpack('H', b)[0]
+                str_len = struct.unpack('<H', b)[0]
                 stream.read(str_len + 1); length += str_len + 1
 
             else:
@@ -293,7 +297,7 @@ class MessageParser:
             start_pos = stream.tell()
             b = stream.read(1)
             if not b: break
-            msg_type = struct.unpack('B', b)[0]
+            msg_type = struct.unpack('<B', b)[0]
 
             # [异常拦截]
             if msg_type not in VALID_MSGS:
@@ -313,12 +317,12 @@ class MessageParser:
             if msg_type == 5:
                 if stream.tell() < data_len:
                     wb = stream.read(1)
-                    winner = struct.unpack('B', wb)[0]
+                    winner = struct.unpack('<B', wb)[0]
                     
                     reason = 0
                     if stream.tell() < data_len:
                         rb = stream.read(1)
-                        reason = struct.unpack('B', rb)[0]
+                        reason = struct.unpack('<B', rb)[0]
                         
                     stream.seek(start_pos + 1)
                     
@@ -405,8 +409,9 @@ class DuelState:
             # --- 状态维护 ---
             if msg_type in [30, 31, 42]:
                 stream.read(1) # P
-                if msg_type == 31: stream.read(1) #未知幽灵字节
-                count = struct.unpack('B', stream.read(1))[0]
+                if msg_type == 31 and CORE_HAS_GHOST_BYTE:
+                    stream.read(1) #未知幽灵字节
+                count = struct.unpack('<B', stream.read(1))[0]
                 for _ in range(count):
                     code = struct.unpack('<I', stream.read(4))[0]
                     stream.read(3) # c, l, s
@@ -494,11 +499,11 @@ class DuelState:
             elif msg_type == 70: # MSG_CHAINING (严格匹配 C++ 的 16 字节)
                 code = struct.unpack('<I', stream.read(4))[0]
                 info_loc = struct.unpack('<I', stream.read(4))[0] # 卡片当前位置
-                tc = struct.unpack('B', stream.read(1))[0]      # 触发控制者
-                tl = struct.unpack('B', stream.read(1))[0]      # 触发区域
-                ts = struct.unpack('B', stream.read(1))[0]      # 触发编号
+                tc = struct.unpack('<B', stream.read(1))[0]      # 触发控制者
+                tl = struct.unpack('<B', stream.read(1))[0]      # 触发区域
+                ts = struct.unpack('<B', stream.read(1))[0]      # 触发编号
                 desc = struct.unpack('<I', stream.read(4))[0]   # 效果描述
-                ct = struct.unpack('B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
+                ct = struct.unpack('<B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
                 
                 # 压入堆栈记事本
                 self.chain_stack.append({'code': code, 'c': tc, 'l': tl, 's': ts, 'desc': desc})
@@ -518,8 +523,8 @@ class DuelState:
 
             elif msg_type == 90: # DRAW (抽卡)
                 #  [录像修复 B] 记录抽卡到手牌！
-                p = struct.unpack('B', stream.read(1))[0]
-                count = struct.unpack('B', stream.read(1))[0]
+                p = struct.unpack('<B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
                 for _ in range(count):
                     raw_code = struct.unpack('<I', stream.read(4))[0]
                     code = raw_code & 0x7FFFFFFF
@@ -570,12 +575,12 @@ class DuelState:
                     self.field_map[tc][tl][ts]['is_equipped'] = True
             
             elif msg_type == 40: self.turn += 1
-            elif msg_type == 41: self.phase = struct.unpack('H', stream.read(2))[0]
+            elif msg_type == 41: self.phase = struct.unpack('<H', stream.read(2))[0]
 
             # --- [新增] 动作空间解析 (Action Parsing) ---
             # 如果是交互消息，解析出 valid_actions
             if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
-                self.active_player = struct.unpack('B', msg_payload[0:1])[0]
+                self.active_player = struct.unpack('<B', msg_payload[0:1])[0]
                 self._parse_valid_actions(msg_type, stream)
             # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
             # 否则重演时无法用上一次的选项去验证人类的修正点击
@@ -606,7 +611,7 @@ class DuelState:
                 for at in action_types:
                     b = stream.read(1)
                     if not b: break # <--- [修改] 读不到就停，别报错
-                    count = struct.unpack('B', b)[0]
+                    count = struct.unpack('<B', b)[0]
                     
                     need_bytes = 11 if at == 5 else 7
                     for i in range(count):
@@ -617,15 +622,15 @@ class DuelState:
                         # 手动解包
                         if at == 5:
                             code = struct.unpack('<I', raw_bytes[0:4])[0]
-                            c = struct.unpack('B', raw_bytes[4:5])[0]
-                            l = struct.unpack('B', raw_bytes[5:6])[0]
-                            s = struct.unpack('B', raw_bytes[6:7])[0]
+                            c = struct.unpack('<B', raw_bytes[4:5])[0]
+                            l = struct.unpack('<B', raw_bytes[5:6])[0]
+                            s = struct.unpack('<B', raw_bytes[6:7])[0]
                             desc = struct.unpack('<I', raw_bytes[7:11])[0]
                         else:
                             code = struct.unpack('<I', raw_bytes[0:4])[0]
-                            c = struct.unpack('B', raw_bytes[4:5])[0]
-                            l = struct.unpack('B', raw_bytes[5:6])[0]
-                            s = struct.unpack('B', raw_bytes[6:7])[0]
+                            c = struct.unpack('<B', raw_bytes[4:5])[0]
+                            l = struct.unpack('<B', raw_bytes[5:6])[0]
+                            s = struct.unpack('<B', raw_bytes[6:7])[0]
                             desc = 0
                         
                         loc_raw = LocationInfo.encode(c, l, s, 0)
@@ -637,10 +642,10 @@ class DuelState:
                 # 能读几个是几个，绝对不报错
                 bp = 0; ep = 0
                 b = stream.read(1)
-                if b: bp = struct.unpack('B', b)[0]
+                if b: bp = struct.unpack('<B', b)[0]
                 
                 b = stream.read(1)
-                if b: ep = struct.unpack('B', b)[0]
+                if b: ep = struct.unpack('<B', b)[0]
                 
                 # shuf 读不读无所谓
                 
@@ -649,15 +654,15 @@ class DuelState:
 
             # 2. MSG_SELECT_CHAIN (16)
             elif msg_type == 16:
-                player = struct.unpack('B', stream.read(1))[0]
-                count = struct.unpack('B', stream.read(1))[0]
-                spe_count = struct.unpack('B', stream.read(1))[0]
-                forced = struct.unpack('B', stream.read(1))[0]
+                player = struct.unpack('<B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
+                spe_count = struct.unpack('<B', stream.read(1))[0]
+                forced = struct.unpack('<B', stream.read(1))[0]
                 stream.read(8) # 跳过 hint1 (4), hint2 (4)
                 
                 for i in range(count):
                     # 【定界符】C++ 在多个项目之间会隐式插入一个 0x00
-                    if i > 0:
+                    if i > 0 and CORE_HAS_GHOST_BYTE:
                         stream.read(1) 
                         
                     stream.read(1) # Flag
@@ -679,9 +684,9 @@ class DuelState:
             # 结构: P + Cancelable + Min + Max + Count + List(Code4+Loc4)
             elif msg_type == 15:
                 stream.read(1) # P
-                can_cancel = struct.unpack('B', stream.read(1))[0]
+                can_cancel = struct.unpack('<B', stream.read(1))[0]
                 stream.read(2) # Min, Max
-                count = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
                 
                 for i in range(count):
                     code = struct.unpack('<I', stream.read(4))[0]
@@ -700,15 +705,15 @@ class DuelState:
                 
                 # --- A. Activatable (发动效果) ---
                 # C++: write_buffer8(core.select_chains.size())
-                count = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
                 
                 for i in range(count):
                     # C++ 结构 (11 字节): 
                     # Code(4) + Controler(1) + Location(1) + Sequence(1) + Desc(4)
                     code = struct.unpack('<I', stream.read(4))[0]
-                    c = struct.unpack('B', stream.read(1))[0]
-                    l = struct.unpack('B', stream.read(1))[0]
-                    s = struct.unpack('B', stream.read(1))[0]
+                    c = struct.unpack('<B', stream.read(1))[0]
+                    l = struct.unpack('<B', stream.read(1))[0]
+                    s = struct.unpack('<B', stream.read(1))[0]
                     desc = struct.unpack('<I', stream.read(4))[0]
                     
                     # 编码位置 -> Entity ID
@@ -721,16 +726,16 @@ class DuelState:
 
                 # --- B. Attackable (攻击宣言) ---
                 # C++: write_buffer8(core.attackable_cards.size())
-                count_atk = struct.unpack('B', stream.read(1))[0]
+                count_atk = struct.unpack('<B', stream.read(1))[0]
                 
                 for i in range(count_atk):
                     # C++ 结构 (8 字节):
                     # Code(4) + Controler(1) + Location(1) + Sequence(1) + Direct(1)
                     code = struct.unpack('<I', stream.read(4))[0]
-                    c = struct.unpack('B', stream.read(1))[0]
-                    l = struct.unpack('B', stream.read(1))[0]
-                    s = struct.unpack('B', stream.read(1))[0]
-                    direct = struct.unpack('B', stream.read(1))[0]
+                    c = struct.unpack('<B', stream.read(1))[0]
+                    l = struct.unpack('<B', stream.read(1))[0]
+                    s = struct.unpack('<B', stream.read(1))[0]
+                    direct = struct.unpack('<B', stream.read(1))[0]
                     
                     # 编码位置 -> Entity ID
                     loc_raw = LocationInfo.encode(c, l, s, 0)
@@ -742,8 +747,8 @@ class DuelState:
                     )
 
                 # --- C. Phase Transition ---
-                m2 = struct.unpack('B', stream.read(1))[0]
-                ep = struct.unpack('B', stream.read(1))[0]
+                m2 = struct.unpack('<B', stream.read(1))[0]
+                ep = struct.unpack('<B', stream.read(1))[0]
                 
                 # [修正] M2=2, EP=3 (C++ t=2, t=3)
                 if m2: self.current_valid_actions.append(GameAction(action_type=2, index=0, desc_str="To M2"))
@@ -755,9 +760,9 @@ class DuelState:
                 # 结构: P(1) + Code(4) + C(1) + L(1) + S(1) + Desc(4)
                 stream.read(1) # P
                 code = struct.unpack('<I', stream.read(4))[0]
-                c = struct.unpack('B', stream.read(1))[0]
-                l = struct.unpack('B', stream.read(1))[0]
-                s = struct.unpack('B', stream.read(1))[0]
+                c = struct.unpack('<B', stream.read(1))[0]
+                l = struct.unpack('<B', stream.read(1))[0]
+                s = struct.unpack('<B', stream.read(1))[0]
                 desc = struct.unpack('<I', stream.read(4))[0]
                 
                 # 关键：绑定卡片位置,让 AI 知道是哪张卡在问
@@ -783,14 +788,14 @@ class DuelState:
             # 6. MSG_SELECT_OPTION (14)
             elif msg_type == 14:
                 stream.read(1) # P
-                count = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
                 for i in range(count):
                     self.current_valid_actions.append(GameAction(action_type=14, index=i, desc_str=f"Option {i}"))
 
             # 7. MSG_SELECT_POSITION (19)
             elif msg_type == 19:
                 stream.read(5) # P + Code
-                mask = struct.unpack('B', stream.read(1))[0]
+                mask = struct.unpack('<B', stream.read(1))[0]
                 # 0x1:ATK, 0x2:ATK_down(N/A), 0x4:DEF, 0x8:DEF_down
                 if mask & 0x1: self.current_valid_actions.append(GameAction(action_type=19, index=1, desc_str="ATK"))
                 if mask & 0x2: self.current_valid_actions.append(GameAction(action_type=19, index=2, desc_str="ATK_Down"))
@@ -799,7 +804,7 @@ class DuelState:
 
             # 8. MSG_SELECT_PLACE (18) / DISFIELD (24) - [攻克难点！]
             elif msg_type in [18, 24]:
-                stream.read(1); count = struct.unpack('B', stream.read(1))[0]
+                stream.read(1); count = struct.unpack('<B', stream.read(1))[0]
                 mask = struct.unpack('<I', stream.read(4))[0]
                 for i in range(32):
                     if not (mask & (1 << i)):
@@ -812,19 +817,19 @@ class DuelState:
             # 9. MSG_SELECT_UNSELECT (26)
             elif msg_type == 26:
                 stream.read(1) # P
-                finishable = struct.unpack('B', stream.read(1))[0]
-                cancelable = struct.unpack('B', stream.read(1))[0]
+                finishable = struct.unpack('<B', stream.read(1))[0]
+                cancelable = struct.unpack('<B', stream.read(1))[0]
                 stream.read(2) # min, max
                 
                 # 可选卡片 (Select)
-                count_sel = struct.unpack('B', stream.read(1))[0]
+                count_sel = struct.unpack('<B', stream.read(1))[0]
                 for i in range(count_sel):
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     self.current_valid_actions.append(GameAction(action_type=26, index=i, target_entity_idx=loc_val, desc_str="Select"))
                 
                 # 可取消卡片 (Unselect)
-                count_unsel = struct.unpack('B', stream.read(1))[0]
+                count_unsel = struct.unpack('<B', stream.read(1))[0]
                 for i in range(count_unsel):
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
@@ -841,7 +846,7 @@ class DuelState:
             # =================================================================
             elif msg_type in [140, 141, 142, 143]:
                 stream.read(1) # P
-                count = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
                 
                 # 种族 (140) / 属性 (141)
                 if msg_type in [140, 141]:
@@ -869,8 +874,8 @@ class DuelState:
                             try:
                                 card_db.get_full_stats(pure_code) # 数据库自检
                                 unique_codes.add(pure_code)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                print(f"⚠️ [RPN VM] 无法识别的卡片代码 {pure_code}，已自动忽略: {e}")
                     
                     # 有些卡会把真实卡密直接作为参数发过来！
                     for op in opcodes:
@@ -992,8 +997,8 @@ class DuelState:
                             elif hasattr(self, 'history_stack') and self.history_stack:
                                 top_code = self.history_stack[0]['code']
                                 trigger_card = f"最近动向 -> 【{card_db.get_card_name(top_code)}】({top_code})"
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"⚠️ [Gamestate RPN雷达] 回退机制触发，但抓取触发源头失败: {e}")
 
                         print("❌ [Gamestate RPN雷达] Type 142 (卡名宣言) 过滤后选项集全空！")
                         print(f"   -> 🎯 触发源头: {trigger_card}")

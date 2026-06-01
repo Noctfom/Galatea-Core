@@ -167,7 +167,7 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
             
             elif msg_type == 41: # PHASE
                 try:
-                    phase = struct.unpack('H', msg_payload[0:2])[0]
+                    phase = struct.unpack('<H', msg_payload[0:2])[0]
                     print(f"[阶段] {Phases.get_str(phase)}")
                 except: pass
 

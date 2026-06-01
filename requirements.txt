@@ -29,6 +29,7 @@ pyzmq>=25.0.0
 
 # -- ONNX Inference Acceleration (optional, for --use_onnx) --
 onnxruntime>=1.16.0
+onnxscript
 
 # -- System Monitoring --
 psutil>=5.9.0

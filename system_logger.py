@@ -8,20 +8,36 @@ class DualLogger:
     def __init__(self, log_dir="./system_logs", prefix="main", max_logs=30):
         os.makedirs(log_dir, exist_ok=True)
         
-        # 1. 自动清理旧日志
+        # 尝试从环境变量获取全局统一的训练批次 ID
+        run_id = os.environ.get('GALATEA_RUN_ID', None)
+        
+        if run_id:
+            # 如果有 run_id，强制使用统一命名 (如 worker_0_20231025_120000.log)
+            self.log_file = os.path.join(log_dir, f"{prefix}_{run_id}.log")
+        else:
+            # 如果没有 (比如单独测试 worker)，则按当前时间戳生成
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.log_file = os.path.join(log_dir, f"{prefix}_{timestamp}.log")
+            
+        # 自动清理旧日志 (排除当前正在使用的这个文件，防误删)
         try:
             existing_logs = sorted(glob.glob(os.path.join(log_dir, f"{prefix}_*.log")), key=os.path.getmtime)
+            existing_logs = [f for f in existing_logs if os.path.abspath(f) != os.path.abspath(self.log_file)]
+            
             while len(existing_logs) >= max_logs:
                 oldest_log = existing_logs.pop(0)
                 os.remove(oldest_log)
         except Exception:
             pass
 
-        # 2. 创建新日志文件
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file = os.path.join(log_dir, f"{prefix}_{timestamp}.log")
         self.terminal = sys.stdout
+        
+        # "a" 追加模式是灵魂,同一次训练的后续 Iteration 会自动在文件末尾写
         self.file = open(self.log_file, "a", encoding="utf-8")
+        
+        # 写入分界线，方便你在几万行日志里看出这是哪一轮(Iteration)重启的
+        start_time = datetime.datetime.now().strftime("%H:%M:%S")
+        self.file.write(f"\n\n{'='*60}\n🚀 [Process Spawned] {start_time} - Worker Active \n{'='*60}\n")
         
         # 性能核心：记录上一次 flush 的时间
         self.last_flush_time = time.time()

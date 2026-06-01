@@ -28,7 +28,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.2.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.3.0"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -506,6 +506,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         c_onnx = st.checkbox(_("同时导出 ONNX 静态模型 (--use_onnx)", "Export ONNX Model (--use_onnx)"), value=True, 
                              help=_("开启后会在保存 Checkpoint 时同步导出优化后的 .onnx 文件，大幅加速老模型对打和自决斗时的 CPU 推理速度。", 
                                    "Export .onnx graphs synchronously to accelerate CPU inference during arena duels."))
+        c_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False, 
+                                 help=_("如果使用自编译的无幽灵字节内核(Standard Core)，请勾选此项以防止解析错位。", "Check this if using a custom core without ghost bytes at 16/31 messages."))
         
         if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
             if is_running:
@@ -533,7 +535,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_async: cmd.append("--async_infer")
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
-            
+                if c_std_core: cmd.append("--standard_core")
                 p = subprocess.Popen(cmd) 
                 st.session_state.running_pid = p.pid # 🌟 记录PID
                 st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
@@ -559,6 +561,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             with c2:
                 d_freq = st.number_input("🧠 " + _("读心频率 (导出 JSON)", "Thought Log Freq"), value=5, 
                                          help=_("每隔 N 局保存一次极其详尽的 AI 脑电波日志（存放于 ./ai_thoughts/），用于后续读心回放复盘。设为 0 关闭。", "Save AI probability dist every N games for replay."))
+            d_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False)
             
             if st.form_submit_button("⚔️ " + _("在后台启动竞技场", "Start Arena Process"), use_container_width=True):
                 if is_running:
@@ -567,6 +570,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     if d_p0 != "None":
                         cmd = [sys.executable, "main.py", "duel", "--p0", d_p0, "--num", str(d_num), "--thought_freq", str(d_freq)]
                         if d_p1 != "None": cmd.extend(["--p1", d_p1])
+                        if d_std_core: cmd.append("--standard_core")
                         p = subprocess.Popen(cmd)
                         st.session_state.running_pid = p.pid # 🌟 记录PID
                         st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
@@ -594,11 +598,15 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         with c_run:
             with st.form("selfcheck_form"):
                 sc_num = st.number_input(_("极端压测局数", "Number of Games"), min_value=1, value=50, step=10)
+                sc_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False)
+
                 if st.form_submit_button("🚀 " + _("启动 RuleBot 压测", "Start Self-Check"), type="primary", use_container_width=True):
                     if is_running:
                         st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
                     else:
                         cmd = [sys.executable, "main.py", "play", "-n", str(sc_num)]
+                        if sc_std_core:
+                            cmd.append("--standard_core")
                         p = subprocess.Popen(cmd)
                         st.session_state.running_pid = p.pid
                         st.success(_(f"自检压测启动 (PID: {p.pid})！", f"Self-Check started (PID: {p.pid})!"))

@@ -153,6 +153,7 @@ def main():
     train_parser.add_argument('--no_compile', action='store_true', help='禁用 torch.compile (兼容性模式)')
 
     train_parser.add_argument('--use_onnx', action='store_true', help='开启 ONNX 后台导出与 Worker 本地极速推理')
+    train_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
 
     # RL 灵魂超参数
     train_parser.add_argument('--gamma', type=float, default=0.998, help='目光长远度 (推荐0.998)')
@@ -167,7 +168,9 @@ def main():
     play_parser = subparsers.add_parser('play', help='运行自我博弈测试')
     play_parser.add_argument('-n', '--num', type=int, default=10, help='对局数量')
     play_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
-    
+    play_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
+
+
     # --- 3. 竞技场模式 (Duel) ---
     duel_parser = subparsers.add_parser('duel', help='模型竞技场')
     duel_parser.add_argument('--p0', type=str, default=None, help='P0 模型路径')
@@ -180,7 +183,7 @@ def main():
     duel_parser.add_argument("--d_model", type=int, default=256, help="Model dimension")
     duel_parser.add_argument("--n_heads", type=int, default=4, help="Attention heads")
     duel_parser.add_argument("--n_layers", type=int, default=2, help="Transformer layers")
-
+    duel_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
     # --- 4. 语义化提取模式 (Parse) ---
     parse_parser = subparsers.add_parser('parse', help='提取并更新卡片Lua脚本语义知识库')
     parse_parser.add_argument('--script_dir', type=str, default='./script', help='Lua脚本所在目录')
@@ -243,7 +246,8 @@ def main():
             entropy=args.entropy,
             gae_lambda=args.gae_lambda,
             clip_eps=args.clip_eps,
-            use_onnx=args.use_onnx
+            use_onnx=args.use_onnx,
+            standard_core=args.standard_core
         )
         trainer.run_training_loop(max_iterations=args.steps)
         
@@ -271,7 +275,8 @@ def main():
             'n_heads': args.n_heads,
             'n_layers': args.n_layers,
             'vocab_size': 20000, # 这个通常不变，不需要传参
-            'thought_freq': args.thought_freq  # [新增] 把参数传给竞技场
+            'thought_freq': args.thought_freq,  # [新增] 把参数传给竞技场
+            'standard_core': args.standard_core  # [新增] 把参数传给竞技场
         }
 
         arena = ModelArena(
@@ -279,7 +284,8 @@ def main():
             model_p1_path=args.p1, 
             device=args.device,
             deck_dir=args.deck_dir,
-            config=config
+            config=config,
+            standard_core=args.standard_core
         )
         arena.run_tournament(n_games=args.num)
         

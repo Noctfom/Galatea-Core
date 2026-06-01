@@ -170,7 +170,7 @@ python main.py parse --script_dir ./script
 ## 🙏 致谢
 
 - [OCGCore](https://github.com/Fluorohydride/ygopro-core) - YGOPRO 核心引擎，万物之源
-- [MDPro3](https://code.moenext.com/sherry_chaos/MDPro3) - MDPro3，目前优先适配的端，以及目前使用的核心
+- [MDPro3](https://code.moenext.com/sherry_chaos/MDPro3) - MDPro3，目前优先适配的端
 - [YGOPro 官方脚本库](https://github.com/Fluorohydride/ygopro-scripts) - 官方 Lua 脚本仓库，卡片效果解析的基础
 - [萌卡 MyCard](https://github.com/mycard/ygopro-database) - cards.cdb 卡片数据库来源
 - [百鸽 YGOCDB](https://ygocdb.com/) - 卡片图片渲染 API 与数据查询

@@ -23,17 +23,114 @@ MOCKA_CDB_URL = "https://raw.githubusercontent.com/mycard/ygopro-database/master
 OFFICIAL_SCRIPT_REPO = "https://github.com/Fluorohydride/ygopro-scripts.git"
 
 def update_core_code():
-    """更新本地核心代码 (相当于 git pull)"""
+    """更新本地核心代码。有 .git 则 git pull，否则从 GitHub ZIP Archive 覆盖更新"""
     print("🚀 正在检查并拉取核心代码更新...")
+
+    # ----- 路径 A：标准 Git 仓库 -----
+    if os.path.exists(".git"):
+        try:
+            result = subprocess.run(
+                ["git", "pull", "origin", "main"],
+                capture_output=True, text=True, check=True
+            )
+            print(f"✅ 代码更新成功:\n{result.stdout.strip()}")
+            return True
+        except Exception as e:
+            print(f"❌ Git 更新失败: {e}")
+            # 不直接 return False —— 下面还有 ZIP 兜底
+            print("🔄 尝试使用 ZIP Archive 方式作为备用方案...")
+    else:
+        print("ℹ️  当前目录不是 Git 仓库，将使用 ZIP Archive 方式更新。")
+
+    # ----- 路径 B：ZIP Archive 下载 + 覆盖（一键包 / 非 git 环境）-----
+    return _update_core_via_zip()
+
+
+def _update_core_via_zip():
+    """通过 GitHub ZIP Archive 下载最新代码并覆盖 .py 文件"""
+    zip_url = _git_url_to_zip_url(MY_REPO_URL)
+    print(f"📥 正在下载最新代码包 (ZIP Archive)...")
+
     try:
-        if not os.path.exists(".git"):
-            print("⚠️ 当前目录不是一个 Git 仓库，无法执行自动更新。")
-            return False
-        result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, check=True)
-        print(f"✅ 代码更新成功:\n{result.stdout.strip()}")
-        return True
+        req = urllib.request.Request(zip_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            zip_data = response.read()
+
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            root_prefix = _find_zip_root_prefix(zf)  # e.g. "Galatea-Core-master/"
+
+            # 用户数据目录/文件，跳过不覆盖
+            SKIP_PATTERNS = [
+                'cards.cdb',
+                'knowledge_base.json',
+                'meta_staples.json',
+                '一键包启动Webui.bat',
+                '.gitignore',
+                '.git/',
+                'script/',
+                'decks/',
+                'models/',
+                'runs/',
+                'ai_thoughts/',
+                'replays/',
+                'replay_data/',
+                'system_logs/',
+                'web_data/',
+                'deploy_packages/',
+                'python_env/',
+                'venv/',
+                '__pycache__/',
+                '.vscode/',
+            ]
+
+            updated_count = 0
+            for member in zf.namelist():
+                # 去掉仓库根目录前缀
+                rel_path = member[len(root_prefix):] if root_prefix else member
+                if not rel_path:
+                    continue
+
+                # 跳过目录条目
+                if rel_path.endswith('/'):
+                    continue
+
+                # 跳过用户数据
+                skip = False
+                for pattern in SKIP_PATTERNS:
+                    if pattern.endswith('/'):
+                        if rel_path.startswith(pattern) or rel_path == pattern[:-1]:
+                            skip = True
+                            break
+                    else:
+                        if rel_path == pattern:
+                            skip = True
+                            break
+                if skip:
+                    continue
+
+                # 只更新 .py / .md / .txt 等核心文件
+                if not (rel_path.endswith('.py') or rel_path.endswith('.md') or rel_path.endswith('.txt')):
+                    continue
+
+                # 确保目标目录存在
+                target_path = os.path.join('.', rel_path)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+                # 写入文件
+                with zf.open(member) as src:
+                    with open(target_path, 'wb') as dst:
+                        dst.write(src.read())
+                updated_count += 1
+
+            if updated_count > 0:
+                print(f"✅ 核心代码更新完成！共更新了 {updated_count} 个文件。")
+                return True
+            else:
+                print("ℹ️  未发现需要更新的文件，当前已是最新版本。")
+                return True
+
     except Exception as e:
-        print(f"❌ 代码更新失败: {e}")
+        print(f"❌ ZIP 更新失败: {e}")
         return False
 
 def update_data_and_scripts(repo_type='default', force=False):

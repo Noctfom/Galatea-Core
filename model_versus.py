@@ -20,8 +20,16 @@ from thought_logger import AIThoughtLogger
 
 class ModelArena:
     # 增加 config 参数
-    def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None):
+    def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None, standard_core=False):
         self.deck_dir = deck_dir
+        self.standard_core = standard_core
+
+        import gamestate
+        if standard_core:
+            gamestate.CORE_HAS_GHOST_BYTE = False
+            print("🔧 [Arena] 协议自适应：已关闭幽灵定界符 (Standard Core Mode)")
+        else:
+            gamestate.CORE_HAS_GHOST_BYTE = True
 
         # 1. 先处理设备
         if device == 'auto' or device is None:

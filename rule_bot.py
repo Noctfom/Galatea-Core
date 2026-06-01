@@ -70,7 +70,7 @@ def parse_idle_cmd(msg_data):
     for cat in range(6):
         b = stream.read(1)
         if not b: break
-        count = struct.unpack('B', b)[0]
+        count = struct.unpack('<B', b)[0]
         
         for i in range(count):
             stream.read(7) # code(4) + con(1) + loc(1) + seq(1)
@@ -78,9 +78,9 @@ def parse_idle_cmd(msg_data):
             legal_actions.append({'cat': cat, 'idx': i})          
 
     b = stream.read(1)
-    if b and struct.unpack('B', b)[0]: legal_actions.append({'cat': 6, 'idx': 0}) # BP
+    if b and struct.unpack('<B', b)[0]: legal_actions.append({'cat': 6, 'idx': 0}) # BP
     b = stream.read(1)
-    if b and struct.unpack('B', b)[0]: legal_actions.append({'cat': 7, 'idx': 0}) # EP
+    if b and struct.unpack('<B', b)[0]: legal_actions.append({'cat': 7, 'idx': 0}) # EP
     return legal_actions
 
 def parse_battle_cmd(msg_data):
@@ -92,7 +92,7 @@ def parse_battle_cmd(msg_data):
     # Activatable (发动效果)
     b = stream.read(1) 
     if b:
-        count = struct.unpack('B', b)[0]
+        count = struct.unpack('<B', b)[0]
         for i in range(count): 
             stream.read(11) # Skip details
             legal_actions.append({'cat': 0, 'idx': i})
@@ -100,7 +100,7 @@ def parse_battle_cmd(msg_data):
     # Attackable
     b = stream.read(1) 
     if b:
-        count = struct.unpack('B', b)[0]
+        count = struct.unpack('<B', b)[0]
         for i in range(count):
             code = struct.unpack('<I', stream.read(4))[0]
             stream.read(4) 
@@ -108,9 +108,9 @@ def parse_battle_cmd(msg_data):
             
     # M2 / EP
     b = stream.read(1); 
-    if b and struct.unpack('B', b)[0]: legal_actions.append({'cat': 2, 'idx': 0}) 
+    if b and struct.unpack('<B', b)[0]: legal_actions.append({'cat': 2, 'idx': 0}) 
     b = stream.read(1); 
-    if b and struct.unpack('B', b)[0]: legal_actions.append({'cat': 3, 'idx': 0}) 
+    if b and struct.unpack('<B', b)[0]: legal_actions.append({'cat': 3, 'idx': 0}) 
     return legal_actions
 
 # --- 核心决策逻辑 ---
@@ -224,7 +224,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             
             stream.read(1) 
             try:
-                count = struct.unpack('B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
             except:
                 return bytes([0])
             possible_choices = list(range(count))
@@ -276,7 +276,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         # =================================================================
         elif msg_type in [MSG_ANNOUNCE_RACE, MSG_ANNOUNCE_ATTRIB]:
             stream.read(1) # Player
-            count = struct.unpack('B', stream.read(1))[0] # 需要选几个
+            count = struct.unpack('<B', stream.read(1))[0] # 需要选几个
             available = struct.unpack('<I', stream.read(4))[0] # 可选掩码
             
             options = []
@@ -302,7 +302,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         # =================================================================
         elif msg_type == MSG_ANNOUNCE_CARD: # 142: 必须返回真实卡密
             stream.read(1)
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             for _ in range(count): stream.read(4)
             
             valid_codes = [act.desc_id for act in _shared_valid_actions if act.action_type == 142]
@@ -317,7 +317,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
 
         elif msg_type == MSG_ANNOUNCE_NUMBER: # 143: 必须返回索引
             stream.read(1)
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             for _ in range(count): stream.read(4) 
             
             decision = 0
@@ -339,7 +339,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 mask_byte = stream.read(1)
                 if not mask_byte: decision = bytes([1])
                 else:
-                    mask = struct.unpack('B', mask_byte)[0]
+                    mask = struct.unpack('<B', mask_byte)[0]
                     options = []
                     if mask & 0x1: options.append(1)
                     if mask & 0x2: options.append(2)
@@ -371,10 +371,10 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             stream.read(1) # 跳过 player_id
             
             try:
-                cancelable = struct.unpack('B', stream.read(1))[0]
-                min_c = struct.unpack('B', stream.read(1))[0]
-                max_c = struct.unpack('B', stream.read(1))[0]
-                list_len = struct.unpack('B', stream.read(1))[0]
+                cancelable = struct.unpack('<B', stream.read(1))[0]
+                min_c = struct.unpack('<B', stream.read(1))[0]
+                max_c = struct.unpack('<B', stream.read(1))[0]
+                list_len = struct.unpack('<B', stream.read(1))[0]
             except Exception as e:
                 print(f"⚠️ [RuleBot] 处理 MSG_SELECT_CARD 时发生异常: {e}")
                 return bytes([0]) 
@@ -438,15 +438,15 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     # [防爆2] 原有逻辑包裹在 try 中
                     # 源码结构: P(1)+Finish(1)+Can(1)+Min(1)+Max(1) + SizeA(1) + ...
                     stream.read(1) # Player
-                    finishable = struct.unpack('B', stream.read(1))[0]
-                    cancelable = struct.unpack('B', stream.read(1))[0]
-                    min_c = struct.unpack('B', stream.read(1))[0]
-                    max_c = struct.unpack('B', stream.read(1))[0]
+                    finishable = struct.unpack('<B', stream.read(1))[0]
+                    cancelable = struct.unpack('<B', stream.read(1))[0]
+                    min_c = struct.unpack('<B', stream.read(1))[0]
+                    max_c = struct.unpack('<B', stream.read(1))[0]
                     
-                    size_a = struct.unpack('B', stream.read(1))[0]
+                    size_a = struct.unpack('<B', stream.read(1))[0]
                     stream.read(size_a * 8) # 跳过 List A
                     
-                    size_b = struct.unpack('B', stream.read(1))[0]
+                    size_b = struct.unpack('<B', stream.read(1))[0]
                     stream.read(size_b * 8) # 跳过 List B
                     
                     # 策略：能结束就结束，否则从A里选一张
@@ -471,13 +471,13 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             if len(payload) < 10: return bytes([0])
             try:
                 stream = io.BytesIO(payload)
-                mode = struct.unpack('B', stream.read(1))[0]
+                mode = struct.unpack('<B', stream.read(1))[0]
                 stream.read(1) # 跳过 player_id
                 total_acc = struct.unpack('<I', stream.read(4))[0]
-                min_c = struct.unpack('B', stream.read(1))[0]
-                max_c = struct.unpack('B', stream.read(1))[0]
+                min_c = struct.unpack('<B', stream.read(1))[0]
+                max_c = struct.unpack('<B', stream.read(1))[0]
                 
-                must_count = struct.unpack('B', stream.read(1))[0]
+                must_count = struct.unpack('<B', stream.read(1))[0]
                 must_vals = []
                 for _ in range(must_count):
                     stream.read(7)
@@ -486,7 +486,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 
                 count_b = stream.read(1)
                 if not count_b: return bytes([0])
-                count = struct.unpack('B', count_b)[0]
+                count = struct.unpack('<B', count_b)[0]
 
                 candidates = []
                 for i in range(count):
@@ -558,7 +558,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         # ==================== 6. 排序与位置 (MSG_SORT_CARD) ====================
         elif msg_type == MSG_SORT_CARD:
             stream.read(1) # Player
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             # 后面是 count * 7 字节的卡片信息，跳过
             
             # 逻辑：返回一个全新的索引顺序。
@@ -573,8 +573,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         # [RuleBot 核弹级修复] 6. 全局位置选择 (Place/Disfield)
         elif msg_type in [MSG_SELECT_PLACE, MSG_SELECT_DISFIELD]:
             stream.seek(0) 
-            req_player = struct.unpack('B', stream.read(1))[0]
-            count = struct.unpack('B', stream.read(1))[0]
+            req_player = struct.unpack('<B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             # 防止核心发疯传来 count=0 导致 b'' 和 loc=0 越界崩溃
             count = max(1, count)
             mask = struct.unpack('<I', stream.read(4))[0]
@@ -663,14 +663,14 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             # 结构解析 (基于 C++ field::select_counter)
             stream.read(1) # Player
             stream.read(2) # Type
-            qty = struct.unpack('H', stream.read(2))[0] # 需要移除的总数
-            size = struct.unpack('B', stream.read(1))[0] # 列表长度
+            qty = struct.unpack('<H', stream.read(2))[0] # 需要移除的总数
+            size = struct.unpack('<B', stream.read(1))[0] # 列表长度
             
             cards = []
             for i in range(size):
                 # 9 Bytes: Code(4)+C(1)+L(1)+S(1)+Avail(2)
                 stream.read(7)
-                avail = struct.unpack('H', stream.read(2))[0]
+                avail = struct.unpack('<H', stream.read(2))[0]
                 cards.append({'idx': i, 'avail': avail})
                 
             # 分配逻辑：构造一个长度为 size 的数组，总和等于 qty
@@ -691,7 +691,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             # C++ 期望读取的是 int16 (svalue)，所以每个数字占 2 字节
             resp_buf = bytearray()
             for count_val in response:
-                resp_buf.extend(struct.pack('H', count_val))
+                resp_buf.extend(struct.pack('<H', count_val))
                 
             decision = bytes(resp_buf)
         
@@ -712,7 +712,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         # =================================================================
         elif msg_type == 130: # MSG_TOSS_COIN
             stream.read(1) # Player
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             # 这里的逻辑通常是 Core 告诉客户端结果，或者是客户端确认
             # 如果需要回复，通常是发 0 或 1 (猜正反)
             # 简单起见，发 0 (Heads) 或 1 (Tails) * Count
@@ -721,7 +721,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
 
         elif msg_type == 131: # MSG_TOSS_DICE
             stream.read(1) # Player
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             # 同上，回复占位符
             resp_buf = bytearray([0] * count)
             decision = bytes(resp_buf)
@@ -759,17 +759,17 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         # 1. 普通选卡 / 祭品 (Link, Xyz, 融合)
         if msg_type in [MSG_SELECT_CARD, MSG_SELECT_TRIBUTE]:
             stream.read(1) # P
-            cancelable = struct.unpack('B', stream.read(1))[0]
-            min_c = struct.unpack('B', stream.read(1))[0]
-            max_c = struct.unpack('B', stream.read(1))[0]
-            count = struct.unpack('B', stream.read(1))[0]
+            cancelable = struct.unpack('<B', stream.read(1))[0]
+            min_c = struct.unpack('<B', stream.read(1))[0]
+            max_c = struct.unpack('<B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             
             cards = []
             for i in range(count):
                 code = struct.unpack('<I', stream.read(4))[0] 
-                c = struct.unpack('B', stream.read(1))[0]
-                l = struct.unpack('B', stream.read(1))[0]
-                s = struct.unpack('B', stream.read(1))[0]
+                c = struct.unpack('<B', stream.read(1))[0]
+                l = struct.unpack('<B', stream.read(1))[0]
+                s = struct.unpack('<B', stream.read(1))[0]
                 stream.read(1) 
                 loc_raw = LocationInfo.encode(c, l, s, 0)
                 cards.append({'idx': i, 'loc': loc_raw, 'code': code})
@@ -840,32 +840,32 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 
         # 2. 星级凑数求和 (同调, 仪式, 以及械刀等特殊SumEqual卡)
         elif msg_type == MSG_SELECT_SUM:
-            mode = struct.unpack('B', stream.read(1))[0]
+            mode = struct.unpack('<B', stream.read(1))[0]
             stream.read(1) # P
             total_acc = struct.unpack('<I', stream.read(4))[0]
-            min_c = struct.unpack('B', stream.read(1))[0]
-            max_c = struct.unpack('B', stream.read(1))[0]
-            must_count = struct.unpack('B', stream.read(1))[0]
+            min_c = struct.unpack('<B', stream.read(1))[0]
+            max_c = struct.unpack('<B', stream.read(1))[0]
+            must_count = struct.unpack('<B', stream.read(1))[0]
             
             must_vals = []
             must_locs = []
             for _ in range(must_count):
                 stream.read(4) # Code
-                c = struct.unpack('B', stream.read(1))[0]
-                l = struct.unpack('B', stream.read(1))[0]
-                s = struct.unpack('B', stream.read(1))[0]
+                c = struct.unpack('<B', stream.read(1))[0]
+                l = struct.unpack('<B', stream.read(1))[0]
+                s = struct.unpack('<B', stream.read(1))[0]
                 must_locs.append(LocationInfo.encode(c, l, s, 0))
                 v = struct.unpack('<I', stream.read(4))[0]
                 must_vals.append(v)
             
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             
             candidates = []
             for i in range(count):
                 code = struct.unpack('<I', stream.read(4))[0]
-                c = struct.unpack('B', stream.read(1))[0]
-                l = struct.unpack('B', stream.read(1))[0]
-                s = struct.unpack('B', stream.read(1))[0]
+                c = struct.unpack('<B', stream.read(1))[0]
+                l = struct.unpack('<B', stream.read(1))[0]
+                s = struct.unpack('<B', stream.read(1))[0]
                 val = struct.unpack('<I', stream.read(4))[0]
                 candidates.append({'index': i, 'val': val, 'code': code, 'loc': LocationInfo.encode(c, l, s, 0)})
             
@@ -965,16 +965,16 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         elif msg_type == MSG_SELECT_COUNTER:
             stream.read(1) # Player
             stream.read(2) # Type
-            qty = struct.unpack('H', stream.read(2))[0]
-            size = struct.unpack('B', stream.read(1))[0]
+            qty = struct.unpack('<H', stream.read(2))[0]
+            size = struct.unpack('<B', stream.read(1))[0]
             
             cards = []
             for i in range(size):
                 code = struct.unpack('<I', stream.read(4))[0]
-                c = struct.unpack('B', stream.read(1))[0]
-                l = struct.unpack('B', stream.read(1))[0]
-                s = struct.unpack('B', stream.read(1))[0]
-                avail = struct.unpack('H', stream.read(2))[0]
+                c = struct.unpack('<B', stream.read(1))[0]
+                l = struct.unpack('<B', stream.read(1))[0]
+                s = struct.unpack('<B', stream.read(1))[0]
+                avail = struct.unpack('<H', stream.read(2))[0]
                 cards.append({'idx': i, 'avail': avail, 'code': code, 'loc': LocationInfo.encode(c, l, s, 0)})
             
             # DFS 分配指示物
@@ -985,7 +985,7 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                         resp_buf = bytearray()
                         locs = []
                         for i, count_val in enumerate(current_distribution):
-                            resp_buf.extend(struct.pack('H', count_val))
+                            resp_buf.extend(struct.pack('<H', count_val))
                             if count_val > 0: locs.append(cards[i]['loc'])
                         options.append({'bytes': bytes(resp_buf), 'locs': locs})
                     return
@@ -1008,13 +1008,13 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         # 4. 排序卡片
         elif msg_type == 25: # MSG_SORT_CARD
             stream.read(1) # P
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             cards = []
             for i in range(count):
                 code = struct.unpack('<I', stream.read(4))[0]
-                c = struct.unpack('B', stream.read(1))[0]
-                l = struct.unpack('B', stream.read(1))[0]
-                s = struct.unpack('B', stream.read(1))[0]
+                c = struct.unpack('<B', stream.read(1))[0]
+                l = struct.unpack('<B', stream.read(1))[0]
+                s = struct.unpack('<B', stream.read(1))[0]
                 cards.append({'idx': i, 'loc': LocationInfo.encode(c, l, s, 0), 'code': code})
                 
             valid_solutions = []
@@ -1039,7 +1039,7 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         # 5. 格子/区域封锁
         elif msg_type in [18, 24]: 
             stream.read(1) # P
-            count = struct.unpack('B', stream.read(1))[0]
+            count = struct.unpack('<B', stream.read(1))[0]
             mask = struct.unpack('<I', stream.read(4))[0]
             req_player = msg_payload[0] 
             
