@@ -186,7 +186,7 @@ class PPOTrainer:
             'card_race': ((120,), torch.long),
             'card_attr': ((120,), torch.long),
             'card_setcodes': ((120, 4), torch.long),
-            'card_feats': ((120, 58), torch.float32),
+            'card_feats': ((120, 66), torch.float32),
             'padding_mask': ((120,), torch.bool),
             
             # ---前场/后场/手牌 语义大脑皮层槽位 ---

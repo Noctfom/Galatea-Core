@@ -62,6 +62,7 @@ class CardEntity:
     counter_count: int = 0       # 指示物数量
     overlay_count: int = 0       # 叠放的超量素材数量
     is_equipped: bool = False    # 是否有装备卡/取对象羁绊
+    used_effect_mask: int = 0    # 已经发动过的效果 (Bitmask，区分同一张卡的不同效果)
 
 @dataclass
 class GameAction:

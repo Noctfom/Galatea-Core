@@ -167,7 +167,7 @@ class GalateaNet(nn.Module):
         
         # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
-        self.feat_proj = nn.Linear(58, self.d_model)
+        self.feat_proj = nn.Linear(66, self.d_model)
         self.race_embed = nn.Embedding(30, self.d_model, padding_idx=0)
         self.attr_embed = nn.Embedding(10, self.d_model, padding_idx=0)
         self.setcode_embed = nn.Embedding(4096, self.d_model, padding_idx=0) 

@@ -149,7 +149,7 @@ python main.py parse --script_dir ./script
 | GPU | GTX 1060 6GB | RTX 3060 12GB+ |
 | RAM | 16GB | 32GB+ |
 | 硬盘 | 10GB | SSD |
-| Linux | GLIBC ≥ 2.38（Ubuntu 22.04+） | — |
+| Linux | GLIBC ≥ 2.35（Ubuntu 22.04+） | — |
 
 ---
 
@@ -169,7 +169,7 @@ python main.py parse --script_dir ./script
 
 ## 🙏 致谢
 
-- [OCGCore](https://github.com/Fluorohydride/ygopro-core) - YGOPRO 核心引擎，万物之源
+- [YGOProCore](https://github.com/Fluorohydride/ygopro-core) - YGOPRO 核心引擎，万物之源
 - [MDPro3](https://code.moenext.com/sherry_chaos/MDPro3) - MDPro3，目前优先适配的端
 - [YGOPro 官方脚本库](https://github.com/Fluorohydride/ygopro-scripts) - 官方 Lua 脚本仓库，卡片效果解析的基础
 - [萌卡 MyCard](https://github.com/mycard/ygopro-database) - cards.cdb 卡片数据库来源

@@ -321,13 +321,6 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             loop_tracker = {}
             last_valid_hash = ""
 
-            oscillation_memory_idx = {}
-            oscillation_memory_val = {}
-            last_main_hash = ""
-            last_main_action_idx = None
-            last_main_action_val = None
-            last_msg_type = -1
-
             while ep_steps < MAX_EPISODE_STEPS:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
                 # 超时保护
@@ -432,37 +425,6 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
                     current_snap = brain.get_snapshot(env)
                     player = current_snap.global_data.to_play
-
-                    # 生成当前可选项的哈希值，用于检测局势是否发生了实质性变化
-                    current_hash = "|".join([f"{a.action_type}_{a.index}" for a in current_snap.valid_actions])
-                    
-                    if msg_type in [10, 11]:
-                        if current_hash != last_main_hash:
-                            # 真正的局势推进！当前可选项变了，清空旧的震荡记忆，防止跨回合误伤
-                            oscillation_memory_idx.clear()
-                            oscillation_memory_val.clear()
-                            last_main_hash = current_hash
-                            
-                        # 局势没变，且是从【选卡/祭品/对象等子菜单】退回来的 -> 发生死胡同回档！
-                        elif last_msg_type in [14, 15, 18, 20, 22, 23, 24, 26]:
-                            if last_main_action_idx is not None:
-                                oscillation_memory_idx[last_main_action_idx] = oscillation_memory_idx.get(last_main_action_idx, 0) + 1
-                                oscillation_memory_val[last_main_action_val] = oscillation_memory_val.get(last_main_action_val, 0) + 1
-                                
-                                # 只有当同一个选项连续导致 5 次回档时，才触发警报
-                                fail_count = oscillation_memory_idx[last_main_action_idx]
-                                if fail_count == 5:
-                                    print(f"⚠️ [Worker {worker_id}] 捕捉到状态回档 ({last_msg_type}->{msg_type})！选项 [{last_main_action_idx}] 连续 5 次死胡同，已正式记入黑名单。")
-
-                        # 将黑名单注入到当前的短期错题本 (只有失败 5 次及以上的才会被真正拉黑)
-                        for bad_idx, fails in oscillation_memory_idx.items():
-                            if fails >= 5 and bad_idx not in current_step_ignore_idx_list:
-                                current_step_ignore_idx_list.append(bad_idx)
-                        for bad_val, fails in oscillation_memory_val.items():
-                            if fails >= 5 and bad_val not in current_step_ignore_list:
-                                current_step_ignore_list.append(bad_val)
-
-                    last_msg_type = msg_type
 
                     perf_ledger['t_cpp_env'] += (time.time() - t_start) # 计时器1
                     
@@ -789,8 +751,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             loop_key = f"{current_hash}_{sel_idx}"
                             loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
                             
-                            # 3. 执法时刻：不论是 Cancel 还是什么神仙卡，同一个局势下连选 5 次，必是恶意拖延
-                            if loop_tracker[loop_key] >= 5:
+                            # 同一个局势下连选 10 次，是恶意拖延
+                            if loop_tracker[loop_key] >= 10:
                                 step_reward -= 0.005  # 重罚！
 
                             # --- 动作翻译 ---
@@ -806,10 +768,6 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             env.send_action(resp)
                             last_decision_value = resp
                             last_decision_idx = sel_idx 
-
-                            if msg_type in [10, 11]:
-                                last_main_action_idx = sel_idx
-                                last_main_action_val = resp
 
                             msg_queue = [] 
                             

@@ -149,7 +149,7 @@ python main.py parse --script_dir ./script
 | GPU | GTX 1060 6GB | RTX 3060 12GB+ |
 | RAM | 16GB | 32GB+ |
 | Disk | 10GB | SSD |
-| Linux | GLIBC ≥ 2.38 (Ubuntu 22.04+) | — |
+| Linux | GLIBC ≥ 2.35 (Ubuntu 22.04+) | — |
 
 ---
 
@@ -169,7 +169,7 @@ This project is licensed under the [GNU General Public License v3.0](LICENSE).
 
 ## 🙏 Acknowledgements
 
-- [OCGCore](https://github.com/Fluorohydride/ygopro-core) - YGOPRO core engine, the foundation of everything
+- [YGOProCore](https://github.com/Fluorohydride/ygopro-core) - YGOPRO core engine, the foundation of everything
 - [MDPro3](https://code.moenext.com/sherry_chaos/MDPro3) - MDPro3, the currently preferred client
 - [YGOPro Official Scripts](https://github.com/Fluorohydride/ygopro-scripts) - Official Lua script repository, basis for card effect parsing
 - [MyCard](https://github.com/mycard/ygopro-database) - cards.cdb card database source

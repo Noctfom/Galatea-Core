@@ -92,7 +92,10 @@ class AiBot:
             
             # 网络已经内置了 act_mask 并把无效槽位变成了 -1e9
             # 不需要手动切片，直接 Argmax，不可能选到 Padding
-            sel_idx = torch.argmax(logits[0]).item()
+            temperature = 0.5
+            probs = torch.softmax(logits[0] / temperature, dim=-1)
+            dist = torch.distributions.Categorical(probs=probs)
+            sel_idx = dist.sample().item()
 
         if sel_idx < len(snap.valid_actions):
             chosen = snap.valid_actions[sel_idx]

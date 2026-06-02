@@ -147,7 +147,7 @@ class GalateaEncoder:
         card_races = np.zeros(MAX_CARDS, dtype=np.int64)
         card_attrs = np.zeros(MAX_CARDS, dtype=np.int64)
         card_setcodes = np.zeros((MAX_CARDS, 4), dtype=np.int64)
-        card_feats = np.zeros((MAX_CARDS, 58), dtype=np.float32)
+        card_feats = np.zeros((MAX_CARDS, 66), dtype=np.float32)
         masks = np.zeros(MAX_CARDS, dtype=np.bool_)
 
         # 语义大矩阵全量预分配，消灭碎片
@@ -194,12 +194,24 @@ class GalateaEncoder:
                 card_indices[i] = self._hash_code(e.code)
                 pos_x, pos_y = self._get_coords(player_id, e.owner, e.location, e.sequence)
 
+                mask = getattr(e, 'used_effect_mask', 0)  # 使用 getattr 安全获取实体属性
+                
+                used_eff_0 = 1.0 if (mask & (1 << 0)) else 0.0
+                used_eff_1 = 1.0 if (mask & (1 << 1)) else 0.0
+                used_eff_2 = 1.0 if (mask & (1 << 2)) else 0.0
+                used_eff_3 = 1.0 if (mask & (1 << 3)) else 0.0
+                used_eff_4 = 1.0 if (mask & (1 << 4)) else 0.0
+                used_eff_5 = 1.0 if (mask & (1 << 5)) else 0.0
+                used_eff_6 = 1.0 if (mask & (1 << 6)) else 0.0
+                used_eff_7 = 1.0 if (mask & (1 << 7)) else 0.0
+
                 feat_numeric = [
                     1.0 if e.owner == player_id else -1.0, e.location / 100.0, e.sequence / 10.0,
                     e.current_atk / 4000.0, e.current_def / 4000.0, e.base_atk / 4000.0, e.base_def / 4000.0,
                     pos_x, pos_y, e.level / 12.0, e.lscale / 13.0, e.rscale / 13.0, e.position / 10.0,
                     1.0 if e.is_public else (0.5 if is_tracked_by_memory else 0.0),
-                    min(e.overlay_count / 5.0, 1.0), min(e.counter_count / 10.0, 1.0), 1.0 if e.is_equipped else 0.0
+                    min(e.overlay_count / 5.0, 1.0), min(e.counter_count / 10.0, 1.0), 1.0 if e.is_equipped else 0.0,
+                    used_eff_0, used_eff_1, used_eff_2, used_eff_3, used_eff_4, used_eff_5, used_eff_6, used_eff_7
                 ]
                 feat = feat_numeric + [1.0 if (e.type_mask & (1<<idx)) else 0.0 for idx in range(32)] + [1.0 if (e.link_marker & (1<<idx)) else 0.0 for idx in range(9)]
                 card_feats[i] = feat
@@ -215,7 +227,12 @@ class GalateaEncoder:
                 # 写入预分配矩阵对应切片
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(e.code)
             else:
-                card_indices[i] = UNK_CODE_IDX
+                if e.location == Zone.HAND:
+                    card_indices[i] = 2 
+                elif e.location == Zone.SZONE:
+                    card_indices[i] = 3
+                else:
+                    card_indices[i] = UNK_CODE_IDX
                 card_overlay_indices[i] = PAD_CODE_IDX
                 masks[i] = True
                 card_feats[i, :5] = [-1.0, e.location / 100.0, e.sequence / 10.0, -1.0, -1.0]

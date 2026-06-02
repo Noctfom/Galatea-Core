@@ -504,6 +504,13 @@ class DuelState:
                 ts = struct.unpack('<B', stream.read(1))[0]      # 触发编号
                 desc = struct.unpack('<I', stream.read(4))[0]   # 效果描述
                 ct = struct.unpack('<B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
+
+                # 【新增】提取效果槽位索引 (0-15) 并写入实体的记忆字典
+                effect_slot_idx = desc & 0xF  # 获取 0-15 的效果槽位
+                if effect_slot_idx < 8:
+                    if tc in [0, 1] and ts in self.field_map[tc].get(tl, {}):
+                        current_mask = self.field_map[tc][tl][ts].get('used_effect_mask', 0)
+                        self.field_map[tc][tl][ts]['used_effect_mask'] = current_mask | (1 << effect_slot_idx)
                 
                 # 压入堆栈记事本
                 self.chain_stack.append({'code': code, 'c': tc, 'l': tl, 's': ts, 'desc': desc})
@@ -574,10 +581,17 @@ class DuelState:
                 if tc in [0,1] and ts in self.field_map[tc].get(tl, {}):
                     self.field_map[tc][tl][ts]['is_equipped'] = True
             
-            elif msg_type == 40: self.turn += 1
+            elif msg_type == 40: 
+                self.turn += 1
+                # [新增] 换回合时，清空全场的一回合一次记忆
+                for p in [0, 1]:
+                    for loc in self.field_map[p]:
+                        for seq in self.field_map[p][loc]:
+                            self.field_map[p][loc][seq]['used_effect_mask'] = 0
+
             elif msg_type == 41: self.phase = struct.unpack('<H', stream.read(2))[0]
 
-            # --- [新增] 动作空间解析 (Action Parsing) ---
+            # --- 动作空间解析 (Action Parsing) ---
             # 如果是交互消息，解析出 valid_actions
             if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
                 self.active_player = struct.unpack('<B', msg_payload[0:1])[0]
@@ -1211,6 +1225,9 @@ class DuelState:
          self.field_map[p][Zone.MZONE] = {}
          self.field_map[p][Zone.SZONE] = {}
          self.field_map[p][Zone.HAND] = {}
+         self.field_map[p][Zone.GRAVE] = {}    
+         self.field_map[p][Zone.REMOVED] = {}  
+         self.field_map[p][Zone.EXTRA] = {}
 
          # 1. 绝对同步怪兽区 
          for s in range(7):
