@@ -236,6 +236,9 @@ class YGOProLuaParser:
                 # 常规效果也给个空列表，保证 JSON 结构统一
                 effect_slot['requirements']['custom_numbers'] = []
                 effect_slot['requirements']['custom_hexes'] = []
+            
+            raw_text = func_bodies_text + "\n" + op_code_block
+            effect_slot['raw_code'] = raw_text.strip()
 
             card_data["effects"].append(effect_slot)
             slot_idx += 1

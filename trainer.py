@@ -197,6 +197,8 @@ class PPOTrainer:
             'sem_ref': ((120, 8, 4), torch.int32),
             'sem_race': ((120, 8, 4), torch.int16),
             'sem_attr': ((120, 8, 4), torch.int16),
+            'sem_code_idx': ((120, 8), torch.long),  # [新增]
+            'sem_mask': ((120, 8), torch.bool),
             
             'deck_idx': ((75,), torch.long),
             'deck_race': ((75,), torch.long),
@@ -212,6 +214,8 @@ class PPOTrainer:
             'd_sem_ref': ((75, 8, 4), torch.int32),
             'd_sem_race': ((75, 8, 4), torch.int16),
             'd_sem_attr': ((75, 8, 4), torch.int16),
+            'd_sem_code_idx': ((75, 8), torch.long), # [新增]
+            'd_sem_mask': ((75, 8), torch.bool),
             
             'c_mask': ((12,), torch.bool),
             
@@ -223,7 +227,8 @@ class PPOTrainer:
             'c_sem_ref': ((12, 8, 4), torch.int32),
             'c_sem_race': ((12, 8, 4), torch.int16),
             'c_sem_attr': ((12, 8, 4), torch.int16),
-            
+            'c_sem_code_idx': ((12, 8), torch.long), # [新增]
+            'c_sem_mask': ((12, 8), torch.bool),
             'h_mask': ((8,), torch.bool),
             
             # --- 历史施法雷达 语义槽位 ---
@@ -234,7 +239,8 @@ class PPOTrainer:
             'h_sem_ref': ((8, 8, 4), torch.int32),
             'h_sem_race': ((8, 8, 4), torch.int16),
             'h_sem_attr': ((8, 8, 4), torch.int16),
-            
+            'h_sem_code_idx': ((8, 8), torch.long), # [新增]
+            'h_sem_mask': ((8, 8), torch.bool),
             'act_card_idx': ((120, 5), torch.long),
             'act_type': ((120,), torch.long),
             'act_desc': ((120,), torch.long),

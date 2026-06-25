@@ -37,6 +37,15 @@ class SemanticKnowledgeBase:
         self.num_cats = len(self.cat2idx)
         self.req_dim = 128 
         #print(f"✅ 知识库加载完毕！包含 {self.num_cats} 种动作，已实现表征大一统！")
+        self.code_dim = 384
+        try:
+            self.code_embeddings = np.load('code_embeddings.npy')
+            with open('code_embeddings_idx.json', 'r', encoding='utf-8') as f:
+                self.hash2idx = json.load(f)
+        except Exception as e:
+            print(f"⚠️ 未找到代码语义向量文件或加载失败: {e}，将使用全零特征。")
+            self.code_embeddings = None
+            self.hash2idx = {}
 
     def get_card_semantics(self, card_id):
         if card_id in self._cache:
@@ -55,12 +64,14 @@ class SemanticKnowledgeBase:
         ref_out = np.zeros((8, 4), dtype=np.int32)  
         race_out = np.zeros((8, 4), dtype=np.int16) 
         attr_out = np.zeros((8, 4), dtype=np.int16)
-        
-        card_id_str = str(card_id)
-        if card_id_str not in self.kb:
-            return cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out
-            
-        effects = self.kb[card_id_str].get('effects', [])
+
+        # 【修改】不再分配 384 维浮点，而是 1 维整数 (0代表空效果)
+        code_idx_out = np.zeros((8,), dtype=np.int32)
+
+        if card_id == 0 or str(card_id) not in self.kb:
+            return (cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_idx_out)
+
+        effects = self.kb[str(card_id)].get('effects', [])
         
         for i, eff in enumerate(effects):
             if i >= 8: break 
@@ -99,7 +110,14 @@ class SemanticKnowledgeBase:
                         n_idx += 1
                 except Exception as e: 
                     print(f"[semantic_kb]⚠️ custom_number解析异常: {e} (cnum={cnum})")
+
+            # 代码语义向量提取
+            key = f"{card_id}_{i}"
+            if self.code_embeddings is not None and key in self.hash2idx:
+                idx = self.hash2idx[key]
+                # 【修改】只记录索引！因为 0 用作空白占位符，所以整体向后偏移 1 位
+                code_idx_out[i] = idx + 1
                     
-        result = (cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out)
+        result = (cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_idx_out)
         self._cache[card_id] = result # 算完直接存下来
         return result

@@ -235,7 +235,7 @@ class ModelArena:
                             # 使用 .get(..., set()) 完美避开 KeyError！
                             for bad_idx in banned_actions_for_state.get(current_hash, set()):
                                 if bad_idx < logits.shape[-1]:
-                                    logits[0, bad_idx] = -1e4
+                                    logits[0, bad_idx] = -65000.0
                                     
                             # [竞技场核心] 绝对贪婪策略
                             action_idx = torch.argmax(logits, dim=-1)

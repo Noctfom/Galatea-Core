@@ -34,6 +34,16 @@ class GalateaEncoder:
         if code == 0: return UNK_CODE_IDX 
         return (code % (self.vocab_size - self.reserved_ids)) + self.reserved_ids
     
+    def _get_sem_mask(self, cat_out, code_idx_out):
+        """动态侦测哪些槽位是有效的，生成 Attention 掩码"""
+        m = np.zeros(8, dtype=np.bool_)
+        for j in range(8):
+            # 【修改】如果分类非 0，或者索引非 0，说明该槽位有效
+            if cat_out[j, 0] != 0 or code_idx_out[j] != 0:
+                m[j] = True
+        if not np.any(m): m[0] = True
+        return m
+    
     def _get_coords(self, player_id, owner, location, sequence):
         """将一维的 location 和 sequence 转换为二维平面坐标 (X, Y)"""
         # 非场上卡片，放入异次元坐标
@@ -158,6 +168,9 @@ class GalateaEncoder:
         sem_refs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int32)
         sem_races = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
         sem_attrs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
+        sem_code_idx = np.zeros((MAX_CARDS, 8), dtype=np.int32)
+        sem_mask = np.zeros((MAX_CARDS, 8), dtype=np.bool_)
+        sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
 
         # ==========================================
         # 1. 处理场上/手牌/墓地实体 
@@ -225,7 +238,7 @@ class GalateaEncoder:
                 card_overlay_indices[i] = self._hash_code(getattr(e, 'top_overlay_code', 0))
                 
                 # 写入预分配矩阵对应切片
-                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(e.code)
+                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(e.code)
             else:
                 if e.location == Zone.HAND:
                     card_indices[i] = 2 
@@ -236,10 +249,12 @@ class GalateaEncoder:
                 card_overlay_indices[i] = PAD_CODE_IDX
                 masks[i] = True
                 card_feats[i, :5] = [-1.0, e.location / 100.0, e.sequence / 10.0, -1.0, -1.0]
-                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out = self.sem_kb.get_card_semantics(0)
+                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(0)
 
             sem_cats[i] = cat_out; sem_reqs[i] = req_out; sem_scs[i] = set_out
             sem_nums[i] = num_out; sem_refs[i] = ref_out; sem_races[i] = race_out; sem_attrs[i] = attr_out
+            sem_code_idx[i] = code_out
+            sem_mask[i] = self._get_sem_mask(cat_out, code_out)
 
         # ==========================================
         # 2. 处理上帝视角卡组残像 (MAX_DECK_CARDS = 75)
@@ -260,6 +275,9 @@ class GalateaEncoder:
         d_sem_refs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int32)
         d_sem_races = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
         d_sem_attrs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
+        d_sem_code_idx = np.zeros((MAX_DECK_CARDS, 8), dtype=np.int32)
+        d_sem_mask = np.zeros((MAX_DECK_CARDS, 8), dtype=np.bool_)
+        d_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
 
         from card_reader import card_db
         for i, code in enumerate(my_deck[:MAX_DECK_CARDS]):
@@ -275,9 +293,11 @@ class GalateaEncoder:
             deck_idx[i] = self._hash_code(code)
             deck_masks[i] = True
             
-            dc_out, dr_out, ds_out, dn_out, dref_out, drace_out, dattr_out = self.sem_kb.get_card_semantics(code)
+            dc_out, dr_out, ds_out, dn_out, dref_out, drace_out, dattr_out, dcode_out = self.sem_kb.get_card_semantics(code)
             d_sem_cats[i] = dc_out; d_sem_reqs[i] = dr_out; d_sem_scs[i] = ds_out
             d_sem_nums[i] = dn_out; d_sem_refs[i] = dref_out; d_sem_races[i] = drace_out; d_sem_attrs[i] = dattr_out
+            d_sem_code_idx[i] = dcode_out
+            d_sem_mask[i] = self._get_sem_mask(dc_out, dcode_out)
 
         # ==========================================
         # 2.5 处理连锁堆栈 (MAX_CHAIN = 12)
@@ -291,12 +311,16 @@ class GalateaEncoder:
         c_sem_refs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int32)
         c_sem_races = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
         c_sem_attrs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
-        
+        c_sem_code_idx = np.zeros((MAX_CHAIN, 8), dtype=np.int32)
+        c_sem_mask = np.zeros((MAX_CHAIN, 8), dtype=np.bool_)
+        c_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
         if hasattr(snapshot, 'chain_stack'):
             for i, item in enumerate(snapshot.chain_stack[:MAX_CHAIN]):
-                cc_out, cr_out, cs_out, cn_out, cref_out, crace_out, cattr_out = self.sem_kb.get_card_semantics(item['code'])
+                cc_out, cr_out, cs_out, cn_out, cref_out, crace_out, cattr_out, ccode_out = self.sem_kb.get_card_semantics(item['code'])
                 c_sem_cats[i] = cc_out; c_sem_reqs[i] = cr_out; c_sem_scs[i] = cs_out
                 c_sem_nums[i] = cn_out; c_sem_refs[i] = cref_out; c_sem_races[i] = crace_out; c_sem_attrs[i] = cattr_out
+                c_sem_code_idx[i] = ccode_out
+                c_sem_mask[i] = self._get_sem_mask(cc_out, ccode_out)
                 c_masks[i] = True
 
         # ==========================================
@@ -311,12 +335,17 @@ class GalateaEncoder:
         h_sem_refs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int32)
         h_sem_races = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
         h_sem_attrs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
-        
+        h_sem_code_idx = np.zeros((MAX_HISTORY, 8), dtype=np.int32)
+        h_sem_mask = np.zeros((MAX_HISTORY, 8), dtype=np.bool_)
+        h_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
+
         if hasattr(snapshot, 'history_stack'):
             for i, item in enumerate(snapshot.history_stack[:MAX_HISTORY]):
-                hc_out, hr_out, hs_out, hn_out, href_out, hrace_out, hattr_out = self.sem_kb.get_card_semantics(item['code'])
+                hc_out, hr_out, hs_out, hn_out, href_out, hrace_out, hattr_out, hcode_out = self.sem_kb.get_card_semantics(item['code'])
                 h_sem_cats[i] = hc_out; h_sem_reqs[i] = hr_out; h_sem_scs[i] = hs_out
                 h_sem_nums[i] = hn_out; h_sem_refs[i] = href_out; h_sem_races[i] = hrace_out; h_sem_attrs[i] = hattr_out
+                h_sem_code_idx[i] = hcode_out
+                h_sem_mask[i] = self._get_sem_mask(hc_out, hcode_out)
                 h_masks[i] = True
 
         # ==========================================
@@ -378,6 +407,8 @@ class GalateaEncoder:
             'sem_ref': torch.from_numpy(sem_refs).unsqueeze(0),
             'sem_race': torch.from_numpy(sem_races).unsqueeze(0),
             'sem_attr': torch.from_numpy(sem_attrs).unsqueeze(0),
+            'sem_code_idx': torch.from_numpy(sem_code_idx).unsqueeze(0),
+            'sem_mask': torch.from_numpy(sem_mask).unsqueeze(0),
             
             'deck_idx': torch.from_numpy(deck_idx).unsqueeze(0),
             'deck_race': torch.from_numpy(deck_race).unsqueeze(0),
@@ -392,6 +423,8 @@ class GalateaEncoder:
             'd_sem_ref': torch.from_numpy(d_sem_refs).unsqueeze(0),
             'd_sem_race': torch.from_numpy(d_sem_races).unsqueeze(0),
             'd_sem_attr': torch.from_numpy(d_sem_attrs).unsqueeze(0),
+            'd_sem_code_idx': torch.from_numpy(d_sem_code_idx).unsqueeze(0),
+            'd_sem_mask': torch.from_numpy(d_sem_mask).unsqueeze(0),
 
             'c_mask': torch.from_numpy(c_masks).unsqueeze(0),
             'c_sem_category': torch.from_numpy(c_sem_cats).unsqueeze(0),
@@ -401,7 +434,9 @@ class GalateaEncoder:
             'c_sem_ref': torch.from_numpy(c_sem_refs).unsqueeze(0),
             'c_sem_race': torch.from_numpy(c_sem_races).unsqueeze(0),
             'c_sem_attr': torch.from_numpy(c_sem_attrs).unsqueeze(0),
-        
+            'c_sem_code_idx': torch.from_numpy(c_sem_code_idx).unsqueeze(0),
+            'c_sem_mask': torch.from_numpy(c_sem_mask).unsqueeze(0),
+
             'h_mask': torch.from_numpy(h_masks).unsqueeze(0),
             'h_sem_category': torch.from_numpy(h_sem_cats).unsqueeze(0),
             'h_sem_req': torch.from_numpy(h_sem_reqs).unsqueeze(0),
@@ -410,6 +445,8 @@ class GalateaEncoder:
             'h_sem_ref': torch.from_numpy(h_sem_refs).unsqueeze(0),
             'h_sem_race': torch.from_numpy(h_sem_races).unsqueeze(0),
             'h_sem_attr': torch.from_numpy(h_sem_attrs).unsqueeze(0),
+            'h_sem_code_idx': torch.from_numpy(h_sem_code_idx).unsqueeze(0),
+            'h_sem_mask': torch.from_numpy(h_sem_mask).unsqueeze(0),
         }
         
         base_dict.update(act_dict)

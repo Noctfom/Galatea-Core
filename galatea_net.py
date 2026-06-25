@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+import numpy as np
 
 class RunningMeanStd(nn.Module):
     # 动态记录输入的均值和方差，用于 RND 归一化
@@ -164,6 +165,16 @@ class GalateaNet(nn.Module):
         self.n_heads = config.get('n_heads', 8)
         self.n_layers = config.get('n_layers', 6)
         self.vocab_size = config.get('vocab_size', 20000) 
+
+        try:
+            code_emb_np = np.load('code_embeddings.npy')
+            padded_emb = np.vstack([np.zeros((1, 384), dtype=np.float32), code_emb_np])
+            
+            # 将其注册为 Buffer，且 persistent=False 意味着它绝对不会被写入 .pth 文件
+            self.register_buffer('code_dict', torch.from_numpy(padded_emb), persistent=False)
+        except Exception:
+            print("⚠️ 网络层未找到 code_embeddings.npy，使用全0回退")
+            self.register_buffer('code_dict', torch.zeros((1, 384), dtype=torch.float32), persistent=False)
         
         # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
@@ -181,14 +192,31 @@ class GalateaNet(nn.Module):
         
         # A. 主动作与 Hash (词表 4000，足以容纳目前的特殊效果)
         self.sem_cat_embed = nn.Embedding(4000, self.d_sem, padding_idx=0)
+        self.code_vec_proj = nn.Sequential(
+            nn.Linear(384, self.d_sem),
+            nn.GELU(),
+            nn.LayerNorm(self.d_sem)
+        )
         # B. 发动条件与限制 (128维多热向量直接映射)
-        self.sem_req_proj = nn.Linear(128, self.d_sem)
+        self.sem_req_proj = nn.Sequential(
+            nn.Linear(128, 256),
+            nn.GELU(),
+            nn.LayerNorm(256),
+            nn.Linear(256, self.d_sem)
+        )
         # C. 关联字段 (与基础 setcode 隔离，专用于效果对象)
         self.sem_setcode_embed = nn.Embedding(4096, self.d_sem, padding_idx=0)
         # D. 魔法数字参数 (4个脱敏数字的提取)
         self.sem_num_proj = nn.Linear(4, self.d_sem)
 
         self.final_slot_norm = nn.LayerNorm(self.d_model)
+
+        self.slot_attention = nn.MultiheadAttention(
+            embed_dim=self.d_model,  # 你的特征融合后维度 (假设 d_sem 等拼接后是 512)
+            num_heads=self.n_heads, 
+            batch_first=True
+        )
+        self.query_proj = nn.Linear(self.d_model, self.d_model) # 用于生成 Slot Attention 的查询向量
         
         # E. 最终融合成 d_model 宽度的降维打击转换器
         self.sem_fusion_proj = nn.Sequential(
@@ -253,32 +281,47 @@ class GalateaNet(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=1.0)
                 nn.init.constant_(m.bias, 0.0)
 
-    def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr):
-        # 核心修复：将 int16 (Short) 强转为 long()，满足 PyTorch Embedding 的要求
+    def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr, sem_code_idx, sem_mask, feat_vecs=None):
         cat_v = self.sem_cat_embed(sem_cat.long()).sum(dim=-2)
+        
+        # 残差融合代码语义
+        sem_code_vec = F.embedding(sem_code_idx.long(), self.code_dict)
+        code_v = self.code_vec_proj(sem_code_vec)
+        cat_v = cat_v + code_v
+        
         req_v = self.sem_req_proj(sem_req.to(torch.float32))
         sc_v = self.sem_setcode_embed(sem_sc.long()).sum(dim=-2)
-        
-        # 将 float16 转为 float32 满足 Linear 的要求
         num_v = self.sem_num_proj(sem_num.to(torch.float32))
         
-        # 1. 基础语义聚合 (128维)
-        sem_base = cat_v + req_v + sc_v + num_v # [B, S, 槽数, 128]
+        sem_base = cat_v + req_v + sc_v + num_v 
+        sem_base_512 = self.sem_fusion_proj(sem_base) 
         
-        # 2. 升维到 512 维，准备与物理特征接轨
-        sem_base_512 = self.sem_fusion_proj(sem_base) # [B, S, 槽数, 512]
-        
-        # 3. 提取物理共鸣特征 (已经是 512 维了！)
         safe_sem_ref = torch.clamp(sem_ref.long(), 0, self.vocab_size - 1)
         ref_v = self.card_embed(safe_sem_ref).sum(dim=-2)
         race_v = self.race_embed(sem_race.long()).sum(dim=-2)
         attr_v = self.attr_embed(sem_attr.long()).sum(dim=-2)
         
-        # 4. 512维空间的终极融合
-        slot_v = sem_base_512 + ref_v + race_v + attr_v
+        slot_v = sem_base_512 + ref_v + race_v + attr_v  # [B, N, 8, 512]
         
-        # 将所有效果槽叠加
-        card_sem_v = slot_v.sum(dim=-2) 
+        B, N, S, D = slot_v.shape
+        slot_v_flat = slot_v.view(B * N, S, D)           
+        
+        # 【核心】：如果有物理特征传入，用物理特征去查；否则用默认意图查
+        if feat_vecs is not None:
+            query_raw = feat_vecs.view(B * N, self.d_model)
+            query = self.query_proj(query_raw).view(B * N, 1, D)
+        else:
+            query = sem_base_512[:, :, 0, :].view(B * N, 1, D)
+        
+        # 【核心】：构建 Padding Mask，屏蔽全 0 的无效效果槽
+        key_padding_mask = ~(sem_mask.view(B * N, S)) # PyTorch中True代表忽略
+
+        attn_out, _ = self.slot_attention(
+            query, slot_v_flat, slot_v_flat, 
+            key_padding_mask=key_padding_mask
+        )
+        
+        card_sem_v = attn_out.view(B, N, D)
         return self.final_slot_norm(card_sem_v)
 
     def forward(self, batch_dict):
@@ -298,11 +341,11 @@ class GalateaNet(nn.Module):
             x_sem = self.process_semantics(
                 batch_dict['sem_category'], batch_dict['sem_req'], 
                 batch_dict['sem_setcode'], batch_dict['sem_number'],
-                batch_dict['sem_ref'], batch_dict['sem_race'], batch_dict['sem_attr']
+                batch_dict['sem_ref'], batch_dict['sem_race'], batch_dict['sem_attr'],
+                batch_dict['sem_code_idx'], batch_dict['sem_mask'], x_feat  #传入新增的 3 个变量
             )
         else:
             x_sem = 0.0
-
         # 全息物理与语义的大一统！
         x = x_code + x_overlay + x_feat + x_race + x_attr + x_setcode + x_sem
         seq_len = x.shape[1]
@@ -319,7 +362,7 @@ class GalateaNet(nn.Module):
         
         # --- 全局局面掌控 ---
         g_embed = self.global_proj(batch_dict['global']).unsqueeze(1) 
-        masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -1e4)
+        masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -65000.0)
         pooled = torch.max(masked_memory, dim=1)[0].unsqueeze(1) 
         
         # --- 上帝视角的语义化 ---
@@ -333,11 +376,12 @@ class GalateaNet(nn.Module):
                 d_sem = self.process_semantics(
                     batch_dict['d_sem_category'], batch_dict['d_sem_req'],
                     batch_dict['d_sem_setcode'], batch_dict['d_sem_number'],
-                    batch_dict['d_sem_ref'], batch_dict['d_sem_race'], batch_dict['d_sem_attr'] # 🌟 补上这行！
+                    batch_dict['d_sem_ref'], batch_dict['d_sem_race'], batch_dict['d_sem_attr'],
+                    batch_dict['d_sem_code_idx'], batch_dict['d_sem_mask'], None
                 )
             else:
                 d_sem = 0
-                
+                d_sem_code_idx = None
             x_deck = e_d_code + e_d_race + e_d_attr + e_d_setcode + d_sem # 连卡组都知道自己有什么效果了！
             
             d_mask_f = batch_dict['deck_mask'].float().unsqueeze(-1)
@@ -352,7 +396,8 @@ class GalateaNet(nn.Module):
             c_sem = self.process_semantics(
                 batch_dict['c_sem_category'], batch_dict['c_sem_req'],
                 batch_dict['c_sem_setcode'], batch_dict['c_sem_number'],
-                batch_dict['c_sem_ref'], batch_dict['c_sem_race'], batch_dict['c_sem_attr']
+                batch_dict['c_sem_ref'], batch_dict['c_sem_race'], batch_dict['c_sem_attr'],
+                batch_dict['c_sem_code_idx'], batch_dict['c_sem_mask'], None
             ) # [B, 5, 512]
             
             seq_len = c_sem.shape[1]
@@ -371,7 +416,8 @@ class GalateaNet(nn.Module):
             h_sem = self.process_semantics(
                 batch_dict['h_sem_category'], batch_dict['h_sem_req'],
                 batch_dict['h_sem_setcode'], batch_dict['h_sem_number'],
-                batch_dict['h_sem_ref'], batch_dict['h_sem_race'], batch_dict['h_sem_attr']
+                batch_dict['h_sem_ref'], batch_dict['h_sem_race'], batch_dict['h_sem_attr'],
+                batch_dict['h_sem_code_idx'], batch_dict['h_sem_mask'], None
             ) # [B, 8, 512]
 
             # 注入历史时序 (近期发生的在前面，远期发生的在后面)
@@ -445,7 +491,7 @@ class GalateaNet(nn.Module):
         combined_vecs = self.fusion_norm(combined_vecs) # 双塔融合后的 LayerNorm
 
         logits = self.policy_head(combined_vecs).squeeze(-1) 
-        logits = logits.masked_fill(~act_mask, -1e4)
+        logits = logits.masked_fill(~act_mask, -65000.0)
 
         return logits, value, v_input.squeeze(1)
     

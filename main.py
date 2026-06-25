@@ -194,6 +194,7 @@ def main():
     parse_parser.add_argument('--remote_url', type=str, 
                               default='https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json', 
                               help='指定其他的 Github Raw URL')
+    parse_parser.add_argument('--embed', action='store_true', help='为知识库中的自定义效果生成深度代码语义向量')
 
     # --- 5. 更新同步模式 (Update) ---
     update_parser = subparsers.add_parser('update', help='更新本地代码、卡片数据库(CDB)与脚本库')
@@ -298,6 +299,11 @@ def main():
         actual_remote_url = args.remote_url if args.sync else None
         
         parser.run_batch(output_file=args.output, clear_existing=args.clear, remote_url=actual_remote_url)
+        if args.embed:
+            print("🧬 启动代码语义向量化提取...")
+            from code_embedder import CodeSemanticEmbedder
+            embedder = CodeSemanticEmbedder()
+            embedder.generate_embeddings(kb_file='knowledge_base.json', output_file='code_embeddings.npy')
         
     elif args.command == 'update':
         print("🌐 启动自动同步更新模块...")

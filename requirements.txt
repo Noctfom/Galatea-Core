@@ -23,6 +23,7 @@ tensorboard>=2.14.0
 # -- Math / Data Processing --
 numpy>=1.24.0
 pandas>=2.0.0
+sentence_transformers
 
 # -- Inter-Process Communication --
 pyzmq>=25.0.0
@@ -30,6 +31,7 @@ pyzmq>=25.0.0
 # -- ONNX Inference Acceleration (optional, for --use_onnx) --
 onnxruntime>=1.16.0
 onnxscript
+onnx
 
 # -- System Monitoring --
 psutil>=5.9.0

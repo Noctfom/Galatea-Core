@@ -28,7 +28,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.3.0"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.3.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -193,6 +193,14 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
         
     csv_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.csv')], reverse=True)
 
+    @st.cache_data(show_spinner=False, max_entries=10)
+    def load_csv_cached(filepath, mtime):
+        # 参数中传入 mtime(文件最后修改时间)。只要文件没被训练进程写入新数据，就直接走内存秒读！
+        temp_df = pd.read_csv(filepath)
+        run_id = os.path.basename(filepath).replace("match_history_", "").replace(".csv", "")
+        temp_df['run_id'] = run_id
+        return temp_df
+
     if not csv_files:
         st.info(_("数据库为空，等待训练进程写入数据...", "Database is empty. Waiting for training process..."))
     else:
@@ -205,11 +213,10 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
             # 🌟 新增：合并多个 CSV，并打上来源标签
             all_dfs = []
             for f in selected_csvs:
-                temp_df = pd.read_csv(os.path.join(data_dir, f))
-                # 提取时间戳 run_id 作为唯一标识
-                run_id = f.replace("match_history_", "").replace(".csv", "")
-                temp_df['run_id'] = run_id
-                all_dfs.append(temp_df)
+                filepath = os.path.join(data_dir, f)
+                mtime = os.path.getmtime(filepath) # 获取文件当前的物理修改时间
+                # 如果文件没变，这行代码只需不到 1 毫秒！
+                all_dfs.append(load_csv_cached(filepath, mtime)) 
             
             df = pd.concat(all_dfs, ignore_index=True)
 
@@ -218,10 +225,19 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
                 st.info(_("当前数据仅包含一个迭代轮次，无法选择范围。", "Only one iteration available, range selection disabled."))
                 selected_range = (min_iter, max_iter)   # 单点范围
             else:
-                selected_range = st.slider(
-                    _("⏳ 选择分析的训练轮次范围", "⏳ Select Iteration Range"),
-                    min_value=min_iter, max_value=max_iter, value=(max(min_iter, max_iter-200), max_iter)
-                )
+                # 🌟 核心修复：用 form 表单上锁，阻断拖动时的疯狂重绘
+                st.markdown(_("⏳ **选择分析的训练轮次范围**", "⏳ **Select Iteration Range**"))
+                with st.form("range_filter_form"):
+                    c_slider, c_btn = st.columns([8, 2])
+                    with c_slider:
+                        selected_range = st.slider(
+                            "Range", # Label 隐藏掉
+                            min_value=min_iter, max_value=max_iter, value=(max(min_iter, max_iter-200), max_iter),
+                            label_visibility="collapsed"
+                        )
+                    with c_btn:
+                        st.form_submit_button("✅ " + _("应用筛选", "Apply"), use_container_width=True)
+                        
             filtered_df = df[(df['iteration'] >= selected_range[0]) & (df['iteration'] <= selected_range[1])]
             
             if filtered_df.empty:
@@ -827,12 +843,20 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                                  help=_("以主仓库的知识库作为基础字典，跳过已有的卡片，大幅加快本地解析速度。", "Use remote KB as baseline to skip existing cards and speed up parsing."))
             p_url = st.text_input(_("远程基座 URL (可选)", "Remote Base URL (Optional)"), value="https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json")
             
+            # 👇 [新增] 代码语义化特征提取开关
+            p_embed = st.checkbox(_("🧬 提取代码语义特征 (--embed)", "Extract Code Semantic Features"), value=False, 
+                                  help=_("调用 SentenceTransformer 提取 Lua 源码的高维语义向量。耗时较长，建议在 GPU 环境下开启。", 
+                                         "Uses SentenceTransformer to extract high-dimensional semantic vectors of Lua source code. Takes longer, GPU recommended."))
+            
             if st.form_submit_button("🧠 " + _("开始提取卡片语义", "Start Semantic Parsing"), use_container_width=True):
                 cmd = [sys.executable, "main.py", "parse"]
                 if p_clear: cmd.append("--clear")
                 if p_sync: 
                     cmd.append("--sync")
                     if p_url: cmd.extend(["--remote_url", p_url])
+                
+                # 👇 [新增] 捕捉勾选状态并传递给 main.py
+                if p_embed: cmd.append("--embed")
                 
                 with st.spinner(_("⏳ 正在暴力解析全卡池 Lua 脚本中，请耐心等待...", "⏳ Parsing all Lua scripts... Please wait.")):
                     try:

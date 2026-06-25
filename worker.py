@@ -684,7 +684,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                         
                                         # 严格在局部执行非法动作遮罩隔离
                                         act_mask_tensor = tensor_dict['act_mask'].squeeze(0)
-                                        action_logits[~act_mask_tensor] = -1e4
+                                        action_logits[~act_mask_tensor] = -65000.0
                                         
                                         dist = torch.distributions.Categorical(logits=action_logits)
                                         action_idx = dist.sample()
