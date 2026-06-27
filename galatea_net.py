@@ -167,10 +167,19 @@ class GalateaNet(nn.Module):
         self.vocab_size = config.get('vocab_size', 20000) 
 
         try:
-            code_emb_np = np.load('code_embeddings.npy')
+            code_emb_np = None
+            for _ in range(5):
+                try:
+                    code_emb_np = np.load('code_embeddings.npy')
+                    break
+                except Exception:
+                    import time
+                    time.sleep(0.1) # 遇到并发锁就等 0.1 秒重试
+                    
+            if code_emb_np is None:
+                raise FileNotFoundError("重试 5 次后依然无法读取")
+                
             padded_emb = np.vstack([np.zeros((1, 384), dtype=np.float32), code_emb_np])
-            
-            # 将其注册为 Buffer，且 persistent=False 意味着它绝对不会被写入 .pth 文件
             self.register_buffer('code_dict', torch.from_numpy(padded_emb), persistent=False)
         except Exception:
             print("⚠️ 网络层未找到 code_embeddings.npy，使用全0回退")
@@ -289,7 +298,21 @@ class GalateaNet(nn.Module):
         code_v = self.code_vec_proj(sem_code_vec)
         cat_v = cat_v + code_v
         
-        req_v = self.sem_req_proj(sem_req.to(torch.float32))
+        # 修复：兼容旧版本权重与新版超压缩索引的 GPU 极速还原
+        if sem_req.dtype == torch.int8 or sem_req.shape[-1] == 16:
+            B, N, S, K = sem_req.shape
+            indices_flat = sem_req.view(-1, K).long()
+            valid_mask = (indices_flat >= 0).float()
+            indices_clamped = indices_flat.clamp(min=0)
+            
+            # 使用 scatter_ 零损耗展开回 128 维 One-Hot
+            req_multi_hot = torch.zeros(indices_flat.size(0), 128, device=sem_req.device, dtype=torch.float32)
+            req_multi_hot.scatter_(1, indices_clamped, valid_mask)
+            req_multi_hot = req_multi_hot.view(B, N, S, 128)
+        else:
+            req_multi_hot = sem_req.to(torch.float32)
+            
+        req_v = self.sem_req_proj(req_multi_hot)
         sc_v = self.sem_setcode_embed(sem_sc.long()).sum(dim=-2)
         num_v = self.sem_num_proj(sem_num.to(torch.float32))
         

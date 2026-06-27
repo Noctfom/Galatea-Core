@@ -136,9 +136,25 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
     
     # 极速超时配置（防死锁），单位为毫秒
     socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
-    socket.setsockopt(zmq.RCVTIMEO, 15000)
-    socket.setsockopt(zmq.SNDTIMEO, 5000)
+    socket.setsockopt(zmq.RCVTIMEO, 60000)
+    socket.setsockopt(zmq.SNDTIMEO, 15000)
     socket.connect(f"{ZMQ_ADDR}{zmq_port}")
+
+    def build_ort_inputs(session, t_dict):
+        inputs = {}
+        for node in session.get_inputs():
+            if node.name in t_dict:
+                val = t_dict[node.name].numpy()
+                # 使用 str().lower() 包含匹配，才能兼容所有 ONNX 版本
+                ntype = str(node.type).lower()
+                if 'int64' in ntype: val = val.astype(np.int64)
+                elif 'int32' in ntype: val = val.astype(np.int32)
+                elif 'int16' in ntype: val = val.astype(np.int16)
+                elif 'int8' in ntype: val = val.astype(np.int8)
+                elif 'float' in ntype: val = val.astype(np.float32)
+                elif 'bool' in ntype: val = val.astype(np.bool_)
+                inputs[node.name] = val
+        return inputs
 
     use_onnx_p1 = False
     ort_session_p1 = None
@@ -472,8 +488,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                             socket.close(linger=0)
                                             socket = context.socket(zmq.REQ)
                                             socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
-                                            socket.setsockopt(zmq.RCVTIMEO, 15000)
-                                            socket.setsockopt(zmq.SNDTIMEO, 5000)
+                                            socket.setsockopt(zmq.RCVTIMEO, 60000)
+                                            socket.setsockopt(zmq.SNDTIMEO, 15000)
                                             socket.connect(f"{ZMQ_ADDR}{zmq_port}")
                                             raise RuntimeError("Pass1 ZMQ 首次通讯超时")
                                         
@@ -485,7 +501,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     # 如果是历史存档老模型（P1 Hist），执行宿主本地独立剥离推演（ONNX 优先，CPU 兜底）
                                     else:
                                         if use_onnx_p1 and ort_session_p1 is not None:
-                                            ort_inputs = {k: v.numpy() for k, v in dict_pass1.items() if isinstance(v, torch.Tensor)}
+                                            ort_inputs = build_ort_inputs(ort_session_p1, dict_pass1)
                                             ort_outs = ort_session_p1.run(None, ort_inputs) 
                                             probs = torch.softmax(torch.tensor(ort_outs[0]), dim=-1).squeeze(0).numpy()
                                         else:
@@ -652,11 +668,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     socket.close(linger=0)
                                     socket = context.socket(zmq.REQ)
                                     socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
-                                    socket.setsockopt(zmq.RCVTIMEO, 15000)
-                                    socket.setsockopt(zmq.SNDTIMEO, 5000)
+                                    socket.setsockopt(zmq.RCVTIMEO, 60000)
+                                    socket.setsockopt(zmq.SNDTIMEO, 15000)
                                     socket.connect(f"{ZMQ_ADDR}{zmq_port}")
                                     
-                                    raise RuntimeError("ZMQ 首次通讯超时，已强制重启连接")
+                                    print("ZMQ 首次通讯超时，已强制重启连接")
                                 
                                 # 从 4 维基础槽中拉取采样出的动作面包屑
                                 res_array = shared_outputs[worker_id].numpy()
@@ -676,7 +692,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 t_p1_anchor = time.time() 
                                 with torch.no_grad():
                                     if use_onnx_p1 and ort_session_p1 is not None:
-                                        ort_inputs = {k: v.numpy() for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)}
+                                        ort_inputs = build_ort_inputs(ort_session_p1, tensor_dict)
                                         ort_outs = ort_session_p1.run(None, ort_inputs) 
                                         
                                         action_logits = torch.tensor(ort_outs[0]).squeeze(0)

@@ -162,7 +162,7 @@ class GalateaEncoder:
 
         # 语义大矩阵全量预分配，消灭碎片
         sem_cats = np.zeros((MAX_CARDS, 8, 8), dtype=np.int16)
-        sem_reqs = np.zeros((MAX_CARDS, 8, 128), dtype=np.bool_)
+        sem_reqs = np.full((MAX_CARDS, 8, 16), -1, dtype=np.int8)
         sem_scs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
         sem_nums = np.zeros((MAX_CARDS, 8, 4), dtype=np.float16)
         sem_refs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int32)
@@ -269,7 +269,7 @@ class GalateaEncoder:
         deck_masks = np.zeros(MAX_DECK_CARDS, dtype=np.bool_)
 
         d_sem_cats = np.zeros((MAX_DECK_CARDS, 8, 8), dtype=np.int16)
-        d_sem_reqs = np.zeros((MAX_DECK_CARDS, 8, 128), dtype=np.bool_)
+        d_sem_reqs = np.full((MAX_DECK_CARDS, 8, 16), -1, dtype=np.int8)
         d_sem_scs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
         d_sem_nums = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.float16)
         d_sem_refs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int32)
@@ -305,7 +305,7 @@ class GalateaEncoder:
         MAX_CHAIN = 12
         c_masks = np.zeros(MAX_CHAIN, dtype=np.bool_)
         c_sem_cats = np.zeros((MAX_CHAIN, 8, 8), dtype=np.int16)
-        c_sem_reqs = np.zeros((MAX_CHAIN, 8, 128), dtype=np.bool_)
+        c_sem_reqs = np.full((MAX_CHAIN, 8, 16), -1, dtype=np.int8)
         c_sem_scs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
         c_sem_nums = np.zeros((MAX_CHAIN, 8, 4), dtype=np.float16)
         c_sem_refs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int32)
@@ -329,7 +329,7 @@ class GalateaEncoder:
         MAX_HISTORY = 8
         h_masks = np.zeros(MAX_HISTORY, dtype=np.bool_)
         h_sem_cats = np.zeros((MAX_HISTORY, 8, 8), dtype=np.int16)
-        h_sem_reqs = np.zeros((MAX_HISTORY, 8, 128), dtype=np.bool_)
+        h_sem_reqs = np.full((MAX_HISTORY, 8, 16), -1, dtype=np.int8)
         h_sem_scs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
         h_sem_nums = np.zeros((MAX_HISTORY, 8, 4), dtype=np.float16)
         h_sem_refs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int32)

@@ -4,8 +4,10 @@
 
 import json
 import numpy as np
+import time
+import random
 
-# 🌟 从 common.h 映射的统一规则字典
+#从 common.h 映射的统一规则字典
 RACE_MAP = {'RACE_WARRIOR': 0x1, 'RACE_SPELLCASTER': 0x2, 'RACE_FAIRY': 0x4, 'RACE_FIEND': 0x8, 'RACE_ZOMBIE': 0x10, 'RACE_MACHINE': 0x20, 'RACE_AQUA': 0x40, 'RACE_PYRO': 0x80, 'RACE_ROCK': 0x100, 'RACE_WINDBEAST': 0x200, 'RACE_PLANT': 0x400, 'RACE_INSECT': 0x800, 'RACE_THUNDER': 0x1000, 'RACE_DRAGON': 0x2000, 'RACE_BEAST': 0x4000, 'RACE_BEASTWARRIOR': 0x8000, 'RACE_DINOSAUR': 0x10000, 'RACE_FISH': 0x20000, 'RACE_SEASERPENT': 0x40000, 'RACE_REPTILE': 0x80000, 'RACE_PSYCHO': 0x100000, 'RACE_DEVINE': 0x200000, 'RACE_CREATORGOD': 0x400000, 'RACE_WYRM': 0x800000, 'RACE_CYBERSE': 0x1000000, 'RACE_ILLUSION': 0x2000000}
 ATTR_MAP = {'ATTRIBUTE_EARTH': 0x01, 'ATTRIBUTE_WATER': 0x02, 'ATTRIBUTE_FIRE': 0x04, 'ATTRIBUTE_WIND': 0x08, 'ATTRIBUTE_LIGHT': 0x10, 'ATTRIBUTE_DARK': 0x20, 'ATTRIBUTE_DEVINE': 0x40}
 
@@ -14,18 +16,18 @@ class SemanticKnowledgeBase:
         self._cache = {}
         self.vocab_size = vocab_size
         self.reserved_ids = 10 
-        #print(f"🧠 正在连接卡片效果语义知识库...")
+        time.sleep(random.uniform(0.1, 1.5))
         try:
             with open(kb_path, 'r', encoding='utf-8') as f:
-                self.kb = json.load(f)
+                kb_data = json.load(f)
         except Exception as e:
             print(f"⚠️ 无法加载知识库 {kb_path}: {e}，将使用空知识库。")
-            self.kb = {}
+            kb_data = {}
             
         self.cat2idx = {'<PAD>': 0, '<UNK>': 1}
         self.req2idx = {}
         
-        for cid_str, card_data in self.kb.items():
+        for cid_str, card_data in kb_data.items():
             for eff in card_data.get('effects', []):
                 for cat in eff.get('categories', []):
                     if cat not in self.cat2idx: self.cat2idx[cat] = len(self.cat2idx)
@@ -47,31 +49,24 @@ class SemanticKnowledgeBase:
             self.code_embeddings = None
             self.hash2idx = {}
 
-    def get_card_semantics(self, card_id):
-        if card_id in self._cache:
-            return self._cache[card_id]
-        
-        # 压缩：动作词表不到4000，int16(2字节)足够
+        for cid_str in kb_data.keys():
+            card_id = int(cid_str)
+            self._cache[card_id] = self._build_card_semantics(card_id, kb_data[cid_str])
+            
+        del kb_data
+        import gc; gc.collect()
+
+    def _build_card_semantics(self, card_id, card_data):
         cat_out = np.zeros((8, 8), dtype=np.int16)
-        # 压缩：掩码只有 0/1，必须用 bool_(1字节)
-        req_out = np.zeros((8, 128), dtype=np.bool_)
-        # 压缩：字段同样用 int16
+        req_out = np.full((8, 16), -1, dtype=np.int8)  # 🛡️ 核心修复 3：128维 bool 坍缩为 16 维紧凑 Index
         set_out = np.zeros((8, 4), dtype=np.int16)
-        # 压缩：数值除以 4000 后很小，float16(2字节)足够
         num_out = np.zeros((8, 4), dtype=np.float16)
-        
-        # 压缩：卡密可能超过 32767，用 int32(4字节) 安全
         ref_out = np.zeros((8, 4), dtype=np.int32)  
         race_out = np.zeros((8, 4), dtype=np.int16) 
         attr_out = np.zeros((8, 4), dtype=np.int16)
-
-        # 【修改】不再分配 384 维浮点，而是 1 维整数 (0代表空效果)
         code_idx_out = np.zeros((8,), dtype=np.int32)
 
-        if card_id == 0 or str(card_id) not in self.kb:
-            return (cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_idx_out)
-
-        effects = self.kb[str(card_id)].get('effects', [])
+        effects = card_data.get('effects', [])
         
         for i, eff in enumerate(effects):
             if i >= 8: break 
@@ -80,17 +75,18 @@ class SemanticKnowledgeBase:
                 cat_out[i, j] = self.cat2idx.get(cat, 1) 
                 
             reqs = eff.get('requirements', {})
+            req_idx = 0
             for key in ['locations', 'phases', 'types', 'summon_types', 'reasons', 'positions']:
                 for item in reqs.get(key, []):
                     if item in self.req2idx and self.req2idx[item] < 128:
-                        req_out[i, self.req2idx[item]] = 1.0
+                        if req_idx < 16:
+                            req_out[i, req_idx] = self.req2idx[item]
+                            req_idx += 1
                         
             for j, scode in enumerate(reqs.get('setcodes', [])[:4]):
                 try: set_out[i, j] = (int(scode, 16) if scode.startswith('0x') else int(scode)) % 4096 
-                except Exception as e: 
-                    print(f"[semantic_kb]⚠️ setcode解析异常: {e} (scode={scode})")
+                except Exception: pass
 
-            # 🌟 种族/属性 大一统解析
             for j, r in enumerate(reqs.get('races', [])[:4]):
                 if r in RACE_MAP: race_out[i, j] = RACE_MAP[r] % 30
             for j, a in enumerate(reqs.get('attributes', [])[:4]):
@@ -101,23 +97,30 @@ class SemanticKnowledgeBase:
                 try: 
                     val = float(cnum)
                     if val > 10000 and r_idx < 4: 
-                        # 卡密：转换为 Hash Embedding 索引
                         ref_out[i, r_idx] = (int(val) % (self.vocab_size - self.reserved_ids)) + self.reserved_ids
                         r_idx += 1
                     elif n_idx < 4:
-                        # 常规数值：直接除以 4000.0，与 feature_encoder.py 完全对齐！
                         num_out[i, n_idx] = val / 4000.0
                         n_idx += 1
-                except Exception as e: 
-                    print(f"[semantic_kb]⚠️ custom_number解析异常: {e} (cnum={cnum})")
+                except Exception: pass
 
-            # 代码语义向量提取
             key = f"{card_id}_{i}"
             if self.code_embeddings is not None and key in self.hash2idx:
                 idx = self.hash2idx[key]
-                # 【修改】只记录索引！因为 0 用作空白占位符，所以整体向后偏移 1 位
                 code_idx_out[i] = idx + 1
                     
-        result = (cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_idx_out)
-        self._cache[card_id] = result # 算完直接存下来
-        return result
+        return (cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_idx_out)
+
+    def get_card_semantics(self, card_id):
+        if card_id in self._cache:
+            return self._cache[card_id]
+        return (
+            np.zeros((8, 8), dtype=np.int16),
+            np.full((8, 16), -1, dtype=np.int8),
+            np.zeros((8, 4), dtype=np.int16),
+            np.zeros((8, 4), dtype=np.float16),
+            np.zeros((8, 4), dtype=np.int32),
+            np.zeros((8, 4), dtype=np.int16),
+            np.zeros((8, 4), dtype=np.int16),
+            np.zeros((8,), dtype=np.int32)
+        )

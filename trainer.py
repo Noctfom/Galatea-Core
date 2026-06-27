@@ -137,7 +137,7 @@ class PPOTrainer:
         if self.enable_compile and self.device.type == 'cuda':
             try:
                 print("🚀 [编译] 正在启用 torch.compile...")
-                self.agent.net = torch.compile(self.agent.net, mode='reduce-overhead')
+                self.agent.net = torch.compile(self.agent.net, mode='default')
             except Exception as e:
                 print(f"⚠️ 编译跳过: {e}")
 
@@ -191,7 +191,7 @@ class PPOTrainer:
             
             # ---前场/后场/手牌 语义大脑皮层槽位 ---
             'sem_category': ((120, 8, 8), torch.int16),
-            'sem_req': ((120, 8, 128), torch.bool),
+            'sem_req': ((120, 8, 16), torch.int8),
             'sem_setcode': ((120, 8, 4), torch.int16),
             'sem_number': ((120, 8, 4), torch.float16),
             'sem_ref': ((120, 8, 4), torch.int32),
@@ -208,7 +208,7 @@ class PPOTrainer:
             
             # --- 上帝视角卡组残像 语义槽位 ---
             'd_sem_category': ((75, 8, 8), torch.int16),
-            'd_sem_req': ((75, 8, 128), torch.bool),
+            'd_sem_req': ((75, 8, 16), torch.int8),
             'd_sem_setcode': ((75, 8, 4), torch.int16),
             'd_sem_number': ((75, 8, 4), torch.float16),
             'd_sem_ref': ((75, 8, 4), torch.int32),
@@ -221,7 +221,7 @@ class PPOTrainer:
             
             # --- 瞬间时点连锁堆栈 语义槽位 ---
             'c_sem_category': ((12, 8, 8), torch.int16),
-            'c_sem_req': ((12, 8, 128), torch.bool),
+            'c_sem_req': ((12, 8, 16), torch.int8),
             'c_sem_setcode': ((12, 8, 4), torch.int16),
             'c_sem_number': ((12, 8, 4), torch.float16),
             'c_sem_ref': ((12, 8, 4), torch.int32),
@@ -233,7 +233,7 @@ class PPOTrainer:
             
             # --- 历史施法雷达 语义槽位 ---
             'h_sem_category': ((8, 8, 8), torch.int16),
-            'h_sem_req': ((8, 8, 128), torch.bool),
+            'h_sem_req': ((8, 8, 16), torch.int8),
             'h_sem_setcode': ((8, 8, 4), torch.int16),
             'h_sem_number': ((8, 8, 4), torch.float16),
             'h_sem_ref': ((8, 8, 4), torch.int32),
@@ -841,6 +841,8 @@ class PPOTrainer:
                 nn.utils.clip_grad_norm_(self.agent.net.parameters(), 0.5)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+
+                del logits, values, v_input, surr1, surr2, ratio, entropy, loss, policy_loss, value_loss, entropy_loss
 
     def run_training_loop(self, max_iterations=1000):
         print("🚦 Starting PPO Training Loop...")
