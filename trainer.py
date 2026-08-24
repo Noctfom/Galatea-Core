@@ -31,6 +31,11 @@ from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from worker import worker_process
 from ai_bot import AiBot
+from checkpoint_utils import (
+    canonical_model_state_dict,
+    load_training_checkpoint,
+    restore_model_state_strict,
+)
 import deck_utils
 import rule_bot 
 from feature_encoder import MAX_CARDS as MAX_SEQ_LEN
@@ -127,13 +132,32 @@ class PPOTrainer:
             except Exception as e: 
                 print(f"[trainer]⚠️ 无法删除临时文件 {f}: {e}")
 
-        # 初始化 AI
-        self.agent = AiBot(device=self.device, net_config=self.net_config)
-        # 内存布局优化
-        #self.agent.net = self.agent.net.to(memory_format=torch.channels_last)
-        self.agent.net.train()
+        resume_checkpoint = None
+        if resume_path:
+            print(f"📥 正在从 {resume_path} 恢复训练...")
+            resume_checkpoint = load_training_checkpoint(resume_path, map_location="cpu")
+            self.net_config = resume_checkpoint['net_config']
 
-        # 编译优化
+        # 始终先在未编译模型上严格恢复参数，再创建优化器并启用编译。
+        self.agent = AiBot(device=self.device, net_config=self.net_config)
+        self.agent.net.train()
+        if resume_checkpoint is not None:
+            restore_model_state_strict(self.agent.net, resume_checkpoint)
+
+        self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
+        # 初始化 Scaler (BF16时其实不需要缩放，但为了代码通用，我们保留它)
+        # 使用新版 API，指定设备类型 'cuda'
+        self.scaler = torch.amp.GradScaler('cuda', enabled=(self.amp_dtype == torch.float16))
+
+        self.global_step = 0
+        self.iteration = 0
+        self.train_step = 0
+
+        if resume_checkpoint is not None:
+            self._restore_training_state(resume_checkpoint)
+            del resume_checkpoint
+
+        # 编译必须发生在严格恢复之后；OptimizedModule 与基础模型共享参数对象。
         if self.enable_compile and self.device.type == 'cuda':
             try:
                 print("🚀 [编译] 正在启用 torch.compile...")
@@ -141,16 +165,8 @@ class PPOTrainer:
             except Exception as e:
                 print(f"⚠️ 编译跳过: {e}")
 
-        self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
-        # 初始化 Scaler (BF16时其实不需要缩放，但为了代码通用，我们保留它)
-        # 使用新版 API，指定设备类型 'cuda'
-        self.scaler = torch.amp.GradScaler('cuda', enabled=(self.amp_dtype == torch.float16))
         # 初始化环境 (仅用于参数查询等，不参与对战)
         self.env = GalateaEnv()
-        
-        self.global_step = 0
-        self.iteration = 0
-        self.train_step = 0
         
         # [静态内存池] 预先设定最大容量，彻底消灭内存碎片
         self.buffer_allocated = False
@@ -291,83 +307,26 @@ class PPOTrainer:
         else:
             self.req_q = None
 
-        # 恢复训练逻辑简化为调用函数
-        if resume_path and os.path.exists(resume_path):
-            self.load_checkpoint(resume_path)
-
-    def load_checkpoint(self, path):
-        """
-        独立的加载函数，增强了对编译模型的兼容性
-        """
-        print(f"📥 正在从 {path} 恢复训练...")
-        try:
-            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-            
-            # 1. 架构配置检查与重建
-            if 'net_config' in checkpoint:
-                saved_config = checkpoint['net_config']
-                # 如果存档配置和当前不同，必须重建网络
-                if saved_config != self.net_config:
-                    print(f"⚠️ 架构变更! 重建网络: {saved_config}")
-                    self.net_config = saved_config
-                    
-                    # 重新初始化 Agent
-                    self.agent = AiBot(device=self.device, net_config=self.net_config)
-                    # 重新应用内存布局优化
-                    self.agent.net = self.agent.net.to(memory_format=torch.channels_last)
-                    
-                    # 如果启用了编译，重建后需要再次编译
-                    if self.enable_compile and self.device.type == 'cuda':
-                         try: 
-                             self.agent.net = torch.compile(self.agent.net, mode='default', dynamic=True)
-                         except Exception as e:
-                             print(f"[trainer]⚠️ 编译跳过: {e}")
-                    
-                    self.agent.net.train()
-                    # 重建优化器 (因为网络参数对象变了)
-                    self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
-
-            # 2. 权重加载 (核心修复：处理 compile 产生的前缀)
-            state_dict = checkpoint['model_state_dict']
-            new_state_dict = {}
-            for k, v in state_dict.items():
-                # 如果存档里的 key 有 _orig_mod. 前缀 (说明是编译版存的)，去掉它
-                # 这样无论是编译版还是普通版网络，都能匹配上
-                name = k.replace("_orig_mod.", "")
-                new_state_dict[name] = v
-            
-            # 使用 strict=False 容忍细微差异
-            self.agent.net.load_state_dict(new_state_dict, strict=False)
-            
-            # 3. 恢复优化器和 Scaler
-            if 'optimizer_state_dict' in checkpoint:
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            
-            if 'scaler_state_dict' in checkpoint:
-                self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                
-            self.iteration = checkpoint.get('iteration', 0)
-            self.global_step = checkpoint.get('global_step', 0)
-            self.train_step = checkpoint.get('train_step', 0) # 不再用数学公式逆推
-            
-            print(f"✅ 恢复成功! Iter: {self.iteration} | Train_Step: {self.train_step}")
-
-        except Exception as e:
-            print(f"❌ 恢复失败: {e}")
+    def _restore_training_state(self, checkpoint):
+        """Restore non-model training state after strict model loading."""
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        self.iteration = int(checkpoint['iteration'])
+        self.global_step = int(checkpoint['global_step'])
+        self.train_step = int(checkpoint['train_step'])
+        print(f"✅ 恢复成功! Iter: {self.iteration} | Train_Step: {self.train_step}")
 
     def collect_rollouts(self):
         print(f"📥 [Iter {self.iteration}] 唤醒 {self.num_workers} 个工人 | 目标: {self.update_timesteps} 步")
         t0 = time.time()
 
-        raw_weights = self.agent.net.state_dict()
-        cpu_weights = {k.replace("_orig_mod.", ""): v.cpu() for k, v in raw_weights.items()}
+        cpu_weights = canonical_model_state_dict(self.agent.net, to_cpu=True)
         
         # 将权重写进硬盘，禁止通过多进程参数传递 Tensor
         weight_file = f"tmp_weights_iter_{self.iteration}.pt"
         torch.save(cpu_weights, weight_file)
 
         del cpu_weights
-        del raw_weights
         import gc; gc.collect()
 
         # --- 联盟训练对手选择逻辑 ---
@@ -885,8 +844,7 @@ class PPOTrainer:
                 path = f"{self.save_dir}/galatea_iter_{self.iteration}.pth"
                 
                 # 在保存的源头剥离编译前缀，确保存档是纯净标准版
-                raw_state = self.agent.net.state_dict()
-                clean_state = {k.replace("_orig_mod.", ""): v for k, v in raw_state.items()}
+                clean_state = canonical_model_state_dict(self.agent.net)
                 
                 # 补全生命周期字段，确保 TensorBoard 曲线 100% 无缝对接
                 checkpoint = {

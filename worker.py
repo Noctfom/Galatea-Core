@@ -19,6 +19,7 @@ import sys
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
+from action_candidates import MACRO_ACTION_MSGS, MODEL_ACTION_MSGS, build_macro_action_pool
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
@@ -36,7 +37,7 @@ else:
 # 状态与消息定义
 STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
 INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
-AI_MANAGED_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]
+AI_MANAGED_MSGS = MODEL_ACTION_MSGS
 DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143]
 
 # GAE 参数 (和 Trainer 保持一致)
@@ -397,6 +398,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 
                 msg = msg_queue.pop(0)
                 msg_type = msg[0]
+                is_retry_message = msg_type == 1
                 try:
                     brain.update(msg_type, msg[1:])
                 except Exception as e:
@@ -448,6 +450,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 # [决策逻辑] AI vs RuleBot
                 # ===========================
                 if msg_type in DECISION_MSGS:
+                    if not is_retry_message:
+                        current_macro_pool = None
                     last_interaction_msg = msg
                     ai_handled = False
                     
@@ -474,16 +478,17 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         current_agent = opp_agent
                     
                     # --- AI 尝试接管 ---
-                    is_macro_supported = msg_type in [15, 18, 20, 22, 23, 24, 25]
+                    is_macro_supported = msg_type in MACRO_ACTION_MSGS
                     if current_agent and msg_type in AI_MANAGED_MSGS and (brain.current_valid_actions or is_macro_supported):
                         
                         # ==================================================================================
                         # [Two-Pass 架构] 拦截多选/排序等复杂指令，进行意图打分与降维 (NumPy 极限向量化版)
                         # ==================================================================================
-                        if msg_type in [15, 18, 20, 22, 23, 24, 25]:
+                        if msg_type in MACRO_ACTION_MSGS:
                             if current_macro_pool is None:
                                 # [前置意图感知] 先问问网络喜欢哪张卡
-                                code_preferences = {}
+                                base_actions = list(brain.current_valid_actions)
+                                probs = np.ones(len(base_actions), dtype=np.float64)
                                 try:
                                     # 📍 桩点 B1：精准分离 Pass 1 的表征生成耗时
                                     t_enc_p1 = time.time()
@@ -532,80 +537,30 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                                 probs = torch.softmax(action_logits, dim=-1).squeeze(0).cpu().numpy()
                                         perf_ledger['t_pass1_cpu'] += (time.time() - t_infer_p1)
                                         
-                                    for i, act in enumerate(brain.current_valid_actions):
-                                        if hasattr(act, 'code'):
-                                            code_preferences[act.code] = max(code_preferences.get(act.code, 0), probs[i])
                                 except Exception as e:
                                     print(f"⚠️ [Worker {worker_id}] 意图感知阶段发生错误，跳过打分: {e}")
-                                
+
                                 t_rule_anchor = time.time()# 计时器4
-                                large_options = rule_bot.get_macro_options(msg_type, msg[1:], brain, limit=5000, pref_weights=code_preferences)
-                                
-                                if large_options:
-                                    # 构建 256 宽度的 NumPy 极速查表，彻底消灭字典 Lookup 损耗
-                                    action_prob_map = np.zeros(256, dtype=np.float64)
-                                    for i, act in enumerate(brain.current_valid_actions):
-                                        if 0 <= act.index < 256:
-                                            action_prob_map[act.index] = float(probs[i])
-                                            
-                                    scored_options = []
-                                    is_place_msg = msg_type in [18, 24]
-                                    
-                                    # 斩断纯 Python 嵌套循环，全面转为 C 层次向量化运算
-                                    for opt in large_options:
-                                        score = 1e-4  # 基础探索分
-                                        opt_bytes = opt['bytes']
-                                        
-                                        # 消除 struct.unpack：小端 -1 等价于 b'\xff\xff\xff\xff'
-                                        if len(opt_bytes) == 4 and opt_bytes == b'\xff\xff\xff\xff':
-                                            score += 0.05
-                                        elif is_place_msg:
-                                            # 物理格子类：直接利用 NumPy 批量求和
-                                            places = opt.get('places', [])
-                                            if places:
-                                                score += action_prob_map[places].sum()
-                                        else:
-                                            # 卡片/素材选择类：用 np.frombuffer 零拷贝转为 uint8 数组批量求和
-                                            if len(opt_bytes) > 1:
-                                                card_idxs = np.frombuffer(opt_bytes, dtype=np.uint8, offset=1)
-                                                score += action_prob_map[card_idxs].sum()
-                                                
-                                        opt['weight'] = score
-                                        scored_options.append(opt)
-                                        
-                                    # 扩容到 120，完美饱和特征编码器最大深度，提供更广阔的 RL 探索视野
-                                    sample_size = min(120, len(scored_options))
-                                    weights = np.array([o['weight'] for o in scored_options], dtype=np.float64)
-                                    weights_sum = weights.sum()
-                                    if weights_sum > 0: 
-                                        weights /= weights_sum
-                                    else: 
-                                        weights = np.ones_like(weights) / len(weights)
-                                    
-                                    sampled_indices = np.random.choice(len(scored_options), size=sample_size, replace=False, p=weights)
-                                    
-                                    # 组装缓存的小池子
-                                    from data_types import GameAction
-                                    new_valid_actions = []
-                                    for i, idx in enumerate(sampled_indices):
-                                        opt = scored_options[idx]
-                                        desc = f"Macro Action {i}"
-                                        if len(opt['bytes']) == 4 and opt['bytes'] == b'\xff\xff\xff\xff': 
-                                            desc = "Cancel"
-                                        act = GameAction(action_type=msg_type, index=i, desc_str=desc)
-                                        if 'locs' in opt: setattr(act, 'macro_targets', opt['locs'])
-                                        if 'places' in opt: setattr(act, 'macro_places', opt['places'])
-                                        setattr(act, 'decision_bytes', opt['bytes'])
-                                        new_valid_actions.append(act)
-                                        
-                                    current_macro_pool = new_valid_actions
-                                else:
+                                current_macro_pool = build_macro_action_pool(
+                                    msg_type,
+                                    msg[1:],
+                                    brain,
+                                    base_actions,
+                                    probs,
+                                    option_limit=5000,
+                                )
+                                if not current_macro_pool:
                                     current_macro_pool = brain.current_valid_actions
 
                                 perf_ledger['t_rule_bot'] += (time.time() - t_rule_anchor) # 计时器4
-                            
-                            brain.current_valid_actions = current_macro_pool
-                            current_snap.valid_actions = current_macro_pool
+
+                                # 宏动作中的 locs 是引擎原始位置，必须重新生成快照映射为实体索引。
+                                brain.current_valid_actions = current_macro_pool
+                                t_macro_snapshot = time.time()
+                                current_snap = brain.get_snapshot(env)
+                                perf_ledger['t_cpp_env'] += (time.time() - t_macro_snapshot)
+                            else:
+                                brain.current_valid_actions = current_macro_pool
 
 
                         # [防死锁强力干预] 获取网络专属的数字错题本

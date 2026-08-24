@@ -3,17 +3,18 @@
 # ==================================================================================
 
 import os
-import time
-import random
+import numpy as np
 import torch
 import struct
 import traceback
 import torch.nn.functional as F
 
 import rule_bot
+from action_candidates import MACRO_ACTION_MSGS, MODEL_ACTION_MSGS, build_macro_action_pool
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
+from feature_encoder import MAX_CARDS
 import deck_utils
 from thought_logger import AIThoughtLogger
 
@@ -56,8 +57,8 @@ class ModelArena:
         print(f"⚙️ [Arena] 模型配置: {self.net_config}")
         
         # P0
-        self.p0_bot = AiBot(device=self.device, net_config=self.net_config) 
-        self.p0_bot.load_model(model_p0_path)
+        self.p0_bot = AiBot(device=self.device, net_config=self.net_config)
+        self._require_model_loaded(self.p0_bot, model_p0_path, "P0")
         self.p0_bot.net.eval()
         print(f"🤖 [AiBot] 成功加载模型权重: {model_p0_path}")
 
@@ -65,7 +66,7 @@ class ModelArena:
         self.p1_bot = None
         if model_p1_path:
             self.p1_bot = AiBot(device=self.device)
-            self.p1_bot.load_model(model_p1_path)
+            self._require_model_loaded(self.p1_bot, model_p1_path, "P1")
             self.p1_bot.net.eval()
             print(f"🤖 [Opponent] 成功加载模型权重: {model_p1_path}")
         else:
@@ -73,30 +74,56 @@ class ModelArena:
 
         self.env = GalateaEnv()
 
+    @staticmethod
+    def _require_model_loaded(bot, path, player_label):
+        if not path:
+            raise ValueError(f"{player_label} model path is required")
+        if not bot.load_model(path):
+            raise RuntimeError(f"{player_label} model failed to load: {path}")
+
+    @staticmethod
+    def _validate_action_indices(tensor_dict):
+        indices = tensor_dict['act_card_idx']
+        if torch.any(indices < 0) or torch.any(indices > MAX_CARDS):
+            minimum = int(indices.min().item())
+            maximum = int(indices.max().item())
+            raise ValueError(
+                f"act_card_idx outside [0, {MAX_CARDS}]: min={minimum}, max={maximum}"
+            )
+
     def run_duel(self, game_idx=1):
         """
-        返回: (winner_index, reason_code)
-        reason_code: 
+        返回: (winner_index, reason_code, model_fallback_count)
+        reason_code:
            0-4: 游戏规则胜利 (投降, 0LP, 0卡组等)
            -1: AI死锁 (Retry过多)
            -2: 超时 (Steps过多)
            -3: 初始化失败
+           -4: 模型决策链失败
         """
-        res = deck_utils.get_random_deck_pair(ydk_dir=self.deck_dir)
-        if not res: return 0, -3
-        env_name, d1_name, d1, d2_name, d2 = res
-        
-        raw_data = self.env.reset(d1, d2)
-        if not raw_data: return 0, -3
+        try:
+            res = deck_utils.get_random_deck_pair(ydk_dir=self.deck_dir)
+            if not res:
+                return -1, -3, 0
+            env_name, d1_name, d1, d2_name, d2 = res
 
-        brain = DuelState(d1.main, d1.extra, d2.main, d2.extra)
-        msg_queue = MessageParser.parse(raw_data)
+            raw_data = self.env.reset(d1, d2)
+            if not raw_data:
+                return -1, -3, 0
+
+            brain = DuelState(d1.main, d1.extra, d2.main, d2.extra)
+            msg_queue = MessageParser.parse(raw_data)
+        except Exception as error:
+            print(f"\n❌ [Arena] 对局初始化失败: {error}")
+            traceback.print_exc()
+            return -1, -3, 0
         
         consecutive_retries = 0
         current_step_ignore_list = []
         last_decision_value = None
         last_decision_index = None
         last_interaction_msg = None
+        current_macro_pool = None
 
         ai_fallback_count = 0
 
@@ -111,7 +138,8 @@ class ModelArena:
         STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
         INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
         DECISION_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143}
-        AI_MANAGED_MSGS = DECISION_MSGS.copy()
+        AI_MANAGED_MSGS = MODEL_ACTION_MSGS
+        macro_rng = np.random.default_rng(game_idx)
 
         steps = 0
         # 增加步数上限到 5000，防止慢速卡组被误判
@@ -124,6 +152,7 @@ class ModelArena:
                 if msg_queue and msg_queue[0][0] != 1:
                     consecutive_retries = 0
                     current_step_ignore_list.clear()
+                    current_macro_pool = None
                 continue
             
             msg = msg_queue.pop(0)
@@ -131,6 +160,7 @@ class ModelArena:
             brain.update(msg_type, msg[1:])
 
             if msg_type in DECISION_MSGS:
+                current_macro_pool = None
                 last_interaction_msg = msg
 
             # 状态重置：如果发生局势变动，清空 Retry 计数和黑名单
@@ -178,9 +208,6 @@ class ModelArena:
                 if last_decision_index is not None and last_valid_hash:
                     banned_actions_for_state.setdefault(last_valid_hash, set()).add(last_decision_index)
 
-                if consecutive_retries == 1:
-                     ai_fallback_count += 1
-                
                 # [犯罪现场记录仪] 如果连 RuleBot 都卡死了，立刻在终端打印尸检报告
                 if consecutive_retries > 6:
                     print(f"\n   [🚨 深度追凶] 连续被引擎拒绝 {consecutive_retries} 次！")
@@ -202,141 +229,138 @@ class ModelArena:
                     continue
 
             # --- 决策 ---
-            if msg_type in AI_MANAGED_MSGS:
-                player_to_act = 0
-                if len(msg) > 1: player_to_act = msg[1]
-                
-                resp = None
-                is_p0_turn = (player_to_act == 0)
+            if msg_type in DECISION_MSGS:
+                player_to_act = msg[1] if len(msg) > 1 else 0
+                is_p0_turn = player_to_act == 0
                 active_bot = self.p0_bot if is_p0_turn else self.p1_bot
+                model_should_act = active_bot is not None and msg_type in AI_MANAGED_MSGS
 
-                # 尝试 AI 决策
-                if active_bot and msg_type in AI_MANAGED_MSGS and brain.current_valid_actions and consecutive_retries < 4:
+                if model_should_act:
                     try:
-                        # 1. 提取当前状态快照
                         snap = brain.get_snapshot(self.env)
                         player = snap.global_data.to_play
 
-                        current_hash = "|".join([f"{a.action_type}_{a.index}" for a in snap.valid_actions])
+                        if msg_type in MACRO_ACTION_MSGS:
+                            if current_macro_pool is None:
+                                base_actions = list(brain.current_valid_actions)
+                                base_tensor_dict = active_bot.encoder.encode(snap, player_id=player)
+                                self._validate_action_indices(base_tensor_dict)
+                                base_infer_dict = {
+                                    key: value.to(self.device)
+                                    for key, value in base_tensor_dict.items()
+                                }
+                                with torch.no_grad():
+                                    base_logits, _, _ = active_bot.net(base_infer_dict)
+                                    base_probabilities = F.softmax(
+                                        base_logits.squeeze(0), dim=-1
+                                    )
+
+                                current_macro_pool = build_macro_action_pool(
+                                    msg_type,
+                                    msg[1:],
+                                    brain,
+                                    base_actions,
+                                    base_probabilities,
+                                    rng=macro_rng,
+                                )
+                                if not current_macro_pool:
+                                    raise RuntimeError(
+                                        f"no legal macro actions generated for message {msg_type}"
+                                    )
+
+                            brain.current_valid_actions = current_macro_pool
+                            # Map raw macro locations to entity indices exactly as training does.
+                            snap = brain.get_snapshot(self.env)
+
+                        if not snap.valid_actions:
+                            raise RuntimeError(f"model received no valid actions for message {msg_type}")
+
+                        current_hash = "|".join(
+                            f"{action.action_type}_{action.index}_{action.desc_id}_"
+                            f"{bytes(getattr(action, 'decision_bytes', b'')).hex()}"
+                            for action in snap.valid_actions
+                        )
                         if current_hash != last_valid_hash:
                             last_valid_hash = current_hash
-                            current_step_ignore_list.clear() # 场面推进了，清空黑名单
+                            current_step_ignore_list.clear()
                             action_history.clear()
-                        
-                        # 2. 调用 V3 编码器生成 53 维字典，并挂载到设备 (GPU/CPU)
+
                         tensor_dict = active_bot.encoder.encode(snap, player_id=player)
-                        tensor_dict['act_card_idx'] = torch.clamp(tensor_dict['act_card_idx'], 0, 119)
-                        infer_dict = {k: v.to(self.device) for k, v in tensor_dict.items()}
-                        
-                        # 3. 神经网络前向传播
+                        self._validate_action_indices(tensor_dict)
+                        infer_dict = {
+                            key: value.to(self.device)
+                            for key, value in tensor_dict.items()
+                        }
+
                         with torch.no_grad():
                             logits, _, _ = active_bot.net(infer_dict)
-                            
-                            # 使用 .get(..., set()) 完美避开 KeyError！
+                            valid_count = min(
+                                len(snap.valid_actions), logits.shape[-1]
+                            )
+                            if valid_count == 0:
+                                raise RuntimeError("model produced no encodable actions")
+                            valid_logits = logits[0, :valid_count].clone()
                             for bad_idx in banned_actions_for_state.get(current_hash, set()):
-                                if bad_idx < logits.shape[-1]:
-                                    logits[0, bad_idx] = -65000.0
-                                    
-                            # [竞技场核心] 绝对贪婪策略
-                            action_idx = torch.argmax(logits, dim=-1)
-                            
-                        # 记录动作频率，侦测死循环
-                        sel_idx = action_idx.item()
+                                if 0 <= bad_idx < valid_count:
+                                    valid_logits[bad_idx] = -65000.0
+
+                            if not torch.isfinite(valid_logits).any() or torch.all(
+                                valid_logits <= -64000.0
+                            ):
+                                raise RuntimeError("all model actions are banned or non-finite")
+                            sel_idx = int(torch.argmax(valid_logits).item())
+
                         loop_key = f"{current_hash}_{sel_idx}"
                         loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
-                    
-                        # 事不过三，超过 3 次同样的动作，立刻拉黑
                         if loop_tracker[loop_key] >= 3:
-                            # 修复：使用 setdefault，如果没有这个键，就自动创建一个空集合再 add
                             banned_actions_for_state.setdefault(current_hash, set()).add(sel_idx)
-                            #print(f"\n   ⚡ [断路器] 侦测到合法死循环！屏蔽该状态下动作索引: {sel_idx}")
-                            
-                        # 截获 AI 的胜率打分并记录
+
                         if is_p0_turn and self.logger.is_active:
-                            # 用 Softmax 把原始的 logits 分数转换为 0~1 的概率
                             probs = F.softmax(logits.squeeze(0), dim=-1)
                             self.logger.log_decision(
                                 turn=brain.turn,
                                 phase_id=brain.phase,
                                 snapshot=snap,
                                 probs=probs,
-                                chosen_index=action_idx.item()
+                                chosen_index=sel_idx,
                             )
 
-                        # 4. 取出动作
-                        sel_idx = action_idx.item()
+                        chosen = snap.valid_actions[sel_idx]
                         last_decision_index = sel_idx
-                        if sel_idx < len(snap.valid_actions):
-                            chosen = snap.valid_actions[sel_idx]
-                        else:
-                            chosen = random.choice(snap.valid_actions)
-                            
-                        # 5. 翻译动作为 YGOPro 底层指令
-                        resp = None
-                        
-                        if msg_type == 15:
-                            val = chosen.index
-                            if val == -1: 
-                                resp = struct.pack('<i', -1)
-                            else:
-                                min_c = msg[3] if len(msg) >= 4 else 1
-                                count = max(1, min_c)
-                                available_indices = [a.index for a in snap.valid_actions if a.index != -1 and a.index != val]
-                                selected = [val] + available_indices[:count-1]
-                                
-                                if len(selected) < min_c:
-                                    resp = None # AI 凑不够卡，直接让 RuleBot 兜底
-                                else:
-                                    resp_buf = bytearray([len(selected)])
-                                    for i in selected: resp_buf.append(i)
-                                    resp = bytes(resp_buf)
-                                
-                        # 核心修复：10, 11, 16 彻底抛弃 bytes 转换，直接传原生整数！
-                        elif msg_type in [10, 11]:
-                            resp = int((chosen.index << 16) | chosen.action_type)
-                        elif msg_type == 16:
-                            resp = int(chosen.index)
-                        elif msg_type in [12, 13, 14, 143]:
-                            resp = int(chosen.index) # 引擎要求 4字节 索引
-                        elif msg_type in [140, 141, 142]:
-                            resp = struct.pack('<I', int(chosen.desc_id))
-                            
-                        # 19 和 区域选择 依然保留 bytes，galatea_env 会帮我们安全补全 64 字节
-                        elif msg_type == 19:
-                            val = chosen.index
-                            resp = bytes([val])
-                        elif msg_type in [18, 24]:
-                            zone_id = chosen.index
-                            p = 0; l = 0x04; s = 0
-                            if zone_id & 16: p = 1
-                            if zone_id & 8:  l = 0x08
-                            s = zone_id & 0x7
-                            req_p = msg[1] if len(msg) > 1 else 0
-                            raw_p = req_p if p == 0 else (1 - req_p)
-                            final_p = 1 if raw_p == 1 else 0
-                            resp = bytes([final_p, l, s])
-                            
-                        if resp is not None:
-                            last_decision_value = resp
-                                
-                    except Exception as e:
-                        print(f"\n⚠️ [Arena] AI 推理崩溃: {e}")
-                        traceback.print_exc()
-                        resp = None
+                        resp = active_bot._pack_response(
+                            chosen,
+                            msg_type=msg_type,
+                            msg_args=msg[1:],
+                        )
+                        last_decision_value = resp
+                        action_history.append((msg_type, sel_idx, resp))
+                        action_history[:] = action_history[-5:]
 
-                # RuleBot 兜底
-                if resp is None:
+                    except Exception as e:
+                        ai_fallback_count += 1
+                        print(f"\n❌ [Arena] 模型决策链失败，拒绝 RuleBot 代打: {e}")
+                        traceback.print_exc()
+                        if self.logger.is_active:
+                            self.logger.save(-1, game_idx, f"模型决策链失败: {e}")
+                        return -1, -4, ai_fallback_count
+                else:
                     clean_ignore = []
-                    for val in current_step_ignore_list:
-                        clean_ignore.append(val)
-                        if isinstance(val, bytes):
-                            if len(val)>=4: clean_ignore.append(struct.unpack('<I', val[:4])[0])
-                            elif len(val)>=1: clean_ignore.append(val[0])
+                    for value in current_step_ignore_list:
+                        clean_ignore.append(value)
+                        if isinstance(value, bytes):
+                            if len(value) >= 4:
+                                clean_ignore.append(struct.unpack('<I', value[:4])[0])
+                            elif len(value) >= 1:
+                                clean_ignore.append(value[0])
 
                     rule_bot.sync_valid_actions(brain.current_valid_actions)
-                    
-                   # 直接传 msg
-                    resp = rule_bot.get_rule_decision(player_to_act, msg_type, msg, brain, clean_ignore)
+                    resp = rule_bot.get_rule_decision(
+                        player_to_act,
+                        msg_type,
+                        msg,
+                        brain,
+                        clean_ignore,
+                    )
                     last_decision_value = resp
 
                 self.env.send_action(resp)
@@ -365,7 +389,9 @@ class ModelArena:
             'Deck_0': 0, 
             'TimeLimit': 0,
             'Deadlock': 0,
-            'StepsOut': 0
+            'StepsOut': 0,
+            'InitFail': 0,
+            'ModelError': 0,
         }
         
         # 修复了致命的语法错误：只需要 range(n_games) 即可
@@ -388,7 +414,8 @@ class ModelArena:
             elif r == 3: reason_str = "Time Limit"; reasons['TimeLimit'] += 1
             elif r == -1: reason_str = "❌ AI Deadlock"; is_abnormal = True; reasons['Deadlock'] += 1
             elif r == -2: reason_str = "⌛ Steps Limit"; is_abnormal = True; reasons['StepsOut'] += 1
-            elif r == -3: reason_str = "⚠️ Init Fail"; is_abnormal = True
+            elif r == -3: reason_str = "⚠️ Init Fail"; is_abnormal = True; reasons['InitFail'] += 1
+            elif r == -4: reason_str = "❌ Model Decision Error"; is_abnormal = True; reasons['ModelError'] += 1
             else: # 👇 [新增] 把未知的数字打印出来！
                 reason_str = f"Special({r})"
                 reasons[reason_str] = reasons.get(reason_str, 0) + 1
