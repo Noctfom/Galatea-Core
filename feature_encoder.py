@@ -13,7 +13,15 @@ MAX_CARDS = 120
 VOCAB_SIZE = 20000       
 UNK_CODE_IDX = 1         
 PAD_CODE_IDX = 0         
-MAX_ACTIONS = 120  
+MAX_ACTIONS = 120
+HIDDEN_OPPONENT_ZONES = {
+    Zone.HAND,
+    Zone.DECK,
+    Zone.MZONE,
+    Zone.SZONE,
+    Zone.REMOVED,
+    Zone.EXTRA,
+}
 
 _GLOBAL_SEM_KB = None
 
@@ -31,8 +39,45 @@ class GalateaEncoder:
         self.sem_kb = _GLOBAL_SEM_KB
 
     def _hash_code(self, code):
-        if code == 0: return UNK_CODE_IDX 
+        if code == 0:
+            return UNK_CODE_IDX
         return (code % (self.vocab_size - self.reserved_ids)) + self.reserved_ids
+
+    @staticmethod
+    def _encode_global_vector(g, player_id):
+        """Encode fixed P0/P1 state fields from the acting player's view."""
+        if player_id not in (0, 1):
+            raise ValueError(f"player_id must be 0 or 1, got {player_id}")
+
+        resource_pairs = [
+            (g.my_lp, g.op_lp, 8000.0),
+            (g.my_hand_len, g.op_hand_len, 10.0),
+            (g.my_deck_len, g.op_deck_len, 40.0),
+            (g.my_grave_len, g.op_grave_len, 20.0),
+            (g.my_removed_len, g.op_removed_len, 10.0),
+            (g.my_extra_len, g.op_extra_len, 15.0),
+        ]
+
+        if player_id == 1:
+            resource_pairs = [(op, me, scale) for me, op, scale in resource_pairs]
+
+        global_vec = [
+            min(g.turn_count / 20.0, 5.0),
+            g.phase_id / 10.0,
+            1.0 if g.to_play == player_id else 0.0,
+        ]
+        for me, opponent, scale in resource_pairs:
+            global_vec.extend([me / scale, opponent / scale])
+        return global_vec
+
+    @staticmethod
+    def _is_entity_visible_to_player(entity, player_id):
+        if entity.owner == player_id:
+            return True
+
+        if entity.location in HIDDEN_OPPONENT_ZONES:
+            return bool(entity.is_public)
+        return True
     
     def _get_sem_mask(self, cat_out, code_idx_out):
         """动态侦测哪些槽位是有效的，生成 Attention 掩码"""
@@ -140,16 +185,7 @@ class GalateaEncoder:
 
     def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:
         g = snapshot.global_data
-        global_vec = [
-            min(g.turn_count / 20.0, 5.0), g.phase_id / 10.0,
-            1.0 if g.to_play == player_id else 0.0,
-            g.my_lp / 8000.0, g.op_lp / 8000.0,
-            g.my_hand_len / 10.0, g.op_hand_len / 10.0,
-            g.my_deck_len / 40.0, g.op_deck_len / 40.0,
-            g.my_grave_len / 20.0, g.op_grave_len / 20.0,
-            g.my_removed_len / 10.0, g.op_removed_len / 10.0,
-            g.my_extra_len / 15.0, g.op_extra_len / 15.0
-        ]
+        global_vec = self._encode_global_vector(g, player_id)
         
         # 核心优化：直接预分配全量固定形状的 NumPy 数组，天然自带 Padding
         card_indices = np.full(MAX_CARDS, PAD_CODE_IDX, dtype=np.int64)
@@ -189,22 +225,18 @@ class GalateaEncoder:
                 op_known.pop(0)
 
         for i, e in enumerate(snapshot.entities[:MAX_CARDS]):
-            is_visible = True
+            is_visible = self._is_entity_visible_to_player(e, player_id)
             is_tracked_by_memory = False
-            if e.owner != player_id:
-                if e.location in [Zone.HAND, Zone.DECK]:
-                    if not e.is_public: is_visible = False
-                if e.location in [Zone.MZONE, Zone.SZONE] and (e.position & 0xA):
-                     if not e.is_public: is_visible = False
-            
+            visible_code = e.code
+
             if not is_visible and len(op_known) > 0:
                 if e.location == Zone.HAND or (e.location in [Zone.MZONE, Zone.SZONE] and not is_visible):
-                    e.code = op_known.pop(0) 
+                    visible_code = op_known.pop(0)
                     is_visible = True
                     is_tracked_by_memory = True
 
             if is_visible:
-                card_indices[i] = self._hash_code(e.code)
+                card_indices[i] = self._hash_code(visible_code)
                 pos_x, pos_y = self._get_coords(player_id, e.owner, e.location, e.sequence)
 
                 mask = getattr(e, 'used_effect_mask', 0)  # 使用 getattr 安全获取实体属性
@@ -236,9 +268,9 @@ class GalateaEncoder:
                 card_setcodes[i] = [(s % 4096) for s in (list(raw_sc) + [0]*4)[:4]]
                 masks[i] = True
                 card_overlay_indices[i] = self._hash_code(getattr(e, 'top_overlay_code', 0))
-                
+
                 # 写入预分配矩阵对应切片
-                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(e.code)
+                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(visible_code)
             else:
                 if e.location == Zone.HAND:
                     card_indices[i] = 2 

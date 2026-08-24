@@ -1151,10 +1151,11 @@ class DuelState:
                         base_atk=base_atk, base_def=base_def,
                         lscale=lscale, rscale=rscale, link_marker=link_marker, # 传入新参数
                         setcodes=setcodes, # 写入实体
-                        is_public=(pos & 0x1 or pos & 0x4),
+                        is_public=bool(pos & 0x1 or pos & 0x4),
                         counter_count=counters,
                         overlay_count=len(overlays),
-                        is_equipped=is_equipped
+                        is_equipped=is_equipped,
+                        used_effect_mask=info.get('used_effect_mask', 0)
                     ))
                     entities[-1].top_overlay_code = top_overlay_code
                     idx_counter += 1
@@ -1218,29 +1219,40 @@ class DuelState:
         return snap
     
     def sync_active_field(self, env):
-     """直接从底层 C++ 内存覆写核心区域的状态"""
-     from game_constants import Zone
-     for p in [0, 1]:
-         # 清空原有的不靠谱记录
-         self.field_map[p][Zone.MZONE] = {}
-         self.field_map[p][Zone.SZONE] = {}
-         self.field_map[p][Zone.HAND] = {}
-         self.field_map[p][Zone.GRAVE] = {}    
-         self.field_map[p][Zone.REMOVED] = {}  
-         self.field_map[p][Zone.EXTRA] = {}
+        """Reconcile active zones with C++ without erasing event-only state.
 
-         # 1. 绝对同步怪兽区 
-         for s in range(7):
-             res = env.query_card_state(p, Zone.MZONE, s)
-             if res: self.field_map[p][Zone.MZONE][s] = res # 直接赋值，因为已经是字典了
+        Graveyard, banished and extra-deck state is maintained by MSG_MOVE and
+        must not be cleared here because ``query_card_state`` is only used for
+        the monster zone, spell/trap zone and hand.  Per-turn effect usage is
+        also event-derived, so it is retained when the queried slot still
+        contains the same public card.
+        """
+        zone_sizes = (
+            (Zone.MZONE, 7, False),
+            (Zone.SZONE, 8, False),
+            (Zone.HAND, 30, True),
+        )
 
-         # 2. 绝对同步魔陷区 
-         for s in range(8):
-             res = env.query_card_state(p, Zone.SZONE, s)
-             if res: self.field_map[p][Zone.SZONE][s] = res
+        for player in (0, 1):
+            for zone, capacity, is_contiguous in zone_sizes:
+                previous_zone = self.field_map[player].get(zone, {})
+                reconciled_zone = {}
 
-         # 3. 绝对同步手牌
-         for s in range(30):
-             res = env.query_card_state(p, Zone.HAND, s)
-             if res: self.field_map[p][Zone.HAND][s] = res
-             else: break # 手牌是连续的，遇到空位就结束
+                for sequence in range(capacity):
+                    queried = env.query_card_state(player, zone, sequence)
+                    if not queried:
+                        if is_contiguous:
+                            break
+                        continue
+
+                    merged = dict(queried)
+                    previous = previous_zone.get(sequence)
+                    if previous:
+                        old_code = int(previous.get('code', 0)) & 0x7FFFFFFF
+                        new_code = int(queried.get('code', 0)) & 0x7FFFFFFF
+                        if new_code != 0 and old_code == new_code:
+                            merged['used_effect_mask'] = previous.get('used_effect_mask', 0)
+
+                    reconciled_zone[sequence] = merged
+
+                self.field_map[player][zone] = reconciled_zone

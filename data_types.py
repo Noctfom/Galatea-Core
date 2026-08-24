@@ -12,7 +12,7 @@ class GlobalFeature:
     phase_id: int         # 当前阶段ID
     to_play: int          # 当前行动玩家 (0或1)
     
-    # 核心资源
+    # 核心资源（固定座位顺序：历史命名 my=P0，op=P1；编码器再转换为行动方视角）
     my_lp: int
     op_lp: int
     

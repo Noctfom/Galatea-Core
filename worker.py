@@ -21,6 +21,7 @@ from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
 import deck_utils
 import rule_bot
+from rollout_cursor import RolloutCursor
 import warnings # [新增]
 # [新增] 屏蔽 PyTorch 的 Nested Tensor 警告
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.transformer")
@@ -182,7 +183,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
         time.sleep(worker_id * 0.4) # 让 0~N 号工人错开 0.4 秒启动
         env = GalateaEnv()
-        collected_steps = 0
+        rollout_cursor = RolloutCursor()
         
         consecutive_ai_fails = 0 # 死亡熔断计数器
 
@@ -215,9 +216,6 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             'return': torch.zeros(max_len, dtype=torch.float32),
             'advantage': torch.zeros(max_len, dtype=torch.float32)
         }
-        global_ptr = 0      # 全局写入指针
-        ep_start_ptr = 0    # 当前对局的起始指针
-
         gc.collect()
         
         for k, v in shared_buffers[worker_id].items():
@@ -226,7 +224,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
         # print(f"👷 Worker {worker_id} 启动 | 目标: {target_steps} 步")
 
-        while collected_steps < target_steps:
+        while rollout_cursor.collected_steps < target_steps:
             if time.time() - worker_start_time > max_worker_uptime:
                 break
 
@@ -318,6 +316,12 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     pass
                 continue
 
+            # 本局写入先保持为未提交状态；只有完成结算后才会进入训练批次。
+            rollout_cursor.begin_episode()
+            episode_aborted = False
+            episode_abort_reason = ""
+            stop_worker_after_episode = False
+
             # 局内状态
             game_buffer = {0: [], 1: []}
             winner = -1
@@ -351,18 +355,27 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         t_start = time.time() # 计时器1
                         raw_data = env.step()
                         perf_ledger['t_cpp_env'] += (time.time() - t_start) # 计时器1
-                        if raw_data and len(raw_data) > 500 * 1024: 
+                        if raw_data and len(raw_data) > 500 * 1024:
                             print(f"🚨 [防爆截断] Worker {worker_id} 引擎吐出畸形海量数据({len(raw_data)/1024:.1f}KB)，强行摧毁对局防止 RAM 溢出！")
+                            episode_aborted = True
+                            episode_abort_reason = "engine returned an oversized message"
                             break
-                    except OSError as e: 
+                    except OSError as e:
                         print(f"⚠️ [Worker {worker_id}] OCGCore 引擎底层崩溃: {e}")
-                        break 
-                    except Exception as e: 
+                        episode_aborted = True
+                        episode_abort_reason = f"engine step failed: {e}"
+                        break
+                    except Exception as e:
                         print(f"⚠️ [Worker {worker_id}] 环境 Step 发生未知错误: {e}")
                         import traceback; traceback.print_exc()
+                        episode_aborted = True
+                        episode_abort_reason = f"environment step failed: {e}"
                         break
                     
-                    if not raw_data: break
+                    if not raw_data:
+                        episode_aborted = True
+                        episode_abort_reason = "engine stopped without a terminal message"
+                        break
                     
                     try:
                         msg_queue = MessageParser.parse(raw_data)
@@ -373,8 +386,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             current_step_ignore_list = []
                             current_step_ignore_idx_list = []
                             current_macro_pool = None
-                    except Exception as e: 
+                    except Exception as e:
                         print(f"⚠️ [Worker {worker_id}] 消息解析失败 (静默退出): {e}")
+                        episode_aborted = True
+                        episode_abort_reason = f"message parsing failed: {e}"
                         break
                     
                     last_act_time = time.time()
@@ -382,7 +397,13 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 
                 msg = msg_queue.pop(0)
                 msg_type = msg[0]
-                brain.update(msg_type, msg[1:])
+                try:
+                    brain.update(msg_type, msg[1:])
+                except Exception as e:
+                    print(f"⚠️ [Worker {worker_id}] 状态更新失败，本局数据回滚: {e}")
+                    episode_aborted = True
+                    episode_abort_reason = f"game state update failed: {e}"
+                    break
                 
                 # 增加读取 reason
                 if msg_type == 5: # Win
@@ -789,9 +810,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             
                             # 仅当训练代理操作时才录入数据，绝对防止指针错位与重复
                             if is_training_agent and not ai_is_broken[player]:
+                                write_index = rollout_cursor.next_write_pos
+
                                 # 内存直写：把特征直接强行塞进连续的静态池坑位里
                                 for k, v in infer_dict.items():
-                                    columns['obs'][k][global_ptr] = v.squeeze(0)
+                                    columns['obs'][k][write_index] = v.squeeze(0)
 
                                 # game_buffer 极速瘦身：只存最轻量的 Python 原生数字！
                                 game_buffer[player].append({
@@ -800,9 +823,13 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     'value': float(value.item() if isinstance(value, torch.Tensor) else value),
                                     'step_reward': float(step_reward)
                                 })
-                                
-                                global_ptr += 1  # 只有有效训练步才推针
-                                collected_steps += 1
+
+                                recorded_index = rollout_cursor.record_step()
+                                if recorded_index != write_index:
+                                    raise RuntimeError(
+                                        f"rollout cursor moved unexpectedly: expected={write_index}, "
+                                        f"actual={recorded_index}"
+                                    )
                             
                             ep_steps += 1
                             ai_handled = True
@@ -817,9 +844,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             if "access violation" in str(e).lower() or "exception" in str(e).lower():
                                     # 绝对不能让 RuleBot 接管，否则会引发无限死循环 DDOS 攻击主进程
                                     log_fatal_crash(worker_id, "【AI 神经网络】", last_msg_type, last_resp, e, last_valid_actions)
-                                    winner = 1 - player  # 惩罚导致崩溃的 AI
-                                    win_reason = 0
-                                    return
+                                    episode_aborted = True
+                                    episode_abort_reason = f"fatal AI engine error: {e}"
+                                    stop_worker_after_episode = True
+                                    break
                             else:
                                 raise e
                             
@@ -867,9 +895,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             if "access violation" in str(e).lower() or "exception" in str(e).lower():
                                 # 如果 RuleBot 发送后引擎崩溃，同样强行打断循环
                                 log_fatal_crash(worker_id, "【RuleBot 兜底逻辑】", last_msg_type, last_resp, e, last_valid_actions)
-                                winner = 1 - player
-                                win_reason = 0
-                                return
+                                episode_aborted = True
+                                episode_abort_reason = f"fatal RuleBot engine error: {e}"
+                                stop_worker_after_episode = True
+                                break
                             else:
                                 raise e
                         except Exception as e:
@@ -878,19 +907,39 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             traceback.print_exc()
                             continue
 
+            # 未产生可信终局的退出一律视为异常局，禁止其观察行进入训练批次。
+            if not episode_aborted and winner == -1 and ep_steps < MAX_EPISODE_STEPS:
+                episode_aborted = True
+                episode_abort_reason = "episode loop exited without a terminal or truncation state"
+
+            if episode_aborted:
+                discarded_rows = rollout_cursor.write_pos - rollout_cursor.episode_start_pos
+                rollout_cursor.rollback_episode()
+                game_buffer[0].clear()
+                game_buffer[1].clear()
+                print(
+                    f"⚠️ [Worker {worker_id}] 异常对局已回滚 {discarded_rows} 条未提交样本: "
+                    f"{episode_abort_reason}"
+                )
+                if stop_worker_after_episode:
+                    break
+                continue
+
             # --- 结算与 GAE ---
             if winner != -1 or ep_steps >= MAX_EPISODE_STEPS:
                 if ep_steps == 0:
                     consecutive_ai_fails += 1
                     if consecutive_ai_fails >= 3:
                         print(f"💀 [Worker {worker_id}] AI 连续 3 局无法行动，触发物理自毁防止死锁！可能卡组有问题: 训练方={d1_name}, 对手={d2_name}")
-                        return
+                        stop_worker_after_episode = True
                 else:
                     consecutive_ai_fails = 0
                     episode_lens.append(ep_steps)
 
                 # 只处理主训练模型 (train_p_id) 的数据
                 traj = game_buffer[train_p_id]
+                trajectory_length = len(traj)
+                rollout_cursor.validate_episode(trajectory_length)
                 if traj:
                     final_reward = 0.0
 
@@ -1011,40 +1060,45 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                         next_value = traj[t]['value']
                     
                     for i, t_data in enumerate(traj):
-                        idx = ep_start_ptr + i
+                        idx = rollout_cursor.episode_start_pos + i
                         columns['action'][idx] = t_data['action']
                         columns['log_prob'][idx] = t_data['log_prob']
                         columns['return'][idx] = t_data['return']
                         columns['advantage'][idx] = t_data['advantage']
-                    
-                    game_buffer[train_p_id].clear()
-                    ep_start_ptr = global_ptr
+
+                game_buffer[0].clear()
+                game_buffer[1].clear()
+                rollout_cursor.commit_episode(trajectory_length)
+
+                if stop_worker_after_episode:
+                    break
 
         # 死锁保护 - 只要有数据就保存，宁可少也要有
         tmp_file = f"tmp_rollout_iter_{iteration}_worker_{worker_id}.pt"
-        if 'columns' not in locals() or ep_start_ptr < 10:
-            print(f"❌ [Worker {worker_id}] 数据几乎为空 ({ep_start_ptr}/{target_steps})，跳过保存")
+        committed_steps = rollout_cursor.committed_pos
+        if 'columns' not in locals() or committed_steps < 10:
+            print(f"❌ [Worker {worker_id}] 数据几乎为空 ({committed_steps}/{target_steps})，跳过保存")
             return
-        if ep_start_ptr < (target_steps * 0.6):
-            print(f"⚠️ [Worker {worker_id}] 数据仅收集了 {ep_start_ptr}/{target_steps} 步 (<60%)，但仍然保存以便训练继续")
+        if committed_steps < (target_steps * 0.6):
+            print(f"⚠️ [Worker {worker_id}] 数据仅收集了 {committed_steps}/{target_steps} 步 (<60%)，但仍然保存以便训练继续")
 
         batch_data = {'obs': {}}
 
         # 提取外层特征
         for k in ['action', 'log_prob', 'return', 'advantage']:
-            batch_data[k] = columns[k][:ep_start_ptr].clone()
+            batch_data[k] = columns[k][:committed_steps].clone()
             columns[k] = None
             
         # 提取 obs 内部特征
         for k in shared_buffers[worker_id].keys():
             if k in columns['obs']:
-                batch_data['obs'][k] = columns['obs'][k][:ep_start_ptr].clone()
+                batch_data['obs'][k] = columns['obs'][k][:committed_steps].clone()
                 columns['obs'][k] = None
             else:
                 # 这一局压根没触发过这个特征，用 zeros 安全补齐
                 ref_tensor = shared_buffers[worker_id][k]
                 shape = list(ref_tensor.shape)
-                shape[0] = ep_start_ptr
+                shape[0] = committed_steps
                 batch_data['obs'][k] = torch.zeros(shape, dtype=ref_tensor.dtype)
             
         columns.clear()
