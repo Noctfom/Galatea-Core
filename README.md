@@ -59,7 +59,7 @@ git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
 # 安装依赖（根据 CUDA 版本调整 PyTorch index-url）
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 
 # 准备资源文件
@@ -85,7 +85,7 @@ chmod +x setup.sh
 # 或手动安装
 python3 -m venv venv
 source venv/bin/activate
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 python main.py update --data
 streamlit run app.py

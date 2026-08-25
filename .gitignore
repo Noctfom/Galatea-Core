@@ -20,6 +20,7 @@ web_data/
 crash_report.txts
 deploy_packages/
 debug.log
+tests/
 
 # 卡组文件 
 decks/
@@ -31,7 +32,6 @@ tmp_rollout_*.pt.tmp
 
 # python 打包环境
 python_env/
-一键包启动Webui.bat
 
 # --- 允许提交引擎核心 ---
 !ocgcore.dll

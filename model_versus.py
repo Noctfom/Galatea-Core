@@ -76,6 +76,7 @@ class ModelArena:
 
     @staticmethod
     def _require_model_loaded(bot, path, player_label):
+        """确保指定玩家模型成功加载，失败时立即终止初始化"""
         if not path:
             raise ValueError(f"{player_label} model path is required")
         if not bot.load_model(path):
@@ -83,6 +84,7 @@ class ModelArena:
 
     @staticmethod
     def _validate_action_indices(tensor_dict):
+        """校验动作卡片索引，同时保留 MAX_CARDS 作为无目标哨兵"""
         indices = tensor_dict['act_card_idx']
         if torch.any(indices < 0) or torch.any(indices > MAX_CARDS):
             minimum = int(indices.min().item())

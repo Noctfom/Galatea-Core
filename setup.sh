@@ -96,20 +96,23 @@ if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
         echo -e "${GREEN}  ✓ NVIDIA GPU detected (CUDA $CUDA_VER)${NC}"
         echo -e "  Installing PyTorch with CUDA support..."
         # PyTorch official index uses cu121 for CUDA 11.8/12.1 compatible
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
+        pip install torch --index-url https://download.pytorch.org/whl/cu121 --quiet
     else
         echo -e "${YELLOW}  ⚠ NVIDIA GPU found but couldn't detect CUDA version${NC}"
         echo -e "  Installing PyTorch with CUDA support (cu121)..."
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
+        pip install torch --index-url https://download.pytorch.org/whl/cu121 --quiet
     fi
 else
     echo -e "${YELLOW}  ⚠ No NVIDIA GPU detected, installing CPU-only PyTorch${NC}"
     echo -e "  (Training will be slow - a GPU is strongly recommended)"
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+    pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
 fi
 
 # Install remaining dependencies from requirements.txt
 pip install -r "$PROJECT_DIR/requirements.txt" --quiet
+
+# 使用与 Windows 一键包相同的检查器验证依赖能够实际导入
+python "$PROJECT_DIR/environment_setup.py" --verify-imports
 
 echo -e "${GREEN}  ✓ All dependencies installed${NC}"
 

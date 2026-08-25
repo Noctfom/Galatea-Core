@@ -47,7 +47,7 @@ def update_core_code():
 
 
 def _update_core_via_zip():
-    """通过 GitHub ZIP Archive 下载最新代码并覆盖 .py 文件"""
+    """通过 GitHub ZIP Archive 下载并更新代码、文档和启动脚本"""
     zip_url = _git_url_to_zip_url(MY_REPO_URL)
     print(f"📥 正在下载最新代码包 (ZIP Archive)...")
 
@@ -64,7 +64,6 @@ def _update_core_via_zip():
                 'cards.cdb',
                 'knowledge_base.json',
                 'meta_staples.json',
-                '一键包启动Webui.bat',
                 '.gitignore',
                 '.git/',
                 'script/',
@@ -108,8 +107,8 @@ def _update_core_via_zip():
                 if skip:
                     continue
 
-                # 只更新 .py / .md / .txt 等核心文件
-                if not (rel_path.endswith('.py') or rel_path.endswith('.md') or rel_path.endswith('.txt')):
+                # 只更新代码、文档和跨平台启动脚本
+                if not rel_path.endswith(('.py', '.md', '.txt', '.bat', '.sh')):
                     continue
 
                 # 确保目标目录存在

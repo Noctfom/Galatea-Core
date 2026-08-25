@@ -36,6 +36,12 @@ from checkpoint_utils import (
     load_training_checkpoint,
     restore_model_state_strict,
 )
+from inference_protocol import (
+    InferenceProtocolError,
+    decode_inference_request,
+    encode_inference_error,
+    encode_inference_success,
+)
 import deck_utils
 import rule_bot 
 from feature_encoder import MAX_CARDS as MAX_SEQ_LEN
@@ -192,6 +198,7 @@ class PPOTrainer:
         self.shared_buffers = []
         self.shared_outputs = []
         self.shared_logits = []
+        self.shared_response_ids = []
         self.worker_events = [mp.Event() for _ in range(self.num_workers)]
         
         # 严密对齐特工的观测维度 specs
@@ -287,6 +294,11 @@ class PPOTrainer:
             logits_t.share_memory_()
             self.shared_logits.append(logits_t)
 
+            # 完成号必须使用 int64，避免浮点精度导致请求号误判
+            response_id_t = torch.full((), -1, dtype=torch.int64)
+            response_id_t.share_memory_()
+            self.shared_response_ids.append(response_id_t)
+
         self.pinned_batch_buffers = {}
         print("📌 [Pinned Memory] 正在为主进程注入高效锁页多路聚合批处理器...")
         for k, (shape, dtype) in input_specs.items():
@@ -297,18 +309,28 @@ class PPOTrainer:
         self.zmq_port = 55555  # 固定一个端口
 
         if self.async_infer:
-            # 启动服务器，传入端口号
-            self.infer_thread = threading.Thread(
-                target=self.inference_server, 
-                args=(self.shared_buffers, self.shared_outputs, self.server_stop_event, self.zmq_port),
-                daemon=True
-            )
-            self.infer_thread.start()
+            self._start_inference_server()
         else:
             self.req_q = None
 
+    def _start_inference_server(self):
+        """启动异步推理线程，并接通宏动作第一遍推理所需的共享分数槽"""
+        self.infer_thread = threading.Thread(
+            target=self.inference_server,
+            args=(
+                self.shared_buffers,
+                self.shared_outputs,
+                self.server_stop_event,
+                self.zmq_port,
+                self.shared_logits,
+                self.shared_response_ids,
+            ),
+            daemon=True,
+        )
+        self.infer_thread.start()
+
     def _restore_training_state(self, checkpoint):
-        """Restore non-model training state after strict model loading."""
+        """严格恢复优化器、混合精度和训练进度状态"""
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
         self.iteration = int(checkpoint['iteration'])
@@ -377,7 +399,8 @@ class PPOTrainer:
                 self.worker_events,
                 self.use_onnx,
                 self.shared_logits,
-                self.standard_core
+                self.standard_core,
+                self.shared_response_ids,
             ))
             p.daemon = True
             p.start()
@@ -613,7 +636,16 @@ class PPOTrainer:
         
         return cursor # 核心改动：不再返回内存大字典，而是返回有效步数
 
-    def inference_server(self, shared_buffers, shared_outputs, stop_event, zmq_port, shared_logits=None):
+    def inference_server(
+        self,
+        shared_buffers,
+        shared_outputs,
+        stop_event,
+        zmq_port,
+        shared_logits=None,
+        shared_response_ids=None,
+    ):
+        """批量执行中心推理，并用请求号保护共享输出不被旧请求冒用"""
         print(f" [Server] ZeroMQ ROUTER 硬件级微批处理中枢启动 (Port: {zmq_port})")
         
         context = zmq.Context()
@@ -625,22 +657,63 @@ class PPOTrainer:
         
         poller = zmq.Poller()
         poller.register(socket, zmq.POLLIN)
-        
+
         self.agent.net.eval()
-        
+        last_completed_request_ids = [-1] * self.num_workers
+
         while not stop_event.is_set():
             try:
                 socks = dict(poller.poll(100))
                 if socket in socks:
                     requests = []
-                    addresses = {}
-                    
+                    pending_requests = {}
+
+                    def receive_request():
+                        """接收一个请求，并在同批重复时只保留该 Worker 的最新请求"""
+                        addr, empty, payload = socket.recv_multipart(flags=zmq.NOBLOCK)
+                        try:
+                            wid, request_id = decode_inference_request(payload)
+                        except InferenceProtocolError:
+                            socket.send_multipart(
+                                [addr, b'', encode_inference_error(-1, "INVALID_REQUEST")]
+                            )
+                            return
+
+                        if wid >= self.num_workers:
+                            socket.send_multipart(
+                                [addr, b'', encode_inference_error(request_id, "INVALID_WORKER")]
+                            )
+                            return
+
+                        if request_id <= last_completed_request_ids[wid]:
+                            socket.send_multipart(
+                                [addr, b'', encode_inference_error(request_id, "STALE")]
+                            )
+                            return
+
+                        previous = pending_requests.get(wid)
+                        if previous is not None:
+                            previous_request_id, previous_addr = previous
+                            if request_id <= previous_request_id:
+                                socket.send_multipart(
+                                    [addr, b'', encode_inference_error(request_id, "STALE")]
+                                )
+                                return
+                            socket.send_multipart(
+                                [
+                                    previous_addr,
+                                    b'',
+                                    encode_inference_error(previous_request_id, "SUPERSEDED"),
+                                ]
+                            )
+                        else:
+                            requests.append(wid)
+
+                        pending_requests[wid] = (request_id, addr)
+
                     while True:
                         try:
-                            addr, empty, payload = socket.recv_multipart(flags=zmq.NOBLOCK)
-                            wid = int(payload.decode('utf-8'))
-                            requests.append(wid)
-                            addresses[wid] = addr
+                            receive_request()
                         except zmq.Again:
                             break
                     
@@ -648,11 +721,7 @@ class PPOTrainer:
                     while len(requests) < self.num_workers and (time.perf_counter() - start_wait) < 0.003:
                         if poller.poll(0):
                             try:
-                                addr, empty, payload = socket.recv_multipart(flags=zmq.NOBLOCK)
-                                wid = int(payload.decode('utf-8'))
-                                if wid not in requests:
-                                    requests.append(wid)
-                                    addresses[wid] = addr
+                                receive_request()
                             except zmq.Again:
                                 pass
                     
@@ -679,6 +748,7 @@ class PPOTrainer:
                     
                     # 5. 精准解包回写：单次前向输出同时灌入两个共享切片
                     for i, wid in enumerate(requests):
+                        request_id, addr = pending_requests[wid]
                         # A. 基础槽（供 Pass 2 或 自对局决策流抽样消费）
                         shared_outputs[wid][0] = actions[i].cpu().float()
                         shared_outputs[wid][1] = log_probs[i].cpu().float()
@@ -687,8 +757,12 @@ class PPOTrainer:
                         # B. [精细新增] 分数槽（供 Pass 1 意图感知大矩阵查表消费）
                         if shared_logits is not None:
                             shared_logits[wid].copy_(logits[i].cpu().float())
-                            
-                        socket.send_multipart([addresses[wid], b'', b'OK'])
+
+                        # 最后写入完成号，再发送响应，保证 Worker 不会读取半写入结果
+                        if shared_response_ids is not None:
+                            shared_response_ids[wid].fill_(request_id)
+                        last_completed_request_ids[wid] = request_id
+                        socket.send_multipart([addr, b'', encode_inference_success(request_id)])
                     #del logits, values, v_input, batch_obs
 
             except Exception as e:

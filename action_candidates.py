@@ -1,3 +1,5 @@
+# 构建训练与竞技场共用的复杂宏动作候选池
+
 import numpy as np
 
 import rule_bot
@@ -11,9 +13,11 @@ MODEL_ACTION_MSGS = frozenset(
     {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143}
 )
 _CANCEL_RESPONSE = b"\xff\xff\xff\xff"
+MIN_MACRO_OPTION_WEIGHT = 1e-4
 
 
 def _as_probabilities(action_probabilities):
+    """将模型输出统一转换为一维双精度概率数组"""
     if hasattr(action_probabilities, "detach"):
         action_probabilities = action_probabilities.detach().cpu().numpy()
     return np.asarray(action_probabilities, dtype=np.float64).reshape(-1)
@@ -30,12 +34,9 @@ def build_macro_action_pool(
     max_actions=MAX_ACTIONS,
     rng=None,
 ):
-    """Build policy-guided, engine-ready macro actions for complex prompts.
+    """按策略权重随机缩减复杂选择池，并生成可直接提交给引擎的宏动作
 
-    ``base_actions`` and ``action_probabilities`` must describe the same
-    pre-macro action list.  Returned actions retain raw location identifiers;
-    callers must regenerate a DuelState snapshot so they are mapped to entity
-    indices before feature encoding.
+    返回动作保留原始位置标识，调用方需重新生成快照，将其映射为实体索引
     """
     if msg_type not in MACRO_ACTION_MSGS:
         raise ValueError(f"message type {msg_type} is not a macro action prompt")
@@ -80,7 +81,8 @@ def build_macro_action_pool(
     scored_options = []
     for option in options:
         response = bytes(option["bytes"])
-        score = 1e-4
+        # 给每个合法组合保留最低探索权重，避免低分选项被永久排除
+        score = MIN_MACRO_OPTION_WEIGHT
 
         if response == _CANCEL_RESPONSE:
             score += 0.05

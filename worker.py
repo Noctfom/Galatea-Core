@@ -20,6 +20,7 @@ from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
 from action_candidates import MACRO_ACTION_MSGS, MODEL_ACTION_MSGS, build_macro_action_pool
+from inference_protocol import InferenceProtocolError, request_shared_inference_result
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
@@ -44,6 +45,17 @@ DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130
 GAMMA = 0.998
 GAE_LAMBDA = 0.95
 MAX_EPISODE_STEPS = 1500
+
+
+def _create_inference_socket(context, worker_id, zmq_port, generation):
+    """创建带唯一身份和超时限制的中心推理请求 Socket。"""
+    socket = context.socket(zmq.REQ)
+    identity = f"worker_{worker_id}_{os.getpid()}_{generation}".encode("ascii")
+    socket.setsockopt(zmq.IDENTITY, identity)
+    socket.setsockopt(zmq.RCVTIMEO, 60000)
+    socket.setsockopt(zmq.SNDTIMEO, 15000)
+    socket.connect(f"{ZMQ_ADDR}{zmq_port}")
+    return socket
 
 def setup_optimal_cpu_threads():
     # 获取物理核心数
@@ -98,7 +110,7 @@ def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
         # 哪怕发生极端情况的并发踩踏，也静默吞下异常，保证 Worker 能够顺利走完后续的销毁流程
         pass
 
-def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu',zmq_port=55555,opp_config=None, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4,shared_buffers=None, shared_outputs=None, worker_events=None, use_onnx=False,shared_logits=None, standard_core=False):
+def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu',zmq_port=55555,opp_config=None, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4,shared_buffers=None, shared_outputs=None, worker_events=None, use_onnx=False,shared_logits=None, standard_core=False, shared_response_ids=None):
     
     try:
         from system_logger import setup_global_logger
@@ -134,13 +146,44 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
     # [新增 ZMQ 连接初始化]
     context = zmq.Context()
-    socket = context.socket(zmq.REQ)
-    
-    # 极速超时配置（防死锁），单位为毫秒
-    socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
-    socket.setsockopt(zmq.RCVTIMEO, 60000)
-    socket.setsockopt(zmq.SNDTIMEO, 15000)
-    socket.connect(f"{ZMQ_ADDR}{zmq_port}")
+    socket_generation = 0
+    socket = _create_inference_socket(context, worker_id, zmq_port, socket_generation)
+    # 高 32 位使用训练轮次，避免新一轮 Worker 的请求号与上一轮重复。
+    next_inference_request_id = int(iteration) << 32
+
+    def request_central_result(result_slot, phase):
+        """请求中心推理；连接异常时重建 Socket，并阻止读取旧共享结果。"""
+        nonlocal socket, socket_generation, next_inference_request_id
+        next_inference_request_id += 1
+        request_id = next_inference_request_id
+        response_id_slot = (
+            shared_response_ids[worker_id] if shared_response_ids is not None else None
+        )
+
+        try:
+            return request_shared_inference_result(
+                socket,
+                worker_id,
+                request_id,
+                response_id_slot,
+                result_slot,
+            )
+        except (zmq.ZMQError, InferenceProtocolError) as exc:
+            print(
+                f"🛰️ [ZeroMQ 断联] Worker {worker_id} {phase} 请求失败，"
+                "已重建连接并放弃本次旧结果"
+            )
+            socket.close(linger=0)
+            socket_generation += 1
+            socket = _create_inference_socket(
+                context,
+                worker_id,
+                zmq_port,
+                socket_generation,
+            )
+            raise RuntimeError(
+                f"{phase} 中心推理请求 {request_id} 未取得匹配结果"
+            ) from exc
 
     def build_ort_inputs(session, t_dict):
         inputs = {}
@@ -505,22 +548,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                             if k in shared_buffers[worker_id]:
                                                 shared_buffers[worker_id][k].copy_(v.squeeze(0))
                                         
-                                        # 激活操作系统级信号量，呼叫服务端批处理
-                                        try:
-                                            socket.send(str(worker_id).encode('utf-8'))
-                                            socket.recv()
-                                        except zmq.error.Again:
-                                            print(f"🛰️ [ZeroMQ 断联] Worker {worker_id} Pass1 超时，重建连接...")
-                                            socket.close(linger=0)
-                                            socket = context.socket(zmq.REQ)
-                                            socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
-                                            socket.setsockopt(zmq.RCVTIMEO, 60000)
-                                            socket.setsockopt(zmq.SNDTIMEO, 15000)
-                                            socket.connect(f"{ZMQ_ADDR}{zmq_port}")
-                                            raise RuntimeError("Pass1 ZMQ 首次通讯超时")
-                                        
-                                        # 极限极速：直接从 120 维超广阔共享大矩阵中捞取全量 Logits 并激活 Softmax
-                                        raw_logits = shared_logits[worker_id].numpy()
+                                        # 只在响应号和共享完成号一致时取得当前 Pass1 分数快照。
+                                        raw_logits = request_central_result(
+                                            shared_logits[worker_id],
+                                            "Pass1",
+                                        ).numpy()
                                         probs = torch.softmax(torch.tensor(raw_logits), dim=-1).numpy()
                                         perf_ledger['t_zmq_p0'] += (time.time() - t_infer_p1)
                                         
@@ -635,23 +667,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 for k, v in tensor_dict.items():
                                     if k in shared_buffers[worker_id]:
                                         shared_buffers[worker_id][k].copy_(v.squeeze(0))
-                                try:
-                                    socket.send(str(worker_id).encode('utf-8'))
-                                    reply = socket.recv()
-                                except zmq.error.Again:
-                                    print(f"🛰️ [ZeroMQ 断联] Worker {worker_id} 超时，正在执行神经连接重建...")
-                                    # [核心修复] 必须彻底销毁并重建 Socket，否则 REQ 状态机会永久锁死
-                                    socket.close(linger=0)
-                                    socket = context.socket(zmq.REQ)
-                                    socket.setsockopt(zmq.IDENTITY, f"worker_{worker_id}".encode('utf-8'))
-                                    socket.setsockopt(zmq.RCVTIMEO, 60000)
-                                    socket.setsockopt(zmq.SNDTIMEO, 15000)
-                                    socket.connect(f"{ZMQ_ADDR}{zmq_port}")
-                                    
-                                    print("ZMQ 首次通讯超时，已强制重启连接")
-                                
-                                # 从 4 维基础槽中拉取采样出的动作面包屑
-                                res_array = shared_outputs[worker_id].numpy()
+                                # 只在响应号和共享完成号一致时取得当前动作结果快照。
+                                res_array = request_central_result(
+                                    shared_outputs[worker_id],
+                                    "Pass2",
+                                ).numpy()
                                 action_idx = torch.tensor(int(res_array[0]), dtype=torch.long)
                                 log_prob = torch.tensor(res_array[1], dtype=torch.float32)
                                 value = torch.tensor(res_array[2], dtype=torch.float32)

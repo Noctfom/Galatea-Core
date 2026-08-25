@@ -1,3 +1,6 @@
+# 本文件验证 P0 检查点恢复、宏动作候选池和竞技场决策链修复。
+
+import ast
 import sys
 import tempfile
 import unittest
@@ -128,9 +131,66 @@ class MacroActionCandidateTests(unittest.TestCase):
             )
 
         self.assertGreater(rng.probabilities[1], rng.probabilities[0])
+        self.assertTrue(np.all(rng.probabilities > 0))
         self.assertEqual(len(pool), 1)
         self.assertEqual(pool[0].decision_bytes, b"\x01\x01")
         self.assertEqual(pool[0].macro_targets, [option_b])
+
+
+class AsyncInferenceWiringTests(unittest.TestCase):
+    def test_async_server_receives_shared_logits(self):
+        """确认异步推理线程能够写入宏动作第一遍推理的分数槽。"""
+        source = (PROJECT_ROOT / "trainer.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        method = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_start_inference_server"
+        )
+        thread_call = next(
+            node
+            for node in ast.walk(method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Thread"
+        )
+        args_keyword = next(
+            keyword for keyword in thread_call.keywords if keyword.arg == "args"
+        )
+
+        self.assertIsInstance(args_keyword.value, ast.Tuple)
+        shared_arguments = args_keyword.value.elts[-2:]
+        self.assertTrue(all(isinstance(arg, ast.Attribute) for arg in shared_arguments))
+        self.assertEqual(
+            [arg.attr for arg in shared_arguments],
+            ["shared_logits", "shared_response_ids"],
+        )
+
+    def test_worker_receives_shared_response_ids(self):
+        """确认 Worker 进程能够收到用于结果校验的共享完成号。"""
+        source = (PROJECT_ROOT / "trainer.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        worker_process_call = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "Process"
+            and any(
+                keyword.arg == "target"
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "worker_process"
+                for keyword in node.keywords
+            )
+        )
+        args_keyword = next(
+            keyword for keyword in worker_process_call.keywords if keyword.arg == "args"
+        )
+
+        last_argument = args_keyword.value.elts[-1]
+        self.assertIsInstance(last_argument, ast.Attribute)
+        self.assertEqual(last_argument.attr, "shared_response_ids")
 
 
 class ArenaCorrectnessTests(unittest.TestCase):

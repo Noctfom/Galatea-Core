@@ -1,3 +1,5 @@
+# 本文件验证采样游标、玩家视角编码和场面快照同步修复。
+
 import sys
 import unittest
 from pathlib import Path

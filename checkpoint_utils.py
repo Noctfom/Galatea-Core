@@ -1,3 +1,5 @@
+# 训练检查点的严格校验、恢复与规范化导出
+
 import os
 
 import torch
@@ -15,7 +17,7 @@ REQUIRED_TRAINING_CHECKPOINT_KEYS = {
 
 
 def load_training_checkpoint(path, map_location="cpu"):
-    """Load and validate a checkpoint produced by the current trainer."""
+    """加载并校验当前训练框架生成的完整检查点"""
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"training checkpoint does not exist: {path}")
 
@@ -42,12 +44,12 @@ def load_training_checkpoint(path, map_location="cpu"):
 
 
 def restore_model_state_strict(model, checkpoint):
-    """Restore exact model parameters before torch.compile wraps the model."""
+    """在 torch.compile 包装前严格恢复模型参数"""
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
 
 
 def canonical_model_state_dict(model, *, to_cpu=False):
-    """Return a state dict whose keys are independent of torch.compile wrappers."""
+    """导出不受 torch.compile 包装前缀影响的规范权重字典"""
     canonical = {}
     for key, value in model.state_dict().items():
         clean_key = key.removeprefix("_orig_mod.")

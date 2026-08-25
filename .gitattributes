@@ -1,0 +1,3 @@
+# 保证跨平台启动脚本在检出后使用各自可执行的换行格式。
+*.bat text eol=crlf
+*.sh text eol=lf
