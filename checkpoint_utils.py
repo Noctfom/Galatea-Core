@@ -21,7 +21,7 @@ def load_training_checkpoint(path, map_location="cpu"):
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"training checkpoint does not exist: {path}")
 
-    checkpoint = torch.load(path, map_location=map_location, weights_only=False)
+    checkpoint = torch.load(path, map_location=map_location, weights_only=True)
     if not isinstance(checkpoint, dict):
         raise TypeError("training checkpoint must be a dictionary")
 

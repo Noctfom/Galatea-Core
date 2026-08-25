@@ -21,6 +21,7 @@ from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
 from action_candidates import MACRO_ACTION_MSGS, MODEL_ACTION_MSGS, build_macro_action_pool
 from inference_protocol import InferenceProtocolError, request_shared_inference_result
+from model_artifacts import describe_onnx_artifact
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
@@ -209,8 +210,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
         #  从硬盘读取权重，斩断 Windows IPC 共享内存污染
         if weight_file and isinstance(weight_file, str) and os.path.exists(weight_file):
-            weights = torch.load(weight_file, map_location=device, weights_only=False)
-            agent.net.load_state_dict(weights, strict=False)
+            weights = torch.load(weight_file, map_location=device, weights_only=True)
+            agent.net.load_state_dict(weights, strict=True)
             agent.net.eval()
         
         # --- 新增：对手代理 P1 初始化 ---
@@ -219,10 +220,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             opp_agent = AiBot(device='cpu', net_config=net_config)
             opp_path = opp_config["path"]
             if opp_path and os.path.exists(opp_path):
-                opp_agent.load_model(opp_path)
+                if not opp_agent.load_model(opp_path):
+                    raise RuntimeError(f"无法加载历史对手检查点: {opp_path}")
             else:
                 cpu_state_dict = {k: v.cpu() for k, v in agent.net.state_dict().items()}
-                opp_agent.net.load_state_dict(cpu_state_dict, strict=False)
+                opp_agent.net.load_state_dict(cpu_state_dict, strict=True)
                 opp_agent.net.eval()
 
         time.sleep(worker_id * 0.4) # 让 0~N 号工人错开 0.4 秒启动
@@ -279,14 +281,19 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     hist_onnx_path = opp_config["path"].replace(".pth", ".onnx")
                     if os.path.exists(hist_onnx_path):
                         try:
+                            # 在创建运行时会话前确认所有外置权重都与主图同轮次且完整
+                            describe_onnx_artifact(hist_onnx_path, require_complete=True)
                             import onnxruntime as ort
                             sess_options = ort.SessionOptions()
                             sess_options.intra_op_num_threads = torch.get_num_threads()
                             ort_session_p1 = ort.InferenceSession(hist_onnx_path, sess_options, providers=['CPUExecutionProvider'])
                             use_onnx_p1 = True
                             print(f"🕰️ [Worker {worker_id}] 历史对手 ONNX 引擎 ({os.path.basename(hist_onnx_path)}) 挂载成功！")
-                        except Exception:
-                            pass
+                        except Exception as onnx_error:
+                            print(
+                                f"⚠️ [Worker {worker_id}] 历史对手 ONNX 加载失败，"
+                                f"已回退到 PyTorch: {onnx_error}"
+                            )
 
             perf_ledger = {
                 'steps': 0,
@@ -325,9 +332,9 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             # --- Reset 环境 ---
             try:
                 res = deck_utils.get_random_deck_pair(ydk_dir=deck_dir)
-                if not res or res[1] is None: 
+                if res is None:
                     time.sleep(1)
-                    continue 
+                    continue
                 env_name, d1_name, d1, d2_name, d2 = res
                 raw_data = env.reset(d1, d2)
             except Exception as e: 
@@ -1081,12 +1088,12 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         
         avg_rew = np.mean(episode_rewards) if episode_rewards else 0.0
         avg_len = np.mean(episode_lens) if episode_lens else 0.0
-        batch_data['avg_rew'] = np.array([avg_rew], dtype=np.float32)
-        batch_data['avg_len'] = np.array([avg_len], dtype=np.float32)
+        batch_data['avg_rew'] = torch.tensor([avg_rew], dtype=torch.float32)
+        batch_data['avg_len'] = torch.tensor([avg_len], dtype=torch.float32)
 
-        # 把胜率字典打包成 numpy 发回去
+        # 把胜率字典保存为安全可加载的 Tensor
         for k, v in stats.items():
-            batch_data[f'stats_{k}'] = np.array([v], dtype=np.int32)
+            batch_data[f'stats_{k}'] = torch.tensor([v], dtype=torch.int32)
 
         batch_data['deck_records'] = deck_records
         

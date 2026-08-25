@@ -33,7 +33,7 @@ class AiBot:
             return False
         
         try:
-            checkpoint = torch.load(path, map_location=self.device)
+            checkpoint = torch.load(path, map_location=self.device, weights_only=True)
             
             # [新逻辑] 检查是否包含配置字典
             if isinstance(checkpoint, dict) and 'net_config' in checkpoint:

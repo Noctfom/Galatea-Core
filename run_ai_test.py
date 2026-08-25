@@ -12,9 +12,10 @@ def main():
     
     # 2. 准备卡组
     env = GalateaEnv()
-    d1_name, d1, d2_name, d2 = deck_utils.get_random_deck_pair()
-    
-    if not d1: return
+    deck_pair = deck_utils.get_random_deck_pair()
+    if deck_pair is None:
+        return
+    _env_name, d1_name, d1, d2_name, d2 = deck_pair
 
     print(f"⚔️ 实验对局: AI (P0, {d1_name}) vs AI (P1, {d2_name})")
     

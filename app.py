@@ -120,7 +120,7 @@ if st.session_state.running_pid:
 def load_model_config(path):
     try:
         # 只加载字典信息到 CPU，不把张量放进 GPU，极速且不占显存
-        cp = torch.load(path, map_location='cpu', weights_only=False)
+        cp = torch.load(path, map_location='cpu', weights_only=True)
         return cp.get('net_config', {})
     except Exception as e:
         print(f"读取配置失败: {e}")
@@ -2111,6 +2111,13 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     import time
     import platform
     import subprocess
+    from model_artifacts import (
+        build_package_model_records,
+        collect_model_artifact_files,
+        is_artifact_manifest_filename,
+        is_primary_model_filename,
+        safe_extract_zip,
+    )
     
     st.title(_("📦 模型打包与发布工厂", "📦 Model Deployment Factory"))
     st.markdown(_("将训练好的模型与知识库打包为 `.gkg` 部署包。已启用纯本地原生 I/O 加速，彻底免除网页端大文件传输导致的卡顿与内存溢出。", 
@@ -2141,12 +2148,12 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
         
         with col_form:
             st.markdown("### 🔧 " + _("构建新的 .gkg 部署包", "Build new .gkg Package"))
-            models = [f for f in os.listdir("./models") if f.endswith(".pth") or f.endswith(".onnx")]
+            models = sorted(f for f in os.listdir("./models") if is_primary_model_filename(f))
             
             with st.form("pack_form"):
                 st.markdown("##### 🤖 核心模型选择")
-                sel_models = st.multiselect(_("选择要打包的模型 (.pth，可多选)", "Select Core Models (.pth)"), models) if models else []
-                if not models: st.warning(_("暂无 .pth 模型文件。", "No .pth models found."))
+                sel_models = st.multiselect(_("选择要打包的模型 (.pth/.onnx，可多选)", "Select Core Models (.pth/.onnx)"), models) if models else []
+                if not models: st.warning(_("暂无 .pth 或 .onnx 模型文件。", "No .pth or .onnx models found."))
                 
                 st.markdown("##### 🗂️ 附加数据组件")
                 c1, c2, c3 = st.columns(3)
@@ -2161,9 +2168,20 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                     missing = []
                     if inc_kb and not os.path.exists("knowledge_base.json"): missing.append("knowledge_base.json")
                     if inc_staples and not os.path.exists("meta_staples.json"): missing.append("meta_staples.json")
-                    
+                    package_model_files = []
+                    package_model_records = []
+                    artifact_error = None
+                    if sel_models:
+                        try:
+                            package_model_files = collect_model_artifact_files("./models", sel_models)
+                            package_model_records = build_package_model_records("./models", sel_models)
+                        except Exception as error:
+                            artifact_error = error
+
                     if missing:
                         st.error(_(f"缺少勾选的组件: {', '.join(missing)}。请先生成或取消勾选！", f"Missing files: {', '.join(missing)}."))
+                    elif artifact_error is not None:
+                        st.error(f"模型产物不完整，已拒绝打包: {artifact_error}")
                     elif not sel_models and not (inc_kb or inc_staples):
                         st.error("包体不能为空，请至少选择一个模型或组件！")
                     else:
@@ -2174,18 +2192,19 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                             manifest = {
                                 "package_name": final_name, "version": "3.0.0",
                                 "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                "models_included": sel_models, "includes_kb": inc_kb, "includes_staples": inc_staples
+                                "models_included": sel_models,
+                                "model_artifacts": package_model_records,
+                                "model_files_included": package_model_files,
+                                "includes_kb": inc_kb,
+                                "includes_staples": inc_staples,
                             }
-                            if inc_manifest:
-                                with open("manifest_temp.json", "w", encoding="utf-8") as f: json.dump(manifest, f, indent=4)
-                                    
+
                             with zipfile.ZipFile(target_zip, 'w', zipfile.ZIP_DEFLATED) as gkg_zip:
-                                for m in sel_models: gkg_zip.write(os.path.join("./models", m), arcname=m)
+                                for m in package_model_files: gkg_zip.write(os.path.join("./models", m), arcname=m)
                                 if inc_kb: gkg_zip.write("knowledge_base.json", arcname="knowledge_base.json")
                                 if inc_staples: gkg_zip.write("meta_staples.json", arcname="meta_staples.json")
-                                if inc_manifest: gkg_zip.write("manifest_temp.json", arcname="manifest.json")
-                                
-                            if inc_manifest: os.remove("manifest_temp.json")
+                                if inc_manifest:
+                                    gkg_zip.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=4))
                             st.success(_(f"✅ 打包成功！文件位于 `{target_zip}`", f"✅ Successfully packaged to `{target_zip}`"))
                             time.sleep(1)
                             st.rerun()
@@ -2234,7 +2253,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                         
                         try:
                             with zipfile.ZipFile(os.path.join(deploy_dir, sel_gkg), 'r') as gkg_zip:
-                                gkg_zip.extractall(target_extract_dir)
+                                safe_extract_zip(gkg_zip, target_extract_dir)
                             st.success(f"✅ 解包成功！已存入暂存区：`{os.path.basename(target_extract_dir)}`")
                         except Exception as e:
                             st.error(f"解压失败，包体可能损坏: {str(e)}")
@@ -2261,8 +2280,11 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                     with st.form("import_form"):
                         st.write("**勾选需要部署进当前系统的文件：**")
                         
-                        models_in_stage = [f for f in staged_files if f.endswith(".pth") or f.endswith(".onnx")]
-                        jsons_in_stage = [f for f in staged_files if f.endswith(".json")]
+                        models_in_stage = sorted(f for f in staged_files if is_primary_model_filename(f))
+                        jsons_in_stage = [
+                            f for f in staged_files
+                            if f.endswith(".json") and not is_artifact_manifest_filename(f)
+                        ]
                         
                         import_selections = []
                         
@@ -2286,10 +2308,21 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                             else:
                                 try:
                                     os.makedirs("./models", exist_ok=True)
+                                    expanded_selections = []
                                     for target_type, fname in import_selections:
+                                        if target_type == "models":
+                                            for artifact_file in collect_model_artifact_files(stage_path, [fname]):
+                                                item = ("models", artifact_file)
+                                                if item not in expanded_selections:
+                                                    expanded_selections.append(item)
+                                        else:
+                                            expanded_selections.append((target_type, fname))
+
+                                    for target_type, fname in expanded_selections:
                                         src_file = os.path.join(stage_path, fname)
                                         if target_type == "models":
                                             dest_file = os.path.join("./models", fname)
+                                            os.makedirs(os.path.dirname(dest_file), exist_ok=True)
                                         else:
                                             dest_file = os.path.join(".", fname)
                                         shutil.copy2(src_file, dest_file)

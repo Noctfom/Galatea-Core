@@ -3,6 +3,14 @@ import time
 import zipfile
 import shutil
 import json
+import tempfile
+
+from model_artifacts import (
+    build_package_model_records,
+    collect_model_artifact_files,
+    is_primary_model_filename,
+    safe_extract_zip,
+)
 
 DEPLOY_DIR = "./deploy_packages"
 
@@ -22,9 +30,9 @@ def pack_model():
     os.makedirs("./models", exist_ok=True)
     os.makedirs(DEPLOY_DIR, exist_ok=True)
     
-    models = [f for f in os.listdir("./models") if f.endswith(".pth")]
+    models = sorted(f for f in os.listdir("./models") if is_primary_model_filename(f))
     if not models:
-        print("❌ 未在 ./models 目录下发现 .pth 模型文件，按回车返回...")
+        print("❌ 未在 ./models 目录下发现 .pth 或 .onnx 模型文件，按回车返回...")
         input()
         return
 
@@ -41,9 +49,18 @@ def pack_model():
         input()
         return
 
-    pkg_name = input(f"\n请输入自定义包名 (直接回车默认使用 {selected_models[0].replace('.pth', '')}): ").strip()
+    try:
+        package_model_files = collect_model_artifact_files("./models", selected_models)
+        package_model_records = build_package_model_records("./models", selected_models)
+    except Exception as error:
+        print(f"❌ 模型产物不完整，已拒绝打包: {error}")
+        input("\n按回车键返回主菜单...")
+        return
+
+    default_name = os.path.splitext(selected_models[0])[0]
+    pkg_name = input(f"\n请输入自定义包名 (直接回车默认使用 {default_name}): ").strip()
     if not pkg_name:
-        pkg_name = selected_models[0].replace(".pth", "")
+        pkg_name = default_name
         
     pkg_name += f"_{int(time.time())}" # 加时间戳防重名
     target_zip = os.path.join(DEPLOY_DIR, f"{pkg_name}.gkg")
@@ -53,7 +70,7 @@ def pack_model():
     try:
         with zipfile.ZipFile(target_zip, 'w', zipfile.ZIP_DEFLATED) as gkg_zip:
             # 1. 压入模型
-            for m in selected_models:
+            for m in package_model_files:
                 print(f"  -> 压缩模型: {m}")
                 gkg_zip.write(os.path.join("./models", m), arcname=m)
                 
@@ -70,13 +87,12 @@ def pack_model():
                 "package_name": pkg_name,
                 "version": "3.0.0",
                 "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "models_included": selected_models
+                "models_included": selected_models,
+                "model_artifacts": package_model_records,
+                "model_files_included": package_model_files,
             }
-            with open("manifest_temp.json", "w", encoding="utf-8") as f:
-                json.dump(manifest, f, indent=4)
             print("  -> 生成清单: manifest.json")
-            gkg_zip.write("manifest_temp.json", arcname="manifest.json")
-            os.remove("manifest_temp.json")
+            gkg_zip.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=4))
             
         print(f"\n✅ 打包大功告成！部署包已生成至: {os.path.abspath(target_zip)}")
     except Exception as e:
@@ -125,16 +141,24 @@ def unpack_model():
     print("\n⏳ 正在原生极速解压部署中...")
     
     try:
-        with zipfile.ZipFile(pkg_path, 'r') as gkg_zip:
-            file_list = gkg_zip.namelist()
-            
-            for f in file_list:
-                if f.endswith(".pth"):
-                    print(f"  -> 提取模型至 ./models/: {f}")
-                    gkg_zip.extract(f, "./models")
-                elif f.endswith(".json") and f != "manifest.json":
-                    print(f"  -> 覆盖系统基座文件: {f}")
-                    gkg_zip.extract(f, ".")
+        with tempfile.TemporaryDirectory(prefix="galatea_import_", dir=DEPLOY_DIR) as stage_dir:
+            with zipfile.ZipFile(pkg_path, 'r') as gkg_zip:
+                safe_extract_zip(gkg_zip, stage_dir)
+
+            staged_files = os.listdir(stage_dir)
+            primary_models = [f for f in staged_files if is_primary_model_filename(f)]
+            model_files = collect_model_artifact_files(stage_dir, primary_models)
+            for filename in model_files:
+                source = os.path.join(stage_dir, filename)
+                destination = os.path.join("./models", filename)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                print(f"  -> 提取模型产物至 ./models/: {filename}")
+                shutil.copy2(source, destination)
+
+            for filename in staged_files:
+                if filename.endswith(".json") and filename != "manifest.json" and not filename.endswith(".artifacts.json"):
+                    print(f"  -> 覆盖系统基座文件: {filename}")
+                    shutil.copy2(os.path.join(stage_dir, filename), filename)
                     
         print("\n✅ 系统环境更新完毕！模型和字典已全部就位。")
     except Exception as e:

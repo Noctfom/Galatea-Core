@@ -82,12 +82,15 @@ def get_json_data(filepath, cache_key):
         return _cache_dict[cache_key]
 
 def get_random_deck_pair(ydk_dir='./decks'):
-    if not os.path.exists(ydk_dir): return None, None, None, None
+    """随机返回环境名和两副卡组；无法组成对局时统一返回空值"""
+    if not os.path.exists(ydk_dir):
+        return None
     subdirs = [os.path.join(ydk_dir, d) for d in os.listdir(ydk_dir) if os.path.isdir(os.path.join(ydk_dir, d))]
     
     if not subdirs:
         names = list_decks(ydk_dir)
-        if len(names) < 2: return None, None, None, None
+        if len(names) < 2:
+            return None
         n1, n2 = random.choice(names), random.choice(names)
         return "Root_Mix", n1, load_deck(ydk_dir, n1), n2, load_deck(ydk_dir, n2)
 
@@ -113,13 +116,15 @@ def get_random_deck_pair(ydk_dir='./decks'):
         pool_cfg = virtual_pools[chosen_env]
         # 在虚拟池内，根据配方权重重新抽取物理池
         v_weights = [float(pool_cfg.get(name, 0.0)) for name in subdir_names]
-        if sum(v_weights) <= 0: return None, None, None, None 
+        if sum(v_weights) <= 0:
+            return None
         
         c_env1 = random.choices(subdirs, weights=v_weights, k=1)[0]
         c_env2 = random.choices(subdirs, weights=v_weights, k=1)[0]
         
         names1, names2 = list_decks(c_env1), list_decks(c_env2)
-        if not names1 or not names2: return None, None, None, None
+        if not names1 or not names2:
+            return None
         
         n1, n2 = random.choice(names1), random.choice(names2)
         return chosen_env, n1, load_deck(c_env1, n1), n2, load_deck(c_env2, n2)
@@ -128,6 +133,7 @@ def get_random_deck_pair(ydk_dir='./decks'):
     else:
         chosen_dir = os.path.join(ydk_dir, chosen_env)
         names = list_decks(chosen_dir)
-        if len(names) < 1: return None, None, None, None
+        if len(names) < 1:
+            return None
         n1, n2 = random.choice(names), random.choice(names)
         return chosen_env, n1, load_deck(chosen_dir, n1), n2, load_deck(chosen_dir, n2)

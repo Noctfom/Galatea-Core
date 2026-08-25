@@ -39,10 +39,11 @@ class DuelManager:
 
         for i in range(1, n_games + 1):
             # 1. 选卡组 (使用增强版 deck_utils)
-            env_name, name1, d1, name2, d2 = deck_utils.get_random_deck_pair(self.deck_dir)
-            if not d1: 
+            deck_pair = deck_utils.get_random_deck_pair(self.deck_dir)
+            if deck_pair is None:
                 print("⚠️ 无法加载卡组，跳过")
                 continue
+            env_name, name1, d1, name2, d2 = deck_pair
 
             print(f"\n{'='*20} 第 {i} / {n_games} 局 {'='*20}")
             print(f"⚔️ 对阵: 【{name1}】(先手) VS 【{name2}】(后手)")

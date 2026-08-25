@@ -42,6 +42,8 @@ from inference_protocol import (
     encode_inference_error,
     encode_inference_success,
 )
+from model_artifacts import describe_onnx_artifact, write_checkpoint_artifact_manifest
+from training_validation import validate_max_iterations, validate_training_config
 import deck_utils
 import rule_bot 
 from feature_encoder import MAX_CARDS as MAX_SEQ_LEN
@@ -90,7 +92,6 @@ class PPOTrainer:
         self.async_infer = async_infer
         self.use_onnx = use_onnx
         self.server_stop_event = threading.Event()
-        os.makedirs(save_dir, exist_ok=True)
 
         # 默认配置
         if net_config is None:
@@ -104,6 +105,28 @@ class PPOTrainer:
         self.gae_lambda = gae_lambda
         self.clip_eps = clip_eps
         self.standard_core = standard_core
+
+        resume_checkpoint = None
+        if resume_path:
+            print(f"📥 正在从 {resume_path} 恢复训练...")
+            resume_checkpoint = load_training_checkpoint(resume_path, map_location="cpu")
+            self.net_config = resume_checkpoint['net_config']
+
+        # 在模型、共享内存和日志资源分配前统一拒绝非法配置
+        validate_training_config(
+            self.net_config,
+            update_timesteps=self.update_timesteps,
+            mini_batch_size=self.mini_batch_size,
+            num_workers=self.num_workers,
+            worker_device=self.worker_device,
+            worker_timeout=self.worker_timeout,
+            gamma=self.gamma,
+            learning_rate=self.lr,
+            entropy=self.entropy,
+            gae_lambda=self.gae_lambda,
+            clip_eps=self.clip_eps,
+        )
+        os.makedirs(save_dir, exist_ok=True)
 
         # 硬件检查与黑科技自动配置
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -137,12 +160,6 @@ class PPOTrainer:
             try: os.remove(f)
             except Exception as e: 
                 print(f"[trainer]⚠️ 无法删除临时文件 {f}: {e}")
-
-        resume_checkpoint = None
-        if resume_path:
-            print(f"📥 正在从 {resume_path} 恢复训练...")
-            resume_checkpoint = load_training_checkpoint(resume_path, map_location="cpu")
-            self.net_config = resume_checkpoint['net_config']
 
         # 始终先在未编译模型上严格恢复参数，再创建优化器并启用编译。
         self.agent = AiBot(device=self.device, net_config=self.net_config)
@@ -494,7 +511,7 @@ class PPOTrainer:
         for i, f in enumerate(file_list):
             try:
                 # 1. 仅将当前 1 个 Worker 的数据加载到物理内存
-                data = torch.load(f, map_location='cpu', weights_only=False)
+                data = torch.load(f, map_location='cpu', weights_only=True)
                 s = data['action'].shape[0]
 
                 # 2. 提取并累加统计信息
@@ -773,10 +790,20 @@ class PPOTrainer:
         context.term()
 
     def update_policy(self, total_steps):
+        """在训练模式完成 PPO 更新，并保证结束后恢复推理模式"""
+        if total_steps == 0:
+            return
+
+        self.agent.net.train()
+        try:
+            self._update_policy_training(total_steps)
+        finally:
+            self.agent.net.eval()
+
+    def _update_policy_training(self, total_steps):
         """
-        [安全防爆版] 将数据留在 CPU，每次只切片 mini_batch 送进 GPU
+        在已启用训练模式的前提下，将 CPU 数据分批送入设备更新参数
         """
-        if total_steps == 0: return
         print("🔥 Training PPO (Action Head Mode)...")
         
         # 直接从静态缓冲池中切出有效数据
@@ -878,6 +905,7 @@ class PPOTrainer:
                 del logits, values, v_input, surr1, surr2, ratio, entropy, loss, policy_loss, value_loss, entropy_loss
 
     def run_training_loop(self, max_iterations=1000):
+        validate_max_iterations(max_iterations)
         print("🚦 Starting PPO Training Loop...")
         # 如果是恢复训练，max_iterations 应该是“再练多少轮”或者“练到多少轮”
         # 这里假设是“总轮数”，所以如果恢复时已经是 1000，需要把目标设大一点
@@ -936,11 +964,27 @@ class PPOTrainer:
                     'clip_eps': self.clip_eps
                 }
                 torch.save(checkpoint, path)
+
+                onnx_record = None
+                onnx_error = None
                 # 触发 ONNX 同步导出
                 if self.use_onnx:
+                    # 先标记未完成，避免异常中断后误用同名旧 ONNX
+                    write_checkpoint_artifact_manifest(
+                        path,
+                        self.iteration,
+                        onnx_error="export_in_progress",
+                    )
                     # 因为是同步的，主网络此时处于停滞状态，不需要克隆，直接传干净的字典即可
-                    self._export_onnx_sync(clean_state, self.iteration)
+                    onnx_record, onnx_error = self._export_onnx_sync(clean_state, self.iteration)
+                artifact_manifest = write_checkpoint_artifact_manifest(
+                    path,
+                    self.iteration,
+                    onnx_record=onnx_record,
+                    onnx_error=onnx_error,
+                )
                 print(f"💾 Model saved: {path}")
+                print(f"🏷️ Artifact manifest saved: {artifact_manifest}")
             
             dt = time.time() - iter_start
             print(f"⏱️ Iteration {self.iteration} finished in {dt:.1f}s")
@@ -948,7 +992,8 @@ class PPOTrainer:
         print("🏁 训练结束！")
     
     def _export_onnx_sync(self, clean_state, current_iter):
-        """[极简稳健版] 主线程同步导出 ONNX，牺牲 3 秒换取 100% 稳定"""
+        """同步导出 ONNX，并核验所有外置权重文件均已生成"""
+        onnx_archive = os.path.join(self.save_dir, f"galatea_iter_{current_iter}.onnx")
         try:
             import torch.onnx
             print(f"⏳ [ONNX] 正在主线程同步导出第 {current_iter} 轮引擎，这大约需要 3 秒钟...")
@@ -956,7 +1001,7 @@ class PPOTrainer:
             # 建立临时的 CPU 感知皮层
             from galatea_net import GalateaNet
             export_net = GalateaNet(self.net_config).cpu().eval()
-            export_net.load_state_dict(clean_state, strict=False)
+            export_net.load_state_dict(clean_state, strict=True)
             
             # 提取 Dummy Dict 
             dummy_dict = {k: v[0:1].clone().cpu() for k, v in self.pinned_batch_buffers.items()}
@@ -976,7 +1021,11 @@ class PPOTrainer:
                     return logits, values
             
             wrapper_net = ONNXWrapper(export_net, keys).eval()
-            onnx_archive = os.path.join(self.save_dir, f"galatea_iter_{current_iter}.onnx")
+
+            # 同轮次重导出时先移除旧主图与默认外置权重，防止失败后误用陈旧产物
+            for stale_path in (onnx_archive, f"{onnx_archive}.data"):
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
             
             # 执行同步导出
             torch.onnx.export(
@@ -984,18 +1033,30 @@ class PPOTrainer:
                 flat_inputs,        
                 onnx_archive,
                 export_params=True,
-                opset_version=18,   
-                do_constant_folding=True, 
-                input_names=keys,   
+                opset_version=18,
+                do_constant_folding=True,
+                external_data=True,
+                input_names=keys,
                 output_names=['action_logits', 'values']
             )
-            
+            artifact_record = describe_onnx_artifact(
+                onnx_archive,
+                require_complete=True,
+                validate_manifest=False,
+            )
             print(f"✅ [ONNX] 纯净无损静态计算图导出成功！历史引擎 {os.path.basename(onnx_archive)} 已就绪！")
-            
+            return artifact_record, None
         except Exception as e:
             print(f"⚠️ [ONNX] 同步导出失败: {e}")
+            for incomplete_path in (onnx_archive, f"{onnx_archive}.data"):
+                try:
+                    if os.path.exists(incomplete_path):
+                        os.remove(incomplete_path)
+                except OSError as cleanup_error:
+                    print(f"⚠️ [ONNX] 无法清理不完整产物 {incomplete_path}: {cleanup_error}")
             import traceback
             traceback.print_exc()
+            return None, str(e)
 
 if __name__ == "__main__":
     trainer = PPOTrainer()

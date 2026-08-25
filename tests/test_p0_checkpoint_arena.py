@@ -1,10 +1,13 @@
-# 本文件验证 P0 检查点恢复、宏动作候选池和竞技场决策链修复。
+# 本文件验证检查点、训练模式、模型产物和竞技场决策链修复。
 
 import ast
+import json
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -23,10 +26,19 @@ from checkpoint_utils import (
     load_training_checkpoint,
     restore_model_state_strict,
 )
+import deck_utils
 from data_types import GameAction
 from game_constants import LocationInfo, Zone
 from galatea_net import GalateaNet
 from model_versus import ModelArena
+from model_artifacts import (
+    collect_model_artifact_files,
+    describe_onnx_artifact,
+    safe_extract_zip,
+    write_checkpoint_artifact_manifest,
+)
+from trainer import PPOTrainer
+from training_validation import validate_max_iterations, validate_training_config
 
 
 class CheckpointResumeTests(unittest.TestCase):
@@ -92,6 +104,186 @@ class CheckpointResumeTests(unittest.TestCase):
             torch.save(checkpoint, path)
             with self.assertRaisesRegex(ValueError, "canonical uncompiled keys"):
                 load_training_checkpoint(path)
+
+
+class PpoTrainingModeTests(unittest.TestCase):
+    def test_update_uses_train_mode_and_restores_eval_mode(self):
+        """PPO 更新期间必须启用训练模式，完成后恢复推理模式。"""
+        trainer = PPOTrainer.__new__(PPOTrainer)
+        trainer.agent = SimpleNamespace(net=nn.Linear(2, 2).eval())
+        observed_modes = []
+        trainer._update_policy_training = lambda _steps: observed_modes.append(
+            trainer.agent.net.training
+        )
+
+        trainer.update_policy(8)
+
+        self.assertEqual(observed_modes, [True])
+        self.assertFalse(trainer.agent.net.training)
+
+    def test_update_exception_still_restores_eval_mode(self):
+        """更新异常不得把共享网络遗留在训练模式。"""
+        trainer = PPOTrainer.__new__(PPOTrainer)
+        trainer.agent = SimpleNamespace(net=nn.Linear(2, 2).eval())
+
+        def fail_update(_steps):
+            """模拟 PPO 更新中途失败。"""
+            raise RuntimeError("boom")
+
+        trainer._update_policy_training = fail_update
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            trainer.update_policy(8)
+        self.assertFalse(trainer.agent.net.training)
+
+
+class TrainingValidationTests(unittest.TestCase):
+    BASE_CONFIG = {
+        "d_model": 256,
+        "n_heads": 4,
+        "n_layers": 2,
+        "vocab_size": 20000,
+    }
+
+    @classmethod
+    def validate(cls, **overrides):
+        """使用一组合法基线参数验证单项非法覆盖。"""
+        values = {
+            "net_config": dict(cls.BASE_CONFIG),
+            "update_timesteps": 4096,
+            "mini_batch_size": 512,
+            "num_workers": 4,
+            "worker_device": "cpu",
+            "worker_timeout": 300,
+            "gamma": 0.998,
+            "learning_rate": 1e-4,
+            "entropy": 0.03,
+            "gae_lambda": 0.95,
+            "clip_eps": 0.2,
+        }
+        values.update(overrides)
+        validate_training_config(**values)
+
+    def test_valid_configuration_is_accepted(self):
+        """标准训练参数必须通过统一校验。"""
+        self.validate()
+        validate_max_iterations(10)
+
+    def test_invalid_attention_shape_is_rejected(self):
+        """注意力维度无法整除时必须在模型构建前拒绝。"""
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            self.validate(
+                net_config={
+                    "d_model": 250,
+                    "n_heads": 4,
+                    "n_layers": 2,
+                    "vocab_size": 20000,
+                }
+            )
+
+    def test_invalid_batch_and_timeout_are_rejected(self):
+        """无效批量关系和过短 Worker 超时必须被拒绝。"""
+        with self.assertRaisesRegex(ValueError, "mini_batch_size"):
+            self.validate(update_timesteps=128, mini_batch_size=256)
+        with self.assertRaisesRegex(ValueError, "greater than 30"):
+            self.validate(worker_timeout=30)
+
+    def test_non_finite_hyperparameter_is_rejected(self):
+        """NaN 等非有限超参数不得进入优化器。"""
+        with self.assertRaisesRegex(ValueError, "finite"):
+            self.validate(learning_rate=float("nan"))
+
+
+class ModelArtifactTests(unittest.TestCase):
+    @staticmethod
+    def _write_external_onnx(directory, iteration=10):
+        """生成引用单个外置权重文件的最小 ONNX 模型。"""
+        import onnx
+        from onnx import helper, numpy_helper
+
+        graph_name = f"galatea_iter_{iteration}.onnx"
+        data_name = f"{graph_name}.data"
+        weight = numpy_helper.from_array(
+            np.asarray([1.0, 2.0], dtype=np.float32),
+            name="weight",
+        )
+        graph = helper.make_graph([], "artifact_test", [], [], [weight])
+        model = helper.make_model(graph)
+        graph_path = Path(directory) / graph_name
+        onnx.save_model(
+            model,
+            graph_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=data_name,
+            size_threshold=0,
+        )
+        return graph_path, Path(directory) / data_name
+
+    def test_onnx_external_data_is_collected_and_tagged(self):
+        """ONNX 主图、外置权重和轮次标记必须形成完整产物集。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_path, data_path = self._write_external_onnx(temp_dir)
+            self.assertTrue(data_path.is_file())
+
+            record = describe_onnx_artifact(graph_path)
+            self.assertEqual(record["iteration"], 10)
+            self.assertEqual(record["external_data"], [data_path.name])
+            self.assertEqual(
+                collect_model_artifact_files(temp_dir, [graph_path.name]),
+                [graph_path.name, data_path.name],
+            )
+
+            checkpoint_path = Path(temp_dir) / "galatea_iter_10.pth"
+            checkpoint_path.write_bytes(b"checkpoint")
+            marker = write_checkpoint_artifact_manifest(
+                checkpoint_path,
+                10,
+                onnx_record=record,
+            )
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            self.assertEqual(payload["iteration"], 10)
+            self.assertEqual(payload["onnx"]["status"], "complete")
+
+    def test_missing_external_data_is_rejected(self):
+        """外置权重缺失时不得把 ONNX 判定为可用。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_path, data_path = self._write_external_onnx(temp_dir)
+            data_path.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "external data"):
+                describe_onnx_artifact(graph_path)
+
+    def test_incomplete_iteration_marker_rejects_stale_onnx(self):
+        """未完成标记必须阻止同名旧 ONNX 被误用。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            graph_path, _data_path = self._write_external_onnx(temp_dir)
+            checkpoint_path = Path(temp_dir) / "galatea_iter_10.pth"
+            checkpoint_path.write_bytes(b"checkpoint")
+            write_checkpoint_artifact_manifest(
+                checkpoint_path,
+                10,
+                onnx_error="export_in_progress",
+            )
+            with self.assertRaisesRegex(RuntimeError, "not marked complete"):
+                describe_onnx_artifact(graph_path)
+
+    def test_archive_path_traversal_is_rejected(self):
+        """部署包不得通过父目录路径写出暂存区。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "unsafe.gkg"
+            target = Path(temp_dir) / "target"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../escape.pth", b"bad")
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                with self.assertRaisesRegex(ValueError, "unsafe"):
+                    safe_extract_zip(archive, target)
+            self.assertFalse((Path(temp_dir) / "escape.pth").exists())
+
+
+class DeckPairContractTests(unittest.TestCase):
+    def test_failure_returns_none_instead_of_short_tuple(self):
+        """卡组不足时必须返回空值，避免调用方按五项解包崩溃。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.assertIsNone(deck_utils.get_random_deck_pair(temp_dir))
 
 
 class MacroActionCandidateTests(unittest.TestCase):

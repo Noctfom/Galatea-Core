@@ -105,7 +105,7 @@ class ModelArena:
         """
         try:
             res = deck_utils.get_random_deck_pair(ydk_dir=self.deck_dir)
-            if not res:
+            if res is None:
                 return -1, -3, 0
             env_name, d1_name, d1, d2_name, d2 = res
 
