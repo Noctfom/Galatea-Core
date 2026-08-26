@@ -47,6 +47,53 @@ GAMMA = 0.998
 GAE_LAMBDA = 0.95
 MAX_EPISODE_STEPS = 1500
 
+ORT_NUMPY_DTYPES = {
+    "tensor(bool)": np.bool_,
+    "tensor(int8)": np.int8,
+    "tensor(uint8)": np.uint8,
+    "tensor(int16)": np.int16,
+    "tensor(uint16)": np.uint16,
+    "tensor(int32)": np.int32,
+    "tensor(uint32)": np.uint32,
+    "tensor(int64)": np.int64,
+    "tensor(uint64)": np.uint64,
+    "tensor(float16)": np.float16,
+    "tensor(float)": np.float32,
+    "tensor(double)": np.float64,
+}
+
+
+def build_ort_inputs(session, tensor_dict):
+    """按 ONNX 输入签名精确转换 Tensor，避免半精度被误升为单精度"""
+    inputs = {}
+    missing = []
+    for node in session.get_inputs():
+        if node.name not in tensor_dict:
+            missing.append(node.name)
+            continue
+
+        expected_type = str(node.type).strip().lower()
+        numpy_dtype = ORT_NUMPY_DTYPES.get(expected_type)
+        if numpy_dtype is None:
+            raise TypeError(f"不支持的 ONNX 输入类型: {node.name}={node.type}")
+
+        tensor = tensor_dict[node.name]
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"ONNX 输入 {node.name} 必须是 Tensor")
+        value = tensor.detach().cpu().numpy().astype(numpy_dtype, copy=False)
+        inputs[node.name] = value
+
+    if missing:
+        raise KeyError(f"缺少 ONNX 输入: {missing}")
+    return inputs
+
+
+def select_episode_opponent_config(base_config, forced_rule_games_remaining):
+    """按剩余配额选择单局对手，强制局结束后仍可恢复 Worker 原配置"""
+    if int(forced_rule_games_remaining) > 0:
+        return {"mode": "rule", "type": "rule", "path": None}, True
+    return base_config, False
+
 
 def _create_inference_socket(context, worker_id, zmq_port, generation):
     """创建带唯一身份和超时限制的中心推理请求 Socket。"""
@@ -186,24 +233,25 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 f"{phase} 中心推理请求 {request_id} 未取得匹配结果"
             ) from exc
 
-    def build_ort_inputs(session, t_dict):
-        inputs = {}
-        for node in session.get_inputs():
-            if node.name in t_dict:
-                val = t_dict[node.name].numpy()
-                # 使用 str().lower() 包含匹配，才能兼容所有 ONNX 版本
-                ntype = str(node.type).lower()
-                if 'int64' in ntype: val = val.astype(np.int64)
-                elif 'int32' in ntype: val = val.astype(np.int32)
-                elif 'int16' in ntype: val = val.astype(np.int16)
-                elif 'int8' in ntype: val = val.astype(np.int8)
-                elif 'float' in ntype: val = val.astype(np.float32)
-                elif 'bool' in ntype: val = val.astype(np.bool_)
-                inputs[node.name] = val
-        return inputs
-
     use_onnx_p1 = False
     ort_session_p1 = None
+
+    def run_historical_onnx(tensor_dict):
+        """运行历史 ONNX；首次异常后停用会话，让当前步骤回退到 PyTorch"""
+        nonlocal use_onnx_p1, ort_session_p1
+        if not use_onnx_p1 or ort_session_p1 is None:
+            return None
+        try:
+            ort_inputs = build_ort_inputs(ort_session_p1, tensor_dict)
+            return ort_session_p1.run(None, ort_inputs)
+        except Exception as onnx_error:
+            print(
+                f"⚠️ [Worker {worker_id}] 历史对手 ONNX 运行失败，"
+                f"本 Worker 后续改用 PyTorch: {onnx_error}"
+            )
+            use_onnx_p1 = False
+            ort_session_p1 = None
+            return None
 
     try:
         agent = AiBot(device=device, net_config=net_config)
@@ -220,7 +268,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             opp_agent = AiBot(device='cpu', net_config=net_config)
             opp_path = opp_config["path"]
             if opp_path and os.path.exists(opp_path):
-                if not opp_agent.load_model(opp_path):
+                if not opp_agent.load_model(
+                    opp_path,
+                    expected_model_id=opp_config.get("model_id"),
+                ):
                     raise RuntimeError(f"无法加载历史对手检查点: {opp_path}")
             else:
                 cpu_state_dict = {k: v.cpu() for k, v in agent.net.state_dict().items()}
@@ -252,6 +303,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         }
 
         deck_records = []
+        forced_rule_games_remaining = max(
+            0,
+            int(opp_config.get("forced_rule_games", 0)),
+        )
 
         #提前拉起绝对连续的静态内存池
         max_len = target_steps + MAX_EPISODE_STEPS + 100
@@ -282,7 +337,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     if os.path.exists(hist_onnx_path):
                         try:
                             # 在创建运行时会话前确认所有外置权重都与主图同轮次且完整
-                            describe_onnx_artifact(hist_onnx_path, require_complete=True)
+                            describe_onnx_artifact(
+                                hist_onnx_path,
+                                require_complete=True,
+                                expected_model_id=opp_config.get("model_id"),
+                            )
                             import onnxruntime as ort
                             sess_options = ort.SessionOptions()
                             sess_options.intra_op_num_threads = torch.get_num_threads()
@@ -294,6 +353,11 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 f"⚠️ [Worker {worker_id}] 历史对手 ONNX 加载失败，"
                                 f"已回退到 PyTorch: {onnx_error}"
                             )
+
+            episode_opp_config, force_rule_episode = select_episode_opponent_config(
+                opp_config,
+                forced_rule_games_remaining,
+            )
 
             perf_ledger = {
                 'steps': 0,
@@ -313,21 +377,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             current_turn = 0
             turn_steps = 0
             
-            # 记录这局是打先手还是后手
-            opp_type = opp_config.get("type", "self")
-            if train_p_id == 0: 
-                stats['games_all_first'] += 1
-                if opp_type == "self": 
-                    stats['games_self_first'] += 1
-            else: 
-                stats['games_all_second'] += 1
-                if opp_type == "self": 
-                    stats['games_self_second'] += 1
-                
-            if opp_type == "hist": 
-                stats['games_hist'] += 1
-            elif opp_type == "rule": 
-                stats['games_rule'] += 1
+            # 记录本局实际使用的对手类型，强制 Rule 局不会改写 Worker 原配置
+            opp_type = episode_opp_config.get("type", "self")
 
             # --- Reset 环境 ---
             try:
@@ -524,7 +575,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     current_agent = None
                     if is_training_agent:
                         current_agent = agent
-                    elif opp_config["mode"] == "ai":
+                    elif episode_opp_config["mode"] == "ai":
                         current_agent = opp_agent
                     
                     # --- AI 尝试接管 ---
@@ -549,7 +600,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     t_infer_p1 = time.time()
                                     # 【大一统分流点 A】判断此轮推演是否具备全实时训练资格
                                     # 如果当前是主特工在操作（P0），或者是自对局模式下的对手（P1 Self），一律走 ZMQ 绑定 GPU 中枢
-                                    if is_training_agent or opp_config["mode"] == "ai" and opp_config["type"] == "self":
+                                    if is_training_agent or (
+                                        episode_opp_config["mode"] == "ai"
+                                        and episode_opp_config["type"] == "self"
+                                    ):
                                         # 零拷贝填入超导通道
                                         for k, v in dict_pass1.items():
                                             if k in shared_buffers[worker_id]:
@@ -565,9 +619,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                         
                                     # 如果是历史存档老模型（P1 Hist），执行宿主本地独立剥离推演（ONNX 优先，CPU 兜底）
                                     else:
-                                        if use_onnx_p1 and ort_session_p1 is not None:
-                                            ort_inputs = build_ort_inputs(ort_session_p1, dict_pass1)
-                                            ort_outs = ort_session_p1.run(None, ort_inputs) 
+                                        ort_outs = run_historical_onnx(dict_pass1)
+                                        if ort_outs is not None:
                                             probs = torch.softmax(torch.tensor(ort_outs[0]), dim=-1).squeeze(0).numpy()
                                         else:
                                             with torch.no_grad():
@@ -669,7 +722,10 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             t_ipc_anchor = time.time()
                             
                             # 【大一统分流点 B】主特工回合或自对局对手，全部绑上超导通道
-                            if is_training_agent or opp_config["mode"] == "ai" and opp_config["type"] == "self":
+                            if is_training_agent or (
+                                episode_opp_config["mode"] == "ai"
+                                and episode_opp_config["type"] == "self"
+                            ):
                                 t_zmq_anchor = time.time()
                                 for k, v in tensor_dict.items():
                                     if k in shared_buffers[worker_id]:
@@ -694,10 +750,8 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             else:
                                 t_p1_anchor = time.time() 
                                 with torch.no_grad():
-                                    if use_onnx_p1 and ort_session_p1 is not None:
-                                        ort_inputs = build_ort_inputs(ort_session_p1, tensor_dict)
-                                        ort_outs = ort_session_p1.run(None, ort_inputs) 
-                                        
+                                    ort_outs = run_historical_onnx(tensor_dict)
+                                    if ort_outs is not None:
                                         action_logits = torch.tensor(ort_outs[0]).squeeze(0)
                                         value = torch.tensor(ort_outs[1]).squeeze(0)
                                         
@@ -923,6 +977,20 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 trajectory_length = len(traj)
                 rollout_cursor.validate_episode(trajectory_length)
                 if traj:
+                    if train_p_id == 0:
+                        stats['games_all_first'] += 1
+                        if opp_type == "self":
+                            stats['games_self_first'] += 1
+                    else:
+                        stats['games_all_second'] += 1
+                        if opp_type == "self":
+                            stats['games_self_second'] += 1
+
+                    if opp_type == "hist":
+                        stats['games_hist'] += 1
+                    elif opp_type == "rule":
+                        stats['games_rule'] += 1
+
                     final_reward = 0.0
 
                     if ep_steps >= MAX_EPISODE_STEPS:
@@ -1051,6 +1119,13 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 game_buffer[0].clear()
                 game_buffer[1].clear()
                 rollout_cursor.commit_episode(trajectory_length)
+
+                if force_rule_episode and trajectory_length > 0:
+                    forced_rule_games_remaining -= 1
+                    print(
+                        f"✅ [Worker {worker_id}] 强制 Rule 对局已提交，"
+                        f"下一局恢复 {opp_config.get('type', 'self')} 对手。"
+                    )
 
                 if stop_worker_after_episode:
                     break

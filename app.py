@@ -16,6 +16,16 @@ import time
 import sys    
 from collections import deque
 from card_reader import CardReader
+from checkpoint_utils import (
+    CHECKPOINT_FORMAT_VERSION,
+    DEFAULT_MODEL_PREFIX,
+    inspect_training_checkpoint,
+)
+from model_artifacts import (
+    discover_checkpoint_artifacts,
+    find_model_prefix_namespace_files,
+)
+from training_validation import resolve_training_target, validate_model_prefix
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -64,6 +74,7 @@ CACHE_KEYS = {
     't_steps': 5000, 't_batch': 4096, 't_mini': 256, 't_workers': 6, 't_timeout': 300,
     't_gamma': 0.998, 't_lr': 0.0001, 't_entropy': 0.03, 't_gae': 0.95, 't_clip': 0.2,
     't_device': 'cpu', 't_d_model': 256, 't_n_heads': 4, 't_n_layers': 2,
+    't_model_prefix': DEFAULT_MODEL_PREFIX,
     'sp_games': 100, 'sp_freq': 50
 }
 
@@ -113,18 +124,42 @@ if st.session_state.running_pid:
         st.session_state.auto_refresh = False # 进程结束，自动关闭刷新开关
 
 # ==========================================
-# 🧠 全局辅助：极速读取存档配置
+# 🧠 全局辅助：读取存档身份与模型架构
 # 🌟 必须写在最外层全局，否则缓存会失效
 # ==========================================
 @st.cache_data(show_spinner=False)
-def load_model_config(path):
+def load_model_metadata(path):
+    """读取恢复训练所需的协议版本、UUID、前缀、轮次和架构信息"""
     try:
-        # 只加载字典信息到 CPU，不把张量放进 GPU，极速且不占显存
-        cp = torch.load(path, map_location='cpu', weights_only=True)
-        return cp.get('net_config', {})
+        metadata = inspect_training_checkpoint(path, map_location='cpu')
+        metadata['load_error'] = None
+        return metadata
     except Exception as e:
         print(f"读取配置失败: {e}")
-        return {}
+        return {'load_error': str(e), 'net_config': {}}
+
+
+def get_model_identity_signature(model_dir):
+    """生成模型身份相关文件的轻量缓存签名，文件变化时自动失效"""
+    paths = list(glob.glob(os.path.join(model_dir, "*.pth")))
+    paths.extend(glob.glob(os.path.join(model_dir, "*.artifacts.json")))
+    records = []
+    for path in paths:
+        try:
+            records.append((path, os.path.getmtime(path), os.path.getsize(path)))
+        except OSError:
+            continue
+    return tuple(sorted(records))
+
+
+@st.cache_data(show_spinner=False)
+def load_folder_model_identities(model_dir, file_signature):
+    """缓存目录身份扫描，避免 WebUI 重绘时反复读取孤立大检查点"""
+    del file_signature
+    return discover_checkpoint_artifacts(
+        model_dir,
+        include_orphan_checkpoints=True,
+    )
 
 # ==========================================
 # 🎨 前端 CSS 魔法
@@ -427,7 +462,25 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         )
         
         is_resume = (t_resume != "None")
-        saved_cfg = load_model_config(t_resume) if is_resume else {}
+        folder_identity_records = load_folder_model_identities(
+            "./models",
+            get_model_identity_signature("./models"),
+        )
+        saved_meta = load_model_metadata(t_resume) if is_resume else {}
+        saved_cfg = saved_meta.get('net_config', {})
+        resume_metadata_error = saved_meta.get('load_error') if is_resume else None
+        resume_format_warning = saved_meta.get('format_warning') if is_resume else None
+
+        if resume_metadata_error:
+            st.error(_(
+                f"无法读取检查点元数据: {resume_metadata_error}",
+                f"Unable to read checkpoint metadata: {resume_metadata_error}",
+            ))
+        elif resume_format_warning:
+            st.warning(_(
+                f"⚠️ {resume_format_warning}",
+                f"⚠️ {resume_format_warning}",
+            ))
         
         # 将读取到的配置安全转化为整数，防止格式报错
         default_d_model = int(saved_cfg.get('d_model', 256))
@@ -439,6 +492,56 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         with st.expander("🧠 " + _("模型架构参数 (Model Architecture)", "Model Architecture"), expanded=not is_resume):
             if is_resume:
                 st.success(_("🔒 已选择恢复存档，架构参数已自动读取并锁定！", "Architecture locked to the selected checkpoint."))
+
+            default_model_prefix = (
+                saved_meta.get('model_prefix')
+                if is_resume and saved_meta.get('model_prefix')
+                else st.session_state.ui_cache['t_model_prefix']
+            )
+            t_model_prefix = st.text_input(
+                _("模型前缀 (Model Prefix)", "Model Prefix"),
+                value=default_model_prefix,
+                disabled=is_resume,
+                key=f"widget_t_model_prefix_{t_resume}",
+                help=_(
+                    "仅允许字母、数字、下划线和短横线，最长 64 字符。恢复训练时由检查点自动继承。",
+                    "Letters, digits, underscores and hyphens only, up to 64 characters. Inherited on resume.",
+                ),
+            )
+            if not is_resume:
+                st.session_state.ui_cache['t_model_prefix'] = t_model_prefix
+
+            identity_conflicts = []
+            prefix_namespace_files = []
+            if is_resume and saved_meta.get('model_id') and saved_meta.get('model_prefix'):
+                identity_conflicts = [
+                    record
+                    for record in folder_identity_records
+                    if record['model_prefix'].casefold()
+                    == saved_meta['model_prefix'].casefold()
+                    and record['model_id'] != saved_meta['model_id']
+                ]
+            elif not is_resume:
+                try:
+                    validate_model_prefix(t_model_prefix)
+                    identity_conflicts = [
+                        record
+                        for record in folder_identity_records
+                        if record['model_prefix'].casefold()
+                        == t_model_prefix.casefold()
+                    ]
+                    prefix_namespace_files = find_model_prefix_namespace_files(
+                        "./models",
+                        t_model_prefix,
+                    )
+                except ValueError:
+                    identity_conflicts = []
+
+            if is_resume and saved_meta.get('model_id'):
+                st.caption(_(
+                    f"模型 UUID（只读）: {saved_meta['model_id']} | 当前轮次: {saved_meta.get('iteration')} | 检查点协议: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION}",
+                    f"Model UUID (read-only): {saved_meta['model_id']} | Current iteration: {saved_meta.get('iteration')} | Checkpoint protocol: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION}",
+                ))
             
             m1, m2, m3 = st.columns(3)
             with m1:
@@ -448,8 +551,20 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 t_n_heads = st.number_input("n_heads", value=default_n_heads, step=1, disabled=is_resume, 
                                             help=_("注意力头数。AI同时观察局面的视角数量(例如有的头看手牌，有的头看墓地)。", "Num of attention heads."))
             with m3:
-                t_n_layers = st.number_input("n_layers", value=default_n_layers, step=1, disabled=is_resume, 
+                t_n_layers = st.number_input("n_layers", value=default_n_layers, step=1, disabled=is_resume,
                                                 help=_("神经网络的思考深度。2层适合简单尝试，6层适合复杂的长线战术推演。", "Num of Transformer layers."))
+
+        if identity_conflicts:
+            conflict_ids = sorted({item['model_id'] for item in identity_conflicts})
+            st.warning(_(
+                f"目录中存在同前缀但不同 UUID 的模型: {conflict_ids}。训练加载会按 UUID 严格隔离。",
+                f"The folder contains the same prefix under different UUIDs: {conflict_ids}. Loading is UUID-isolated.",
+            ))
+        elif prefix_namespace_files:
+            st.warning(_(
+                f"该前缀的规范文件名空间已被现有检查点占用: {prefix_namespace_files}",
+                f"The canonical filename namespace is already occupied: {prefix_namespace_files}",
+            ))
 
         st.markdown("---")
         
@@ -458,10 +573,16 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         # 1. 常规配置区 (恢复三列布局，把 device 加回来)
         col_r1, col_r2, col_r3 = st.columns(3)
         with col_r1:
-            t_steps = st.number_input(_("目标轮数 (Target Iterations)", "Target Iterations"), 
-                                    value=st.session_state.ui_cache['t_steps'], step=100, 
+            iteration_mode = st.radio(
+                _("轮次计算方式", "Iteration Mode"),
+                [_("训练至指定轮次", "Train to iteration"), _("追加训练轮数", "Additional iterations")],
+                horizontal=True,
+                help=_("两种方式互斥，不再自动追加 1000 轮。", "The modes are exclusive; no implicit 1000-iteration extension."),
+            )
+            t_steps = st.number_input(_("轮次数值", "Iteration Value"),
+                                    value=st.session_state.ui_cache['t_steps'], step=100,
                                     key="widget_t_steps", on_change=cache_val, args=('t_steps',),
-                                    help=_("打算练多少轮。如果是恢复训练，它会自动追加。", "Total iterations to reach."))
+                                    help=_("根据上方模式解释为绝对停止轮次或追加轮数。", "Interpreted as an absolute target or additional count."))
             t_workers = st.number_input(_("进程数 (CPU Workers)", "CPU Workers"), 
                                         value=st.session_state.ui_cache['t_workers'], min_value=1, max_value=32, 
                                         key="widget_t_workers", on_change=cache_val, args=('t_workers',),
@@ -529,9 +650,50 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             if is_running:
                 st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
             else:
+                launch_error = None
+                try:
+                    validate_model_prefix(t_model_prefix)
+                    if is_resume:
+                        if resume_metadata_error:
+                            raise ValueError(resume_metadata_error)
+                        if resume_format_warning:
+                            raise ValueError(resume_format_warning)
+                        if not saved_meta.get('model_id'):
+                            raise ValueError("检查点缺少自动生成的 model_id")
+                    elif identity_conflicts or prefix_namespace_files:
+                        raise PermissionError(
+                            "新模型前缀已被现有 UUID 使用，请更换模型前缀"
+                        )
+                    current_iteration = int(saved_meta.get('iteration', 0)) if is_resume else 0
+                    if iteration_mode == _("训练至指定轮次", "Train to iteration"):
+                        resolve_training_target(
+                            current_iteration,
+                            target_iteration=int(t_steps),
+                        )
+                    else:
+                        resolve_training_target(
+                            current_iteration,
+                            additional_iterations=int(t_steps),
+                        )
+                except (ValueError, PermissionError) as error:
+                    launch_error = str(error)
+
+                if launch_error:
+                    st.error(_(
+                        f"训练参数校验失败: {launch_error}",
+                        f"Training validation failed: {launch_error}",
+                    ))
+                    st.stop()
+
+                iteration_flag = (
+                    "--target-iteration"
+                    if iteration_mode == _("训练至指定轮次", "Train to iteration")
+                    else "--additional-iterations"
+                )
                 cmd = [
-                    sys.executable, "main.py", "train", 
-                    "--steps", str(t_steps), 
+                    sys.executable, "main.py", "train",
+                    iteration_flag, str(t_steps),
+                    "--model-prefix", str(t_model_prefix),
                     "--batch_size", str(t_batch),
                     "--mini_batch", str(t_mini),
                     "--workers", str(t_workers),

@@ -6,6 +6,7 @@ import json
 import tempfile
 
 from model_artifacts import (
+    assert_checkpoint_target_identity,
     build_package_model_records,
     collect_model_artifact_files,
     is_primary_model_filename,
@@ -148,6 +149,10 @@ def unpack_model():
             staged_files = os.listdir(stage_dir)
             primary_models = [f for f in staged_files if is_primary_model_filename(f)]
             model_files = collect_model_artifact_files(stage_dir, primary_models)
+            model_records = build_package_model_records(stage_dir, primary_models)
+            for record in model_records:
+                destination = os.path.join("./models", record["primary"])
+                assert_checkpoint_target_identity(destination, record["model_id"])
             for filename in model_files:
                 source = os.path.join(stage_dir, filename)
                 destination = os.path.join("./models", filename)

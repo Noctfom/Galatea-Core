@@ -8,6 +8,7 @@ import torch.nn as nn
 import os
 import random
 import struct
+from checkpoint_utils import load_training_checkpoint
 # 引入桥接后的 FeatureEncoder
 try:
     from feature_encoder import GalateaEncoder as FeatureEncoder
@@ -27,31 +28,30 @@ class AiBot:
         self.encoder = FeatureEncoder()
         self.net.eval() # 默认推理模式
 
-    def load_model(self, path):
+    def load_model(self, path, expected_model_id=None):
+        """严格加载当前检查点，并可核验联盟训练要求的模型 UUID"""
         if not os.path.exists(path):
             print(f"⚠️ 模型文件不存在: {path}")
             return False
-        
+
         try:
-            checkpoint = torch.load(path, map_location=self.device, weights_only=True)
-            
-            # [新逻辑] 检查是否包含配置字典
-            if isinstance(checkpoint, dict) and 'net_config' in checkpoint:
-                saved_config = checkpoint['net_config']
-                print(f"📦 发现内嵌配置: {saved_config}")
-                self.net = GalateaNet(saved_config).to(self.device)
-                self.net.load_state_dict(checkpoint['model_state_dict'])
-                self.net.eval()
-                print(f"✅ 网络已自动重构并加载权重。")
-                return True
-            
-            # [旧逻辑]
-            elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                 self.net.load_state_dict(checkpoint['model_state_dict'])
-                 return True
-            else:
-                self.net.load_state_dict(checkpoint)
-                return True
+            checkpoint = load_training_checkpoint(path, map_location=self.device)
+            if (
+                expected_model_id is not None
+                and checkpoint['model_id'] != expected_model_id
+            ):
+                raise PermissionError(
+                    "模型 UUID 鉴权失败: "
+                    f"期望 {expected_model_id}, 实际 {checkpoint['model_id']}"
+                )
+
+            saved_config = checkpoint['net_config']
+            print(f"📦 发现内嵌配置: {saved_config}")
+            self.net = GalateaNet(saved_config).to(self.device)
+            self.net.load_state_dict(checkpoint['model_state_dict'], strict=True)
+            self.net.eval()
+            print(f"✅ 网络已自动重构并加载权重。")
+            return True
 
         except Exception as e:
             print(f"❌ 加载模型失败: {e}")

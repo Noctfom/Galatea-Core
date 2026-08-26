@@ -10,6 +10,8 @@ import run_self_play
 from trainer import PPOTrainer
 from model_versus import ModelArena
 from system_logger import setup_global_logger
+from checkpoint_utils import load_training_checkpoint
+from training_validation import resolve_training_target
 
 # [必须] Windows多进程入口保护
 import torch.multiprocessing as mp
@@ -99,10 +101,10 @@ except RuntimeError:
 #  tensorboard --logdir=runs    查看训练过程
 
 #  训练示例命令:
-#  python main.py train --dir ./models --batch_size 16384 --mini_batch 256 --workers 6 --steps 1000 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile --use_onnx 
+#  python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --batch_size 16384 --mini_batch 256 --workers 6 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile --use_onnx
 
 #  恢复训练命令示例:  从第 100 轮存档继续，目标是练到第 5000 轮
-#  python main.py train --resume ./models/galatea_iter_100.pth --batch_size 16384 --mini_batch 256 --workers 6 --steps 5000 --async_infer --no_compile --use_onnx 
+#  python main.py train --resume ./models/galatea_iter_100.pth --target-iteration 5000 --batch_size 16384 --mini_batch 256 --workers 6 --async_infer --no_compile --use_onnx
 
 #  测试示例命令(每隔 5 局保存一次心声):
 #  python main.py duel --p0 ./models/galatea_iter_100.pth --thought_freq 5 --num 100
@@ -133,7 +135,25 @@ def main():
     # --- 1. 训练模式 (Train) ---
     train_parser = subparsers.add_parser('train', help='开始强化学习训练')
     train_parser.add_argument('--dir', type=str, default='./models', help='模型保存路径')
-    train_parser.add_argument('--steps', type=int, default=1000, help='训练总迭代轮数')
+    iteration_group = train_parser.add_mutually_exclusive_group()
+    iteration_group.add_argument(
+        '--target-iteration',
+        type=int,
+        default=None,
+        help='训练停止时的绝对轮次',
+    )
+    iteration_group.add_argument(
+        '--additional-iterations',
+        type=int,
+        default=None,
+        help='从当前检查点开始追加的轮数',
+    )
+    train_parser.add_argument(
+        '--model-prefix',
+        type=str,
+        default=None,
+        help='新模型文件前缀，默认 galatea；恢复训练时自动读取且不得改写',
+    )
     # [修正] 默认路径改为 ./decks
     train_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
     # === 新增：模型架构参数 (就像 duel 那样) ===
@@ -220,6 +240,27 @@ def main():
                 
     # --- 调度逻辑 ---
     if args.command == 'train':
+        if args.target_iteration is None and args.additional_iterations is None:
+            if args.resume:
+                parser.error(
+                    "恢复训练必须指定 --target-iteration 或 --additional-iterations"
+                )
+            args.additional_iterations = 1000
+
+        resume_checkpoint = None
+        current_iteration = 0
+        if args.resume:
+            resume_checkpoint = load_training_checkpoint(
+                args.resume,
+                map_location="cpu",
+            )
+            current_iteration = int(resume_checkpoint['iteration'])
+        resolved_target_iteration = resolve_training_target(
+            current_iteration,
+            target_iteration=args.target_iteration,
+            additional_iterations=args.additional_iterations,
+        )
+
         # 1. 组装配置字典
         net_config = {
             'd_model': args.d_model,
@@ -248,9 +289,13 @@ def main():
             gae_lambda=args.gae_lambda,
             clip_eps=args.clip_eps,
             use_onnx=args.use_onnx,
-            standard_core=args.standard_core
+            standard_core=args.standard_core,
+            model_prefix=args.model_prefix,
+            preloaded_resume_checkpoint=resume_checkpoint,
         )
-        trainer.run_training_loop(max_iterations=args.steps)
+        trainer.run_training_loop(
+            target_iteration=resolved_target_iteration,
+        )
         
     elif args.command == 'play':
         print(f"⚔️ 启动规则系统自检测压测 (Self-Check)...")

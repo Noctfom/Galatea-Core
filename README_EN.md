@@ -127,7 +127,7 @@ streamlit run app.py
 
 ```bash
 # Training
-python main.py train --dir ./models --steps 1000 --async_infer --no_compile
+python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --async_infer --no_compile
 
 # Arena
 python main.py duel --p0 ./models/galatea_iter_100.pth --num 100

@@ -349,7 +349,9 @@ python main.py train [选项]
 | 选项 | 说明 | 默认值 |
 |------|------|--------|
 | `--dir` | 模型保存目录 | `./models` |
-| `--steps` | 训练总轮数 | 1000 |
+| `--target-iteration` | 训练停止时的绝对轮次，与追加轮数互斥 | - |
+| `--additional-iterations` | 从当前检查点开始追加的轮数 | 新训练未指定时为 1000 |
+| `--model-prefix` | 新模型文件前缀；恢复时自动继承 | `galatea` |
 | `--deck_dir` | 卡组目录 | `./decks` |
 | `--d_model` | 特征维度 | 256 |
 | `--n_heads` | 注意力头数 | 4 |
@@ -367,11 +369,13 @@ python main.py train [选项]
 
 ```bash
 # 基础训练
-python main.py train --dir ./models --steps 1000 --no_compile
+python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --no_compile
 
 # 高级配置
 python main.py train \
   --dir ./models \
+  --additional-iterations 1000 \
+  --model-prefix galatea \
   --batch_size 16384 \
   --mini_batch 512 \
   --workers 6 \
@@ -384,7 +388,7 @@ python main.py train \
 # 恢复训练
 python main.py train \
   --resume ./models/galatea_iter_100.pth \
-  --steps 5000 \
+  --target-iteration 5000 \
   --async_infer \
   --no_compile
 ```

@@ -32,9 +32,13 @@ from gamestate import MessageParser, DuelState
 from worker import worker_process
 from ai_bot import AiBot
 from checkpoint_utils import (
+    CHECKPOINT_FORMAT_VERSION,
+    DEFAULT_MODEL_PREFIX,
     canonical_model_state_dict,
+    generate_model_id,
     load_training_checkpoint,
     restore_model_state_strict,
+    validate_training_checkpoint,
 )
 from inference_protocol import (
     InferenceProtocolError,
@@ -42,8 +46,21 @@ from inference_protocol import (
     encode_inference_error,
     encode_inference_success,
 )
-from model_artifacts import describe_onnx_artifact, write_checkpoint_artifact_manifest
-from training_validation import validate_max_iterations, validate_training_config
+from model_artifacts import (
+    assert_checkpoint_target_identity,
+    describe_onnx_artifact,
+    discover_checkpoint_artifacts,
+    find_model_prefix_namespace_files,
+    find_prefix_identity_conflicts,
+    model_artifact_stem,
+    tag_onnx_model_identity,
+    write_checkpoint_artifact_manifest,
+)
+from training_validation import (
+    resolve_training_target,
+    validate_model_prefix,
+    validate_training_config,
+)
 import deck_utils
 import rule_bot 
 from feature_encoder import MAX_CARDS as MAX_SEQ_LEN
@@ -69,7 +86,30 @@ CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
 MAX_EPISODE_STEPS = 1500 # 单局最大步数，防止死循环
-    
+
+
+def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
+    """当本轮没有 Rule Worker 时，为轮换的 AI Worker 追加一局 Rule 配额。"""
+    if not worker_opp_configs:
+        return None
+    if any(config.get("type") == "rule" for config in worker_opp_configs):
+        return None
+
+    ai_worker_indexes = [
+        index
+        for index, config in enumerate(worker_opp_configs)
+        if config.get("mode") == "ai"
+    ]
+    if not ai_worker_indexes:
+        raise ValueError("本轮没有可承载强制 Rule 对局的 AI Worker")
+
+    rotation_index = (max(1, int(iteration)) - 1) % len(ai_worker_indexes)
+    worker_index = ai_worker_indexes[rotation_index]
+    worker_config = dict(worker_opp_configs[worker_index])
+    worker_config["forced_rule_games"] = 1
+    worker_opp_configs[worker_index] = worker_config
+    return worker_index
+
 def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, result_q, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4):
     """用于原生 Process 的安全包装器，防止 DLL 崩溃导致主进程死锁"""
     try:
@@ -81,8 +121,8 @@ def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, devic
         result_q.put((worker_id, None))
 
 class PPOTrainer:
-    def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None, 
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cpu', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False):
+    def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cpu', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -107,10 +147,43 @@ class PPOTrainer:
         self.standard_core = standard_core
 
         resume_checkpoint = None
+        requested_model_prefix = (
+            validate_model_prefix(model_prefix) if model_prefix is not None else None
+        )
         if resume_path:
             print(f"📥 正在从 {resume_path} 恢复训练...")
-            resume_checkpoint = load_training_checkpoint(resume_path, map_location="cpu")
+            resume_checkpoint = (
+                validate_training_checkpoint(
+                    preloaded_resume_checkpoint,
+                )
+                if preloaded_resume_checkpoint is not None
+                else load_training_checkpoint(resume_path, map_location="cpu")
+            )
             self.net_config = resume_checkpoint['net_config']
+            self.model_id = resume_checkpoint['model_id']
+            self.model_prefix = resume_checkpoint['model_prefix']
+            self.resume_source_record = {
+                'model_id': self.model_id,
+                'model_prefix': self.model_prefix,
+                'iteration': int(resume_checkpoint['iteration']),
+                'checkpoint_path': os.path.abspath(resume_path),
+            }
+            if (
+                requested_model_prefix is not None
+                and requested_model_prefix != self.model_prefix
+            ):
+                raise ValueError(
+                    "恢复训练不得改写 model_prefix；"
+                    f"检查点={self.model_prefix!r}, 请求={requested_model_prefix!r}"
+                )
+        else:
+            if preloaded_resume_checkpoint is not None:
+                raise ValueError(
+                    "preloaded_resume_checkpoint requires a resume_path"
+                )
+            self.model_id = generate_model_id()
+            self.model_prefix = requested_model_prefix or DEFAULT_MODEL_PREFIX
+            self.resume_source_record = None
 
         # 在模型、共享内存和日志资源分配前统一拒绝非法配置
         validate_training_config(
@@ -127,6 +200,31 @@ class PPOTrainer:
             clip_eps=self.clip_eps,
         )
         os.makedirs(save_dir, exist_ok=True)
+        prefix_conflicts = find_prefix_identity_conflicts(
+            self.save_dir,
+            self.model_prefix,
+            self.model_id,
+        )
+        if prefix_conflicts:
+            conflict_ids = sorted({item['model_id'] for item in prefix_conflicts})
+            print(
+                f"⚠️ 模型目录中存在同前缀 {self.model_prefix!r} 的其他 UUID: "
+                f"{conflict_ids}。历史池和写入操作将严格按当前 UUID 隔离。"
+            )
+            if resume_checkpoint is None:
+                raise PermissionError(
+                    "新模型不得占用已有模型前缀，请修改 --model-prefix"
+                )
+        if resume_checkpoint is None:
+            namespace_files = find_model_prefix_namespace_files(
+                self.save_dir,
+                self.model_prefix,
+            )
+            if namespace_files:
+                raise PermissionError(
+                    "新模型前缀的输出文件名空间已被占用，请修改 --model-prefix: "
+                    f"{namespace_files}"
+                )
 
         # 硬件检查与黑科技自动配置
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -200,10 +298,11 @@ class PPOTrainer:
         # 初始化 TensorBoard 记录器
         # log_dir 可以按时间戳命名，方便区分不同次训练
         time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.writer = SummaryWriter(log_dir=f"./runs/galatea_{time_str}")
+        self.writer = SummaryWriter(log_dir=f"./runs/{self.model_prefix}_{time_str}")
         self.run_id = time_str
         os.environ['GALATEA_RUN_ID'] = self.run_id
-        print(f"📊 TensorBoard 日志将保存至: ./runs/galatea_{time_str}")
+        print(f"📊 TensorBoard 日志将保存至: ./runs/{self.model_prefix}_{time_str}")
+        print(f"🔐 模型身份: {self.model_prefix} | UUID: {self.model_id}")
 
         # Windows 必须设置
         try:
@@ -369,8 +468,25 @@ class PPOTrainer:
         import gc; gc.collect()
 
         # --- 联盟训练对手选择逻辑 ---
-        # 扫描 models 文件夹下的所有历史存档
-        historical_models = glob.glob(os.path.join(self.save_dir, "galatea_iter_*.pth"))
+        # 只发现同一 UUID 的历史存档，禁止同前缀异模型混入联盟池
+        historical_records = discover_checkpoint_artifacts(
+            self.save_dir,
+            model_id=self.model_id,
+        )
+        historical_by_path = {
+            os.path.abspath(record['checkpoint_path']): record
+            for record in historical_records
+            if record['iteration'] < self.iteration
+        }
+        if (
+            self.resume_source_record is not None
+            and self.resume_source_record['iteration'] < self.iteration
+        ):
+            historical_by_path.setdefault(
+                self.resume_source_record['checkpoint_path'],
+                self.resume_source_record,
+            )
+        historical_models = list(historical_by_path)
         
         worker_opp_configs = []
         for i in range(self.num_workers):
@@ -380,10 +496,25 @@ class PPOTrainer:
                 worker_opp_configs.append({"mode": "rule", "type": "rule", "path": None})
             elif roll < 0.40 and historical_models:
                 # 25% 几率：对抗历史随机模型 (防止策略退化)
-                worker_opp_configs.append({"mode": "ai", "type": "hist", "path": random.choice(historical_models)})
+                worker_opp_configs.append({
+                    "mode": "ai",
+                    "type": "hist",
+                    "path": random.choice(historical_models),
+                    "model_id": self.model_id,
+                })
             else:
                 # 60% 几率：自对局 (追求当前最优对抗)
                 worker_opp_configs.append({"mode": "ai", "type": "self", "path": weight_file})
+
+        forced_rule_worker = ensure_rule_opponent_coverage(
+            worker_opp_configs,
+            self.iteration,
+        )
+        if forced_rule_worker is not None:
+            print(
+                f"🎯 [Iter {self.iteration}] 本轮未抽中 Rule Worker，"
+                f"Worker {forced_rule_worker} 将先完成 1 局 Rule 对局后恢复原对手。"
+            )
         # --------------------------------------
         
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
@@ -904,15 +1035,20 @@ class PPOTrainer:
 
                 del logits, values, v_input, surr1, surr2, ratio, entropy, loss, policy_loss, value_loss, entropy_loss
 
-    def run_training_loop(self, max_iterations=1000):
-        validate_max_iterations(max_iterations)
+    def run_training_loop(
+        self,
+        *,
+        target_iteration=None,
+        additional_iterations=None,
+    ):
+        """按明确的绝对目标或追加轮数执行训练，禁止隐式增加轮次"""
+        target_iter = resolve_training_target(
+            self.iteration,
+            target_iteration=target_iteration,
+            additional_iterations=additional_iterations,
+        )
         print("🚦 Starting PPO Training Loop...")
-        # 如果是恢复训练，max_iterations 应该是“再练多少轮”或者“练到多少轮”
-        # 这里假设是“总轮数”，所以如果恢复时已经是 1000，需要把目标设大一点
-        target_iter = max_iterations
-        if self.iteration >= target_iter:
-            target_iter += 1000
-            print(f"⚠️ 当前轮数已达目标，自动追加 1000 轮 (Target: {target_iter})")
+        print(f"🎯 当前轮次: {self.iteration} | 明确停止轮次: {target_iter}")
 
         while self.iteration < target_iter:
             self.iteration += 1
@@ -943,13 +1079,22 @@ class PPOTrainer:
             
             # 3. 保存 (打包保存)
             if self.iteration % 10 == 0:
-                path = f"{self.save_dir}/galatea_iter_{self.iteration}.pth"
+                artifact_stem = model_artifact_stem(
+                    self.model_prefix,
+                    self.iteration,
+                )
+                path = os.path.join(self.save_dir, f"{artifact_stem}.pth")
+                assert_checkpoint_target_identity(path, self.model_id)
                 
                 # 在保存的源头剥离编译前缀，确保存档是纯净标准版
                 clean_state = canonical_model_state_dict(self.agent.net)
                 
                 # 补全生命周期字段，确保 TensorBoard 曲线 100% 无缝对接
                 checkpoint = {
+                    'checkpoint_format_version': CHECKPOINT_FORMAT_VERSION,
+                    'model_id': self.model_id,
+                    'model_prefix': self.model_prefix,
+                    'run_id': self.run_id,
                     'model_state_dict': clean_state,
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scaler_state_dict': self.scaler.state_dict(),
@@ -973,6 +1118,8 @@ class PPOTrainer:
                     write_checkpoint_artifact_manifest(
                         path,
                         self.iteration,
+                        model_id=self.model_id,
+                        model_prefix=self.model_prefix,
                         onnx_error="export_in_progress",
                     )
                     # 因为是同步的，主网络此时处于停滞状态，不需要克隆，直接传干净的字典即可
@@ -980,6 +1127,8 @@ class PPOTrainer:
                 artifact_manifest = write_checkpoint_artifact_manifest(
                     path,
                     self.iteration,
+                    model_id=self.model_id,
+                    model_prefix=self.model_prefix,
                     onnx_record=onnx_record,
                     onnx_error=onnx_error,
                 )
@@ -993,7 +1142,8 @@ class PPOTrainer:
     
     def _export_onnx_sync(self, clean_state, current_iter):
         """同步导出 ONNX，并核验所有外置权重文件均已生成"""
-        onnx_archive = os.path.join(self.save_dir, f"galatea_iter_{current_iter}.onnx")
+        artifact_stem = model_artifact_stem(self.model_prefix, current_iter)
+        onnx_archive = os.path.join(self.save_dir, f"{artifact_stem}.onnx")
         try:
             import torch.onnx
             print(f"⏳ [ONNX] 正在主线程同步导出第 {current_iter} 轮引擎，这大约需要 3 秒钟...")
@@ -1039,10 +1189,19 @@ class PPOTrainer:
                 input_names=keys,
                 output_names=['action_logits', 'values']
             )
+            tag_onnx_model_identity(
+                onnx_archive,
+                model_id=self.model_id,
+                model_prefix=self.model_prefix,
+                iteration=current_iter,
+            )
             artifact_record = describe_onnx_artifact(
                 onnx_archive,
                 require_complete=True,
                 validate_manifest=False,
+                model_id=self.model_id,
+                model_prefix=self.model_prefix,
+                iteration=current_iter,
             )
             print(f"✅ [ONNX] 纯净无损静态计算图导出成功！历史引擎 {os.path.basename(onnx_archive)} 已就绪！")
             return artifact_record, None
@@ -1060,4 +1219,4 @@ class PPOTrainer:
 
 if __name__ == "__main__":
     trainer = PPOTrainer()
-    trainer.run_training_loop()
+    trainer.run_training_loop(additional_iterations=1000)

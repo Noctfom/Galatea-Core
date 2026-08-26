@@ -1,7 +1,11 @@
 # 本文件在训练资源分配前统一校验模型结构和 PPO 参数
 
 import math
+import re
 from numbers import Integral, Real
+
+
+MODEL_PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 def _require_positive_integer(name, value):
@@ -80,3 +84,44 @@ def validate_max_iterations(max_iterations):
     """校验训练循环目标轮数"""
     _require_positive_integer("max_iterations", max_iterations)
 
+
+def validate_model_prefix(model_prefix):
+    """校验可安全用于跨平台模型文件名的人工前缀。"""
+    if not isinstance(model_prefix, str) or not MODEL_PREFIX_PATTERN.fullmatch(
+        model_prefix
+    ):
+        raise ValueError(
+            "model_prefix must start with an ASCII letter or digit and contain "
+            "only letters, digits, '_' or '-', with a maximum length of 64"
+        )
+    return model_prefix
+
+
+def resolve_training_target(
+    current_iteration,
+    *,
+    target_iteration=None,
+    additional_iterations=None,
+):
+    """将绝对目标或追加轮数解析为唯一且严格递增的停止轮次。"""
+    if (
+        isinstance(current_iteration, bool)
+        or not isinstance(current_iteration, Integral)
+        or current_iteration < 0
+    ):
+        raise ValueError("current_iteration must be a non-negative integer")
+    if (target_iteration is None) == (additional_iterations is None):
+        raise ValueError(
+            "exactly one of target_iteration or additional_iterations is required"
+        )
+
+    if target_iteration is not None:
+        _require_positive_integer("target_iteration", target_iteration)
+        if target_iteration <= current_iteration:
+            raise ValueError(
+                "target_iteration must be greater than the checkpoint iteration"
+            )
+        return int(target_iteration)
+
+    _require_positive_integer("additional_iterations", additional_iterations)
+    return int(current_iteration + additional_iterations)

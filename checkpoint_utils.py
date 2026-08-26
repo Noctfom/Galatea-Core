@@ -1,11 +1,24 @@
-# 训练检查点的严格校验、恢复与规范化导出
+# 训练检查点协议版本、身份校验、严格恢复与规范化导出
 
 import os
+import uuid
+import warnings
+from pathlib import Path
 
 import torch
 
+from training_validation import validate_model_prefix
+
+
+# 仅表示训练检查点数据协议，必须独立于 app.py 中的框架版本维护
+CHECKPOINT_FORMAT_VERSION = 1
+DEFAULT_MODEL_PREFIX = "galatea"
 
 REQUIRED_TRAINING_CHECKPOINT_KEYS = {
+    "checkpoint_format_version",
+    "model_id",
+    "model_prefix",
+    "run_id",
     "model_state_dict",
     "optimizer_state_dict",
     "scaler_state_dict",
@@ -16,14 +29,77 @@ REQUIRED_TRAINING_CHECKPOINT_KEYS = {
 }
 
 
-def load_training_checkpoint(path, map_location="cpu"):
-    """加载并校验当前训练框架生成的完整检查点"""
+def validate_model_id(model_id):
+    """校验框架自动生成的模型 UUID，并返回规范字符串"""
+    if not isinstance(model_id, str):
+        raise ValueError("model_id must be a UUID string")
+    try:
+        normalized = str(uuid.UUID(model_id))
+    except (ValueError, AttributeError) as error:
+        raise ValueError("model_id must be a valid UUID") from error
+    if model_id != normalized:
+        raise ValueError("model_id must use canonical lowercase UUID format")
+    return normalized
+
+
+def generate_model_id():
+    """为全新模型生成不可手动指定的随机 UUID"""
+    return str(uuid.uuid4())
+
+
+def get_checkpoint_format_warning(checkpoint):
+    """返回检查点协议版本告警；版本一致时返回空值"""
+    actual = checkpoint.get("checkpoint_format_version")
+    if (
+        isinstance(actual, int)
+        and not isinstance(actual, bool)
+        and actual == CHECKPOINT_FORMAT_VERSION
+    ):
+        return None
+    return (
+        "检查点协议版本不兼容: "
+        f"文件={actual!r}, 当前={CHECKPOINT_FORMAT_VERSION}。"
+        "该版本独立于 Galatea 框架版本，且当前没有对应迁移规则。"
+    )
+
+
+def inspect_training_checkpoint(path, map_location="cpu"):
+    """安全读取 WebUI 所需的检查点身份和架构元数据，不修改文件"""
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"training checkpoint does not exist: {path}")
-
     checkpoint = torch.load(path, map_location=map_location, weights_only=True)
     if not isinstance(checkpoint, dict):
         raise TypeError("training checkpoint must be a dictionary")
+    format_warning = get_checkpoint_format_warning(checkpoint)
+    if format_warning is None:
+        validate_model_id(checkpoint.get("model_id"))
+        validate_model_prefix(checkpoint.get("model_prefix"))
+        if (
+            isinstance(checkpoint.get("iteration"), bool)
+            or not isinstance(checkpoint.get("iteration"), int)
+            or checkpoint["iteration"] < 0
+        ):
+            raise ValueError("checkpoint iteration must be a non-negative integer")
+    return {
+        "checkpoint_format_version": checkpoint.get("checkpoint_format_version"),
+        "format_warning": format_warning,
+        "model_id": checkpoint.get("model_id"),
+        "model_prefix": checkpoint.get("model_prefix"),
+        "iteration": checkpoint.get("iteration"),
+        "run_id": checkpoint.get("run_id"),
+        "net_config": checkpoint.get("net_config", {}),
+    }
+
+
+def validate_training_checkpoint(checkpoint, *, source_path=None):
+    """校验已加载检查点的协议、UUID、结构和可选文件名一致性。"""
+    if not isinstance(checkpoint, dict):
+        raise TypeError("training checkpoint must be a dictionary")
+
+    format_warning = get_checkpoint_format_warning(checkpoint)
+    if format_warning:
+        warnings.warn(format_warning, RuntimeWarning, stacklevel=2)
+        raise ValueError(format_warning)
 
     missing = sorted(REQUIRED_TRAINING_CHECKPOINT_KEYS.difference(checkpoint))
     if missing:
@@ -40,7 +116,36 @@ def load_training_checkpoint(path, map_location="cpu"):
             f"found compiled key {compiled_keys[0]!r}"
         )
 
+    validate_model_id(checkpoint["model_id"])
+    validate_model_prefix(checkpoint["model_prefix"])
+    if (
+        isinstance(checkpoint["iteration"], bool)
+        or not isinstance(checkpoint["iteration"], int)
+        or checkpoint["iteration"] < 0
+    ):
+        raise ValueError("checkpoint iteration must be a non-negative integer")
+    if not isinstance(checkpoint["run_id"], str) or not checkpoint["run_id"]:
+        raise ValueError("checkpoint run_id must be a non-empty string")
+
+    expected_name = f"{checkpoint['model_prefix']}_iter_{checkpoint['iteration']}.pth"
+    if source_path is not None and Path(source_path).name != expected_name:
+        warnings.warn(
+            f"检查点文件名 {Path(source_path).name!r} 与内部身份不一致；"
+            f"内部元数据 {expected_name!r} 将作为恢复依据。",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     return checkpoint
+
+
+def load_training_checkpoint(path, map_location="cpu"):
+    """加载并校验当前训练框架生成的完整检查点"""
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"training checkpoint does not exist: {path}")
+
+    checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+    return validate_training_checkpoint(checkpoint, source_path=path)
 
 
 def restore_model_state_strict(model, checkpoint):

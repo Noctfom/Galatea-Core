@@ -185,7 +185,7 @@ case "${1:-}" in
         ;;
     --train)
         echo -e "${CYAN}Launching CLI training mode...${NC}"
-        echo -e "  (Pass additional args after --train, e.g.: ./setup.sh --train --steps 2000)"
+        echo -e "  (Pass additional args after --train, e.g.: ./setup.sh --train --additional-iterations 2000)"
         shift
         python main.py train --no_compile "$@"
         ;;

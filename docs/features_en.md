@@ -350,7 +350,9 @@ python main.py train [options]
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--dir` | Model save directory | `./models` |
-| `--steps` | Total training iterations | 1000 |
+| `--target-iteration` | Absolute stopping iteration; mutually exclusive with additional iterations | - |
+| `--additional-iterations` | Iterations to add from the current checkpoint | 1000 when omitted for new training |
+| `--model-prefix` | New model filename prefix; inherited on resume | `galatea` |
 | `--deck_dir` | Deck directory | `./decks` |
 | `--d_model` | Feature dimension | 256 |
 | `--n_heads` | Attention heads | 4 |
@@ -368,11 +370,13 @@ python main.py train [options]
 
 ```bash
 # Basic training
-python main.py train --dir ./models --steps 1000 --no_compile
+python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --no_compile
 
 # Advanced config
 python main.py train \
   --dir ./models \
+  --additional-iterations 1000 \
+  --model-prefix galatea \
   --batch_size 16384 \
   --mini_batch 512 \
   --workers 6 \
@@ -385,7 +389,7 @@ python main.py train \
 # Resume training
 python main.py train \
   --resume ./models/galatea_iter_100.pth \
-  --steps 5000 \
+  --target-iteration 5000 \
   --async_infer \
   --no_compile
 ```

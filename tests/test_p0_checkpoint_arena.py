@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from action_candidates import build_macro_action_pool
 from ai_bot import AiBot
 from checkpoint_utils import (
+    CHECKPOINT_FORMAT_VERSION,
     canonical_model_state_dict,
+    generate_model_id,
     load_training_checkpoint,
     restore_model_state_strict,
 )
@@ -32,19 +35,35 @@ from game_constants import LocationInfo, Zone
 from galatea_net import GalateaNet
 from model_versus import ModelArena
 from model_artifacts import (
+    assert_checkpoint_target_identity,
     collect_model_artifact_files,
     describe_onnx_artifact,
+    discover_checkpoint_artifacts,
+    find_model_prefix_namespace_files,
     safe_extract_zip,
+    tag_onnx_model_identity,
     write_checkpoint_artifact_manifest,
 )
-from trainer import PPOTrainer
-from training_validation import validate_max_iterations, validate_training_config
+from trainer import PPOTrainer, ensure_rule_opponent_coverage
+from training_validation import (
+    resolve_training_target,
+    validate_max_iterations,
+    validate_model_prefix,
+    validate_training_config,
+)
+from worker import build_ort_inputs, select_episode_opponent_config
 
 
 class CheckpointResumeTests(unittest.TestCase):
+    MODEL_ID = "12345678-1234-5678-9234-567812345678"
+
     @staticmethod
     def _checkpoint(model):
         return {
+            "checkpoint_format_version": CHECKPOINT_FORMAT_VERSION,
+            "model_id": CheckpointResumeTests.MODEL_ID,
+            "model_prefix": "galatea",
+            "run_id": "test-run",
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": {},
             "scaler_state_dict": {},
@@ -62,7 +81,7 @@ class CheckpointResumeTests(unittest.TestCase):
             target.bias.zero_()
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "checkpoint.pt"
+            path = Path(temp_dir) / "galatea_iter_7.pth"
             torch.save(self._checkpoint(source), path)
             checkpoint = load_training_checkpoint(path)
             restore_model_state_strict(target, checkpoint)
@@ -100,10 +119,48 @@ class CheckpointResumeTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "bad_checkpoint.pt"
+            path = Path(temp_dir) / "galatea_iter_7.pth"
             torch.save(checkpoint, path)
             with self.assertRaisesRegex(ValueError, "canonical uncompiled keys"):
                 load_training_checkpoint(path)
+
+    def test_uuid_is_preserved_when_loading_for_resume(self):
+        """恢复训练必须继承检查点 UUID，不得重新生成身份。"""
+        source = nn.Linear(3, 2)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "galatea_iter_7.pth"
+            torch.save(self._checkpoint(source), path)
+            checkpoint = load_training_checkpoint(path)
+
+        self.assertEqual(checkpoint["model_id"], self.MODEL_ID)
+        self.assertNotEqual(generate_model_id(), self.MODEL_ID)
+
+    def test_incompatible_checkpoint_version_warns_and_is_rejected(self):
+        """检查点协议版本不同必须先告警，再拒绝无迁移规则的恢复。"""
+        checkpoint = self._checkpoint(nn.Linear(3, 2))
+        checkpoint["checkpoint_format_version"] = CHECKPOINT_FORMAT_VERSION + 1
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "galatea_iter_7.pth"
+            torch.save(checkpoint, path)
+            with warnings.catch_warnings(record=True) as observed:
+                warnings.simplefilter("always")
+                with self.assertRaisesRegex(ValueError, "协议版本不兼容"):
+                    load_training_checkpoint(path)
+
+        self.assertTrue(any(item.category is RuntimeWarning for item in observed))
+
+    def test_renamed_file_warns_but_internal_iteration_remains_authoritative(self):
+        """转发时改名只应告警，恢复轮次仍以内置元数据为准。"""
+        checkpoint = self._checkpoint(nn.Linear(3, 2))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "forwarded-model.pth"
+            torch.save(checkpoint, path)
+            with warnings.catch_warnings(record=True) as observed:
+                warnings.simplefilter("always")
+                loaded = load_training_checkpoint(path)
+
+        self.assertEqual(loaded["iteration"], 7)
+        self.assertTrue(any(item.category is RuntimeWarning for item in observed))
 
 
 class PpoTrainingModeTests(unittest.TestCase):
@@ -192,8 +249,32 @@ class TrainingValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite"):
             self.validate(learning_rate=float("nan"))
 
+    def test_model_prefix_and_iteration_modes_are_strict(self):
+        """前缀字符集及绝对/追加轮次语义必须统一校验。"""
+        self.assertEqual(validate_model_prefix("Galatea_v2-test"), "Galatea_v2-test")
+        with self.assertRaises(ValueError):
+            validate_model_prefix("../galatea")
+        self.assertEqual(
+            resolve_training_target(10, target_iteration=20),
+            20,
+        )
+        self.assertEqual(
+            resolve_training_target(10, additional_iterations=5),
+            15,
+        )
+        with self.assertRaises(ValueError):
+            resolve_training_target(
+                10,
+                target_iteration=20,
+                additional_iterations=5,
+            )
+        with self.assertRaises(ValueError):
+            resolve_training_target(10, target_iteration=10)
+
 
 class ModelArtifactTests(unittest.TestCase):
+    MODEL_ID = "12345678-1234-5678-9234-567812345678"
+
     @staticmethod
     def _write_external_onnx(directory, iteration=10):
         """生成引用单个外置权重文件的最小 ONNX 模型。"""
@@ -224,8 +305,20 @@ class ModelArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             graph_path, data_path = self._write_external_onnx(temp_dir)
             self.assertTrue(data_path.is_file())
+            tag_onnx_model_identity(
+                graph_path,
+                model_id=self.MODEL_ID,
+                model_prefix="galatea",
+                iteration=10,
+            )
 
-            record = describe_onnx_artifact(graph_path)
+            record = describe_onnx_artifact(
+                graph_path,
+                validate_manifest=False,
+                model_id=self.MODEL_ID,
+                model_prefix="galatea",
+                iteration=10,
+            )
             self.assertEqual(record["iteration"], 10)
             self.assertEqual(record["external_data"], [data_path.name])
             self.assertEqual(
@@ -238,11 +331,24 @@ class ModelArtifactTests(unittest.TestCase):
             marker = write_checkpoint_artifact_manifest(
                 checkpoint_path,
                 10,
+                model_id=self.MODEL_ID,
+                model_prefix="galatea",
                 onnx_record=record,
             )
             payload = json.loads(marker.read_text(encoding="utf-8"))
             self.assertEqual(payload["iteration"], 10)
+            self.assertEqual(payload["model_id"], self.MODEL_ID)
             self.assertEqual(payload["onnx"]["status"], "complete")
+            validated = describe_onnx_artifact(
+                graph_path,
+                expected_model_id=self.MODEL_ID,
+            )
+            self.assertEqual(validated["model_id"], self.MODEL_ID)
+            with self.assertRaisesRegex(PermissionError, "model_id mismatch"):
+                describe_onnx_artifact(
+                    graph_path,
+                    expected_model_id="87654321-4321-6789-9234-567812345678",
+                )
 
     def test_missing_external_data_is_rejected(self):
         """外置权重缺失时不得把 ONNX 判定为可用。"""
@@ -256,15 +362,74 @@ class ModelArtifactTests(unittest.TestCase):
         """未完成标记必须阻止同名旧 ONNX 被误用。"""
         with tempfile.TemporaryDirectory() as temp_dir:
             graph_path, _data_path = self._write_external_onnx(temp_dir)
+            tag_onnx_model_identity(
+                graph_path,
+                model_id=self.MODEL_ID,
+                model_prefix="galatea",
+                iteration=10,
+            )
             checkpoint_path = Path(temp_dir) / "galatea_iter_10.pth"
             checkpoint_path.write_bytes(b"checkpoint")
             write_checkpoint_artifact_manifest(
                 checkpoint_path,
                 10,
+                model_id=self.MODEL_ID,
+                model_prefix="galatea",
                 onnx_error="export_in_progress",
             )
             with self.assertRaisesRegex(RuntimeError, "not marked complete"):
                 describe_onnx_artifact(graph_path)
+
+    def test_same_prefix_different_uuid_is_discovered_and_overwrite_rejected(self):
+        """同前缀异 UUID 必须可告警，并禁止覆盖其同名检查点。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = Path(temp_dir) / "galatea_iter_10.pth"
+            checkpoint_path.write_bytes(b"checkpoint")
+            write_checkpoint_artifact_manifest(
+                checkpoint_path,
+                10,
+                model_id=self.MODEL_ID,
+                model_prefix="galatea",
+            )
+
+            records = discover_checkpoint_artifacts(
+                temp_dir,
+                model_prefix="galatea",
+            )
+            self.assertEqual([record["model_id"] for record in records], [self.MODEL_ID])
+            with self.assertRaisesRegex(PermissionError, "refusing to overwrite"):
+                assert_checkpoint_target_identity(
+                    checkpoint_path,
+                    "87654321-4321-6789-9234-567812345678",
+                )
+
+    def test_orphan_checkpoint_identity_is_scanned_only_when_requested(self):
+        """仅转发 PTH 时仍可参与冲突告警，常规历史扫描则不重复读取大文件。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = Path(temp_dir) / "galatea_iter_7.pth"
+            checkpoint = CheckpointResumeTests._checkpoint(nn.Linear(3, 2))
+            torch.save(checkpoint, checkpoint_path)
+
+            self.assertEqual(discover_checkpoint_artifacts(temp_dir), [])
+            records = discover_checkpoint_artifacts(
+                temp_dir,
+                model_prefix="galatea",
+                include_orphan_checkpoints=True,
+            )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["model_id"], CheckpointResumeTests.MODEL_ID)
+        self.assertIsNone(records[0]["manifest_path"])
+
+    def test_prefix_namespace_detection_is_case_insensitive(self):
+        """Windows 风格同名冲突必须按大小写不敏感方式提前拦截。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = Path(temp_dir) / "Galatea_iter_10.pth"
+            checkpoint_path.write_bytes(b"checkpoint")
+
+            matches = find_model_prefix_namespace_files(temp_dir, "galatea")
+
+        self.assertEqual(matches, [str(checkpoint_path.resolve())])
 
     def test_archive_path_traversal_is_rejected(self):
         """部署包不得通过父目录路径写出暂存区。"""
@@ -277,6 +442,93 @@ class ModelArtifactTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsafe"):
                     safe_extract_zip(archive, target)
             self.assertFalse((Path(temp_dir) / "escape.pth").exists())
+
+
+class OnnxInputAdapterTests(unittest.TestCase):
+    class FakeNode:
+        """模拟 ONNX Runtime 输入节点。"""
+
+        def __init__(self, name, node_type):
+            self.name = name
+            self.type = node_type
+
+    class FakeSession:
+        """模拟仅暴露输入签名的 ONNX Runtime 会话。"""
+
+        def __init__(self, nodes):
+            self.nodes = nodes
+
+        def get_inputs(self):
+            """返回测试输入签名。"""
+            return self.nodes
+
+    def test_float16_and_float32_are_converted_exactly(self):
+        """半精度语义槽不得被 float 的宽泛匹配误转成单精度。"""
+        session = self.FakeSession(
+            [
+                self.FakeNode("sem_number", "tensor(float16)"),
+                self.FakeNode("global", "tensor(float)"),
+            ]
+        )
+        inputs = build_ort_inputs(
+            session,
+            {
+                "sem_number": torch.zeros((1, 2), dtype=torch.float32),
+                "global": torch.zeros((1, 2), dtype=torch.float16),
+            },
+        )
+        self.assertEqual(inputs["sem_number"].dtype, np.float16)
+        self.assertEqual(inputs["global"].dtype, np.float32)
+
+    def test_missing_input_is_rejected_before_runtime_call(self):
+        """输入缺失必须在调用 ONNX Runtime 前给出明确错误。"""
+        session = self.FakeSession([self.FakeNode("required", "tensor(int64)")])
+        with self.assertRaisesRegex(KeyError, "required"):
+            build_ort_inputs(session, {})
+
+
+class RuleOpponentCoverageTests(unittest.TestCase):
+    def test_missing_rule_assigns_one_rotating_ai_worker(self):
+        """整轮未抽中 Rule 时，只给轮换选中的 AI Worker 追加一局配额。"""
+        configs = [
+            {"mode": "ai", "type": "self", "path": "current.pth"},
+            {"mode": "ai", "type": "hist", "path": "history.pth"},
+        ]
+
+        selected = ensure_rule_opponent_coverage(configs, iteration=2)
+
+        self.assertEqual(selected, 1)
+        self.assertNotIn("forced_rule_games", configs[0])
+        self.assertEqual(configs[1]["forced_rule_games"], 1)
+        self.assertEqual(configs[1]["type"], "hist")
+
+    def test_existing_rule_worker_does_not_add_forced_game(self):
+        """已有 Rule Worker 时不得额外改变本轮原始采样比例。"""
+        configs = [
+            {"mode": "rule", "type": "rule", "path": None},
+            {"mode": "ai", "type": "self", "path": "current.pth"},
+        ]
+
+        selected = ensure_rule_opponent_coverage(configs, iteration=1)
+
+        self.assertIsNone(selected)
+        self.assertFalse(any("forced_rule_games" in config for config in configs))
+
+    def test_forced_episode_does_not_replace_base_config(self):
+        """强制局只覆盖当前一局，配额耗尽后必须恢复原 Hist 配置。"""
+        base_config = {"mode": "ai", "type": "hist", "path": "history.pth"}
+
+        forced_config, is_forced = select_episode_opponent_config(base_config, 1)
+        restored_config, is_restored_forced = select_episode_opponent_config(
+            base_config,
+            0,
+        )
+
+        self.assertTrue(is_forced)
+        self.assertEqual(forced_config["type"], "rule")
+        self.assertFalse(is_restored_forced)
+        self.assertIs(restored_config, base_config)
+        self.assertEqual(base_config["type"], "hist")
 
 
 class DeckPairContractTests(unittest.TestCase):
@@ -386,15 +638,14 @@ class AsyncInferenceWiringTests(unittest.TestCase):
 
 
 class ArenaCorrectnessTests(unittest.TestCase):
-    def test_constructor_loads_a_current_checkpoint(self):
-        config = {
-            "d_model": 32,
-            "n_heads": 4,
-            "n_layers": 1,
-            "vocab_size": 128,
-        }
-        network = GalateaNet(config)
-        checkpoint = {
+    @staticmethod
+    def _current_checkpoint(config, network):
+        """生成带当前协议身份字段的竞技场测试检查点。"""
+        return {
+            "checkpoint_format_version": CHECKPOINT_FORMAT_VERSION,
+            "model_id": CheckpointResumeTests.MODEL_ID,
+            "model_prefix": "galatea",
+            "run_id": "arena-test",
             "model_state_dict": network.state_dict(),
             "optimizer_state_dict": {},
             "scaler_state_dict": {},
@@ -404,8 +655,18 @@ class ArenaCorrectnessTests(unittest.TestCase):
             "global_step": 3,
         }
 
+    def test_constructor_loads_a_current_checkpoint(self):
+        config = {
+            "d_model": 32,
+            "n_heads": 4,
+            "n_layers": 1,
+            "vocab_size": 128,
+        }
+        network = GalateaNet(config)
+        checkpoint = self._current_checkpoint(config, network)
+
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "current_checkpoint.pt"
+            path = Path(temp_dir) / "galatea_iter_1.pth"
             torch.save(checkpoint, path)
             with patch("model_versus.GalateaEnv", return_value=object()), patch(
                 "builtins.print"
@@ -413,6 +674,27 @@ class ArenaCorrectnessTests(unittest.TestCase):
                 arena = ModelArena(str(path), device="cpu", config=config)
 
         self.assertIsNotNone(arena.p0_bot)
+
+    def test_ai_bot_rejects_a_wrong_expected_model_id(self):
+        """联盟 Worker 实际加载 PTH 时必须再次核验内部 UUID。"""
+        config = {
+            "d_model": 32,
+            "n_heads": 4,
+            "n_layers": 1,
+            "vocab_size": 128,
+        }
+        network = GalateaNet(config)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "galatea_iter_1.pth"
+            torch.save(self._current_checkpoint(config, network), path)
+            bot = AiBot(device="cpu", net_config=config)
+            with patch("builtins.print"):
+                loaded = bot.load_model(
+                    path,
+                    expected_model_id="87654321-4321-6789-9234-567812345678",
+                )
+
+        self.assertFalse(loaded)
 
     def test_padding_sentinel_is_not_clamped_to_a_real_card(self):
         tensor_dict = {"act_card_idx": torch.tensor([[0, 120]])}
