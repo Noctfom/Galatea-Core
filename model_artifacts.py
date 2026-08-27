@@ -2,23 +2,122 @@
 
 import json
 import os
+import re
+import shutil
 import stat
-from pathlib import Path
+import tempfile
+import time
+import zipfile
+from pathlib import Path, PurePosixPath
 
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
     inspect_training_checkpoint,
+    validate_training_checkpoint_file,
     validate_model_id,
 )
 from training_validation import validate_model_prefix
 
 
 ARTIFACT_MANIFEST_FORMAT_VERSION = 2
+# 仅表示 .gkg 部署包协议，必须独立于 WebUI/框架版本维护
+DEPLOY_PACKAGE_FORMAT_VERSION = 1
+MAX_ONNX_GRAPH_FILE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_MODEL_ARTIFACT_FILE_BYTES = 32 * 1024 * 1024 * 1024
+MAX_MODEL_ARTIFACT_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
+MAX_DEPLOY_PACKAGE_FILE_BYTES = 64 * 1024 * 1024 * 1024
+MAX_DEPLOY_ARCHIVE_MEMBERS = 256
+MAX_DEPLOY_ARCHIVE_MEMBER_BYTES = 32 * 1024 * 1024 * 1024
+MAX_DEPLOY_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
+MAX_DEPLOY_COMPRESSION_RATIO = 1000
+MAX_MANIFEST_FILE_BYTES = 2 * 1024 * 1024
+SAFE_FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+SAFE_PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+MODEL_ARTIFACT_SUFFIXES = (".artifacts.json", ".onnx.data", ".onnx", ".pth")
+DEPLOY_ROOT_JSON_FILES = {"knowledge_base.json", "meta_staples.json"}
 ONNX_IDENTITY_KEYS = {
     "model_id": "galatea.model_id",
     "model_prefix": "galatea.model_prefix",
     "iteration": "galatea.iteration",
 }
+
+
+def validate_safe_filename(filename, *, allowed_suffixes=None):
+    """校验不含路径、控制字符和跨平台保留名的普通文件名"""
+    if not isinstance(filename, str) or not filename:
+        raise ValueError("filename must be a non-empty string")
+    if filename != Path(filename).name or "/" in filename or "\\" in filename:
+        raise ValueError(f"filename must not contain a path: {filename!r}")
+    if ".." in filename or not SAFE_FILENAME_PATTERN.fullmatch(filename):
+        raise ValueError(f"filename contains unsupported characters: {filename!r}")
+    if len(filename.encode("utf-8")) > 200:
+        raise ValueError("filename exceeds the 200-byte safety limit")
+    device_stem = filename.split(".", 1)[0].upper()
+    if device_stem in WINDOWS_RESERVED_FILENAMES:
+        raise ValueError(f"reserved filename is not allowed: {filename!r}")
+    if allowed_suffixes and not any(
+        filename.casefold().endswith(suffix.casefold()) for suffix in allowed_suffixes
+    ):
+        raise ValueError(f"filename has an unsupported suffix: {filename!r}")
+    return filename
+
+
+def validate_model_artifact_filename(filename):
+    """校验检查点、ONNX、外置权重或轮次清单的模型产物文件名"""
+    return validate_safe_filename(filename, allowed_suffixes=MODEL_ARTIFACT_SUFFIXES)
+
+
+def validate_model_artifact_file(path):
+    """校验模型制品是大小受限且不经过符号链接的普通文件"""
+    artifact_path = Path(path)
+    validate_model_artifact_filename(artifact_path.name)
+    if artifact_path.is_symlink() or not artifact_path.is_file():
+        raise ValueError(f"model artifact must be a regular file: {artifact_path.name}")
+    file_size = artifact_path.stat().st_size
+    if file_size > MAX_MODEL_ARTIFACT_FILE_BYTES:
+        raise ValueError(
+            f"model artifact exceeds the 32 GiB safety limit: {artifact_path.name}"
+        )
+    return file_size
+
+
+def validate_model_artifact_file_set(model_dir, filenames):
+    """校验一组模型制品的单文件和总容量边界并返回总字节数"""
+    model_root = Path(model_dir).resolve()
+    total_size = 0
+    for filename in filenames:
+        safe_name = validate_model_artifact_filename(filename)
+        total_size += validate_model_artifact_file(model_root / safe_name)
+        if total_size > MAX_MODEL_ARTIFACT_TOTAL_BYTES:
+            raise ValueError("model artifact set exceeds the 64 GiB safety limit")
+    return total_size
+
+
+def validate_package_name(package_name):
+    """校验可安全用于跨平台部署包文件名的包名"""
+    if not isinstance(package_name, str) or not SAFE_PACKAGE_NAME_PATTERN.fullmatch(
+        package_name
+    ):
+        raise ValueError(
+            "package_name must start with an ASCII letter or digit, contain only "
+            "letters, digits, '.', '_' or '-', and be at most 64 characters"
+        )
+    if ".." in package_name or package_name.split(".", 1)[0].upper() in WINDOWS_RESERVED_FILENAMES:
+        raise ValueError("package_name is not safe for a local filename")
+    return package_name
+
+
+def validate_deployment_package_filename(filename):
+    """校验本地部署包必须是安全的单层 .gkg 文件名"""
+    return validate_safe_filename(filename, allowed_suffixes=(".gkg",))
 
 
 def model_artifact_stem(model_prefix, iteration):
@@ -31,13 +130,20 @@ def model_artifact_stem(model_prefix, iteration):
 
 def is_primary_model_filename(filename):
     """判断文件是否为可独立选择的检查点或 ONNX 主图"""
-    name = Path(filename).name
-    return name.endswith(".pth") or name.endswith(".onnx")
+    try:
+        name = validate_safe_filename(filename, allowed_suffixes=(".pth", ".onnx"))
+    except ValueError:
+        return False
+    return name.casefold().endswith(".pth") or name.casefold().endswith(".onnx")
 
 
 def is_artifact_manifest_filename(filename):
     """判断文件是否为训练轮次产物清单"""
-    return Path(filename).name.endswith(".artifacts.json")
+    try:
+        validate_safe_filename(filename, allowed_suffixes=(".artifacts.json",))
+    except ValueError:
+        return False
+    return filename.casefold().endswith(".artifacts.json")
 
 
 def checkpoint_artifact_manifest_path(checkpoint_path):
@@ -70,7 +176,11 @@ def tag_onnx_model_identity(onnx_path, *, model_id, model_prefix, iteration):
     validate_model_id(model_id)
     validate_model_prefix(model_prefix)
     model_artifact_stem(model_prefix, iteration)
-    graph_path = Path(onnx_path).resolve()
+    source_graph_path = Path(onnx_path)
+    if source_graph_path.is_symlink():
+        raise ValueError("symbolic-link ONNX graphs are not allowed")
+    graph_path = source_graph_path.resolve()
+    validate_safe_filename(graph_path.name, allowed_suffixes=(".onnx",))
     model = onnx.load(str(graph_path), load_external_data=False)
     properties = {item.key: item.value for item in model.metadata_props}
     properties.update(
@@ -93,12 +203,13 @@ def tag_onnx_model_identity(onnx_path, *, model_id, model_prefix, iteration):
 def _safe_external_data_path(model_dir, location):
     """解析 ONNX 外置权重路径并拒绝越出模型目录的引用"""
     normalized = str(location).replace("\\", "/")
-    relative = Path(normalized)
-    if relative.is_absolute() or ".." in relative.parts:
+    relative = PurePosixPath(normalized)
+    if relative.is_absolute() or len(relative.parts) != 1 or ".." in relative.parts:
         raise ValueError(f"ONNX external data path is unsafe: {location!r}")
+    validate_safe_filename(relative.name, allowed_suffixes=(".onnx.data",))
 
     model_root = Path(model_dir).resolve()
-    resolved = (model_root / relative).resolve()
+    resolved = (model_root / relative.name).resolve()
     if os.path.commonpath((str(model_root), str(resolved))) != str(model_root):
         raise ValueError(f"ONNX external data escapes model directory: {location!r}")
     return resolved
@@ -106,8 +217,16 @@ def _safe_external_data_path(model_dir, location):
 
 def _read_artifact_manifest(marker_path):
     """读取并校验当前版本产物清单的基础结构"""
+    marker_path = Path(marker_path)
+    validate_safe_filename(marker_path.name, allowed_suffixes=(".artifacts.json",))
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise ValueError(f"artifact manifest must be a regular file: {marker_path.name}")
+    if marker_path.stat().st_size > MAX_MANIFEST_FILE_BYTES:
+        raise ValueError(f"artifact manifest is too large: {marker_path.name}")
     with open(marker_path, "r", encoding="utf-8") as stream:
         payload = json.load(stream)
+    if not isinstance(payload, dict):
+        raise ValueError(f"artifact manifest must be an object: {marker_path.name}")
     manifest_version = payload.get("artifact_manifest_version")
     if (
         isinstance(manifest_version, bool)
@@ -125,6 +244,13 @@ def _read_artifact_manifest(marker_path):
     iteration = payload.get("iteration")
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
         raise ValueError(f"artifact iteration is invalid: {marker_path.name}")
+    checkpoint = payload.get("checkpoint") or {}
+    checkpoint_name = checkpoint.get("file")
+    if checkpoint_name is not None:
+        validate_safe_filename(checkpoint_name, allowed_suffixes=(".pth",))
+    onnx_record = payload.get("onnx") or {}
+    for filename in onnx_record.get("files") or []:
+        validate_model_artifact_filename(filename)
     return payload
 
 
@@ -177,9 +303,15 @@ def describe_onnx_artifact(
     """读取 ONNX 主图引用并返回主图与全部外置权重的完整记录"""
     import onnx
 
-    graph_path = Path(onnx_path).resolve()
-    if not graph_path.is_file():
+    source_graph_path = Path(onnx_path)
+    if source_graph_path.is_symlink():
+        raise ValueError("symbolic-link ONNX graphs are not allowed")
+    graph_path = source_graph_path.resolve()
+    validate_safe_filename(graph_path.name, allowed_suffixes=(".onnx",))
+    if graph_path.is_symlink() or not graph_path.is_file():
         raise FileNotFoundError(f"ONNX graph does not exist: {graph_path}")
+    if graph_path.stat().st_size > MAX_ONNX_GRAPH_FILE_BYTES:
+        raise ValueError("ONNX graph exceeds the 2 GiB safety limit")
 
     model = onnx.load(str(graph_path), load_external_data=False)
     properties = {item.key: item.value for item in model.metadata_props}
@@ -225,10 +357,16 @@ def describe_onnx_artifact(
     files = [graph_path.name]
     for location in sorted(locations):
         data_path = _safe_external_data_path(graph_path.parent, location)
+        if data_path.is_symlink():
+            raise ValueError(
+                f"ONNX external data must not be a symbolic link: {location}"
+            )
         if require_complete and not data_path.is_file():
             raise FileNotFoundError(
                 f"ONNX external data is missing for {graph_path.name}: {location}"
             )
+        if data_path.is_file():
+            validate_model_artifact_file(data_path)
         files.append(os.path.relpath(data_path, graph_path.parent).replace("\\", "/"))
 
     record = {
@@ -378,6 +516,36 @@ def assert_checkpoint_target_identity(checkpoint_path, expected_model_id):
         )
 
 
+def assert_model_artifact_target_identity(model_dir, record):
+    """导入覆盖前核验目标主文件的 UUID、前缀、轮次和格式完全一致"""
+    validate_package_model_records([record], expected_model_id=record["model_id"])
+    model_root = Path(model_dir).resolve()
+    primary_name = validate_safe_filename(
+        record["primary"], allowed_suffixes=(".pth", ".onnx")
+    )
+    target_primary = model_root / primary_name
+    existing_files = [
+        model_root / validate_model_artifact_filename(filename)
+        for filename in record.get("files", [])
+        if (model_root / filename).exists()
+    ]
+    target_marker = checkpoint_artifact_manifest_path(target_primary)
+    if target_marker.exists() and target_marker not in existing_files:
+        existing_files.append(target_marker)
+    if not target_primary.exists():
+        if existing_files:
+            raise PermissionError(
+                f"refusing to overwrite orphan target artifact: {existing_files[0].name}"
+            )
+        return
+    existing = build_package_model_records(model_root, [primary_name])[0]
+    for key in ("format", "model_id", "model_prefix", "iteration"):
+        if existing.get(key) != record.get(key):
+            raise PermissionError(
+                f"refusing to overwrite {primary_name}: existing {key} differs"
+            )
+
+
 def collect_model_artifact_files(model_dir, selected_models):
     """展开用户选择，自动补齐 ONNX 外置权重和同轮次产物清单"""
     model_root = Path(model_dir).resolve()
@@ -390,14 +558,14 @@ def collect_model_artifact_files(model_dir, selected_models):
             collected.append(normalized)
 
     for selected in selected_models:
-        name = Path(selected).name
-        if name != selected or not is_primary_model_filename(name):
+        if not is_primary_model_filename(selected):
             raise ValueError(f"invalid model artifact selection: {selected!r}")
+        name = validate_safe_filename(selected, allowed_suffixes=(".pth", ".onnx"))
         primary_path = model_root / name
-        if not primary_path.is_file():
+        if primary_path.is_symlink() or not primary_path.is_file():
             raise FileNotFoundError(f"selected model does not exist: {primary_path}")
 
-        if name.endswith(".onnx"):
+        if name.casefold().endswith(".onnx"):
             record = describe_onnx_artifact(primary_path, require_complete=True)
             for relative_name in record["files"]:
                 append_once(relative_name)
@@ -408,6 +576,7 @@ def collect_model_artifact_files(model_dir, selected_models):
         if (model_root / marker).is_file():
             append_once(marker)
 
+    validate_model_artifact_file_set(model_root, collected)
     return collected
 
 
@@ -416,33 +585,279 @@ def build_package_model_records(model_dir, selected_models):
     model_root = Path(model_dir).resolve()
     records = []
     for selected in selected_models:
-        name = Path(selected).name
-        if name != selected or not is_primary_model_filename(name):
+        if not is_primary_model_filename(selected):
             raise ValueError(f"invalid model artifact selection: {selected!r}")
+        name = validate_safe_filename(selected, allowed_suffixes=(".pth", ".onnx"))
         primary_path = model_root / name
-        if not primary_path.is_file():
+        if primary_path.is_symlink() or not primary_path.is_file():
             raise FileNotFoundError(f"selected model does not exist: {primary_path}")
-        if name.endswith(".onnx"):
+        if name.casefold().endswith(".onnx"):
             records.append(describe_onnx_artifact(primary_path, require_complete=True))
         else:
+            checkpoint = validate_training_checkpoint_file(
+                primary_path,
+                map_location="cpu",
+            )
             marker_path = checkpoint_artifact_manifest_path(primary_path)
-            if not marker_path.is_file():
-                raise FileNotFoundError(
-                    f"checkpoint identity manifest is missing: {marker_path.name}"
-                )
-            payload = _read_artifact_manifest(marker_path)
+            if marker_path.is_file():
+                payload = _read_artifact_manifest(marker_path)
+                for key in ("model_id", "model_prefix", "iteration"):
+                    if payload[key] != checkpoint[key]:
+                        raise ValueError(
+                            f"checkpoint internal {key} does not match "
+                            f"{marker_path.name}"
+                        )
+                checkpoint_record = payload.get("checkpoint") or {}
+                if (
+                    checkpoint_record.get("status") != "complete"
+                    or checkpoint_record.get("file") != name
+                ):
+                    raise ValueError(
+                        f"checkpoint artifact record is invalid: {marker_path.name}"
+                    )
             records.append(
                 {
                     "format": "pytorch_checkpoint",
-                    "model_id": payload["model_id"],
-                    "model_prefix": payload["model_prefix"],
-                    "iteration": payload["iteration"],
+                    "model_id": checkpoint["model_id"],
+                    "model_prefix": checkpoint["model_prefix"],
+                    "iteration": checkpoint["iteration"],
                     "primary": name,
                     "files": [name],
                     "status": "complete",
                 }
             )
     return records
+
+
+def get_model_iteration_mismatch(records):
+    """比较同一选择中的 PTH 与 ONNX 轮次集合，并返回可展示的提示"""
+    checkpoint_iterations = {
+        record["iteration"]
+        for record in records
+        if record.get("format") == "pytorch_checkpoint"
+    }
+    onnx_iterations = {
+        record["iteration"]
+        for record in records
+        if record.get("format") == "onnx"
+    }
+    if checkpoint_iterations and onnx_iterations and checkpoint_iterations != onnx_iterations:
+        return (
+            "PTH 与 ONNX 的内置轮次不一致: "
+            f"PTH={sorted(checkpoint_iterations)}, ONNX={sorted(onnx_iterations)}"
+        )
+    return None
+
+
+def validate_package_model_records(records, *, expected_model_id=None):
+    """校验部署包只能包含同一 UUID 的模型，且双格式轮次必须成对一致"""
+    if not isinstance(records, list):
+        raise ValueError("model artifact records must be a list")
+    model_ids = {record.get("model_id") for record in records}
+    prefixes = {record.get("model_prefix") for record in records}
+    if None in model_ids or None in prefixes:
+        raise ValueError("model artifact identity is incomplete")
+    for model_id in model_ids:
+        validate_model_id(model_id)
+    for prefix in prefixes:
+        validate_model_prefix(prefix)
+    if len(model_ids) > 1:
+        raise ValueError("one deployment package cannot mix different model_id pools")
+    if len(prefixes) > 1:
+        raise ValueError("one model_id pool cannot contain different model prefixes")
+    if expected_model_id is not None and model_ids and model_ids != {expected_model_id}:
+        raise PermissionError("selected models do not belong to the requested model_id pool")
+    artifact_keys = [
+        (record.get("format"), record.get("iteration")) for record in records
+    ]
+    if len(artifact_keys) != len(set(artifact_keys)):
+        raise ValueError("one deployment package cannot contain duplicate format/iteration artifacts")
+    mismatch = get_model_iteration_mismatch(records)
+    if mismatch:
+        raise ValueError(mismatch)
+    return records
+
+
+def discover_model_repository(model_dir):
+    """按模型 UUID 和内置轮次整理模型仓库，并列出无法归档的产物"""
+    model_root = Path(model_dir).resolve()
+    result = {"pools": {}, "invalid": []}
+    if not model_root.is_dir():
+        return result
+
+    recognized_files = sorted(
+        path
+        for path in model_root.iterdir()
+        if path.is_file()
+        and any(path.name.casefold().endswith(suffix) for suffix in MODEL_ARTIFACT_SUFFIXES)
+    )
+    referenced_files = set()
+    primary_paths = [path for path in recognized_files if is_primary_model_filename(path.name)]
+    for primary_path in primary_paths:
+        try:
+            if primary_path.suffix.casefold() == ".pth":
+                checkpoint = validate_training_checkpoint_file(
+                    primary_path,
+                    map_location="cpu",
+                )
+                marker_path = checkpoint_artifact_manifest_path(primary_path)
+                if marker_path.is_file():
+                    payload = _read_artifact_manifest(marker_path)
+                    for key in ("model_id", "model_prefix", "iteration"):
+                        if payload[key] != checkpoint[key]:
+                            raise ValueError(
+                                f"checkpoint internal {key} does not match "
+                                f"{marker_path.name}"
+                            )
+                    checkpoint_record = payload.get("checkpoint") or {}
+                    if (
+                        checkpoint_record.get("status") != "complete"
+                        or checkpoint_record.get("file") != primary_path.name
+                    ):
+                        raise ValueError("checkpoint manifest does not name this PTH")
+                    record = {
+                        "format": "pytorch_checkpoint",
+                        "model_id": checkpoint["model_id"],
+                        "model_prefix": checkpoint["model_prefix"],
+                        "iteration": checkpoint["iteration"],
+                        "primary": primary_path.name,
+                        "files": [primary_path.name, marker_path.name],
+                        "identity_source": "checkpoint",
+                        "status": "complete",
+                    }
+                else:
+                    record = {
+                        "format": "pytorch_checkpoint",
+                        "model_id": checkpoint["model_id"],
+                        "model_prefix": checkpoint["model_prefix"],
+                        "iteration": checkpoint["iteration"],
+                        "primary": primary_path.name,
+                        "files": [primary_path.name],
+                        "identity_source": "checkpoint",
+                        "status": "complete",
+                    }
+            else:
+                record = describe_onnx_artifact(
+                    primary_path,
+                    require_complete=True,
+                    validate_manifest=checkpoint_artifact_manifest_path(primary_path).is_file(),
+                )
+                if record["model_id"] is None:
+                    raise ValueError("ONNX embedded model identity is missing")
+                record["identity_source"] = "onnx_metadata"
+                marker_path = checkpoint_artifact_manifest_path(primary_path)
+                if marker_path.is_file():
+                    record["files"] = [*record["files"], marker_path.name]
+
+            model_id = record["model_id"]
+            iteration = record["iteration"]
+            pool = result["pools"].setdefault(
+                model_id,
+                {
+                    "model_id": model_id,
+                    "prefixes": set(),
+                    "iterations": {},
+                    "artifacts": [],
+                },
+            )
+            pool["prefixes"].add(record["model_prefix"])
+            pool["iterations"].setdefault(iteration, []).append(record)
+            pool["artifacts"].append(record)
+            referenced_files.update(record["files"])
+        except Exception as error:
+            result["invalid"].append(
+                {"file": primary_path.name, "error": str(error)}
+            )
+
+    invalid_names = {item["file"] for item in result["invalid"]}
+    for path in recognized_files:
+        if path.name not in referenced_files and path.name not in invalid_names:
+            result["invalid"].append(
+                {"file": path.name, "error": "orphan or unverified model artifact"}
+            )
+    for pool in result["pools"].values():
+        pool["prefixes"] = sorted(pool["prefixes"], key=str.casefold)
+        pool["artifacts"].sort(key=lambda item: (item["iteration"], item["format"], item["primary"]))
+    result["invalid"].sort(key=lambda item: item["file"].casefold())
+    return result
+
+
+def install_model_artifact_bundle(
+    source_dir,
+    target_dir,
+    selected_models=None,
+    *,
+    expected_model_id=None,
+    require_all_artifacts=False,
+):
+    """验证暂存模型制品的身份与依赖后，以临时文件原子安装到模型仓库"""
+    source_root = Path(source_dir).resolve()
+    target_root = Path(target_dir).resolve()
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"model artifact source does not exist: {source_root}")
+    target_root.mkdir(parents=True, exist_ok=True)
+    if selected_models is None:
+        selected_models = sorted(
+            path.name for path in source_root.iterdir() if is_primary_model_filename(path.name)
+        )
+    selected_models = list(dict.fromkeys(selected_models))
+    records = build_package_model_records(source_root, selected_models)
+    if expected_model_id is not None:
+        validate_package_model_records(records, expected_model_id=expected_model_id)
+    prefixes_by_model_id = {}
+    for record in records:
+        validate_package_model_records([record])
+        prefixes_by_model_id.setdefault(record["model_id"], set()).add(
+            record["model_prefix"]
+        )
+    if any(len(prefixes) != 1 for prefixes in prefixes_by_model_id.values()):
+        raise ValueError("one model_id cannot be imported with different model prefixes")
+
+    files = collect_model_artifact_files(source_root, selected_models)
+    validate_model_artifact_file_set(source_root, files)
+    for record in records:
+        assert_model_artifact_target_identity(target_root, record)
+
+    if require_all_artifacts:
+        staged_artifacts = {
+            path.name
+            for path in source_root.iterdir()
+            if path.is_file()
+            and any(
+                path.name.casefold().endswith(suffix)
+                for suffix in MODEL_ARTIFACT_SUFFIXES
+            )
+        }
+        unclaimed = staged_artifacts.difference(files)
+        if unclaimed:
+            raise ValueError(
+                "unreferenced model artifacts are not allowed: "
+                f"{sorted(unclaimed)}"
+            )
+
+    installed = []
+    for filename in files:
+        safe_name = validate_model_artifact_filename(filename)
+        source_path = source_root / safe_name
+        validate_model_artifact_file(source_path)
+        target_path = target_root / safe_name
+        temporary_path = None
+        try:
+            with open(source_path, "rb") as source_stream, tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=f".{target_path.name}.",
+                suffix=".import.tmp",
+                dir=target_root,
+                delete=False,
+            ) as temporary_stream:
+                temporary_path = Path(temporary_stream.name)
+                shutil.copyfileobj(source_stream, temporary_stream, length=1024 * 1024)
+            os.replace(temporary_path, target_path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+        installed.append(safe_name)
+    return {"records": records, "files": installed}
 
 
 def write_checkpoint_artifact_manifest(
@@ -501,21 +916,242 @@ def write_checkpoint_artifact_manifest(
     return manifest_path
 
 
+def create_deployment_package(
+    target_path,
+    model_dir,
+    selected_models,
+    *,
+    package_name,
+    extra_files=None,
+):
+    """校验模型池和附加文件后，原子生成带强制清单的部署包"""
+    validate_package_name(package_name)
+    target = Path(target_path)
+    validate_deployment_package_filename(target.name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        if target.is_symlink():
+            raise ValueError("deployment package target must not be a symbolic link")
+        raise FileExistsError(f"deployment package already exists: {target.name}")
+
+    selected_models = list(dict.fromkeys(selected_models))
+    records = build_package_model_records(model_dir, selected_models)
+    validate_package_model_records(records)
+    model_files = collect_model_artifact_files(model_dir, selected_models)
+    model_total_size = validate_model_artifact_file_set(model_dir, model_files)
+    extras = {}
+    for archive_name, source_path in (extra_files or {}).items():
+        if archive_name not in DEPLOY_ROOT_JSON_FILES:
+            raise ValueError(f"unsupported deployment root file: {archive_name!r}")
+        raw_source = Path(source_path)
+        if raw_source.is_symlink():
+            raise ValueError(f"deployment root file must not be a symlink: {archive_name}")
+        source = raw_source.resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"deployment root file does not exist: {source}")
+        extra_size = source.stat().st_size
+        if extra_size > MAX_DEPLOY_ARCHIVE_MEMBER_BYTES:
+            raise ValueError(f"deployment root file exceeds 32 GiB: {archive_name}")
+        model_total_size += extra_size
+        if model_total_size > MAX_MODEL_ARTIFACT_TOTAL_BYTES:
+            raise ValueError("deployment package inputs exceed the 64 GiB safety limit")
+        extras[archive_name] = source
+
+    manifest = {
+        "package_format_version": DEPLOY_PACKAGE_FORMAT_VERSION,
+        "package_name": package_name,
+        "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "models_included": selected_models,
+        "model_artifacts": records,
+        "model_files_included": model_files,
+        "includes_kb": "knowledge_base.json" in extras,
+        "includes_staples": "meta_staples.json" in extras,
+    }
+
+    temporary = tempfile.NamedTemporaryFile(
+        mode="wb",
+        prefix=f".{target.stem}.",
+        suffix=".gkg.tmp",
+        dir=target.parent,
+        delete=False,
+    )
+    temporary_path = Path(temporary.name)
+    temporary.close()
+    try:
+        with zipfile.ZipFile(
+            temporary_path,
+            "w",
+            zipfile.ZIP_DEFLATED,
+            allowZip64=True,
+        ) as archive:
+            for filename in model_files:
+                safe_name = validate_model_artifact_filename(filename)
+                archive.write(
+                    Path(model_dir) / safe_name,
+                    arcname=safe_name,
+                    compress_type=zipfile.ZIP_STORED,
+                )
+            for archive_name, source in extras.items():
+                archive.write(source, arcname=archive_name)
+            archive.writestr(
+                "manifest.json",
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+            )
+        if temporary_path.stat().st_size > MAX_DEPLOY_PACKAGE_FILE_BYTES:
+            raise ValueError("deployment package exceeds the 64 GiB safety limit")
+        os.replace(temporary_path, target)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    return manifest
+
+
+def validate_deployment_package(stage_dir):
+    """核验解包目录、部署协议清单、模型身份与实际文件集合完全一致"""
+    raw_stage_root = Path(stage_dir)
+    if raw_stage_root.is_symlink():
+        raise ValueError("deployment stage must not be a symbolic link")
+    stage_root = raw_stage_root.resolve()
+    if not stage_root.is_dir():
+        raise FileNotFoundError(f"deployment stage does not exist: {stage_root}")
+    staged_paths = sorted(stage_root.iterdir())
+    for path in staged_paths:
+        validate_safe_filename(path.name)
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"deployment member must be a regular file: {path.name}")
+
+    manifest_path = stage_root / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError("deployment package manifest.json is required")
+    if manifest_path.stat().st_size > MAX_MANIFEST_FILE_BYTES:
+        raise ValueError("deployment package manifest is too large")
+    with open(manifest_path, "r", encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if not isinstance(manifest, dict):
+        raise ValueError("deployment package manifest must be an object")
+    if manifest.get("package_format_version") != DEPLOY_PACKAGE_FORMAT_VERSION:
+        raise ValueError(
+            "deployment package format version mismatch: "
+            f"file={manifest.get('package_format_version')!r}, "
+            f"current={DEPLOY_PACKAGE_FORMAT_VERSION}"
+        )
+    validate_package_name(manifest.get("package_name"))
+
+    actual_names = {path.name for path in staged_paths}
+    allowed_names = {"manifest.json", *DEPLOY_ROOT_JSON_FILES}
+    for name in actual_names.difference(allowed_names):
+        validate_model_artifact_filename(name)
+    primary_models = sorted(name for name in actual_names if is_primary_model_filename(name))
+    declared_models = manifest.get("models_included")
+    if not isinstance(declared_models, list) or len(declared_models) != len(set(declared_models)):
+        raise ValueError("manifest models_included must be a unique list")
+    for name in declared_models:
+        if not is_primary_model_filename(name):
+            raise ValueError(f"manifest contains an invalid primary model: {name!r}")
+    if set(declared_models) != set(primary_models):
+        raise ValueError("manifest primary model list does not match package contents")
+
+    actual_records = build_package_model_records(stage_root, declared_models)
+    validate_package_model_records(actual_records)
+    declared_records = manifest.get("model_artifacts")
+    if not isinstance(declared_records, list) or declared_records != actual_records:
+        raise ValueError("manifest model identity records do not match embedded metadata")
+    actual_model_files = collect_model_artifact_files(stage_root, declared_models)
+    declared_model_files = manifest.get("model_files_included")
+    if (
+        not isinstance(declared_model_files, list)
+        or len(declared_model_files) != len(set(declared_model_files))
+        or set(declared_model_files) != set(actual_model_files)
+    ):
+        raise ValueError("manifest model file list does not match package contents")
+
+    expected_names = {"manifest.json", *actual_model_files}
+    for filename, flag in (
+        ("knowledge_base.json", "includes_kb"),
+        ("meta_staples.json", "includes_staples"),
+    ):
+        included = filename in actual_names
+        if manifest.get(flag) is not included:
+            raise ValueError(f"manifest {flag} does not match package contents")
+        if included:
+            expected_names.add(filename)
+    if actual_names != expected_names:
+        raise ValueError(
+            f"deployment package contains undeclared files: {sorted(actual_names - expected_names)}"
+        )
+    return {"manifest": manifest, "records": actual_records, "files": actual_model_files}
+
+
 def safe_extract_zip(archive, target_dir):
-    """校验 ZIP 成员路径和符号链接后安全解压部署包"""
-    target_root = Path(target_dir).resolve()
+    """限制 ZIP 路径、类型、数量、展开体积和压缩比后流式解压"""
+    raw_target = Path(target_dir)
+    if raw_target.exists() and raw_target.is_symlink():
+        raise ValueError("deployment extraction target must not be a symbolic link")
+    target_root = raw_target.resolve()
     target_root.mkdir(parents=True, exist_ok=True)
+    archive_filename = getattr(archive, "filename", None)
+    if isinstance(archive_filename, (str, os.PathLike)):
+        archive_path = Path(archive_filename)
+        if archive_path.is_symlink() or not archive_path.is_file():
+            raise ValueError("deployment package must be a regular file")
+        if archive_path.stat().st_size > MAX_DEPLOY_PACKAGE_FILE_BYTES:
+            raise ValueError("deployment package exceeds the 64 GiB safety limit")
+    members = archive.infolist()
+    if not members or len(members) > MAX_DEPLOY_ARCHIVE_MEMBERS:
+        raise ValueError("deployment archive member count is outside the safety limit")
 
-    for info in archive.infolist():
-        normalized = info.filename.replace("\\", "/")
-        relative = Path(normalized)
-        if relative.is_absolute() or ".." in relative.parts:
+    total_size = 0
+    seen_names = set()
+    for info in members:
+        if info.is_dir() or "/" in info.filename or "\\" in info.filename:
             raise ValueError(f"unsafe archive member path: {info.filename!r}")
-        destination = (target_root / relative).resolve()
-        if os.path.commonpath((str(target_root), str(destination))) != str(target_root):
-            raise ValueError(f"archive member escapes target directory: {info.filename!r}")
+        validate_safe_filename(info.filename)
+        folded = info.filename.casefold()
+        if folded in seen_names:
+            raise ValueError(f"duplicate archive member is not allowed: {info.filename!r}")
+        seen_names.add(folded)
+        if info.flag_bits & 0x1:
+            raise ValueError(f"encrypted archive member is not allowed: {info.filename!r}")
+        if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            raise ValueError(f"unsupported archive compression: {info.filename!r}")
         unix_mode = info.external_attr >> 16
-        if unix_mode and stat.S_ISLNK(unix_mode):
-            raise ValueError(f"archive symbolic links are not allowed: {info.filename!r}")
+        file_type = stat.S_IFMT(unix_mode)
+        if stat.S_ISLNK(unix_mode) or file_type not in {0, stat.S_IFREG}:
+            raise ValueError(f"archive special files are not allowed: {info.filename!r}")
+        if info.file_size < 0 or info.file_size > MAX_DEPLOY_ARCHIVE_MEMBER_BYTES:
+            raise ValueError(f"archive member is too large: {info.filename!r}")
+        total_size += info.file_size
+        if total_size > MAX_DEPLOY_ARCHIVE_TOTAL_BYTES:
+            raise ValueError("deployment archive exceeds the 64 GiB expanded-size limit")
+        if info.file_size > 1024 * 1024:
+            if info.compress_size <= 0 or info.file_size / info.compress_size > MAX_DEPLOY_COMPRESSION_RATIO:
+                raise ValueError(f"archive compression ratio is unsafe: {info.filename!r}")
+        destination = target_root / info.filename
+        if destination.exists():
+            raise FileExistsError(f"archive target already exists: {info.filename!r}")
 
-    archive.extractall(target_root)
+    created_files = []
+    try:
+        for info in members:
+            destination = target_root / info.filename
+            written = 0
+            with archive.open(info, "r") as source, open(destination, "xb") as output:
+                created_files.append(destination)
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > info.file_size or written > MAX_DEPLOY_ARCHIVE_MEMBER_BYTES:
+                        raise ValueError(f"archive member expanded beyond its limit: {info.filename!r}")
+                    output.write(chunk)
+            if written != info.file_size:
+                raise ValueError(f"archive member size mismatch: {info.filename!r}")
+    except Exception:
+        for path in reversed(created_files):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+    return [info.filename for info in members]

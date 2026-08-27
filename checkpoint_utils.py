@@ -1,8 +1,10 @@
 # 训练检查点协议版本、身份校验、严格恢复与规范化导出
 
 import os
+import stat
 import uuid
 import warnings
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -13,6 +15,7 @@ from training_validation import validate_model_prefix
 # 仅表示训练检查点数据协议，必须独立于 app.py 中的框架版本维护
 CHECKPOINT_FORMAT_VERSION = 1
 DEFAULT_MODEL_PREFIX = "galatea"
+MAX_CHECKPOINT_FILE_BYTES = 32 * 1024 * 1024 * 1024
 
 REQUIRED_TRAINING_CHECKPOINT_KEYS = {
     "checkpoint_format_version",
@@ -63,11 +66,69 @@ def get_checkpoint_format_warning(checkpoint):
     )
 
 
+def safe_load_torch_checkpoint(
+    path,
+    map_location="cpu",
+    *,
+    materialize_tensors=True,
+):
+    """在固定文件句柄上预检危险全局对象，并用受限反序列化器加载检查点"""
+    if not path:
+        raise FileNotFoundError(f"training checkpoint does not exist: {path}")
+    checkpoint_path = Path(path)
+    if checkpoint_path.suffix.casefold() != ".pth":
+        raise ValueError("training checkpoint filename must end with .pth")
+    if checkpoint_path.is_symlink():
+        raise ValueError("symbolic-link checkpoints are not allowed")
+
+    try:
+        with open(checkpoint_path, "rb") as stream:
+            file_stat = os.fstat(stream.fileno())
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ValueError("training checkpoint must be a regular file")
+            if file_stat.st_size <= 0:
+                raise ValueError("training checkpoint must not be empty")
+            if file_stat.st_size > MAX_CHECKPOINT_FILE_BYTES:
+                raise ValueError(
+                    "training checkpoint exceeds the 32 GiB safety limit"
+                )
+
+            unsafe_globals = torch.serialization.get_unsafe_globals_in_checkpoint(
+                stream
+            )
+            if unsafe_globals:
+                preview = ", ".join(sorted(unsafe_globals)[:5])
+                raise ValueError(
+                    "training checkpoint contains non-allowlisted globals: "
+                    f"{preview}"
+                )
+            stream.seek(0)
+            if materialize_tensors:
+                load_context = nullcontext()
+            else:
+                from torch._subclasses.fake_tensor import FakeTensorMode
+
+                load_context = FakeTensorMode()
+            with load_context:
+                return torch.load(
+                    stream,
+                    map_location=map_location,
+                    weights_only=True,
+                    mmap=False,
+                )
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"training checkpoint does not exist: {checkpoint_path}"
+        ) from None
+
+
 def inspect_training_checkpoint(path, map_location="cpu"):
     """安全读取 WebUI 所需的检查点身份和架构元数据，不修改文件"""
-    if not path or not os.path.isfile(path):
-        raise FileNotFoundError(f"training checkpoint does not exist: {path}")
-    checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+    checkpoint = safe_load_torch_checkpoint(
+        path,
+        map_location=map_location,
+        materialize_tensors=False,
+    )
     if not isinstance(checkpoint, dict):
         raise TypeError("training checkpoint must be a dictionary")
     format_warning = get_checkpoint_format_warning(checkpoint)
@@ -141,10 +202,17 @@ def validate_training_checkpoint(checkpoint, *, source_path=None):
 
 def load_training_checkpoint(path, map_location="cpu"):
     """加载并校验当前训练框架生成的完整检查点"""
-    if not path or not os.path.isfile(path):
-        raise FileNotFoundError(f"training checkpoint does not exist: {path}")
+    checkpoint = safe_load_torch_checkpoint(path, map_location=map_location)
+    return validate_training_checkpoint(checkpoint, source_path=path)
 
-    checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+
+def validate_training_checkpoint_file(path, map_location="cpu"):
+    """不分配真实张量存储地校验外部检查点的完整协议与模型身份"""
+    checkpoint = safe_load_torch_checkpoint(
+        path,
+        map_location=map_location,
+        materialize_tensors=False,
+    )
     return validate_training_checkpoint(checkpoint, source_path=path)
 
 

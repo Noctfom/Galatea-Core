@@ -265,7 +265,7 @@
 |--------|------|----------|
 | 系统日志 | `./system_logs/` | `.log` |
 | 读心记录 | `./ai_thoughts/` | `.json` |
-| 模型仓库 | `./models/` | `.pth` |
+| 模型仓库 | `./models/` | `.pth`、`.onnx`、`.onnx.data`、`.artifacts.json` |
 | 对局数据 | `./web_data/` | `.csv` |
 | TensorBoard | `./runs/` | 二进制 |
 
@@ -275,6 +275,10 @@
 - 导出（下载）文件
 - 批量删除
 - 一键清空（需二次确认）
+
+模型仓库会以内置 `model_id` 为模型池、以内置轮次为制品组进行展示。上传 ONNX
+时必须同时提供主图和其引用的 `.onnx.data`；删除轮次会同步删除该轮次的 PTH、
+ONNX、外置权重和制品清单。
 
 ![存储与日志仓库](图片/存储与日志仓库.png)
 
@@ -321,9 +325,11 @@
 
 将模型打包为 .gkg 格式：
 
-- 选择要打包的 `.pth` 模型（可多选）
+- 先按内置 `model_id` 选择模型池，再选择该池内的 `.pth`/`.onnx` 主文件
+- ONNX 引用的 `.onnx.data` 会自动补齐，不能单独遗漏
+- 同时选择 PTH 与 ONNX 时，两种格式的内置轮次集合必须一致
 - 可选包含知识库 (`knowledge_base.json`) 和泛用卡池 (`meta_staples.json`)
-- 自动生成清单文件 (`manifest.json`)
+- 强制生成并校验清单文件 (`manifest.json`)
 - 支持自定义包名
 
 #### 📤 解包与选择性导入 (Import)
@@ -333,6 +339,10 @@
 - 支持从本地文件系统直接解包（无需上传）
 - 精细勾选要导入的模型和配置文件
 - 暂存区管理（预览后再决定是否导入）
+- 解包前限制路径、文件类型、成员数量、展开体积和压缩比；导入前重新核验 UUID、前缀与轮次
+
+`.gkg` 包协议版本在 `model_artifacts.py` 的
+`DEPLOY_PACKAGE_FORMAT_VERSION` 中独立维护，不与框架版本号共用。
 
 ---
 
@@ -476,7 +486,7 @@ python deploy_tool.py
 #### 1. 打包新模型 (.gkg)
 
 将训练好的模型打包成 `.gkg` 部署包，包含：
-- 模型文件 (`.pth`)
+- 同一 `model_id` 池内的模型文件 (`.pth`/`.onnx`/`.onnx.data`)
 - 知识库 (`knowledge_base.json`)
 - 泛用卡池 (`meta_staples.json`)
 - 清单文件 (`manifest.json`)
@@ -486,6 +496,7 @@ python deploy_tool.py
 将 `.gkg` 部署包解压并导入到当前系统：
 - 模型文件提取到 `./models/`
 - 知识库文件覆盖到根目录
+- 危险反序列化、越界文件名、压缩炸弹和身份/轮次不一致会被拒绝
 
 ---
 

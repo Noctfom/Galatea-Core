@@ -2,15 +2,17 @@ import os
 import time
 import zipfile
 import shutil
-import json
 import tempfile
 
 from model_artifacts import (
-    assert_checkpoint_target_identity,
-    build_package_model_records,
-    collect_model_artifact_files,
-    is_primary_model_filename,
+    create_deployment_package,
+    discover_model_repository,
+    get_model_iteration_mismatch,
+    install_model_artifact_bundle,
     safe_extract_zip,
+    validate_deployment_package,
+    validate_deployment_package_filename,
+    validate_package_name,
 )
 
 DEPLOY_DIR = "./deploy_packages"
@@ -31,30 +33,56 @@ def pack_model():
     os.makedirs("./models", exist_ok=True)
     os.makedirs(DEPLOY_DIR, exist_ok=True)
     
-    models = sorted(f for f in os.listdir("./models") if is_primary_model_filename(f))
-    if not models:
-        print("❌ 未在 ./models 目录下发现 .pth 或 .onnx 模型文件，按回车返回...")
+    repository = discover_model_repository("./models")
+    pool_ids = sorted(repository["pools"])
+    if not pool_ids:
+        print("❌ 未在 ./models 目录下发现可验证的模型 UUID 池，按回车返回...")
         input()
         return
 
-    print("发现以下模型文件：")
-    for i, m in enumerate(models):
-        print(f"  [{i+1}] {m}")
-        
-    choice = input("\n请选择要打包的模型序号 (多选请用逗号分隔，如 1,3): ")
+    print("发现以下模型 UUID 池：")
+    for index, model_id in enumerate(pool_ids):
+        pool = repository["pools"][model_id]
+        print(
+            f"  [{index + 1}] {', '.join(pool['prefixes'])} | {model_id} | "
+            f"{len(pool['iterations'])} 个轮次"
+        )
+    choice = input("\n请先选择模型池序号: ")
     try:
-        indices = [int(x.strip()) - 1 for x in choice.split(',')]
-        selected_models = [models[i] for i in indices]
-    except:
+        selected_pool_index = int(choice.strip()) - 1
+        if selected_pool_index < 0 or selected_pool_index >= len(pool_ids):
+            raise IndexError
+        selected_pool_id = pool_ids[selected_pool_index]
+    except (ValueError, IndexError):
         print("❌ 输入无效，按回车返回...")
         input()
         return
 
+    pool_artifacts = repository["pools"][selected_pool_id]["artifacts"]
+    print("\n该模型池包含以下可选主文件：")
+    for index, artifact in enumerate(pool_artifacts):
+        print(
+            f"  [{index + 1}] iter {artifact['iteration']} | "
+            f"{artifact['format']} | {artifact['primary']}"
+        )
+    choice = input("\n请选择文件序号 (多选请用逗号分隔，如 1,3): ")
     try:
-        package_model_files = collect_model_artifact_files("./models", selected_models)
-        package_model_records = build_package_model_records("./models", selected_models)
-    except Exception as error:
-        print(f"❌ 模型产物不完整，已拒绝打包: {error}")
+        indices = [int(item.strip()) - 1 for item in choice.split(",")]
+        if (
+            not indices
+            or len(indices) != len(set(indices))
+            or any(index < 0 or index >= len(pool_artifacts) for index in indices)
+        ):
+            raise IndexError
+        selected_artifacts = [pool_artifacts[index] for index in indices]
+        selected_models = [artifact["primary"] for artifact in selected_artifacts]
+    except (ValueError, IndexError):
+        print("❌ 输入无效，按回车返回...")
+        input()
+        return
+    mismatch = get_model_iteration_mismatch(selected_artifacts)
+    if mismatch:
+        print(f"❌ {mismatch}，请补齐相同轮次或只选择一种格式。")
         input("\n按回车键返回主菜单...")
         return
 
@@ -64,37 +92,29 @@ def pack_model():
         pkg_name = default_name
         
     pkg_name += f"_{int(time.time())}" # 加时间戳防重名
+    try:
+        validate_package_name(pkg_name)
+    except ValueError as error:
+        print(f"❌ 包名不合法: {error}")
+        input("\n按回车键返回主菜单...")
+        return
     target_zip = os.path.join(DEPLOY_DIR, f"{pkg_name}.gkg")
 
     print("\n⏳ 正在极速封装打包中，请稍候...")
-    
+
     try:
-        with zipfile.ZipFile(target_zip, 'w', zipfile.ZIP_DEFLATED) as gkg_zip:
-            # 1. 压入模型
-            for m in package_model_files:
-                print(f"  -> 压缩模型: {m}")
-                gkg_zip.write(os.path.join("./models", m), arcname=m)
-                
-            # 2. 压入字典 (如果存在)
-            if os.path.exists("knowledge_base.json"):
-                print("  -> 压缩知识库: knowledge_base.json")
-                gkg_zip.write("knowledge_base.json", arcname="knowledge_base.json")
-            if os.path.exists("meta_staples.json"):
-                print("  -> 压缩兜底池: meta_staples.json")
-                gkg_zip.write("meta_staples.json", arcname="meta_staples.json")
-                
-            # 3. 生成并压入清单
-            manifest = {
-                "package_name": pkg_name,
-                "version": "3.0.0",
-                "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "models_included": selected_models,
-                "model_artifacts": package_model_records,
-                "model_files_included": package_model_files,
-            }
-            print("  -> 生成清单: manifest.json")
-            gkg_zip.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=4))
-            
+        extra_files = {}
+        if os.path.exists("knowledge_base.json"):
+            extra_files["knowledge_base.json"] = "knowledge_base.json"
+        if os.path.exists("meta_staples.json"):
+            extra_files["meta_staples.json"] = "meta_staples.json"
+        create_deployment_package(
+            target_zip,
+            "./models",
+            selected_models,
+            package_name=pkg_name,
+            extra_files=extra_files,
+        )
         print(f"\n✅ 打包大功告成！部署包已生成至: {os.path.abspath(target_zip)}")
     except Exception as e:
         print(f"\n❌ 打包过程中发生错误: {e}")
@@ -108,7 +128,15 @@ def unpack_model():
     os.makedirs(DEPLOY_DIR, exist_ok=True)
     os.makedirs("./models", exist_ok=True)
     
-    gkgs = [f for f in os.listdir(DEPLOY_DIR) if f.endswith(".gkg")]
+    gkgs = []
+    for filename in os.listdir(DEPLOY_DIR):
+        try:
+            validate_deployment_package_filename(filename)
+            package_path = os.path.join(DEPLOY_DIR, filename)
+            if os.path.isfile(package_path) and not os.path.islink(package_path):
+                gkgs.append(filename)
+        except ValueError:
+            continue
     if not gkgs:
         print(f"❌ 未在 {DEPLOY_DIR} 下发现 .gkg 部署包。")
         print("你可以将包拖入该文件夹中再重试。按回车返回...")
@@ -123,8 +151,10 @@ def unpack_model():
     choice = input("\n请选择要解包导入的序号: ")
     try:
         idx = int(choice.strip()) - 1
+        if idx < 0 or idx >= len(gkgs):
+            raise IndexError
         selected_pkg = gkgs[idx]
-    except:
+    except (ValueError, IndexError):
         print("❌ 输入无效，按回车返回...")
         input()
         return
@@ -145,25 +175,37 @@ def unpack_model():
         with tempfile.TemporaryDirectory(prefix="galatea_import_", dir=DEPLOY_DIR) as stage_dir:
             with zipfile.ZipFile(pkg_path, 'r') as gkg_zip:
                 safe_extract_zip(gkg_zip, stage_dir)
+            validated = validate_deployment_package(stage_dir)
+            model_ids = sorted({record["model_id"] for record in validated["records"]})
+            primary_models = validated["manifest"]["models_included"]
+            if primary_models:
+                installed = install_model_artifact_bundle(
+                    stage_dir,
+                    "./models",
+                    primary_models,
+                    expected_model_id=model_ids[0],
+                )
+                for filename in installed["files"]:
+                    print(f"  -> 提取模型产物至 ./models/: {filename}")
 
-            staged_files = os.listdir(stage_dir)
-            primary_models = [f for f in staged_files if is_primary_model_filename(f)]
-            model_files = collect_model_artifact_files(stage_dir, primary_models)
-            model_records = build_package_model_records(stage_dir, primary_models)
-            for record in model_records:
-                destination = os.path.join("./models", record["primary"])
-                assert_checkpoint_target_identity(destination, record["model_id"])
-            for filename in model_files:
+            for filename in ("knowledge_base.json", "meta_staples.json"):
                 source = os.path.join(stage_dir, filename)
-                destination = os.path.join("./models", filename)
-                os.makedirs(os.path.dirname(destination), exist_ok=True)
-                print(f"  -> 提取模型产物至 ./models/: {filename}")
-                shutil.copy2(source, destination)
-
-            for filename in staged_files:
-                if filename.endswith(".json") and filename != "manifest.json" and not filename.endswith(".artifacts.json"):
+                if os.path.isfile(source):
                     print(f"  -> 覆盖系统基座文件: {filename}")
-                    shutil.copy2(os.path.join(stage_dir, filename), filename)
+                    destination = os.path.abspath(filename)
+                    with tempfile.NamedTemporaryFile(
+                        prefix=f".{filename}.",
+                        suffix=".import.tmp",
+                        dir=os.path.dirname(destination),
+                        delete=False,
+                    ) as temporary:
+                        temporary_path = temporary.name
+                    try:
+                        shutil.copy2(source, temporary_path)
+                        os.replace(temporary_path, destination)
+                    finally:
+                        if os.path.exists(temporary_path):
+                            os.remove(temporary_path)
                     
         print("\n✅ 系统环境更新完毕！模型和字典已全部就位。")
     except Exception as e:

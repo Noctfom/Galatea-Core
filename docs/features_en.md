@@ -266,7 +266,7 @@ Enter card code to view AI-perspective semantic features.
 |-----|-----------|-----------|
 | System Logs | `./system_logs/` | `.log` |
 | Thought Records | `./ai_thoughts/` | `.json` |
-| Model Storage | `./models/` | `.pth` |
+| Model Storage | `./models/` | `.pth`, `.onnx`, `.onnx.data`, `.artifacts.json` |
 | Match Data | `./web_data/` | `.csv` |
 | TensorBoard | `./runs/` | Binary |
 
@@ -276,6 +276,10 @@ Enter card code to view AI-perspective semantic features.
 - Export (download) files
 - Batch delete
 - One-click purge (requires confirmation)
+
+Model storage is grouped by embedded `model_id`, then by embedded iteration. ONNX
+uploads must include both the graph and every referenced `.onnx.data` file. Deleting
+an iteration removes its PTH, ONNX, external data, and artifact manifest together.
 
 ![Storage & Logs](图片/存储与日志仓库.png)
 
@@ -322,9 +326,11 @@ Enter card code to view AI-perspective semantic features.
 
 Package models as .gkg format:
 
-- Select `.pth` models to package (multi-select supported)
+- Select an embedded `model_id` pool first, then choose `.pth`/`.onnx` primaries from that pool
+- Referenced `.onnx.data` files are included automatically
+- When both PTH and ONNX are selected, their embedded iteration sets must match
 - Optionally include knowledge base (`knowledge_base.json`) and staple pool (`meta_staples.json`)
-- Auto-generate manifest file (`manifest.json`)
+- Always generate and validate `manifest.json`
 - Custom package name support
 
 #### 📤 Unpack & Selective Import
@@ -334,6 +340,10 @@ Import external .gkg packages into current system:
 - Support direct unpack from local filesystem (no upload needed)
 - Fine-grained selection of models and config files to import
 - Staging area management (preview before import decision)
+- Enforce path, file-type, member-count, expanded-size, and compression-ratio limits before import; revalidate UUID, prefix, and iteration before installation
+
+The `.gkg` protocol version is maintained independently from the framework version as
+`DEPLOY_PACKAGE_FORMAT_VERSION` in `model_artifacts.py`.
 
 ---
 
@@ -477,7 +487,7 @@ python deploy_tool.py
 #### 1. Package New Model (.gkg)
 
 Package trained models into `.gkg` deployment packages containing:
-- Model files (`.pth`)
+- Model files from one `model_id` pool (`.pth`/`.onnx`/`.onnx.data`)
 - Knowledge base (`knowledge_base.json`)
 - Staple pool (`meta_staples.json`)
 - Manifest file (`manifest.json`)
@@ -487,6 +497,7 @@ Package trained models into `.gkg` deployment packages containing:
 Extract `.gkg` packages and import into current system:
 - Model files extracted to `./models/`
 - Knowledge base files overwritten to root directory
+- Unsafe deserialization, out-of-bound filenames, zip bombs, and identity/iteration mismatches are rejected
 
 ---
 

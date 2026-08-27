@@ -13,7 +13,8 @@ import shutil
 import streamlit.components.v1 as components
 import socket
 import time
-import sys    
+import sys
+import tempfile
 from collections import deque
 from card_reader import CardReader
 from checkpoint_utils import (
@@ -22,8 +23,12 @@ from checkpoint_utils import (
     inspect_training_checkpoint,
 )
 from model_artifacts import (
+    discover_model_repository,
     discover_checkpoint_artifacts,
     find_model_prefix_namespace_files,
+    install_model_artifact_bundle,
+    is_primary_model_filename,
+    validate_model_artifact_filename,
 )
 from training_validation import resolve_training_target, validate_model_prefix
 
@@ -84,6 +89,26 @@ if 'ui_cache' not in st.session_state:
 def cache_val(key):
     st.session_state.ui_cache[key] = st.session_state[f"widget_{key}"]
 
+
+def validate_local_asset_name(filename, *, required_suffix=None):
+    """校验允许中文但不含路径、控制字符或 Windows 保留设备名的本地资产名"""
+    if not isinstance(filename, str) or not filename or filename in {".", ".."}:
+        raise ValueError("文件名不能为空或使用相对路径标记")
+    if filename != os.path.basename(filename) or "/" in filename or "\\" in filename:
+        raise ValueError("文件名不得包含目录路径")
+    if filename[-1] in {" ", "."} or any(ord(char) < 32 for char in filename):
+        raise ValueError("文件名包含跨平台不支持的字符")
+    if len(filename.encode("utf-8")) > 200:
+        raise ValueError("文件名超过 200 字节限制")
+    reserved = {"CON", "PRN", "AUX", "NUL"}
+    reserved.update(f"COM{index}" for index in range(1, 10))
+    reserved.update(f"LPT{index}" for index in range(1, 10))
+    if filename.split(".", 1)[0].upper() in reserved:
+        raise ValueError("文件名使用了 Windows 保留设备名")
+    if required_suffix and not filename.casefold().endswith(required_suffix.casefold()):
+        raise ValueError(f"文件名必须以 {required_suffix} 结尾")
+    return filename
+
 # ==========================================
 # 🛠️ 进程管理辅助函数与状态初始化
 # ==========================================
@@ -141,8 +166,9 @@ def load_model_metadata(path):
 
 def get_model_identity_signature(model_dir):
     """生成模型身份相关文件的轻量缓存签名，文件变化时自动失效"""
-    paths = list(glob.glob(os.path.join(model_dir, "*.pth")))
-    paths.extend(glob.glob(os.path.join(model_dir, "*.artifacts.json")))
+    paths = []
+    for pattern in ("*.pth", "*.onnx", "*.onnx.data", "*.artifacts.json"):
+        paths.extend(glob.glob(os.path.join(model_dir, pattern)))
     records = []
     for path in paths:
         try:
@@ -160,6 +186,13 @@ def load_folder_model_identities(model_dir, file_signature):
         model_dir,
         include_orphan_checkpoints=True,
     )
+
+
+@st.cache_data(show_spinner=False)
+def load_model_repository(model_dir, file_signature):
+    """缓存按 UUID 和轮次整理的模型仓库视图，避免重复解析大文件"""
+    del file_signature
+    return discover_model_repository(model_dir)
 
 # ==========================================
 # 🎨 前端 CSS 魔法
@@ -450,7 +483,16 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         _("🏟️ 发起竞技 (Duel)", "🏟️ Start Arena"),
         _("🛠️ 规则自检压测 (Self-Check)", "🛠️ Rules Self-Check") # <--- 新增
     ])
-    models = ["None"] + sorted(glob.glob("./models/*.pth"), key=os.path.getmtime, reverse=True)
+    models = ["None"] + sorted(
+        (
+            path
+            for path in glob.glob("./models/*.pth")
+            if is_primary_model_filename(os.path.basename(path))
+            and not os.path.islink(path)
+        ),
+        key=os.path.getmtime,
+        reverse=True,
+    )
     
     # --- 🔥 训练控制台 ---
     with tab_train:
@@ -1180,10 +1222,25 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         import deck_utils 
         deck_root = "./decks"
         os.makedirs(deck_root, exist_ok=True)
-        
+
         # 1. 环境池基础导航
-        pools = [d for d in os.listdir(deck_root) if os.path.isdir(os.path.join(deck_root, d))]
-        pools.insert(0, ".") 
+        deck_root_real = os.path.realpath(deck_root)
+        pools = []
+        for dirname in os.listdir(deck_root):
+            try:
+                validate_local_asset_name(dirname)
+            except ValueError:
+                continue
+            candidate = os.path.join(deck_root, dirname)
+            resolved = os.path.realpath(candidate)
+            if (
+                os.path.isdir(candidate)
+                and not os.path.islink(candidate)
+                and os.path.commonpath([deck_root_real, resolved]) == deck_root_real
+                and resolved != deck_root_real
+            ):
+                pools.append(dirname)
+        pools.insert(0, ".")
         
         c_nav, c_del_pool = st.columns([3, 1])
         with c_nav:
@@ -1194,7 +1251,13 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             st.write(""); st.write("")
             if sel_pool != ".":
                 if st.button("🗑️ " + _("删除环境池", "Delete Pool"), use_container_width=True, help=_("注意：将删除该文件夹下所有卡组！", "Warning: This will delete all decks in this folder!")):
-                    shutil.rmtree(pool_path)
+                    resolved_pool = os.path.realpath(pool_path)
+                    if (
+                        os.path.commonpath([deck_root_real, resolved_pool]) != deck_root_real
+                        or resolved_pool == deck_root_real
+                    ):
+                        raise ValueError("环境池目录边界校验失败")
+                    shutil.rmtree(resolved_pool)
                     st.toast(_("环境池已移除", "Pool removed"))
                     st.rerun()
 
@@ -1206,30 +1269,60 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                 new_p_name = st.text_input("Folder Name", placeholder="e.g. tier_1", label_visibility="collapsed", key="in_new_p")
                 if st.button(_("确认创建文件夹", "Confirm Create Folder"), use_container_width=True):
                     if new_p_name:
-                        os.makedirs(os.path.join(deck_root, new_p_name), exist_ok=True)
-                        st.success(_("文件夹创建成功", "Folder Created"))
-                        st.rerun()
+                        try:
+                            safe_pool_name = validate_local_asset_name(new_p_name)
+                            os.makedirs(os.path.join(deck_root, safe_pool_name), exist_ok=False)
+                            st.success(_("文件夹创建成功", "Folder Created"))
+                            st.rerun()
+                        except Exception as error:
+                            st.error(_(f"环境池创建失败: {error}", f"Pool creation failed: {error}"))
             with m2:
                 st.caption(_("在此池中新建空白卡组 (.ydk)", "Create Empty Deck in this Pool"))
                 new_d_name = st.text_input("Deck Name", placeholder="e.g. MyNewDeck", label_visibility="collapsed", key="in_new_d")
                 if st.button(_("确认创建空白卡组", "Confirm Create Deck"), use_container_width=True):
                     if new_d_name:
-                        new_f_path = os.path.join(pool_path, f"{new_d_name}.ydk")
-                        if not os.path.exists(new_f_path):
-                            with open(new_f_path, 'w', encoding='utf-8') as f:
+                        try:
+                            deck_filename = validate_local_asset_name(
+                                f"{new_d_name}.ydk",
+                                required_suffix=".ydk",
+                            )
+                            new_f_path = os.path.join(pool_path, deck_filename)
+                            with open(new_f_path, 'x', encoding='utf-8') as f:
                                 f.write("#main\n#extra\n!side\n")
                             st.success(_("空白卡组已就绪", "Empty Deck Created"))
                             st.rerun()
-                        else:
+                        except FileExistsError:
                             st.error(_("卡组已存在", "Deck already exists"))
+                        except Exception as error:
+                            st.error(_(f"卡组创建失败: {error}", f"Deck creation failed: {error}"))
             
             st.divider()
             uploaded_files = st.file_uploader(_("📤 上传本地 .ydk 文件", "📤 Upload local .ydk"), accept_multiple_files=True, type=['ydk'])
             if uploaded_files and st.button(_("💾 执行保存", "Execute Save"), use_container_width=True):
-                for f in uploaded_files:
-                    with open(os.path.join(pool_path, f.name), "wb") as out_f:
-                        out_f.write(f.read())
-                st.success(_("上传成功", "Upload successful")); st.rerun()
+                try:
+                    for f in uploaded_files:
+                        safe_upload_name = validate_local_asset_name(
+                            f.name,
+                            required_suffix=".ydk",
+                        )
+                        destination = os.path.join(pool_path, safe_upload_name)
+                        f.seek(0)
+                        with tempfile.NamedTemporaryFile(
+                            prefix=f".{safe_upload_name}.",
+                            suffix=".upload.tmp",
+                            dir=pool_path,
+                            delete=False,
+                        ) as temporary_stream:
+                            temporary_path = temporary_stream.name
+                            shutil.copyfileobj(f, temporary_stream, length=1024 * 1024)
+                        try:
+                            os.replace(temporary_path, destination)
+                        finally:
+                            if os.path.exists(temporary_path):
+                                os.remove(temporary_path)
+                    st.success(_("上传成功", "Upload successful")); st.rerun()
+                except Exception as error:
+                    st.error(_(f"上传被拒绝: {error}", f"Upload rejected: {error}"))
 
         st.divider()
 
@@ -1240,7 +1333,11 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             view_deck_name = st.selectbox(_("选择要编辑/预览的卡组", "Select deck to edit/view"), ["None"] + files, key="sb_edit_deck")
             
             if view_deck_name != "None":
-                deck_full_path = os.path.join(pool_path, f"{view_deck_name}.ydk")
+                deck_filename = validate_local_asset_name(
+                    f"{view_deck_name}.ydk",
+                    required_suffix=".ydk",
+                )
+                deck_full_path = os.path.join(pool_path, deck_filename)
                 
                 # 初始化/同步缓存
                 if 'editor_content' not in st.session_state or st.session_state.get('active_deck_path') != deck_full_path:
@@ -1735,10 +1832,16 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         if allow_upload:
             uploaded = st.file_uploader(_(f"📥 上传 {ext} 文件", f"📥 Upload {ext} file"), type=[ext.replace('.', '')], accept_multiple_files=True, key=f"up_{folder_path}")
             if uploaded and st.button(_("💾 保存上传", "Save Uploads"), key=f"save_{folder_path}"):
-                for f in uploaded:
-                    with open(os.path.join(folder_path, f.name), "wb") as out: out.write(f.read())
-                st.success(_("✅ 上传成功！", "✅ Uploaded!"))
-                st.rerun()
+                try:
+                    for f in uploaded:
+                        safe_name = validate_local_asset_name(f.name, required_suffix=ext)
+                        f.seek(0)
+                        with open(os.path.join(folder_path, safe_name), "wb") as out:
+                            shutil.copyfileobj(f, out, length=1024 * 1024)
+                    st.success(_("✅ 上传成功！", "✅ Uploaded!"))
+                    st.rerun()
+                except Exception as error:
+                    st.error(_(f"上传被拒绝: {error}", f"Upload rejected: {error}"))
             st.divider()
 
         if not files:
@@ -1796,7 +1899,182 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
     with tab_thoughts:
         build_file_manager("./ai_thoughts", ".json", _("AI 读心记录", "AI Thought Records"), allow_view=True, allow_upload=False)
     with tab_models:
-        build_file_manager("./models", ".pth", _("模型 Checkpoint", "Model Checkpoints"), allow_view=False, allow_upload=True)
+        st.markdown("### 🧬 " + _("按模型 UUID 管理制品", "Artifacts grouped by model UUID"))
+        st.caption(_(
+            "PTH、ONNX 主图、ONNX 外置权重和轮次清单会按同一模型 UUID 与内置轮次归档。",
+            "PTH, ONNX graphs, external ONNX data and iteration manifests are grouped by embedded UUID and iteration.",
+        ))
+        model_dir = os.path.abspath("./models")
+        os.makedirs(model_dir, exist_ok=True)
+
+        uploaded_models = st.file_uploader(
+            _("📥 上传模型制品（可一次选择完整 ONNX 制品组）", "📥 Upload model artifacts as a complete bundle"),
+            type=["pth", "onnx", "data", "json"],
+            accept_multiple_files=True,
+            key="model_artifact_bundle_upload",
+            help=_(
+                "ONNX 使用外置权重时必须同时选择 .onnx 与对应 .onnx.data；轮次清单可一并上传。",
+                "External-data ONNX uploads must include both .onnx and the referenced .onnx.data file; manifests may be uploaded too.",
+            ),
+        )
+        if uploaded_models and st.button(_("💾 校验并保存模型制品", "💾 Validate and save artifacts"), key="save_model_artifact_bundle"):
+            try:
+                seen_upload_names = set()
+                with tempfile.TemporaryDirectory(prefix=".web_model_upload_", dir=model_dir) as stage_dir:
+                    for uploaded in uploaded_models:
+                        safe_name = validate_model_artifact_filename(uploaded.name)
+                        folded_name = safe_name.casefold()
+                        if folded_name in seen_upload_names:
+                            raise ValueError(f"上传文件名重复: {safe_name}")
+                        seen_upload_names.add(folded_name)
+                        uploaded.seek(0)
+                        with open(os.path.join(stage_dir, safe_name), "xb") as output:
+                            shutil.copyfileobj(uploaded, output, length=1024 * 1024)
+                    installed = install_model_artifact_bundle(
+                        stage_dir,
+                        model_dir,
+                        require_all_artifacts=True,
+                    )
+                load_model_repository.clear()
+                st.success(_(
+                    f"✅ 已安全导入 {len(installed['files'])} 个模型制品文件。",
+                    f"✅ Safely imported {len(installed['files'])} model artifact files.",
+                ))
+                st.rerun()
+            except Exception as error:
+                st.error(_(f"模型制品导入被拒绝: {error}", f"Model artifact import rejected: {error}"))
+
+        st.divider()
+        repository = load_model_repository(
+            model_dir,
+            get_model_identity_signature(model_dir),
+        )
+        pools = repository["pools"]
+        invalid_artifacts = repository["invalid"]
+
+        if pools:
+            pool_ids = sorted(
+                pools,
+                key=lambda model_id: (
+                    ",".join(pools[model_id]["prefixes"]).casefold(),
+                    model_id,
+                ),
+            )
+
+            def format_model_pool(model_id):
+                """把模型 UUID 池格式化为便于选择的前缀与轮次摘要"""
+                pool = pools[model_id]
+                iterations = sorted(pool["iterations"])
+                return (
+                    f"{', '.join(pool['prefixes'])} | {model_id} | "
+                    f"iter {iterations[0]}–{iterations[-1]} ({len(iterations)})"
+                )
+
+            selected_pool_id = st.selectbox(
+                _("先选择模型池（UUID）", "Select model pool (UUID) first"),
+                pool_ids,
+                format_func=format_model_pool,
+                key="storage_model_pool",
+            )
+            selected_pool = pools[selected_pool_id]
+            if len(selected_pool["prefixes"]) > 1:
+                st.warning(_(
+                    "同一模型 UUID 出现多个前缀，已标记为身份异常；打包前会再次拒绝校验。",
+                    "This UUID uses multiple prefixes. It is an identity anomaly and packaging will reject it.",
+                ))
+            st.code(selected_pool_id, language=None)
+
+            artifact_rows = []
+            pool_files = set()
+            for artifact in selected_pool["artifacts"]:
+                pool_files.update(artifact["files"])
+                artifact_rows.append(
+                    {
+                        _("轮次", "Iteration"): artifact["iteration"],
+                        _("格式", "Format"): artifact["format"],
+                        _("主文件", "Primary"): artifact["primary"],
+                        _("完整制品文件", "Artifact files"): ", ".join(artifact["files"]),
+                    }
+                )
+            st.dataframe(artifact_rows, use_container_width=True, hide_index=True)
+
+            downloadable_files = sorted(pool_files, key=str.casefold)
+            selected_download = st.selectbox(
+                _("选择单个制品文件下载（包含 .onnx.data）", "Select an individual artifact to download (including .onnx.data)"),
+                downloadable_files,
+                key="storage_model_download",
+            )
+            download_path = os.path.join(model_dir, selected_download)
+            download_size = os.path.getsize(download_path)
+            if download_size <= 256 * 1024 * 1024:
+                with open(download_path, "rb") as download_stream:
+                    st.download_button(
+                        _("⬇️ 下载所选制品", "⬇️ Download selected artifact"),
+                        data=download_stream.read(),
+                        file_name=selected_download,
+                        key="download_model_artifact",
+                        use_container_width=True,
+                    )
+            else:
+                st.info(_(
+                    f"该文件为 {download_size / (1024 ** 3):.2f} GiB。为避免 WebUI 内存翻倍，请从本地路径复制：{download_path}",
+                    f"This file is {download_size / (1024 ** 3):.2f} GiB. Copy it from {download_path} to avoid duplicating it in WebUI memory.",
+                ))
+
+            iteration_options = sorted(selected_pool["iterations"])
+            delete_iterations = st.multiselect(
+                _("选择要删除的完整轮次制品", "Select complete artifact iterations to delete"),
+                iteration_options,
+                key="storage_delete_model_iterations",
+            )
+            confirm_delete_iterations = st.checkbox(
+                _("确认删除所选轮次的 PTH、ONNX、外置权重及清单", "Confirm deleting PTH, ONNX, external data and manifests for selected iterations"),
+                key="confirm_delete_model_iterations",
+            )
+            if st.button(
+                _("🗑️ 删除所选完整轮次", "🗑️ Delete selected complete iterations"),
+                disabled=not (delete_iterations and confirm_delete_iterations),
+                key="delete_model_iterations",
+            ):
+                files_to_delete = set()
+                for iteration in delete_iterations:
+                    for artifact in selected_pool["iterations"][iteration]:
+                        files_to_delete.update(artifact["files"])
+                for filename in files_to_delete:
+                    safe_name = validate_model_artifact_filename(filename)
+                    candidate = os.path.join(model_dir, safe_name)
+                    if os.path.isfile(candidate) and not os.path.islink(candidate):
+                        os.remove(candidate)
+                load_model_repository.clear()
+                st.success(_("✅ 已删除所选完整轮次。", "✅ Selected complete iterations deleted."))
+                st.rerun()
+        else:
+            st.info(_("模型仓库中暂无可验证的当前协议模型。", "No verifiable current-protocol model is available."))
+
+        if invalid_artifacts:
+            with st.expander(_(
+                f"⚠️ 无法归档或孤立的制品（{len(invalid_artifacts)}）",
+                f"⚠️ Invalid or orphan artifacts ({len(invalid_artifacts)})",
+            )):
+                st.dataframe(invalid_artifacts, use_container_width=True, hide_index=True)
+                invalid_names = [item["file"] for item in invalid_artifacts]
+                delete_invalid = st.multiselect(
+                    _("选择要删除的异常文件", "Select invalid files to delete"),
+                    invalid_names,
+                    key="delete_invalid_model_artifacts",
+                )
+                if st.button(
+                    _("删除所选异常文件", "Delete selected invalid files"),
+                    disabled=not delete_invalid,
+                    key="delete_invalid_model_artifacts_button",
+                ):
+                    for filename in delete_invalid:
+                        safe_name = validate_model_artifact_filename(filename)
+                        candidate = os.path.join(model_dir, safe_name)
+                        if os.path.isfile(candidate) and not os.path.islink(candidate):
+                            os.remove(candidate)
+                    load_model_repository.clear()
+                    st.rerun()
     with tab_data: # <--- 新增
         build_file_manager("./web_data", ".csv", _("天梯对局数据", "Match Data"), allow_view=True, allow_upload=False)
     # 🌟 修复：TensorBoard 专属多选删除与一键清空逻辑
@@ -2274,11 +2552,14 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     import platform
     import subprocess
     from model_artifacts import (
-        build_package_model_records,
-        collect_model_artifact_files,
-        is_artifact_manifest_filename,
-        is_primary_model_filename,
+        create_deployment_package,
+        get_model_iteration_mismatch,
+        install_model_artifact_bundle,
         safe_extract_zip,
+        validate_deployment_package,
+        validate_deployment_package_filename,
+        validate_package_name,
+        validate_safe_filename,
     )
     
     st.title(_("📦 模型打包与发布工厂", "📦 Model Deployment Factory"))
@@ -2292,12 +2573,74 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     
     # 跨平台打开文件夹辅助函数
     def open_local_folder(path):
+        """按当前系统打开已经确定的本地目录"""
         try:
             if platform.system() == "Windows": os.startfile(path)
             elif platform.system() == "Darwin": subprocess.Popen(["open", path])
             else: subprocess.Popen(["xdg-open", path])
         except Exception as e:
             st.error(f"无法打开文件夹: {e}")
+
+    def remove_staged_package_folder(path):
+        """确认暂存目录没有越出部署暂存根目录后再删除"""
+        stage_root = os.path.realpath(unpack_dir)
+        target = os.path.realpath(path)
+        if os.path.commonpath([stage_root, target]) != stage_root or target == stage_root:
+            raise ValueError("暂存目录边界校验失败")
+        shutil.rmtree(target)
+
+    def list_safe_deployment_packages():
+        """只列出通过单层安全文件名校验的本地部署包"""
+        valid = []
+        invalid = []
+        for filename in os.listdir(deploy_dir):
+            if not filename.casefold().endswith(".gkg"):
+                continue
+            try:
+                validate_deployment_package_filename(filename)
+                path = os.path.join(deploy_dir, filename)
+                if os.path.isfile(path) and not os.path.islink(path):
+                    valid.append(filename)
+                else:
+                    invalid.append(filename)
+            except ValueError:
+                invalid.append(filename)
+        return sorted(valid, reverse=True), sorted(invalid, reverse=True)
+
+    def list_safe_staged_folders():
+        """只列出真实位于部署暂存根目录内的普通目录"""
+        root = os.path.realpath(unpack_dir)
+        valid = []
+        for dirname in os.listdir(unpack_dir):
+            try:
+                validate_safe_filename(dirname)
+            except ValueError:
+                continue
+            path = os.path.join(unpack_dir, dirname)
+            resolved = os.path.realpath(path)
+            if (
+                os.path.isdir(path)
+                and not os.path.islink(path)
+                and resolved != root
+                and os.path.commonpath([root, resolved]) == root
+            ):
+                valid.append(dirname)
+        return sorted(valid, reverse=True)
+
+    def deployment_stage_signature(stage_path):
+        """生成暂存包文件签名，让安全验证仅在文件变化后重跑"""
+        records = []
+        for filename in os.listdir(stage_path):
+            path = os.path.join(stage_path, filename)
+            if os.path.isfile(path):
+                records.append((filename, os.path.getmtime(path), os.path.getsize(path)))
+        return tuple(sorted(records))
+
+    @st.cache_data(show_spinner=False)
+    def load_staged_package_validation(stage_path, file_signature):
+        """缓存完整部署包验证结果，避免 WebUI 重绘时重复加载 PTH"""
+        del file_signature
+        return validate_deployment_package(stage_path)
 
     tab_pack, tab_unpack = st.tabs([
         _("📥 封装部署文件 (Export)", "📥 Export Package"), 
@@ -2310,70 +2653,127 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
         
         with col_form:
             st.markdown("### 🔧 " + _("构建新的 .gkg 部署包", "Build new .gkg Package"))
-            models = sorted(f for f in os.listdir("./models") if is_primary_model_filename(f))
-            
+            package_repository = load_model_repository(
+                os.path.abspath("./models"),
+                get_model_identity_signature(os.path.abspath("./models")),
+            )
+            package_pools = package_repository["pools"]
+            package_pool_ids = sorted(
+                package_pools,
+                key=lambda model_id: (
+                    ",".join(package_pools[model_id]["prefixes"]).casefold(),
+                    model_id,
+                ),
+            )
+            selected_package_pool = None
+            if package_pool_ids:
+                selected_package_pool_id = st.selectbox(
+                    _("① 选择模型池（UUID）", "① Select model pool (UUID)"),
+                    package_pool_ids,
+                    format_func=lambda model_id: (
+                        f"{', '.join(package_pools[model_id]['prefixes'])} | "
+                        f"{model_id} | {len(package_pools[model_id]['iterations'])} iterations"
+                    ),
+                    key="deployment_model_pool",
+                )
+                selected_package_pool = package_pools[selected_package_pool_id]
+                artifact_by_primary = {
+                    artifact["primary"]: artifact
+                    for artifact in selected_package_pool["artifacts"]
+                }
+                sel_models = st.multiselect(
+                    _("② 选择该模型池中的文件", "② Select files from this model pool"),
+                    list(artifact_by_primary),
+                    format_func=lambda name: (
+                        f"iter {artifact_by_primary[name]['iteration']} | "
+                        f"{artifact_by_primary[name]['format']} | {name}"
+                    ),
+                    key="deployment_model_files",
+                )
+                preview_records = [artifact_by_primary[name] for name in sel_models]
+            else:
+                sel_models = []
+                preview_records = []
+                st.warning(_(
+                    "暂无可验证的模型池；仍可只打包知识库。",
+                    "No verified model pool is available; a knowledge-only package is still allowed.",
+                ))
+
+            selection_warning = get_model_iteration_mismatch(preview_records)
+            prefix_warning = (
+                selected_package_pool is not None
+                and len(selected_package_pool["prefixes"]) != 1
+            )
+            if selection_warning:
+                st.warning(_(
+                    f"⚠️ {selection_warning}。请补齐相同轮次的另一格式，或只选择一种格式。",
+                    f"⚠️ {selection_warning}. Select matching iterations in both formats, or only one format.",
+                ))
+            if prefix_warning:
+                st.error(_(
+                    "同一 UUID 池出现多个模型前缀，身份异常，已禁止打包。",
+                    "This UUID pool contains multiple prefixes; packaging is disabled.",
+                ))
+            if package_repository["invalid"]:
+                st.caption(_(
+                    f"另有 {len(package_repository['invalid'])} 个异常或孤立制品未进入可选池。",
+                    f"{len(package_repository['invalid'])} invalid or orphan artifacts were excluded.",
+                ))
+
             with st.form("pack_form"):
-                st.markdown("##### 🤖 核心模型选择")
-                sel_models = st.multiselect(_("选择要打包的模型 (.pth/.onnx，可多选)", "Select Core Models (.pth/.onnx)"), models) if models else []
-                if not models: st.warning(_("暂无 .pth 或 .onnx 模型文件。", "No .pth or .onnx models found."))
-                
                 st.markdown("##### 🗂️ 附加数据组件")
                 c1, c2, c3 = st.columns(3)
                 with c1: inc_kb = st.checkbox("包含 知识库", value=True, help="knowledge_base.json")
                 with c2: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
-                with c3: inc_manifest = st.checkbox("生成 说明书", value=True, help="manifest.json")
+                with c3: st.checkbox("强制安全清单", value=True, disabled=True, help="manifest.json")
                 
                 st.markdown("##### 🏷️ 包体信息")
                 pkg_name = st.text_input(_("自定义包名 (留空默认自动生成)", "Package Name"), placeholder="e.g. Galatea_V3_Full")
                 
-                if st.form_submit_button("🔨 " + _("原生极速打包 (.gkg)", "Generate .gkg Fast"), type="primary", use_container_width=True):
+                if st.form_submit_button(
+                    "🔨 " + _("原生极速打包 (.gkg)", "Generate .gkg Fast"),
+                    type="primary",
+                    use_container_width=True,
+                    disabled=bool(selection_warning or prefix_warning),
+                ):
                     missing = []
                     if inc_kb and not os.path.exists("knowledge_base.json"): missing.append("knowledge_base.json")
                     if inc_staples and not os.path.exists("meta_staples.json"): missing.append("meta_staples.json")
-                    package_model_files = []
-                    package_model_records = []
-                    artifact_error = None
-                    if sel_models:
-                        try:
-                            package_model_files = collect_model_artifact_files("./models", sel_models)
-                            package_model_records = build_package_model_records("./models", sel_models)
-                        except Exception as error:
-                            artifact_error = error
 
                     if missing:
                         st.error(_(f"缺少勾选的组件: {', '.join(missing)}。请先生成或取消勾选！", f"Missing files: {', '.join(missing)}."))
-                    elif artifact_error is not None:
-                        st.error(f"模型产物不完整，已拒绝打包: {artifact_error}")
                     elif not sel_models and not (inc_kb or inc_staples):
                         st.error("包体不能为空，请至少选择一个模型或组件！")
                     else:
-                        with st.spinner("正在本地进行高压封装，零内存泄露..."):
-                            final_name = pkg_name.strip() if pkg_name.strip() else f"Galatea_Pkg_{int(time.time())}"
-                            target_zip = os.path.join(deploy_dir, f"{final_name}.gkg")
-                            
-                            manifest = {
-                                "package_name": final_name, "version": "3.0.0",
-                                "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                "models_included": sel_models,
-                                "model_artifacts": package_model_records,
-                                "model_files_included": package_model_files,
-                                "includes_kb": inc_kb,
-                                "includes_staples": inc_staples,
-                            }
-
-                            with zipfile.ZipFile(target_zip, 'w', zipfile.ZIP_DEFLATED) as gkg_zip:
-                                for m in package_model_files: gkg_zip.write(os.path.join("./models", m), arcname=m)
-                                if inc_kb: gkg_zip.write("knowledge_base.json", arcname="knowledge_base.json")
-                                if inc_staples: gkg_zip.write("meta_staples.json", arcname="meta_staples.json")
-                                if inc_manifest:
-                                    gkg_zip.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=4))
+                        try:
+                            with st.spinner("正在校验身份并进行本地封装..."):
+                                final_name = pkg_name.strip() if pkg_name.strip() else f"Galatea_Pkg_{int(time.time())}"
+                                validate_package_name(final_name)
+                                target_zip = os.path.join(deploy_dir, f"{final_name}.gkg")
+                                extra_files = {}
+                                if inc_kb: extra_files["knowledge_base.json"] = "knowledge_base.json"
+                                if inc_staples: extra_files["meta_staples.json"] = "meta_staples.json"
+                                create_deployment_package(
+                                    target_zip,
+                                    "./models",
+                                    sel_models,
+                                    package_name=final_name,
+                                    extra_files=extra_files,
+                                )
                             st.success(_(f"✅ 打包成功！文件位于 `{target_zip}`", f"✅ Successfully packaged to `{target_zip}`"))
                             time.sleep(1)
                             st.rerun()
+                        except Exception as error:
+                            st.error(_(f"部署包生成被拒绝: {error}", f"Package generation rejected: {error}"))
 
         with col_list:
             st.markdown("### 🗄️ " + _("本地部署包仓库", "Local Packages"))
-            gkgs = sorted([f for f in os.listdir(deploy_dir) if f.endswith(".gkg")], reverse=True)
+            gkgs, invalid_gkgs = list_safe_deployment_packages()
+            if invalid_gkgs:
+                st.warning(_(
+                    f"已忽略 {len(invalid_gkgs)} 个文件名不安全的 .gkg 文件。",
+                    f"Ignored {len(invalid_gkgs)} .gkg files with unsafe names.",
+                ))
             
             if st.button("📂 " + _("打开本地部署包文件夹", "Open Local Folder"), use_container_width=True):
                 open_local_folder(deploy_dir)
@@ -2402,32 +2802,45 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 open_local_folder(deploy_dir)
             
             st.write("")
-            local_gkgs = [f for f in os.listdir(deploy_dir) if f.endswith(".gkg")]
+            local_gkgs, invalid_local_gkgs = list_safe_deployment_packages()
+            if invalid_local_gkgs:
+                st.warning(_(
+                    f"已忽略 {len(invalid_local_gkgs)} 个文件名不安全的 .gkg 文件。",
+                    f"Ignored {len(invalid_local_gkgs)} .gkg files with unsafe names.",
+                ))
             if not local_gkgs:
                 st.warning("⚠️ 本地仓库未检测到 `.gkg` 包。请先点击上方按钮拖入文件。")
             else:
                 sel_gkg = st.selectbox("选择要解压的本地部署包：", local_gkgs)
                 if st.button("⚡ " + _("执行本地极速解包", "Unpack Fast"), type="primary", use_container_width=True):
                     with st.spinner("正在进行本地原生解构，绕过所有上传限制..."):
-                        pkg_name_no_ext = sel_gkg.replace(".gkg", "")
-                        target_extract_dir = os.path.join(unpack_dir, f"{pkg_name_no_ext}_{int(time.time())}")
-                        os.makedirs(target_extract_dir, exist_ok=True)
-                        
+                        target_extract_dir = None
                         try:
+                            validate_deployment_package_filename(sel_gkg)
+                            pkg_name_no_ext = os.path.splitext(sel_gkg)[0]
+                            target_extract_dir = os.path.join(unpack_dir, f"{pkg_name_no_ext}_{int(time.time())}")
+                            os.makedirs(target_extract_dir, exist_ok=False)
                             with zipfile.ZipFile(os.path.join(deploy_dir, sel_gkg), 'r') as gkg_zip:
                                 safe_extract_zip(gkg_zip, target_extract_dir)
+                            validated_package = validate_deployment_package(target_extract_dir)
                             st.success(f"✅ 解包成功！已存入暂存区：`{os.path.basename(target_extract_dir)}`")
+                            st.caption(_(
+                                f"模型池 UUID: {', '.join(sorted({record['model_id'] for record in validated_package['records']})) or '无模型'}",
+                                f"Model pool UUID: {', '.join(sorted({record['model_id'] for record in validated_package['records']})) or 'No model'}",
+                            ))
+                            time.sleep(1.0)
+                            st.rerun()
                         except Exception as e:
+                            if target_extract_dir and os.path.isdir(target_extract_dir):
+                                remove_staged_package_folder(target_extract_dir)
                             st.error(f"解压失败，包体可能损坏: {str(e)}")
-                        time.sleep(1.5)
-                        st.rerun()
 
         # 【右侧：暂存库与导入管理】
         with col_mgr:
             st.markdown("### 🚀 " + _("暂存库管理与导入", "Staging & Selective Import"))
             st.info("浏览解包后的暂存区，精准勾选需要导入的文件。")
             
-            staged_folders = sorted([d for d in os.listdir(unpack_dir) if os.path.isdir(os.path.join(unpack_dir, d))], reverse=True)
+            staged_folders = list_safe_staged_folders()
             
             if not staged_folders:
                 st.warning("暂存区为空。请先在左侧解压一个 `.gkg` 包。")
@@ -2435,63 +2848,111 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 sel_stage = st.selectbox("📂 选择解压暂存目录", staged_folders)
                 stage_path = os.path.join(unpack_dir, sel_stage)
                 staged_files = os.listdir(stage_path)
-                
+
                 if not staged_files:
                     st.info("该暂存区为空。")
                 else:
-                    with st.form("import_form"):
-                        st.write("**勾选需要部署进当前系统的文件：**")
-                        
-                        models_in_stage = sorted(f for f in staged_files if is_primary_model_filename(f))
-                        jsons_in_stage = [
-                            f for f in staged_files
-                            if f.endswith(".json") and not is_artifact_manifest_filename(f)
-                        ]
-                        
-                        import_selections = []
-                        
-                        if models_in_stage:
-                            st.markdown("🤖 **模型文件 (将自动分发至 `./models/`)**")
-                            for m in models_in_stage:
-                                if st.checkbox(f"📄 {m}", value=True, key=f"chk_{sel_stage}_{m}"):
-                                    import_selections.append(("models", m))
-                        
-                        if jsons_in_stage:
-                            st.markdown("📝 **字典与配置文件 (将直接覆盖系统根目录文件！)**")
-                            for j in jsons_in_stage:
-                                is_manifest = "manifest" in j.lower()
-                                if st.checkbox(f"⚙️ {j}", value=not is_manifest, key=f"chk_{sel_stage}_{j}"):
-                                    import_selections.append(("root", j))
-                                    
-                        st.write("")
-                        if st.form_submit_button("📥 " + _("执行精准导入", "Execute Import"), type="primary", use_container_width=True):
-                            if not import_selections:
-                                st.warning("未勾选任何文件！")
-                            else:
-                                try:
-                                    os.makedirs("./models", exist_ok=True)
-                                    expanded_selections = []
-                                    for target_type, fname in import_selections:
-                                        if target_type == "models":
-                                            for artifact_file in collect_model_artifact_files(stage_path, [fname]):
-                                                item = ("models", artifact_file)
-                                                if item not in expanded_selections:
-                                                    expanded_selections.append(item)
-                                        else:
-                                            expanded_selections.append((target_type, fname))
+                    try:
+                        stage_validation = load_staged_package_validation(
+                            stage_path,
+                            deployment_stage_signature(stage_path),
+                        )
+                    except Exception as error:
+                        stage_validation = None
+                        st.error(_(
+                            f"该暂存包未通过安全与身份校验，禁止导入: {error}",
+                            f"This staged package failed safety and identity validation: {error}",
+                        ))
 
-                                    for target_type, fname in expanded_selections:
-                                        src_file = os.path.join(stage_path, fname)
-                                        if target_type == "models":
-                                            dest_file = os.path.join("./models", fname)
-                                            os.makedirs(os.path.dirname(dest_file), exist_ok=True)
-                                        else:
-                                            dest_file = os.path.join(".", fname)
-                                        shutil.copy2(src_file, dest_file)
-                                    st.success("✅ 导入成功！系统环境已更新。")
-                                except Exception as e:
-                                    st.error(f"导入中途失败: {str(e)}")
+                    if stage_validation is not None:
+                        manifest = stage_validation["manifest"]
+                        models_in_stage = manifest["models_included"]
+                        package_model_ids = sorted(
+                            {record["model_id"] for record in stage_validation["records"]}
+                        )
+                        if package_model_ids:
+                            st.caption(_(
+                                f"已鉴权模型池 UUID: {package_model_ids[0]}",
+                                f"Authenticated model pool UUID: {package_model_ids[0]}",
+                            ))
+
+                        with st.form("import_form"):
+                            st.write("**勾选需要部署进当前系统的文件：**")
+                            selected_stage_models = []
+                            selected_root_files = []
+
+                            if models_in_stage:
+                                st.markdown("🤖 **模型制品组（依赖文件将自动补齐）**")
+                                record_by_primary = {
+                                    record["primary"]: record
+                                    for record in stage_validation["records"]
+                                }
+                                for model_name in models_in_stage:
+                                    record = record_by_primary[model_name]
+                                    label = (
+                                        f"iter {record['iteration']} | {record['format']} | "
+                                        f"{model_name}"
+                                    )
+                                    if st.checkbox(
+                                        f"📄 {label}",
+                                        value=True,
+                                        key=f"chk_{sel_stage}_{model_name}",
+                                    ):
+                                        selected_stage_models.append(model_name)
+
+                            root_files_in_stage = [
+                                filename
+                                for filename in ("knowledge_base.json", "meta_staples.json")
+                                if filename in staged_files
+                            ]
+                            if root_files_in_stage:
+                                st.markdown("📝 **字典文件（将覆盖系统根目录同名文件）**")
+                                for filename in root_files_in_stage:
+                                    if st.checkbox(
+                                        f"⚙️ {filename}",
+                                        value=True,
+                                        key=f"chk_{sel_stage}_{filename}",
+                                    ):
+                                        selected_root_files.append(filename)
+
+                            st.write("")
+                            if st.form_submit_button("📥 " + _("执行精准导入", "Execute Import"), type="primary", use_container_width=True):
+                                if not selected_stage_models and not selected_root_files:
+                                    st.warning("未勾选任何文件！")
+                                else:
+                                    try:
+                                        if selected_stage_models:
+                                            install_model_artifact_bundle(
+                                                stage_path,
+                                                "./models",
+                                                selected_stage_models,
+                                                expected_model_id=(
+                                                    package_model_ids[0]
+                                                    if package_model_ids
+                                                    else None
+                                                ),
+                                            )
+                                        for filename in selected_root_files:
+                                            source = os.path.join(stage_path, filename)
+                                            destination = os.path.abspath(filename)
+                                            with tempfile.NamedTemporaryFile(
+                                                prefix=f".{filename}.",
+                                                suffix=".import.tmp",
+                                                dir=os.path.dirname(destination),
+                                                delete=False,
+                                            ) as temporary_stream:
+                                                temporary = temporary_stream.name
+                                            try:
+                                                shutil.copy2(source, temporary)
+                                                os.replace(temporary, destination)
+                                            finally:
+                                                if os.path.exists(temporary):
+                                                    os.remove(temporary)
+                                        load_model_repository.clear()
+                                        st.success("✅ 导入成功！系统环境已更新。")
+                                    except Exception as e:
+                                        st.error(f"导入中途失败: {str(e)}")
 
                 if st.button("🗑️ " + _("清空此暂存目录", "Delete this Staged Folder"), use_container_width=True):
-                    shutil.rmtree(stage_path)
+                    remove_staged_package_folder(stage_path)
                     st.rerun()
