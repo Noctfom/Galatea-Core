@@ -21,6 +21,8 @@ crash_report.txts
 deploy_packages/
 debug.log
 tests/
+.galatea_train.lock
+.galatea_train.lock.owner.json
 
 # 卡组文件 
 decks/

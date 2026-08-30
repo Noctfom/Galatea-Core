@@ -1218,5 +1218,10 @@ class PPOTrainer:
             return None, str(e)
 
 if __name__ == "__main__":
-    trainer = PPOTrainer()
-    trainer.run_training_loop(additional_iterations=1000)
+    # 直接运行 trainer.py 时同样遵守单 Trainer 约束
+    from training_lock import TrainerProcessLock
+
+    with TrainerProcessLock() as training_lock:
+        trainer = PPOTrainer()
+        training_lock.set_run_id(trainer.run_id)
+        trainer.run_training_loop(additional_iterations=1000)

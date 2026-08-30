@@ -11,6 +11,7 @@ from trainer import PPOTrainer
 from model_versus import ModelArena
 from system_logger import setup_global_logger
 from checkpoint_utils import load_training_checkpoint
+from training_lock import TrainerAlreadyRunningError, TrainerProcessLock
 from training_validation import resolve_training_target
 
 # [必须] Windows多进程入口保护
@@ -119,6 +120,72 @@ except RuntimeError:
 #  python main.py parse
 
 # ==============================================================================
+
+
+def run_training_command(args, parser):
+    """在单 Trainer 互斥锁内完成训练配置解析、初始化和训练循环。"""
+    try:
+        training_lock = TrainerProcessLock().acquire()
+    except TrainerAlreadyRunningError as error:
+        parser.error(str(error))
+
+    try:
+        if args.target_iteration is None and args.additional_iterations is None:
+            if args.resume:
+                parser.error(
+                    "恢复训练必须指定 --target-iteration 或 --additional-iterations"
+                )
+            args.additional_iterations = 1000
+
+        resume_checkpoint = None
+        current_iteration = 0
+        if args.resume:
+            resume_checkpoint = load_training_checkpoint(
+                args.resume,
+                map_location="cpu",
+            )
+            current_iteration = int(resume_checkpoint['iteration'])
+        resolved_target_iteration = resolve_training_target(
+            current_iteration,
+            target_iteration=args.target_iteration,
+            additional_iterations=args.additional_iterations,
+        )
+
+        net_config = {
+            'd_model': args.d_model,
+            'n_heads': args.n_heads,
+            'n_layers': args.n_layers,
+            'vocab_size': 20000,
+        }
+        print(f"🚀 启动训练模式 (保存至 {args.dir})...")
+        print(f"📂 读取卡组: {args.deck_dir}")
+        print(f"⚙️ 模型架构: {net_config}")
+        trainer = PPOTrainer(
+            save_dir=args.dir,
+            deck_dir=args.deck_dir,
+            net_config=net_config,
+            resume_path=args.resume,
+            update_timesteps=args.batch_size,
+            mini_batch_size=args.mini_batch,
+            num_workers=args.workers,
+            worker_device=args.worker_device,
+            async_infer=args.async_infer,
+            compile_model=not args.no_compile,
+            worker_timeout=args.timeout,
+            gamma=args.gamma,
+            lr=args.lr,
+            entropy=args.entropy,
+            gae_lambda=args.gae_lambda,
+            clip_eps=args.clip_eps,
+            use_onnx=args.use_onnx,
+            standard_core=args.standard_core,
+            model_prefix=args.model_prefix,
+            preloaded_resume_checkpoint=resume_checkpoint,
+        )
+        training_lock.set_run_id(trainer.run_id)
+        trainer.run_training_loop(target_iteration=resolved_target_iteration)
+    finally:
+        training_lock.release()
 
 
 def main():
@@ -240,62 +307,7 @@ def main():
                 
     # --- 调度逻辑 ---
     if args.command == 'train':
-        if args.target_iteration is None and args.additional_iterations is None:
-            if args.resume:
-                parser.error(
-                    "恢复训练必须指定 --target-iteration 或 --additional-iterations"
-                )
-            args.additional_iterations = 1000
-
-        resume_checkpoint = None
-        current_iteration = 0
-        if args.resume:
-            resume_checkpoint = load_training_checkpoint(
-                args.resume,
-                map_location="cpu",
-            )
-            current_iteration = int(resume_checkpoint['iteration'])
-        resolved_target_iteration = resolve_training_target(
-            current_iteration,
-            target_iteration=args.target_iteration,
-            additional_iterations=args.additional_iterations,
-        )
-
-        # 1. 组装配置字典
-        net_config = {
-            'd_model': args.d_model,
-            'n_heads': args.n_heads,
-            'n_layers': args.n_layers,
-            'vocab_size': 20000
-        }
-        print(f"🚀 启动训练模式 (保存至 {args.dir})...")
-        print(f"📂 读取卡组: {args.deck_dir}")
-        print(f"⚙️ 模型架构: {net_config}")
-        trainer = PPOTrainer(
-            save_dir=args.dir, 
-            deck_dir=args.deck_dir, 
-            net_config=net_config,
-            resume_path=args.resume,  # 把命令行参数传进去
-            update_timesteps=args.batch_size,  # 传参
-            mini_batch_size=args.mini_batch,
-            num_workers=args.workers,
-            worker_device=args.worker_device,
-            async_infer=args.async_infer,
-            compile_model=not args.no_compile, # 如果用户输入 --no_compile，这里就是 False
-            worker_timeout=args.timeout,
-            gamma=args.gamma,         #RL 相关超参数
-            lr=args.lr,
-            entropy=args.entropy,
-            gae_lambda=args.gae_lambda,
-            clip_eps=args.clip_eps,
-            use_onnx=args.use_onnx,
-            standard_core=args.standard_core,
-            model_prefix=args.model_prefix,
-            preloaded_resume_checkpoint=resume_checkpoint,
-        )
-        trainer.run_training_loop(
-            target_iteration=resolved_target_iteration,
-        )
+        run_training_command(args, parser)
         
     elif args.command == 'play':
         print(f"⚔️ 启动规则系统自检测压测 (Self-Check)...")

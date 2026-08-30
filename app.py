@@ -30,10 +30,18 @@ from model_artifacts import (
     is_primary_model_filename,
     validate_model_artifact_filename,
 )
+from managed_processes import (
+    build_managed_process_env,
+    process_identity_matches,
+    process_matches_project,
+    purge_managed_processes,
+)
 from training_validation import resolve_training_target, validate_model_prefix
 
 import warnings
 warnings.filterwarnings("ignore")
+
+PROJECT_ROOT = os.path.realpath(os.path.dirname(__file__))
 
 # 强制使用绝对路径挂载 CDB，防止 WebUI 运行目录错位导致查不到卡名
 card_db_ui = CardReader(db_path=os.path.abspath(os.path.join(os.path.dirname(__file__), 'cards.cdb')))
@@ -112,40 +120,81 @@ def validate_local_asset_name(filename, *, required_suffix=None):
 # ==========================================
 # 🛠️ 进程管理辅助函数与状态初始化
 # ==========================================
-def terminate_process(pid):
+def terminate_process(pid, expected_create_time=None):
     """跨平台安全终止进程及其所有子进程"""
     try:
         parent = psutil.Process(pid)
+        if expected_create_time is None:
+            if not process_matches_project(parent, PROJECT_ROOT):
+                return False
+        elif not process_identity_matches(parent, expected_create_time):
+            return False
         for child in parent.children(recursive=True):
             child.kill()
         parent.kill()
         return True
-    except psutil.NoSuchProcess:
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
     except Exception as e:
         print(f"终止进程错误: {e}")
         return False
 
-def is_process_alive(pid):
+def is_process_alive(pid, expected_create_time=None):
     """精准判断进程是否存活，剔除僵尸进程"""
     if not pid or not psutil.pid_exists(pid):
         return False
     try:
         p = psutil.Process(pid)
+        if expected_create_time is None:
+            if not process_matches_project(p, PROJECT_ROOT):
+                return False
+        elif not process_identity_matches(p, expected_create_time):
+            return False
         if p.status() in [psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD]:
             return False
         return True
-    except psutil.NoSuchProcess:
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
+
+
+def launch_managed_task(command):
+    """启动带项目归属标记的后台任务并登记可靠的进程身份。"""
+    process = subprocess.Popen(
+        command,
+        env=build_managed_process_env(PROJECT_ROOT),
+    )
+    st.session_state.running_pid = process.pid
+    try:
+        st.session_state.running_process_create_time = psutil.Process(
+            process.pid
+        ).create_time()
+    except psutil.Error:
+        st.session_state.running_process_create_time = None
+    return process
 
 if 'running_pid' not in st.session_state:
     st.session_state.running_pid = None
+if 'running_process_create_time' not in st.session_state:
+    st.session_state.running_process_create_time = None
 if 'auto_refresh' not in st.session_state:
     st.session_state.auto_refresh = False
 
 if st.session_state.running_pid:
-    if not is_process_alive(st.session_state.running_pid):
+    if st.session_state.running_process_create_time is None:
+        try:
+            registered_process = psutil.Process(st.session_state.running_pid)
+            if process_matches_project(registered_process, PROJECT_ROOT):
+                st.session_state.running_process_create_time = registered_process.create_time()
+            else:
+                st.session_state.running_pid = None
+        except psutil.Error:
+            st.session_state.running_pid = None
+    if not is_process_alive(
+        st.session_state.running_pid,
+        st.session_state.running_process_create_time,
+    ):
         st.session_state.running_pid = None
+        st.session_state.running_process_create_time = None
         st.session_state.auto_refresh = False # 进程结束，自动关闭刷新开关
 
 # ==========================================
@@ -445,11 +494,13 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
     # 新增：全局进程控制台
     is_running = False
     if st.session_state.running_pid:
-        try:
-            p = psutil.Process(st.session_state.running_pid)
-            is_running = p.is_running() and p.status() != psutil.STATUS_ZOMBIE
-        except: pass
-        if not is_running: st.session_state.running_pid = None
+        is_running = is_process_alive(
+            st.session_state.running_pid,
+            st.session_state.running_process_create_time,
+        )
+        if not is_running:
+            st.session_state.running_pid = None
+            st.session_state.running_process_create_time = None
             
     col_status, col_kill, col_purge = st.columns([6, 2, 2])
     with col_status:
@@ -461,21 +512,42 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
     with col_kill:
         if is_running:
             if st.button("🛑 " + _("紧急制动", "Abort"), type="primary", use_container_width=True):
-                terminate_process(st.session_state.running_pid)
+                terminate_process(
+                    st.session_state.running_pid,
+                    st.session_state.running_process_create_time,
+                )
                 st.session_state.running_pid = None
+                st.session_state.running_process_create_time = None
                 st.rerun()
-                
+
     with col_purge:
-        # 🌟 新增：物理净化按钮 (仅限 Windows)
-        if os.name == 'nt':
-            if st.button("🧨 " + _("净化僵尸进程", "Purge Zombies"), use_container_width=True, 
-                         help=_("当遇到引擎 DLL 残留或文件占用报错时，点击此按钮强杀所有 Python 进程。注意：这会连同 WebUI 一起重启！", 
-                                "Force kill all Python processes to release locked DLLs (Will restart UI too!).")):
-                # 提示用户即将发生的事情
-                st.warning("正在执行物理级清洗... 请等待系统自动重启UI。")
-                import time
-                time.sleep(1) # 给前端一点点渲染提示的时间
-                os.system("taskkill /F /IM python.exe") 
+        if st.button(
+            "🧨 " + _("净化僵尸进程", "Purge Zombies"),
+            use_container_width=True,
+            help=_(
+                "仅终止由本项目 WebUI 标记的后台任务及其子进程，不会终止其他 Python 程序或当前 WebUI。",
+                "Only stop background processes owned by this project; unrelated Python tasks and this UI are preserved.",
+            ),
+        ):
+            result = purge_managed_processes(
+                PROJECT_ROOT,
+                known_root_pid=st.session_state.running_pid,
+                known_root_create_time=st.session_state.running_process_create_time,
+            )
+            if result["matched_pids"]:
+                st.session_state.running_pid = None
+                st.session_state.running_process_create_time = None
+                st.session_state.auto_refresh = False
+                st.success(
+                    _(
+                        f"已清理本项目托管进程: {result['matched_pids']}",
+                        f"Purged project-owned processes: {result['matched_pids']}",
+                    )
+                )
+            else:
+                st.info(_("未发现本项目托管的残留进程。", "No project-owned zombie process was found."))
+            if result["failed"]:
+                st.warning(_(f"部分进程清理失败: {result['failed']}", f"Some processes could not be stopped: {result['failed']}"))
     st.divider()
     
     tab_train, tab_duel, tab_selfcheck = st.tabs([
@@ -756,8 +828,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
                 if c_std_core: cmd.append("--standard_core")
-                p = subprocess.Popen(cmd) 
-                st.session_state.running_pid = p.pid # 🌟 记录PID
+                p = launch_managed_task(cmd)
                 st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
                 time.sleep(0.5)
                 st.rerun()
@@ -791,8 +862,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         cmd = [sys.executable, "main.py", "duel", "--p0", d_p0, "--num", str(d_num), "--thought_freq", str(d_freq)]
                         if d_p1 != "None": cmd.extend(["--p1", d_p1])
                         if d_std_core: cmd.append("--standard_core")
-                        p = subprocess.Popen(cmd)
-                        st.session_state.running_pid = p.pid # 🌟 记录PID
+                        p = launch_managed_task(cmd)
                         st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
                         
                         time.sleep(0.5)
@@ -827,8 +897,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         cmd = [sys.executable, "main.py", "play", "-n", str(sc_num)]
                         if sc_std_core:
                             cmd.append("--standard_core")
-                        p = subprocess.Popen(cmd)
-                        st.session_state.running_pid = p.pid
+                        p = launch_managed_task(cmd)
                         st.success(_(f"自检压测启动 (PID: {p.pid})！", f"Self-Check started (PID: {p.pid})!"))
                         time.sleep(0.5)
                         st.rerun()
@@ -2508,7 +2577,8 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
                         "--reload_interval", "60"                               # 把自动刷新间隔拉长到 60 秒
                     ],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    env=build_managed_process_env(PROJECT_ROOT),
                 )
                 import time
                 time.sleep(2.5) # 给服务器 2.5 秒的启动时间

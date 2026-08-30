@@ -783,7 +783,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
 
                             sel_idx = action_idx.item()
                             last_decision_index = sel_idx
-                            if sel_idx < len(current_snap.valid_actions):
+                            if 0 <= sel_idx < len(current_snap.valid_actions):
                                 chosen = current_snap.valid_actions[sel_idx]
                             else:
                                 trigger_card = "未知时点/阶段"
@@ -793,13 +793,14 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 elif brain.history_stack:
                                     trigger_card = f"上一动 -> 【{card_db.get_card_name(brain.history_stack[0]['code'])}】"
                                 
-                                print(f"⚠️ [网络幻觉] 源头: {trigger_card} | 引擎需要 {len(current_snap.valid_actions)} 个选项，网络却强行越界点选了槽位 [{sel_idx}]。已拦截并施加惩罚。")
-                                chosen = current_snap.valid_actions[0] # 保底使用第一个选项
-                                step_reward -= 0.005 # 告诉网络不要做梦
+                                print(f"⚠️ [网络幻觉] 源头: {trigger_card} | 引擎需要 {len(current_snap.valid_actions)} 个选项，网络却强行越界点选了槽位 [{sel_idx}]。本局将整局回滚。")
                                 ai_is_broken[player] = True
-                                # 强制修正送入 PPO 内存的标记，确保梯度的因果关系一致
-                                action_idx = torch.tensor(0, dtype=torch.long) 
-                                # (log_prob 会有略微偏差，但在 PPO 中会被容忍)
+                                episode_aborted = True
+                                episode_abort_reason = (
+                                    f"AI action index out of range: index={sel_idx}, "
+                                    f"valid_actions={len(current_snap.valid_actions)}"
+                                )
+                                break
 
                             if current_snap.global_data.turn_count != current_turn:
                                 current_turn = current_snap.global_data.turn_count
@@ -885,16 +886,19 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                     stop_worker_after_episode = True
                                     break
                             else:
-                                raise e
+                                episode_aborted = True
+                                episode_abort_reason = f"AI operating system error: {e}"
+                                break
                             
-                        except Exception as e: 
-                            # 纯 Python 逻辑报错，允许 RuleBot 兜底
+                        except Exception as e:
+                            # AI 逻辑报错后的轨迹已不再可信，整局回滚并让 Worker 进入下一局
                             print(f"\n❌ [Worker {worker_id}] AI 逻辑计算崩溃: {e}")
-                            if is_training_agent and not ai_is_broken[player]:
-                                ai_is_broken[player] = True
+                            ai_is_broken[player] = True
                             import traceback
                             traceback.print_exc()
-                            ai_handled = False
+                            episode_aborted = True
+                            episode_abort_reason = f"AI logic failed: {e}"
+                            break
 
                     # --- RuleBot 兜底 ---
                     if not ai_handled:
@@ -913,9 +917,23 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             except Exception as e: 
                                 print(f"⚠️ [Worker {worker_id}] ignore_list解析异常: {e}")
 
-                        rule_bot.sync_valid_actions(brain.current_valid_actions)
-                        resp = rule_bot.get_rule_decision(p, msg_type, msg, brain, ignore_actions=clean_ignore_list)
-                        last_decision_value = resp
+                        try:
+                            rule_bot.sync_valid_actions(brain.current_valid_actions)
+                            resp = rule_bot.get_rule_decision(
+                                p,
+                                msg_type,
+                                msg,
+                                brain,
+                                ignore_actions=clean_ignore_list,
+                            )
+                            last_decision_value = resp
+                        except Exception as e:
+                            print(f"⚠️ [Worker {worker_id}] RuleBot 决策异常，本局数据回滚: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            episode_aborted = True
+                            episode_abort_reason = f"RuleBot decision failed: {e}"
+                            break
 
                         # 修复：不再强制计算 RuleBot 的 log_prob，也不把它放进 game_buffer
                         # 从 AI 的视角来看，这相当于对手或者系统强制替它走了一步，是环境状态的跃迁。
@@ -936,12 +954,16 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                                 stop_worker_after_episode = True
                                 break
                             else:
-                                raise e
+                                episode_aborted = True
+                                episode_abort_reason = f"RuleBot operating system error: {e}"
+                                break
                         except Exception as e:
-                            print(f"⚠️ [Worker {worker_id}] RuleBot 发送动作异常: {e}")
+                            print(f"⚠️ [Worker {worker_id}] RuleBot 发送动作异常，本局数据回滚: {e}")
                             import traceback
                             traceback.print_exc()
-                            continue
+                            episode_aborted = True
+                            episode_abort_reason = f"RuleBot action failed: {e}"
+                            break
 
             # 未产生可信终局的退出一律视为异常局，禁止其观察行进入训练批次。
             if not episode_aborted and winner == -1 and ep_steps < MAX_EPISODE_STEPS:
