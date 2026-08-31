@@ -7,7 +7,7 @@
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.4.1](https://img.shields.io/badge/Release-v3.4.1-brightgreen.svg)](docs/changelog_en.md)
+[![Release: v3.4.2](https://img.shields.io/badge/Release-v3.4.2-brightgreen.svg)](docs/changelog_en.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -53,6 +53,18 @@ English | [简体中文](README.md)
 2. Double-click `一键包启动Webui.bat`
 3. Browser automatically opens the WebUI
 
+The current Windows bundle includes PyTorch 2.9.1 with CUDA 13.0 and targets RTX
+20/30/40/50 and GTX 16 series GPUs. `auto` falls back to CPU when no compatible NVIDIA
+GPU is available. GTX 10 and older GPUs require an older compatible PyTorch/CUDA runtime
+for GPU training.
+
+#### Building a Portable Release
+
+Maintainers can double-click `构建一键包.bat` to run dependency, runtime-resource,
+engine, and CUDA probes. A successful build writes `Galatea_Core_Vx.x.x.zip` to the
+project root. The archive includes portable Python, the card database, Lua scripts, and
+decks while excluding local models, logs, replays, caches, and Git development data.
+
 #### Manual Install (Developers)
 
 ```bash
@@ -60,8 +72,8 @@ English | [简体中文](README.md)
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# Install PyTorch (CUDA users should choose the index-url for their environment)
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch (matches the current Windows bundle; older GPUs need a compatible build)
+pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu130
 # For CPU-only environments use: https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 

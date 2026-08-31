@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.4.1**.
+> This document applies to **Galatea-Core v3.4.2**.
 
 ---
 
@@ -32,6 +32,14 @@ Double-click `一键包启动Webui.bat`. The launcher verifies and repairs depen
 ![One-Click Launch](图片/一键包启动窗口.png)
 
 > 💡 If the browser does not open, manually visit `http://127.0.0.1:8501`
+
+The current Windows bundle supports RTX 20/30/40/50 and GTX 16 series GPUs. Systems
+without a compatible GPU automatically use CPU mode; GTX 10 and older GPUs need an older
+PyTorch build compatible with their architecture for GPU training.
+
+Maintainers can double-click `构建一键包.bat` in the project root to create a release.
+After validation, it writes `Galatea_Core_Vx.x.x.zip` without including local models,
+logs, or training data.
 
 ### Linux Users
 

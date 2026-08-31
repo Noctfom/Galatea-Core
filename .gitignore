@@ -34,6 +34,7 @@ tmp_rollout_*.pt.tmp
 
 # python 打包环境
 python_env/
+Galatea_Core_V*.zip
 
 # --- 允许提交引擎核心 ---
 !ocgcore.dll

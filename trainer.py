@@ -153,6 +153,31 @@ def estimate_rollout_commit_requirement(
     return rollout_pool_bytes + process_reserve_bytes + TRAINER_COMMIT_SAFETY_BYTES
 
 
+def get_process_memory_status():
+    """读取当前 Trainer 进程的常驻集、私有提交量和存活子进程数"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    private_bytes = getattr(
+        memory_info,
+        "private",
+        getattr(memory_info, "pagefile", memory_info.rss),
+    )
+    return {
+        "rss_bytes": int(memory_info.rss),
+        "private_bytes": int(private_bytes),
+        "child_count": len(process.children(recursive=True)),
+    }
+
+
+def get_tensor_tree_bytes(value):
+    """统计嵌套字典中张量实际占用的字节数，不复制张量数据"""
+    if isinstance(value, torch.Tensor):
+        return value.numel() * value.element_size()
+    if isinstance(value, dict):
+        return sum(get_tensor_tree_bytes(item) for item in value.values())
+    return 0
+
+
 def resolve_training_device(requested_device):
     """解析训练设备，并在显式请求不可用 CUDA 时提前拒绝启动"""
     if requested_device not in {"auto", "cpu", "cuda"}:
@@ -575,6 +600,44 @@ class PPOTrainer:
         if torch.get_num_threads() != desired_threads:
             torch.set_num_threads(desired_threads)
 
+    def _report_memory_status(self, stage):
+        """输出训练关键阶段的系统、Trainer、合并池和 CUDA 内存快照"""
+        details = []
+        try:
+            process_status = get_process_memory_status()
+            details.extend([
+                f"Trainer 提交 {process_status['private_bytes'] / 1024**3:.1f} GiB",
+                f"RSS {process_status['rss_bytes'] / 1024**3:.1f} GiB",
+                f"子进程 {process_status['child_count']}",
+            ])
+        except (OSError, psutil.Error) as error:
+            details.append(f"Trainer 进程统计不可用: {error}")
+
+        try:
+            commit_status = get_windows_commit_status()
+            if commit_status is not None:
+                details.insert(
+                    0,
+                    f"系统提交余量 {commit_status['available_bytes'] / 1024**3:.1f} GiB",
+                )
+        except OSError as error:
+            details.append(f"系统提交量不可用: {error}")
+
+        merged_memory = getattr(self, "merged_memory", None)
+        details.append(f"合并池 {get_tensor_tree_bytes(merged_memory) / 1024**3:.1f} GiB")
+        if self.device.type == "cuda":
+            details.extend([
+                f"CUDA 已分配 {torch.cuda.memory_allocated() / 1024**3:.1f} GiB",
+                f"CUDA 已保留 {torch.cuda.memory_reserved() / 1024**3:.1f} GiB",
+            ])
+        print(f"🧮 [内存快照/{stage}] " + " | ".join(details))
+
+    def _release_merged_memory_pool(self):
+        """在最终关闭或采集内存告急时释放可重建的 CPU 轨迹合并池"""
+        self.merged_memory = None
+        self.buffer_allocated = False
+        gc.collect()
+
     def _validate_rollout_commit_headroom(self, steps_per_worker):
         """在 Windows 启动 Worker 前校验提交内存余量，避免原生库断言崩溃"""
         try:
@@ -591,6 +654,19 @@ class PPOTrainer:
             num_workers=self.num_workers,
         )
         available_bytes = status["available_bytes"]
+        if (
+            available_bytes < required_bytes
+            and getattr(self, "buffer_allocated", False)
+        ):
+            print(
+                "♻️ [内存预检] Worker 启动余量不足，正在临时释放已完成训练的"
+                "上一轮合并池并重新检查"
+            )
+            self._release_merged_memory_pool()
+            status = get_windows_commit_status()
+            if status is None:
+                return
+            available_bytes = status["available_bytes"]
         print(
             "🧮 [内存预检] "
             f"系统提交余量 {available_bytes / 1024**3:.1f} GiB | "
@@ -669,6 +745,7 @@ class PPOTrainer:
         # --------------------------------------
 
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
+        self._report_memory_status("Worker 启动前")
         self._validate_rollout_commit_headroom(steps_per_worker)
 
         # 🚀 启动工人
@@ -734,6 +811,7 @@ class PPOTrainer:
         # [内存安全回收] 强制等待系统回收 Worker 进程的内存
         # =========================================================================
         gc.collect()
+        self._report_memory_status("Worker 回收后")
         
         # 检查系统可用内存，如果过低则等待更长时间
         try:
@@ -855,7 +933,7 @@ class PPOTrainer:
                 try: os.remove(f)
                 except Exception as e: print(f"[trainer]⚠️ 清理残余文件 {f} 失败: {e}")
 
-                import gc; gc.collect()
+                gc.collect()
                 
             except Exception as e:
                 print(f"❌ 读取/合并文件 {f} 失败: {e}") # 拒绝静默报错
@@ -922,7 +1000,8 @@ class PPOTrainer:
                 print(f"⚠️ [WebUI] CSV 数据库写入冲突: {e}")
 
         self.global_step += cursor
-        
+        self._report_memory_status("轨迹合并后")
+
         return cursor # 核心改动：不再返回内存大字典，而是返回有效步数
 
     def inference_server(
@@ -1216,19 +1295,12 @@ class PPOTrainer:
             # 2. 优化 (只有当样本足够时才更新)
             if total_steps is not None and total_steps >= self.mini_batch_size:
                 self.update_policy(total_steps)
-                print("🧹 [内存调度] 训练完成，正在彻底销毁主进程 PPO 静态内存池，为下一轮 Worker 腾出系统资源")
-                
-                # 物理清空高达 10GB+ 的巨型经验池，把内存还给系统，防止下一轮加载 DLL 时 WinError 1455
-                self.merged_memory = None
-                
-                # 重置标志位，告诉系统下一轮重新用 empty 申请，否则会报 NoneType 错误
-                self.buffer_allocated = False
-                
-                # 强制呼叫系统底层的垃圾车
-                import gc
-                gc.collect()
+                # 下一轮会从索引 0 覆盖有效前缀，保留固定池可避免 Windows 反复提交/释放大块内存。
+                self.optimizer.zero_grad(set_to_none=True)
                 if self.device.type == 'cuda':
                     torch.cuda.empty_cache()
+                print("♻️ [内存调度] PPO 静态合并池将跨轮复用，下一轮从头覆盖有效样本区")
+                self._report_memory_status("PPO 更新后")
 
             else:
                 print(f"⚠️ 样本不足 ({total_steps if total_steps else 0} < {self.mini_batch_size})，跳过本轮训练")
@@ -1311,6 +1383,7 @@ class PPOTrainer:
             self.writer.close()
         if hasattr(self, 'env') and self.env is not None:
             self.env._close_duel()
+        self._release_merged_memory_pool()
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
 

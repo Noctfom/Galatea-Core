@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.4.1**.
+> This document applies to **Galatea-Core v3.4.2**.
 
 ---
 
@@ -591,6 +591,10 @@ On Windows, each iteration reports system commit headroom and the estimated safe
 starting workers. If the preflight rejects startup, close memory-heavy applications or enlarge the
 system page file in addition to reducing workers/batch size; increasing the ZMQ timeout cannot fix
 commit exhaustion.
+Normal training reuses the trainer's merged trajectory pool across iterations. Only a failed
+headroom check releases the already-consumed old pool and retries once. Compare the staged memory
+snapshots with each worker's opponent-backend line to distinguish trainer retention from a
+hist/ONNX per-iteration peak.
 
 ### Q3: Windows torch.compile error
 

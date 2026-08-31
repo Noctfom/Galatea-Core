@@ -4,6 +4,28 @@
 
 ---
 
+## [v3.4.2] - 2026-08-31
+
+### 🐛 Training Hotfix
+
+- **Fixed the post-collection garbage-collection crash**: Removed the duplicate `import gc` inside `collect_rollouts()`, which shadowed the module-level dependency and caused the first `gc.collect()` after worker completion to raise `UnboundLocalError`
+- The failure occurred before trajectory merging and PPO updates, so it could not write a partial optimizer state or contaminate an existing model. The fix only restores the original garbage-collection call and does not change sampling or learning behavior
+- **Fixed stepwise commit loss across iterations**: The trainer's merged trajectory pool now overwrites and reuses its valid prefix instead of being destroyed and reallocated every iteration. A low-headroom preflight may safely release the already-consumed old pool and retry once; trainer shutdown performs the final release
+- **Added staged memory auditing**: Logs now capture system commit, trainer private commit/RSS, merged-pool size, and CUDA usage around worker startup, worker reaping, trajectory merge, and PPO. Workers record process usage after opponent-backend initialization, allowing hist/ONNX peak cost to be distinguished from trainer-lifetime retention
+- The final gradient references are explicitly cleared after PPO; sampling, rewards, GAE, valid-sample bounds, and parameter-update results are unchanged
+
+### 📦 Portable Environment and Release Packaging
+
+- **Restored the GPU runtime**: Replaced the portable environment's CPU-only Torch with `PyTorch 2.9.1+cu130`, verified by an actual CUDA tensor operation, restoring CUDA training when WebUI or CLI is launched from `python_env`
+- **Complete runtime-resource checks**: Environment validation now covers the card database, Lua scripts, decks, semantic-knowledge files, portable interpreter, and the presence and loadability of the `ocgcore` dynamic library in addition to Python packages
+- **Separated launch and release requirements**: Ordinary one-click startup still allows systems without NVIDIA GPUs to fall back to CPU under `auto`; release packaging requires the bundled CUDA runtime to execute successfully, preventing another mislabeled CPU-only bundle
+- **Added one-click packaging**: `构建一键包.bat` invokes `build_portable_package.py` to run release validation and package source, `python_env`, `cards.cdb`, `script`, and `decks` as `Galatea_Core_Vx.x.x.zip`
+- **Excluded user and development data**: Git metadata, models, training logs, replays, caches, tests, and engine build sources are omitted. Archives use one `Galatea_Core/` root, ZIP64, and atomic temporary-file replacement
+- **Compatibility boundary**: The current CUDA Wheel targets modern NVIDIA architectures and supports RTX 20/30/40/50 and GTX 16 series. GTX 10 and older GPUs require an older PyTorch environment or the framework falls back to CPU
+- Updated the displayed framework version, bilingual documentation, README badges, and `version.txt` to `3.4.2`; all 98 tests pass
+
+---
+
 ## [v3.4.1] - 2026-08-31
 
 ### 🛡️ Windows Collection Stability and Memory Optimization

@@ -1,6 +1,7 @@
 # 本文件检查并修复一键包 Python 环境中缺失的项目依赖
 
 import argparse
+import ctypes
 import importlib
 import importlib.util
 import os
@@ -25,6 +26,15 @@ IMPORT_NAME_OVERRIDES = {
     "sentence_transformers": "sentence_transformers",
 }
 MANUALLY_MANAGED_PACKAGES = {"torch"}
+REQUIRED_RUNTIME_FILES = (
+    "cards.cdb",
+    "knowledge_base.json",
+    "meta_staples.json",
+    "requirements.txt",
+    "version.txt",
+    "一键包启动Webui.bat",
+)
+REQUIRED_RUNTIME_DIRECTORIES = ("script", "decks")
 
 
 def normalize_package_name(name):
@@ -135,6 +145,60 @@ def verify_requirement_imports(requirements):
     return failures
 
 
+def find_runtime_asset_issues(project_root=None, require_portable_python=False):
+    """检查一键包运行所需的数据、内核、卡组与便携解释器"""
+    project_root = Path(project_root or PROJECT_ROOT).resolve()
+    issues = []
+
+    for relative_name in REQUIRED_RUNTIME_FILES:
+        path = project_root / relative_name
+        if not path.is_file() or path.stat().st_size <= 0:
+            issues.append(f"缺少或为空的运行文件: {relative_name}")
+
+    for relative_name in REQUIRED_RUNTIME_DIRECTORIES:
+        path = project_root / relative_name
+        if not path.is_dir() or not any(item.is_file() for item in path.rglob("*")):
+            issues.append(f"缺少或为空的运行目录: {relative_name}")
+
+    engine_name = "ocgcore.dll" if os.name == "nt" else "ocgcore.so"
+    engine_path = project_root / engine_name
+    if not engine_path.is_file():
+        issues.append(f"缺少对局内核: {engine_name}")
+    else:
+        try:
+            ctypes.CDLL(str(engine_path))
+        except OSError as exc:
+            issues.append(f"对局内核无法加载: {engine_name} ({exc})")
+
+    if require_portable_python:
+        portable_python = project_root / "python_env" / "python.exe"
+        if not portable_python.is_file():
+            issues.append("缺少便携 Python: python_env/python.exe")
+
+    return issues
+
+
+def verify_torch_runtime(require_cuda=False):
+    """验证 PyTorch 运行时，并按发布要求确认 CUDA 能够实际执行"""
+    try:
+        import torch
+    except Exception as exc:
+        return [f"PyTorch 无法导入: {type(exc).__name__}: {exc}"]
+
+    if not require_cuda:
+        return []
+    if not torch.cuda.is_available():
+        return [
+            "当前便携环境是 CPU-only 或 CUDA 不可用；发布 GPU 一键包前请安装 CUDA 版 PyTorch"
+        ]
+    try:
+        probe = torch.zeros(1, device="cuda")
+        del probe
+    except Exception as exc:
+        return [f"CUDA 运行探针失败: {type(exc).__name__}: {exc}"]
+    return []
+
+
 def install_missing_requirements(missing):
     """调用当前解释器的 pip，仅安装缺失的依赖规格"""
     manual_specs = [
@@ -163,7 +227,13 @@ def install_missing_requirements(missing):
     return subprocess.run(command, cwd=PROJECT_ROOT, check=False).returncode
 
 
-def check_environment(requirements, verify_imports=False):
+def check_environment(
+    requirements,
+    verify_imports=False,
+    verify_runtime_assets=False,
+    require_portable_python=False,
+    require_cuda=False,
+):
     """检查环境完整性，并输出适合启动器显示的诊断信息"""
     missing = find_missing_requirements(requirements)
     if missing:
@@ -177,6 +247,23 @@ def check_environment(requirements, verify_imports=False):
             for install_spec, import_name, error in failures:
                 print(f"  - {install_spec} ({import_name}): {error}")
             return False
+
+    if verify_runtime_assets:
+        asset_issues = find_runtime_asset_issues(
+            require_portable_python=require_portable_python,
+        )
+        if asset_issues:
+            print("[环境检查] 一键包运行资源不完整：")
+            for issue in asset_issues:
+                print(f"  - {issue}")
+            return False
+
+    torch_issues = verify_torch_runtime(require_cuda=require_cuda)
+    if torch_issues:
+        print("[环境检查] PyTorch 运行时不满足发布要求：")
+        for issue in torch_issues:
+            print(f"  - {issue}")
+        return False
 
     print("[环境检查] 一键包依赖完整。")
     return True
@@ -196,6 +283,21 @@ def main(argv=None):
         type=Path,
         default=DEFAULT_REQUIREMENTS,
         help="依赖清单路径",
+    )
+    parser.add_argument(
+        "--verify-runtime-assets",
+        action="store_true",
+        help="检查卡片数据库、脚本、卡组和对局内核",
+    )
+    parser.add_argument(
+        "--require-portable-python",
+        action="store_true",
+        help="要求项目内包含 python_env/python.exe",
+    )
+    parser.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="要求当前 PyTorch 能够实际执行 CUDA 运算",
     )
     args = parser.parse_args(argv)
 
@@ -225,7 +327,17 @@ def main(argv=None):
             return 1
         importlib.invalidate_caches()
 
-    return 0 if check_environment(requirements, args.verify_imports) else 1
+    return (
+        0
+        if check_environment(
+            requirements,
+            verify_imports=args.verify_imports,
+            verify_runtime_assets=args.verify_runtime_assets,
+            require_portable_python=args.require_portable_python,
+            require_cuda=args.require_cuda,
+        )
+        else 1
+    )
 
 
 if __name__ == "__main__":

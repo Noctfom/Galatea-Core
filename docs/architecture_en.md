@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.4.1**.
+> This document applies to **Galatea-Core v3.4.2**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -431,13 +431,16 @@ CPU mode stays in FP32 and does not enable CUDA autocast, GradScaler, or pinned 
 
 ### 2. Static Memory Pool
 
-Pre-allocate fixed-size memory to avoid fragmentation during training:
+The first trajectory merge allocates a fixed-capacity CPU pool. Later iterations overwrite the
+valid prefix from index zero, avoiding repeated multi-GiB allocation/release cycles that can make
+Windows commit usage grow in steps. PPO only reads the current `total_steps` range, so stale tail
+data is never trained. Under memory pressure, preflight may release the already-consumed old pool
+and retry once; `close()` performs the final release:
 
 ```python
 class PPOTrainer:
-    def __init__(self):
-        # Pre-allocated memory pool
-        self.max_buffer_steps = self.update_timesteps + (self.num_workers * 1000)
+    def merge_rollouts(self, first_block):
+        # Allocate lazily once, then reuse and overwrite the valid region
         self.merged_memory = {
             'action': torch.empty(self.max_buffer_steps, ...),
             'log_prob': torch.empty(self.max_buffer_steps, ...),
@@ -445,27 +448,27 @@ class PPOTrainer:
         }
 ```
 
-### 3. Shared-Memory Slots and Temporary Weight Snapshots
+The trainer records commit, RSS, merged-pool, and CUDA snapshots before worker startup, after worker
+reaping, after trajectory merge, and after PPO. Each worker also records one process-memory sample
+after opponent initialization, separating hist/ONNX peak cost from trainer-lifetime retention.
 
-Windows Spawn mode does not pass model tensors directly between processes. At the start of each
-iteration, the Trainer writes a canonical CPU weight snapshot which workers load with
-`weights_only=True`. Observations, action results, full logits, and completion IDs use fixed
-`share_memory_()` slots:
+### 3. Shared-Memory Slots and Central Weights
+
+The current policy and self opponents do not load PyTorch weights inside workers. They request the
+central model over ZMQ, while observations, action results, full logits, and completion IDs use
+fixed `share_memory_()` slots:
 
 ```python
-# Trainer: create the iteration's CPU weight snapshot
-torch.save(canonical_model_state_dict(model, to_cpu=True), weight_file)
-
-# Worker: restricted load; internal temporary files do not use the formal checkpoint protocol
-weights = torch.load(weight_file, map_location="cpu", weights_only=True)
+# Worker: send only request identity; observations are already in its shared slot
+socket.send(encode_inference_request(worker_id, request_id))
 
 # High-frequency observations and results use preallocated shared-memory slots
 shared_tensor.share_memory_()
 ```
 
-Self opponents copy the current iteration's weights directly. Hist opponents load only formal
-`.pth` checkpoints from the same `model_id`, preferring a complete same-iteration ONNX artifact
-when available.
+Self opponents use the central model. Hist opponents select only artifacts from the same `model_id`,
+preferring a complete same-iteration ONNX artifact and lazily loading the `.pth` fallback only when
+ONNX is absent or fails.
 
 ### 4. TF32 Acceleration
 

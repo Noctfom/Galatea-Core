@@ -7,7 +7,7 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.4.1](https://img.shields.io/badge/Release-v3.4.1-brightgreen.svg)](docs/changelog.md)
+[![Release: v3.4.2](https://img.shields.io/badge/Release-v3.4.2-brightgreen.svg)](docs/changelog.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -53,6 +53,16 @@
 2. 双击 `一键包启动Webui.bat`
 3. 浏览器自动打开 WebUI 界面
 
+当前 Windows 一键包内置 PyTorch 2.9.1 + CUDA 13.0，面向 RTX 20/30/40/50
+系列及 GTX 16 系列。没有兼容 NVIDIA 显卡时，`auto` 模式会回落 CPU；GTX 10
+系列及更早显卡如需 GPU 训练，应自行更换兼容的旧版 PyTorch/CUDA 环境。
+
+#### 构建发布用一键包
+
+维护者双击 `构建一键包.bat` 即可执行依赖、运行资源、内核和 CUDA 探针，成功后
+在项目根目录生成 `Galatea_Core_Vx.x.x.zip`。压缩包包含便携 Python、卡片数据库、
+Lua 脚本和卡组，不包含本机模型、日志、回放、缓存及 Git 开发数据。
+
 #### 手动安装（开发者）
 
 ```bash
@@ -60,8 +70,8 @@
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# 安装 PyTorch（CUDA 用户按显卡环境选择对应 index-url）
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+# 安装 PyTorch（以下与当前 Windows 一键包一致；旧显卡请选择兼容版本）
+pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu130
 # 纯 CPU 环境可改用：https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 

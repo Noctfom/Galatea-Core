@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.4.1**。
+> 文档适用于 **Galatea-Core v3.4.2**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -430,13 +430,14 @@ CPU 模式使用 FP32，不启用 CUDA autocast、GradScaler 或锁页内存。
 
 ### 2. 静态内存池
 
-预分配固定大小的内存，避免训练过程中的内存碎片：
+首轮合并轨迹时按固定上限分配 CPU 内存池，后续轮次从索引 0 覆盖有效样本前缀，避免 Windows
+反复申请与释放数 GiB 连续内存造成提交量阶梯式增长。PPO 始终只读取本轮 `total_steps` 范围，
+不会读到上一轮残留尾部；内存告急时预检可释放已完成训练的旧池并复检，最终由 `close()` 统一释放：
 
 ```python
 class PPOTrainer:
-    def __init__(self):
-        # 预分配内存池
-        self.max_buffer_steps = self.update_timesteps + (self.num_workers * 1000)
+    def merge_rollouts(self, first_block):
+        # 首轮延迟分配，后续轮次复用并覆盖有效区
         self.merged_memory = {
             'action': torch.empty(self.max_buffer_steps, ...),
             'log_prob': torch.empty(self.max_buffer_steps, ...),
@@ -444,25 +445,24 @@ class PPOTrainer:
         }
 ```
 
-### 3. 共享内存槽与临时权重快照
+训练器会在 Worker 启动前、Worker 回收后、轨迹合并后和 PPO 更新后输出提交量、RSS、合并池及
+CUDA 内存快照；Worker 初始化对手后也会记录一次进程内存，便于区分 hist/ONNX 单轮峰值和主进程跨轮常驻量。
 
-Windows Spawn 模式不直接跨进程传递模型 Tensor。每轮开始时，Trainer 将当前规范权重
-写入临时 CPU 快照，Worker 通过 `weights_only=True` 加载；观测、动作结果、完整 logits
-和请求完成号使用 `share_memory_()` 创建的固定槽位交换：
+### 3. 共享内存槽与中央权重
+
+当前策略与 self 对手不在 Worker 内加载 PyTorch 权重；它们通过 ZMQ 请求中央模型，并以
+`share_memory_()` 创建的固定槽位交换观测、动作结果、完整 logits 和请求完成号：
 
 ```python
-# Trainer：生成本轮 CPU 权重快照
-torch.save(canonical_model_state_dict(model, to_cpu=True), weight_file)
-
-# Worker：受限加载，不把正式检查点协议用于内部临时文件
-weights = torch.load(weight_file, map_location="cpu", weights_only=True)
+# Worker：只发送请求身份，观测已写入对应共享槽
+socket.send(encode_inference_request(worker_id, request_id))
 
 # 高频观测与结果通过预分配共享内存槽传递
 shared_tensor.share_memory_()
 ```
 
-self 对手直接复制本轮权重；hist 对手只从同一 `model_id` 的正式 `.pth` 检查点加载，并在
-可用时优先挂载同轮次的完整 ONNX 制品。
+self 对手使用中央模型；hist 对手只从同一 `model_id` 的正式制品池选择，优先挂载同轮次完整
+ONNX，缺失或失效时才延迟加载 `.pth` 回退网络。
 
 ### 4. TF32 加速
 

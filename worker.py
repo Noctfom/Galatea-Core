@@ -14,6 +14,7 @@ import gc
 import struct
 import zmq
 import sys
+import psutil
 
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
@@ -60,6 +61,17 @@ ORT_NUMPY_DTYPES = {
     "tensor(float)": np.float32,
     "tensor(double)": np.float64,
 }
+
+
+def get_worker_process_memory_status():
+    """读取当前 Worker 的常驻集与 Windows 私有提交量，供对手后端审计"""
+    memory_info = psutil.Process(os.getpid()).memory_info()
+    private_bytes = getattr(
+        memory_info,
+        "private",
+        getattr(memory_info, "pagefile", memory_info.rss),
+    )
+    return int(memory_info.rss), int(private_bytes)
 
 
 def build_ort_inputs(session, tensor_dict):
@@ -382,6 +394,20 @@ def worker_process(
             opp_config,
             local_history_required=not use_onnx_p1,
         )
+        try:
+            worker_rss, worker_private = get_worker_process_memory_status()
+            opponent_type = str(opp_config.get("type", "self"))
+            if opponent_type == "hist":
+                opponent_backend = "hist/ONNX" if use_onnx_p1 else "hist/PyTorch"
+            else:
+                opponent_backend = opponent_type
+            print(
+                f"🧮 [Worker {worker_id} 内存] 对手后端 {opponent_backend} | "
+                f"提交 {worker_private / 1024**3:.2f} GiB | "
+                f"RSS {worker_rss / 1024**3:.2f} GiB"
+            )
+        except (OSError, psutil.Error) as memory_error:
+            print(f"⚠️ [Worker {worker_id}] 无法读取进程内存统计: {memory_error}")
 
         env = GalateaEnv()
         rollout_cursor = RolloutCursor()

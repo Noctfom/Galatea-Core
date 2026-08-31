@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.4.1**。
+> 文档适用于 **Galatea-Core v3.4.2**。
 
 ---
 
@@ -587,6 +587,8 @@ python main.py train --batch_size 4096
 
 Windows 会在每轮启动 Worker 前显示“系统提交余量”和“本轮安全需求”。如果预检拒绝启动，除减少
 Worker/Batch 外，还应关闭高内存程序或扩大系统页面文件；单纯增加 ZMQ 超时无法解决提交内存不足。
+正常训练会跨轮复用主进程轨迹合并池；只有预检余量不足时才释放已完成训练的旧池并复检一次。
+可对照“内存快照”和各 Worker 的“对手后端”日志，判断增长来自主进程常驻池还是 hist/ONNX 单轮峰值。
 
 ### Q3: Windows 下 torch.compile 报错
 

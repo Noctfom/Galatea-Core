@@ -30,7 +30,7 @@ set "PYTHONIOENCODING=utf-8"
 
 :: 3. 检查并自动补齐依赖，同时验证二进制包能够实际导入
 echo 正在核验一键包依赖完整性...
-.\python_env\python.exe environment_setup.py --repair --verify-imports
+.\python_env\python.exe environment_setup.py --repair --verify-imports --verify-runtime-assets --require-portable-python
 if errorlevel 1 (
     echo [错误] 一键包依赖检查或修复失败。
     echo 请检查网络连接后重试，或手动执行：
