@@ -19,14 +19,16 @@ except ImportError:
 from galatea_net import GalateaNet
 
 class AiBot:
-    def __init__(self, device='cpu', net_config=None):
+    def __init__(self, device='cpu', net_config=None, initialize_network=True):
+        """初始化 AI 控制器；中心推理 Worker 可跳过本地网络以节省内存"""
         if net_config is None:
             net_config = {'d_model': 256, 'n_heads': 4, 'n_layers': 2, 'vocab_size': 20000}
-            
-        self.net = GalateaNet(net_config).to(device)
+
+        self.net = GalateaNet(net_config).to(device) if initialize_network else None
         self.device = device
         self.encoder = FeatureEncoder()
-        self.net.eval() # 默认推理模式
+        if self.net is not None:
+            self.net.eval() # 默认推理模式
 
     def load_model(self, path, expected_model_id=None):
         """严格加载当前检查点，并可核验联盟训练要求的模型 UUID"""
@@ -61,6 +63,8 @@ class AiBot:
         """
         [训练专用 - Action Head版] 获取动作概率和价值
         """
+        if self.net is None:
+            raise RuntimeError("当前 AI 控制器未加载本地推理网络")
         # 1. 前向传播
         # logits: [B, MAX_ACTIONS] (已在网络内部Mask，无效动作是 -1e9)
         # value:  [B, 1]
@@ -78,6 +82,8 @@ class AiBot:
         return action, dist.log_prob(action), dist.entropy().mean(), value, v_input
 
     def get_decision(self, gamestate, msg_type, msg_args=None):
+        if self.net is None:
+            raise RuntimeError("当前 AI 控制器未加载本地推理网络")
         self.net.eval()
         snap = gamestate.get_snapshot(self.env)
         if not snap.valid_actions: return None

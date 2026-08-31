@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.4.0**。
+> 文档适用于 **Galatea-Core v3.4.1**。
 
 ---
 
@@ -584,6 +584,9 @@ python main.py train --workers 2
 # 方案 2: 降低 Batch Size
 python main.py train --batch_size 4096
 ```
+
+Windows 会在每轮启动 Worker 前显示“系统提交余量”和“本轮安全需求”。如果预检拒绝启动，除减少
+Worker/Batch 外，还应关闭高内存程序或扩大系统页面文件；单纯增加 ZMQ 超时无法解决提交内存不足。
 
 ### Q3: Windows 下 torch.compile 报错
 

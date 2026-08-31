@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.4.0**。
+> 文档适用于 **Galatea-Core v3.4.1**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -366,11 +366,12 @@ Worker 3 ──┘                                              ├──> Worke
 
 **优势**：
 
-- Worker 固定使用 CPU，不创建重复 CUDA 模型与上下文
+- Worker 固定使用 CPU；当前策略与 self 对手不创建重复的本地网络或 CUDA 上下文
 - 多个 Worker 固定共享一个中央推理服务
 - `device=auto/cpu/cuda` 只决定中央推理和 PPO 更新设备
 - `auto` 优先使用可用 CUDA，否则回落 CPU；显式 `cuda` 在不可用时会提前拒绝启动
 - ZMQ 只传递 Worker/请求编号，观测与结果通过共享内存槽交换，并校验 64 位完成号
+- Windows 会在拉起 Worker 前校验系统提交内存余量，资源不足时提前停止而不是让原生通讯库崩溃
 
 ---
 
@@ -513,7 +514,7 @@ class ONNXWrapper(torch.nn.Module):
 **核心优势**：
 - **完整制品组**：`.onnx`、其引用的 `.onnx.data` 与 `.artifacts.json` 一并保存和鉴权
 - **输入类型适配**：根据 ONNX Runtime 会话声明转换 FP16/FP32 等输入类型
-- **安全回退**：ONNX 不完整、身份不匹配或运行失败时，该 Worker 回退到历史 PTH 的 CPU 推理
+- **延迟安全回退**：ONNX 不完整、身份不匹配或运行失败时，才加载历史 PTH 执行 CPU 推理；正常 ONNX 路径不会同时常驻两套历史网络
 
 ---
 

@@ -4,6 +4,25 @@
 
 ---
 
+## [v3.4.1] - 2026-08-31
+
+### 🛡️ Windows Collection Stability and Memory Optimization
+
+- **Identified the WinSock 10055 root cause**: Confirmed that `No buffer space available` and the native libzmq assertions were not caused by a forced Rule game conflicting with a hist opponent. They were a cascade triggered when multiple workers, large rollout pools, and duplicate model copies exhausted the Windows commit limit
+- **Lightweight worker inference frontends**: The current policy and self opponents now retain only feature encoding and action-packing support inside workers. Full PyTorch networks that never performed local forwards are no longer created; central requests, opponent weights, and sampling distributions remain unchanged
+- **Removed redundant temporary weights**: Eliminated per-iteration creation, loading, and cleanup of `tmp_weights_iter_*.pt`, removing duplicate self-worker weight copies and unnecessary disk I/O without changing the formal PTH checkpoint protocol
+- **ONNX-first historical inference**: Hist workers first validate and mount ONNX artifacts carrying the model UUID, prefix, and iteration. A formal PTH fallback network is loaded only if ONNX is missing, cannot be initialized, or fails at runtime, so the normal path no longer keeps two historical models resident
+- **Safe fallback and resource cleanup**: An ONNX runtime failure changes only that worker's historical-opponent backend, while the affected episode follows the existing rollback rules. ZMQ contexts are created after large rollout-pool allocation and are safely released after partial initialization failures
+- **Windows commit-memory preflight**: Before workers start each iteration, the trainer reads current commit usage and limit, then estimates rollout-pool, worker-process, and trainer safety requirements. Insufficient headroom now produces a clear error before child-process creation instead of escalating into PyTorch OOM, WinSock 10055, or a libzmq assertion
+- **Regression coverage**: Added coverage for networkless workers, ONNX-first and lazy PTH fallback, commit-memory estimation, and removal of temporary weights; all 87 tests pass
+
+### 📚 Version and Documentation
+
+- Updated the bilingual Feature Guide, Architecture Guide, and changelog with the lightweight-worker, historical-model fallback, and Windows commit-limit protection behavior
+- Updated the displayed framework version, README badges, and `version.txt` to `3.4.1`
+
+---
+
 ## [v3.4.0] - 2026-08-31
 
 ### 🧠 Central Inference Architecture Refactor
@@ -12,7 +31,7 @@
 - **CPU-only workers**: Collection workers no longer accept a pseudo device option and never create CUDA contexts. The current policy and self opponents are both evaluated by central inference
 - **Real CPU/CUDA training modes**: Replaced the old device controls with `--device auto|cpu|cuda`, which selects the device for both central inference and PPO updates. `auto` prefers CUDA and falls back to CPU
 - **Device-specific optimization paths**: CUDA retains pinned memory, non-blocking transfers, TF32, BF16/FP16, and optional `torch.compile`; CPU uses ordinary memory, FP32, and phase-aware thread budgets
-- **Correct self/hist opponent split**: New-training self opponents copy the iteration's temporary weights directly instead of sending internal `.pt` files through the formal `.pth` checkpoint loader. Hist opponents continue to use UUID-authenticated formal checkpoints
+- **Correct self/hist opponent split**: New-training self opponents use the current iteration's policy weights instead of sending internal temporary `.pt` files through the formal `.pth` checkpoint loader. Hist opponents continue to use UUID-authenticated formal checkpoints
 
 ### 📚 Interfaces and Documentation
 
@@ -24,20 +43,65 @@
 
 ## [v3.3.1] ~ [v3.3.10] - 2026-06 to 2026-08
 
-The development releases below follow Git commit order; higher versions are closer to v3.4.0:
+The development releases below follow Git commit order; higher versions are closer to v3.4.0.
 
-| Version | Date | Commit | Summary |
-|---------|------|--------|---------|
-| v3.3.10dev | 2026-08-30 | `85a244e` | Improved abnormal-episode handling and added a single-Trainer process lock to prevent competing training processes |
-| v3.3.9dev | 2026-08-27 | `3a9c35a` | Hardened external imports; completed ONNX/PTH package, import, and embedded UUID validation; added filename, path, and archive boundaries |
-| v3.3.8dev | 2026-08-26 | `85b0027` | Fixed ONNX import failures; introduced dynamic model prefixes, automatic model UUIDs, and embedded iteration validation; separated absolute targets from additional-iteration semantics |
-| v3.3.7dev | 2026-08-25 | `92f9a16` | Fixed PPO mode-state VRAM retention; unified the deck-pair return contract; completed ONNX/external-data saving; added centralized training-parameter validation |
-| v3.3.6dev | 2026-08-25 | `f983d2d` | Refactored the ZMQ request/response pipeline; fixed socket rebuild and stale-result isolation after timeouts; completed one-click dependency checking and repair |
-| v3.3.5dev | 2026-08-24 | `81dda52` | Refactored resumed training; fixed strict restore for compiled models; corrected Arena model loading, action packing, and initialization return-value compatibility |
-| v3.3.4dev | 2026-08-24 | `641ec81` | Improved abnormal-episode rollback; fixed P0/P1 perspective and global-resource swapping; corrected snapshot synchronization and hidden-information leakage |
-| v3.3.3dev | 2026-06-27 | `175893f` | Optimized semantic-knowledge mounting and caching to eliminate concurrent-read failures |
-| v3.3.2dev | 2026-06-25 | `434ab39` | Merged external effect-code semantic models into the existing hash-deduplication path and training features |
-| v3.3.1dev | 2026-06-02 | `d072b67` | Added in-turn card-effect activation history, fixed snapshot cleanup, and added positional features for unknown cards |
+### [v3.3.10dev] - 2026-08-30 · `85a244e`
+
+- Unified AI, RuleBot, environment, and operating-system failures as abnormal episodes and rolled back all uncommitted trajectories from the affected game so partial samples cannot enter PPO updates
+- Added a cross-platform single-Trainer file lock with PID/run_id ownership metadata, preventing multiple trainers in the same project from competing for models, ports, and temporary files
+- Refactored WebUI background-process registration and shutdown. Zombie cleanup now targets only processes carrying this project's identity marker instead of scanning and killing every `python.exe` on the system
+
+### [v3.3.9dev] - 2026-08-27 · `3a9c35a`
+
+- Switched external PTH loading to restricted `weights_only` deserialization and reject unsafe globals, symlinks, non-regular files, invalid suffixes, and oversized files before loading. WebUI metadata inspection uses FakeTensor to avoid materializing full weights
+- Organized the model repository into embedded-`model_id` pools. Import, overwrite, and packaging paths verify UUID, prefix, iteration, and artifact manifests; deployment packaging rejects mismatched PTH and ONNX iterations
+- Added `.onnx.data` and `.artifacts.json` to complete ONNX artifact management, validating external-data paths, graph identity, and manifest consistency so real weights or files from another iteration cannot be omitted or mixed
+- Introduced an independent `.gkg` package protocol version plus safe-filename, reserved-name, path-traversal, symlink, duplicate-member, compression-bomb, member-count, and size limits. Imports use staging and atomic installation
+
+### [v3.3.8dev] - 2026-08-26 · `85b0027`
+
+- Added configurable model prefixes while retaining `galatea` as the default. CLI accepts a prefix for new training, WebUI exposes it in the model-architecture area, and resumed runs inherit a read-only value from the checkpoint
+- New training generates a random UUID `model_id`, while resumed training inherits its original identity. PTH, ONNX, and artifact manifests embed and cross-check UUID, prefix, and iteration; same-prefix/different-UUID files warn and cannot enter the historical pool
+- Added `CHECKPOINT_FORMAT_VERSION`, maintained independently from the framework version. WebUI warns about protocol mismatches and training entry points reject incompatible checkpoints
+- Split resume targets into absolute `--target-iteration` and relative `--additional-iterations` semantics in both CLI and WebUI, removing filename suffixes as an implicit source of the resume target
+- Fixed historical ONNX input dtype adaptation by following the runtime-declared FP16/FP32 types; historical opponents are selected by the same model UUID and the embedded iteration
+
+### [v3.3.7dev] - 2026-08-25 · `92f9a16`
+
+- Explicitly switches to `train()` for PPO updates and restores `eval()` whether the update succeeds or raises, fixing retained mode state that caused unexpected VRAM usage and later inference behavior
+- Standardized `deck_utils.get_random_deck_pair()`: success always returns five values and failure returns `None`, with training, Arena, and test callers updated together
+- Made ONNX export a complete-artifact operation: graph and `.onnx.data` are saved, validated, and tagged together. Every checkpoint records export-in-progress, complete, failed, or disabled status, and historical matches use only complete artifacts
+- Added centralized training-configuration validation for model/head divisibility, batch sizes, worker counts, timeouts, and PPO numeric parameters so invalid configurations fail before collection starts
+
+### [v3.3.6dev] - 2026-08-25 · `f983d2d`
+
+- Added iteration-scoped unique request IDs, shared completion IDs, and explicit success/error replies to central inference, preventing a timed-out request from reading stale results left by a previous request or iteration
+- On ZMQ send/receive timeout or protocol mismatch, workers close the old REQ socket, reconnect under a new identity, and discard results with uncertain ownership. The ROUTER rejects duplicate, stale, and superseded messages
+- Added one-click environment checking and repair to parse requirements, verify real imports, install missing packages, and configure portable-Python project paths; both the Windows bundle launcher and Linux setup flow use it
+
+### [v3.3.5dev] - 2026-08-24 · `81dda52`
+
+- Reordered resume initialization to load and validate the full checkpoint and network configuration first, strictly restore canonical weights before `torch.compile`, then restore optimizer, mixed-precision scaler, iteration, and training-step state
+- Canonicalized compiled-model `_orig_mod.` keys only during export and reject missing, unexpected, or compiler-private keys in stored checkpoints
+- Unified Arena action-candidate construction and response packing with training, fixing complex macro actions, padding-sentinel indices, empty legal-action sets, failed model loads, and inconsistent initialization return arity
+
+### [v3.3.4dev] - 2026-08-24 · `641ec81`
+
+- Added a rollout cursor that separates tentative from committed episode rows. Engine, parser, state-update, or AI failures roll back the entire episode; only terminal or validly truncated episodes commit, with observation/trajectory lengths checked
+- Made feature encoding explicitly actor-relative. P1 perspective now swaps LP, hand, graveyard, banished-zone, and other global resources, removing P0/P1 cognition asymmetry
+- Synchronized field snapshots from engine queries, prevented replacement cards from inheriting stale effect masks, and kept opponent face-down Extra Deck and banished cards hidden to block information leakage
+
+### [v3.3.3dev] - 2026-06-27 · `175893f`
+
+- Reworked semantic-knowledge mounting and caching to reuse loaded data, reduce duplicate concurrent Worker reads, and eliminate concurrent-read failures
+
+### [v3.3.2dev] - 2026-06-25 · `434ab39`
+
+- Merged the external card-effect-code semantic model into the existing hash-deduplication system and training features, avoiding duplicated semantics and split sources
+
+### [v3.3.1dev] - 2026-06-02 · `d072b67`
+
+- Added tracking for card effects activated during the current turn, corrected card-snapshot cleanup, and added location features for unknown cards to preserve necessary board context
 
 ---
 

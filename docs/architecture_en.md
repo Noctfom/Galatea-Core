@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.4.0**.
+> This document applies to **Galatea-Core v3.4.1**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -367,11 +367,12 @@ Worker 3 ──┘                                                              
 
 **Advantages**:
 
-- Workers always stay on CPU and do not create duplicate CUDA models or contexts
+- Workers always stay on CPU; the current policy and self opponents do not create duplicate local networks or CUDA contexts
 - Multiple workers always share one central inference service
 - `device=auto/cpu/cuda` only selects the central inference and PPO update device
 - `auto` prefers available CUDA and otherwise falls back to CPU; explicit `cuda` fails early when unavailable
 - ZMQ carries only worker/request identifiers; observations and results use shared-memory slots protected by 64-bit completion IDs
+- Windows validates system commit headroom before worker startup and stops early instead of allowing a native communication-library crash
 
 ---
 
@@ -517,7 +518,7 @@ class ONNXWrapper(torch.nn.Module):
 **Key Advantages**:
 - **Complete Artifact Bundle**: `.onnx`, referenced `.onnx.data`, and `.artifacts.json` are saved and authenticated together
 - **Input-Type Adaptation**: FP16/FP32 and other inputs are converted from ONNX Runtime session declarations
-- **Safe Fallback**: Incomplete, mismatched, or failing ONNX sessions fall back to historical PTH inference on CPU for that worker
+- **Lazy Safe Fallback**: A historical PTH network is loaded for CPU inference only when ONNX is incomplete, mismatched, or fails at runtime; the normal ONNX path does not keep both history engines resident
 
 ---
 

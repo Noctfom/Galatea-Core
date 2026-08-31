@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.4.0**.
+> This document applies to **Galatea-Core v3.4.1**.
 
 ---
 

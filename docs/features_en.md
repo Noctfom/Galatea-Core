@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.4.0**.
+> This document applies to **Galatea-Core v3.4.1**.
 
 ---
 
@@ -586,6 +586,11 @@ python main.py train --workers 2
 # Option 2: Reduce Batch Size
 python main.py train --batch_size 4096
 ```
+
+On Windows, each iteration reports system commit headroom and the estimated safe requirement before
+starting workers. If the preflight rejects startup, close memory-heavy applications or enlarge the
+system page file in addition to reducing workers/batch size; increasing the ZMQ timeout cannot fix
+commit exhaustion.
 
 ### Q3: Windows torch.compile error
 

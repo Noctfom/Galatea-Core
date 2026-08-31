@@ -78,6 +78,79 @@ CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
 VALUE_LOSS_COEF = 0.5   # 价值网络权中
 MAX_EPISODE_STEPS = 1500 # 单局最大步数，防止死循环
+WORKER_PROCESS_COMMIT_RESERVE_BYTES = 2 * 1024**3
+TRAINER_COMMIT_SAFETY_BYTES = 2 * 1024**3
+
+
+def get_windows_commit_status():
+    """读取 Windows 系统提交量与提交上限，其他平台返回空值"""
+    if os.name != "nt":
+        return None
+
+    import ctypes
+    from ctypes import wintypes
+
+    class PerformanceInformation(ctypes.Structure):
+        """映射 Windows GetPerformanceInfo 所需的内存统计结构"""
+
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("CommitTotal", ctypes.c_size_t),
+            ("CommitLimit", ctypes.c_size_t),
+            ("CommitPeak", ctypes.c_size_t),
+            ("PhysicalTotal", ctypes.c_size_t),
+            ("PhysicalAvailable", ctypes.c_size_t),
+            ("SystemCache", ctypes.c_size_t),
+            ("KernelTotal", ctypes.c_size_t),
+            ("KernelPaged", ctypes.c_size_t),
+            ("KernelNonpaged", ctypes.c_size_t),
+            ("PageSize", ctypes.c_size_t),
+            ("HandleCount", wintypes.DWORD),
+            ("ProcessCount", wintypes.DWORD),
+            ("ThreadCount", wintypes.DWORD),
+        ]
+
+    info = PerformanceInformation()
+    info.cb = ctypes.sizeof(info)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    get_performance_info = psapi.GetPerformanceInfo
+    get_performance_info.argtypes = [
+        ctypes.POINTER(PerformanceInformation),
+        wintypes.DWORD,
+    ]
+    get_performance_info.restype = wintypes.BOOL
+    if not get_performance_info(ctypes.byref(info), info.cb):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    page_size = int(info.PageSize)
+    return {
+        "total_bytes": int(info.CommitTotal) * page_size,
+        "limit_bytes": int(info.CommitLimit) * page_size,
+        "available_bytes": max(
+            0,
+            (int(info.CommitLimit) - int(info.CommitTotal)) * page_size,
+        ),
+    }
+
+
+def estimate_rollout_commit_requirement(
+    input_specs,
+    *,
+    steps_per_worker,
+    num_workers,
+):
+    """估算全部 Worker 轨迹池、进程基础空间和 Trainer 安全余量"""
+    bytes_per_step = 0
+    for shape, dtype in input_specs.values():
+        elements = 1
+        for dimension in shape:
+            elements *= int(dimension)
+        bytes_per_step += elements * torch.empty((), dtype=dtype).element_size()
+
+    max_worker_steps = int(steps_per_worker) + MAX_EPISODE_STEPS + 100
+    rollout_pool_bytes = bytes_per_step * max_worker_steps * int(num_workers)
+    process_reserve_bytes = WORKER_PROCESS_COMMIT_RESERVE_BYTES * int(num_workers)
+    return rollout_pool_bytes + process_reserve_bytes + TRAINER_COMMIT_SAFETY_BYTES
 
 
 def resolve_training_device(requested_device):
@@ -427,6 +500,7 @@ class PPOTrainer:
             'act_code': ((120,), torch.long),
             'act_place': ((120, 5), torch.long),
         }
+        self.input_specs = input_specs
 
         print("🧠 [Shared Memory] 正在开辟高带宽零拷贝多进程超导通道...")
         for _ in range(self.num_workers):
@@ -501,6 +575,35 @@ class PPOTrainer:
         if torch.get_num_threads() != desired_threads:
             torch.set_num_threads(desired_threads)
 
+    def _validate_rollout_commit_headroom(self, steps_per_worker):
+        """在 Windows 启动 Worker 前校验提交内存余量，避免原生库断言崩溃"""
+        try:
+            status = get_windows_commit_status()
+        except OSError as error:
+            print(f"⚠️ [内存预检] 无法读取 Windows 提交量，继续启动: {error}")
+            return
+        if status is None:
+            return
+
+        required_bytes = estimate_rollout_commit_requirement(
+            self.input_specs,
+            steps_per_worker=steps_per_worker,
+            num_workers=self.num_workers,
+        )
+        available_bytes = status["available_bytes"]
+        print(
+            "🧮 [内存预检] "
+            f"系统提交余量 {available_bytes / 1024**3:.1f} GiB | "
+            f"本轮安全需求约 {required_bytes / 1024**3:.1f} GiB"
+        )
+        if available_bytes < required_bytes:
+            raise MemoryError(
+                "Windows 提交内存不足，已在启动 Worker 前安全停止："
+                f"可用 {available_bytes / 1024**3:.1f} GiB，"
+                f"预计至少需要 {required_bytes / 1024**3:.1f} GiB。"
+                "请关闭高内存程序、扩大页面文件，或降低 Worker/批量规模。"
+            )
+
     def _restore_training_state(self, checkpoint):
         """严格恢复优化器、混合精度和训练进度状态"""
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -522,15 +625,6 @@ class PPOTrainer:
             self._configure_cpu_threads(for_policy_update=False)
         print(f"📥 [Iter {self.iteration}] 唤醒 {self.num_workers} 个工人 | 目标: {self.update_timesteps} 步")
         t0 = time.time()
-
-        cpu_weights = canonical_model_state_dict(self.agent.net, to_cpu=True)
-        
-        # 将权重写进硬盘，禁止通过多进程参数传递 Tensor
-        weight_file = f"tmp_weights_iter_{self.iteration}.pt"
-        torch.save(cpu_weights, weight_file)
-
-        del cpu_weights
-        import gc; gc.collect()
 
         # --- 联盟训练对手选择逻辑 ---
         # 只发现同一 UUID 的历史存档，禁止同前缀异模型混入联盟池
@@ -573,8 +667,9 @@ class PPOTrainer:
                 f"Worker {forced_rule_worker} 将先完成 1 局 Rule 对局后恢复原对手。"
             )
         # --------------------------------------
-        
+
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
+        self._validate_rollout_commit_headroom(steps_per_worker)
 
         # 🚀 启动工人
         processes = []
@@ -582,11 +677,10 @@ class PPOTrainer:
             # 根据配置，决定是否把通讯管道发给工人
             
             p = mp.Process(target=worker_process, args=(
-                i, 
+                i,
                 self.iteration,
-                self.net_config, 
-                weight_file,         
-                self.deck_dir, 
+                self.net_config,
+                self.deck_dir,
                 steps_per_worker,
                 self.zmq_port,
                 worker_opp_configs[i],
@@ -656,11 +750,6 @@ class PPOTrainer:
                     print(f"🚨 [内存危机] 可用内存仍然不足 ({available_gb:.1f}GB)，建议减少 Worker 数量或增加系统内存！")
         except Exception as mem_check_err:
             print(f"⚠️ 内存检查失败: {mem_check_err}")
-
-        # 把权重文件删掉
-        try: os.remove(weight_file)
-        except Exception as e: 
-            print(f"[trainer]⚠️ 无法删除权重文件 {weight_file}: {e}")
 
         # 3. 直接去硬盘收割
         file_list = []

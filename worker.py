@@ -118,8 +118,14 @@ def get_episode_abort_key(reason):
     return normalized.partition(":")[0]
 
 
-def create_worker_opponent_agent(current_agent, net_config, opp_config):
-    """按 self 或 hist 类型初始化 CPU 对手，并隔离临时权重与正式检查点"""
+def create_worker_opponent_agent(
+    current_agent,
+    net_config,
+    opp_config,
+    *,
+    local_history_required=True,
+):
+    """创建轻量对手控制器，仅在历史 ONNX 不可用时加载本地网络"""
     if opp_config.get("mode") != "ai":
         return None
 
@@ -132,23 +138,63 @@ def create_worker_opponent_agent(current_agent, net_config, opp_config):
     ):
         raise FileNotFoundError(f"历史对手检查点不存在: {opponent_path}")
 
-    opponent_agent = AiBot(device="cpu", net_config=net_config)
+    # P0/self 的所有网络前向都由中央服务执行，Worker 只需要编码与动作封包能力
+    opponent_agent = AiBot(
+        device="cpu",
+        net_config=net_config,
+        initialize_network=False,
+    )
     if opponent_type == "self":
-        current_state = {
-            key: value.detach().cpu()
-            for key, value in current_agent.net.state_dict().items()
-        }
-        opponent_agent.net.load_state_dict(current_state, strict=True)
-        opponent_agent.net.eval()
         return opponent_agent
 
-    if opponent_type == "hist":
+    if opponent_type == "hist" and local_history_required:
         if not opponent_agent.load_model(
             opponent_path,
             expected_model_id=opp_config.get("model_id"),
         ):
             raise RuntimeError(f"无法加载历史对手检查点: {opponent_path}")
+    return opponent_agent
+
+
+def create_historical_onnx_session(opp_config, cpu_threads):
+    """校验历史 ONNX 产物身份并创建受控 CPU 推理会话"""
+    opponent_path = opp_config.get("path")
+    if opp_config.get("type") != "hist" or not opponent_path:
+        raise ValueError("只有历史对手可以创建 ONNX 会话")
+
+    hist_onnx_path = os.path.splitext(opponent_path)[0] + ".onnx"
+    if not os.path.isfile(hist_onnx_path):
+        raise FileNotFoundError(f"历史 ONNX 主图不存在: {hist_onnx_path}")
+
+    describe_onnx_artifact(
+        hist_onnx_path,
+        require_complete=True,
+        expected_model_id=opp_config.get("model_id"),
+    )
+    import onnxruntime as ort
+
+    sess_options = ort.SessionOptions()
+    sess_options.intra_op_num_threads = max(1, int(cpu_threads))
+    session = ort.InferenceSession(
+        hist_onnx_path,
+        sess_options,
+        providers=["CPUExecutionProvider"],
+    )
+    return session, hist_onnx_path
+
+
+def ensure_historical_pytorch_fallback(opponent_agent, opp_config):
+    """按需加载历史 PTH 网络，供 ONNX 缺失或失效时继续推理"""
+    if opponent_agent is None or opp_config.get("type") != "hist":
+        raise RuntimeError("当前对手不支持历史 PyTorch 回退")
+    if opponent_agent.net is not None:
         return opponent_agent
+    if not opponent_agent.load_model(
+        opp_config.get("path"),
+        expected_model_id=opp_config.get("model_id"),
+    ):
+        raise RuntimeError(f"无法加载历史对手检查点: {opp_config.get('path')}")
+    return opponent_agent
 
 def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
     """独立的跨进程安全黑匣子：只写入专用文件，绝不干涉主进程日志"""
@@ -191,7 +237,6 @@ def worker_process(
     worker_id,
     iteration,
     net_config,
-    weight_file,
     deck_dir,
     target_steps,
     zmq_port=55555,
@@ -240,10 +285,10 @@ def worker_process(
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # [新增 ZMQ 连接初始化]
-    context = zmq.Context()
+    # 连接延迟到大型内存池分配完成后创建，避免初始化失败绕过统一清理
+    context = None
+    socket = None
     socket_generation = 0
-    socket = _create_inference_socket(context, worker_id, zmq_port, socket_generation)
     # 高 32 位使用训练轮次，避免新一轮 Worker 的请求号与上一轮重复。
     next_inference_request_id = int(iteration) << 32
 
@@ -283,9 +328,10 @@ def worker_process(
 
     use_onnx_p1 = False
     ort_session_p1 = None
+    opp_agent = None
 
     def run_historical_onnx(tensor_dict):
-        """运行历史 ONNX；首次异常后停用会话，让当前步骤回退到 PyTorch"""
+        """运行历史 ONNX；首次异常时延迟加载 PyTorch 回退网络"""
         nonlocal use_onnx_p1, ort_session_p1
         if not use_onnx_p1 or ort_session_p1 is None:
             return None
@@ -293,27 +339,50 @@ def worker_process(
             ort_inputs = build_ort_inputs(ort_session_p1, tensor_dict)
             return ort_session_p1.run(None, ort_inputs)
         except Exception as onnx_error:
+            use_onnx_p1 = False
+            ort_session_p1 = None
+            ensure_historical_pytorch_fallback(opp_agent, opp_config)
             print(
                 f"⚠️ [Worker {worker_id}] 历史对手 ONNX 运行失败，"
                 f"本 Worker 后续改用 PyTorch: {onnx_error}"
             )
-            use_onnx_p1 = False
-            ort_session_p1 = None
             return None
 
     try:
-        agent = AiBot(device='cpu', net_config=net_config)
-
-        #  从硬盘读取权重，斩断 Windows IPC 共享内存污染
-        if weight_file and isinstance(weight_file, str) and os.path.exists(weight_file):
-            weights = torch.load(weight_file, map_location='cpu', weights_only=True)
-            agent.net.load_state_dict(weights, strict=True)
-            agent.net.eval()
-        
-        # 对手类型在入口处分流，self 临时权重不会进入正式检查点加载器。
-        opp_agent = create_worker_opponent_agent(agent, net_config, opp_config)
-
         time.sleep(worker_id * 0.4) # 让 0~N 号工人错开 0.4 秒启动
+
+        # 中央推理模式下当前模型不在 Worker 本地执行，只保留编码器与动作封包器
+        agent = AiBot(
+            device='cpu',
+            net_config=net_config,
+            initialize_network=False,
+        )
+
+        if use_onnx and opp_config.get("type") == "hist":
+            try:
+                ort_session_p1, hist_onnx_path = create_historical_onnx_session(
+                    opp_config,
+                    cpu_threads,
+                )
+                use_onnx_p1 = True
+                print(
+                    f"🕰️ [Worker {worker_id}] 历史对手 ONNX 引擎 "
+                    f"({os.path.basename(hist_onnx_path)}) 挂载成功！"
+                )
+            except Exception as onnx_error:
+                print(
+                    f"⚠️ [Worker {worker_id}] 历史对手 ONNX 加载失败，"
+                    f"已回退到 PyTorch: {onnx_error}"
+                )
+
+        # ONNX 正常时只创建轻量历史控制器；缺失或关闭时仍加载原 PTH 网络
+        opp_agent = create_worker_opponent_agent(
+            agent,
+            net_config,
+            opp_config,
+            local_history_required=not use_onnx_p1,
+        )
+
         env = GalateaEnv()
         rollout_cursor = RolloutCursor()
         
@@ -357,39 +426,22 @@ def worker_process(
         gc.collect()
         
         for k, v in shared_buffers[worker_id].items():
-            shape = (max_len,) + v.shape 
+            shape = (max_len,) + v.shape
             columns['obs'][k] = torch.empty(shape, dtype=v.dtype)
+
+        context = zmq.Context()
+        socket = _create_inference_socket(
+            context,
+            worker_id,
+            zmq_port,
+            socket_generation,
+        )
 
         # print(f"👷 Worker {worker_id} 启动 | 目标: {target_steps} 步")
 
         while rollout_cursor.collected_steps < target_steps:
             if time.time() - worker_start_time > max_worker_uptime:
                 break
-
-            # --- [挂载对手引擎] 解决历史模型穿越的 Bug ---
-            if use_onnx and not use_onnx_p1:
-                if opp_config.get("type") == "hist" and opp_config.get("path"):
-                    # 如果是打历史模型，精准定位那个轮次的 .onnx
-                    hist_onnx_path = opp_config["path"].replace(".pth", ".onnx")
-                    if os.path.exists(hist_onnx_path):
-                        try:
-                            # 在创建运行时会话前确认所有外置权重都与主图同轮次且完整
-                            describe_onnx_artifact(
-                                hist_onnx_path,
-                                require_complete=True,
-                                expected_model_id=opp_config.get("model_id"),
-                            )
-                            import onnxruntime as ort
-                            sess_options = ort.SessionOptions()
-                            sess_options.intra_op_num_threads = torch.get_num_threads()
-                            ort_session_p1 = ort.InferenceSession(hist_onnx_path, sess_options, providers=['CPUExecutionProvider'])
-                            use_onnx_p1 = True
-                            print(f"🕰️ [Worker {worker_id}] 历史对手 ONNX 引擎 ({os.path.basename(hist_onnx_path)}) 挂载成功！")
-                        except Exception as onnx_error:
-                            print(
-                                f"⚠️ [Worker {worker_id}] 历史对手 ONNX 加载失败，"
-                                f"已回退到 PyTorch: {onnx_error}"
-                            )
 
             episode_opp_config, force_rule_episode = select_episode_opponent_config(
                 opp_config,
@@ -1308,7 +1360,8 @@ def worker_process(
                     batch_data[k] = None
                 batch_data = None
             
-            # 4. 清理 AI 代理
+            # 4. 清理历史推理会话与 AI 控制器
+            ort_session_p1 = None
             if 'agent' in dir() and agent is not None:
                 agent = None
             if 'opp_agent' in dir() and opp_agent is not None:
@@ -1322,9 +1375,11 @@ def worker_process(
         
         # 关闭 ZMQ 连接
         try:
-            socket.setsockopt(zmq.LINGER, 0) 
-            socket.close(linger=0)
-            context.term()
+            if socket is not None:
+                socket.setsockopt(zmq.LINGER, 0)
+                socket.close(linger=0)
+            if context is not None:
+                context.term()
         except Exception:
             pass
         
