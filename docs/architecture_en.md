@@ -2,6 +2,8 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
+> This document applies to **Galatea-Core v3.4.0**.
+
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
 ---
@@ -348,19 +350,28 @@ To prevent strategy degradation, mixed opponent training is used:
 | Historical Models | 25% | Prevent forgetting old strategies |
 | RuleBot | 15% | Baseline anchor, ensure basic ability |
 
-### Async Inference Server
+Opponent types are first assigned by worker-level weights. If no worker draws RuleBot for an
+iteration, one AI worker is selected in rotation and its first game is temporarily forced to
+RuleBot; it then resumes its original self/hist configuration. This preserves weighted randomness
+while preventing small worker pools from missing the rules baseline for several iterations. When no
+historical checkpoint exists, the hist share naturally falls back to self-play.
+
+### Central Batched Inference Service
 
 ```
 Worker 1 ──┐
-Worker 2 ──┼──> Request Queue ──> GPU Inference Server ──> Response Queue ─┬──> Worker 1
+Worker 2 ──┼──> ZMQ Request ──> CPU/CUDA Central Inference ──> Shared Result ─┬──> Worker 1
 Worker 3 ──┘                                                                ├──> Worker 2
                                                                              └──> Worker 3
 ```
 
 **Advantages**:
-- Workers don't need to load model into VRAM
-- Multiple workers share a single GPU inference service
-- VRAM usage reduced by 70%+
+
+- Workers always stay on CPU and do not create duplicate CUDA models or contexts
+- Multiple workers always share one central inference service
+- `device=auto/cpu/cuda` only selects the central inference and PPO update device
+- `auto` prefers available CUDA and otherwise falls back to CPU; explicit `cuda` fails early when unavailable
+- ZMQ carries only worker/request identifiers; observations and results use shared-memory slots protected by 64-bit completion IDs
 
 ---
 
@@ -401,7 +412,7 @@ class DuelState:
 
 ## Performance Optimization Techniques
 
-### 1. Mixed Precision Training
+### 1. CUDA Mixed Precision Training
 
 ```python
 # Auto-detect hardware capability
@@ -414,6 +425,8 @@ else:
 with torch.amp.autocast('cuda', dtype=self.amp_dtype):
     logits, values, v_input = self.agent.net(batch)
 ```
+
+CPU mode stays in FP32 and does not enable CUDA autocast, GradScaler, or pinned memory.
 
 ### 2. Static Memory Pool
 
@@ -431,18 +444,27 @@ class PPOTrainer:
         }
 ```
 
-### 3. Weight Sharing
+### 3. Shared-Memory Slots and Temporary Weight Snapshots
 
-In Windows Spawn mode, use `share_memory_()` so all child processes share the same model weights:
+Windows Spawn mode does not pass model tensors directly between processes. At the start of each
+iteration, the Trainer writes a canonical CPU weight snapshot which workers load with
+`weights_only=True`. Observations, action results, full logits, and completion IDs use fixed
+`share_memory_()` slots:
 
 ```python
-# Main process
-weights = model.state_dict()
-for v in weights.values():
-    v.share_memory_()
+# Trainer: create the iteration's CPU weight snapshot
+torch.save(canonical_model_state_dict(model, to_cpu=True), weight_file)
 
-# Child processes directly use shared memory weights
+# Worker: restricted load; internal temporary files do not use the formal checkpoint protocol
+weights = torch.load(weight_file, map_location="cpu", weights_only=True)
+
+# High-frequency observations and results use preallocated shared-memory slots
+shared_tensor.share_memory_()
 ```
+
+Self opponents copy the current iteration's weights directly. Hist opponents load only formal
+`.pth` checkpoints from the same `model_id`, preferring a complete same-iteration ONNX artifact
+when available.
 
 ### 4. TF32 Acceleration
 
@@ -454,9 +476,9 @@ if torch.cuda.get_device_capability()[0] >= 8:
     torch.backends.cudnn.allow_tf32 = True
 ```
 
-### 5. ZMQ Zero-Copy IPC (new in v3.2.0)
+### 5. ZMQ Request Routing and Shared-Memory IPC
 
-Replaced old pipe-based communication with ZeroMQ ROUTER micro-batching architecture for drastically reduced collection latency:
+ZeroMQ ROUTER carries request routing while large tensors remain in shared memory, reducing serialization and copy overhead:
 
 ```python
 context = zmq.Context()
@@ -465,13 +487,15 @@ socket.setsockopt(zmq.ROUTER_HANDOVER, 1)  # Auto load balancing
 ```
 
 **Key Advantages**:
-- **Micro-Batching**: Multiple worker inference requests are aggregated into a single batch submitted to GPU at once, reducing scheduling overhead
-- **Pinned Memory DMA**: Data pre-allocated in pinned memory (`tensor.pin_memory()`), asynchronous CPU↔GPU transfers via `non_blocking=True` without blocking main thread
-- **Collection Time Halved**: Overall data collection time reduced by approximately 50% compared to the old pipe-based approach
+- **Micro-Batching**: Multiple worker requests are aggregated into one batch on the selected training device
+- **Device-Aware Staging**: CUDA uses pinned memory and `non_blocking=True`; CPU uses ordinary memory and synchronous copies
+- **Timeout Isolation**: Requests include the iteration and a local sequence; a timeout or mismatched response rebuilds the worker socket without reading stale results
 
 ### 6. ONNX Inference Acceleration (new in v3.2.0)
 
-PyTorch model automatically exported to ONNX computation graph during training, Workers use ONNX Runtime for high-speed inference:
+With `--use_onnx`, ONNX is exported synchronously at each 10-iteration checkpoint. Workers use
+ONNX Runtime only for historical opponents; the current policy and self opponents continue through
+central inference:
 
 ```python
 # Main process exports ONNX synchronously
@@ -487,13 +511,13 @@ class ONNXWrapper(torch.nn.Module):
         logits, values, _ = self.net(batch_dict)
         return logits, values
 
-# Worker loads ONNX model for inference, no need to import PyTorch model
+# Worker validates graph, external data, UUID, and iteration before loading historical ONNX
 ```
 
 **Key Advantages**:
-- **Zero VRAM Inference**: Workers use ONNX Runtime for CPU inference, consuming no GPU VRAM at all
-- **Graph Optimization**: Computation graph-level fusion optimization during ONNX export eliminates redundant operators
-- **Significant Speedup**: Data collection throughput improved by 30%+ on mid-range GPUs
+- **Complete Artifact Bundle**: `.onnx`, referenced `.onnx.data`, and `.artifacts.json` are saved and authenticated together
+- **Input-Type Adaptation**: FP16/FP32 and other inputs are converted from ONNX Runtime session declarations
+- **Safe Fallback**: Incomplete, mismatched, or failing ONNX sessions fall back to historical PTH inference on CPU for that worker
 
 ---
 

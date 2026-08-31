@@ -2,6 +2,8 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
+> This document applies to **Galatea-Core v3.4.0**.
+
 ---
 
 ## 📋 Table of Contents
@@ -92,6 +94,8 @@ Configure and launch AI training tasks.
 **Checkpoint Loader**:
 - Select existing `.pth` model to resume training
 - Select "None" to train from scratch
+- New training accepts a filename prefix, while `model_id` is an automatically generated UUID with no manual edit control
+- Resume inherits UUID, prefix, embedded iteration, and network architecture from the checkpoint and checks directory identity conflicts
 
 **Model Architecture Parameters**:
 | Parameter | Description | Default |
@@ -107,13 +111,15 @@ Configure and launch AI training tasks.
 |-----------|-------------|---------|
 | Target Iterations | Total training iterations | 5000 |
 | Batch Size | Steps per update | 4096 |
-| Mini Batch | GPU training batch | 512 |
+| Mini Batch | PPO update batch | 512 |
 | Workers | Parallel processes | 4 |
-| Worker Device | Device for worker inference | cpu |
+| Training Device | auto / cpu / cuda | auto |
 
 **Advanced Toggles**:
-- **Async Inference**: Central GPU server for inference, drastically saves VRAM
-- **Disable Compile**: Must enable on Windows
+- **Central Batched Inference**: Always enabled; all workers stay on CPU
+- **Disable Compile**: Recommended on Windows or when the compiler toolchain is incomplete
+- **Export ONNX**: Export synchronously at every 10-iteration checkpoint for historical opponents in workers
+- **Standard Core**: Enable for custom OCGCore builds without ghost bytes
 
 ##### 🏟️ Start Arena (Duel)
 
@@ -281,6 +287,9 @@ Model storage is grouped by embedded `model_id`, then by embedded iteration. ONN
 uploads must include both the graph and every referenced `.onnx.data` file. Deleting
 an iteration removes its PTH, ONNX, external data, and artifact manifest together.
 
+The WebUI warns about the same prefix with different UUIDs, or one UUID with multiple prefixes.
+Resume and overwrite authorization always use the embedded UUID rather than trusting filenames alone.
+
 ![Storage & Logs](图片/存储与日志仓库.png)
 
 ---
@@ -369,13 +378,24 @@ python main.py train [options]
 | `--n_layers` | Transformer layers | 2 |
 | `--resume` | Checkpoint to resume from | - |
 | `--batch_size` | Steps per collection | 4096 |
-| `--mini_batch` | GPU training batch | 512 |
+| `--mini_batch` | PPO update batch | 512 |
 | `--workers` | Parallel processes | 4 |
-| `--worker_device` | Worker device | cpu |
-| `--async_infer` | Enable async inference | - |
-| `--use_onnx` | Enable ONNX inference acceleration | - |
+| `--device` | Main training device (auto / cpu / cuda) | auto |
+| `--timeout` | Worker collection timeout; must be greater than 30 seconds | 300 |
+| `--use_onnx` | Export ONNX at checkpoints and accelerate historical opponents | - |
 | `--no_compile` | Disable compilation | - |
 | `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
+| `--gamma` | Discount factor | 0.998 |
+| `--lr` | Learning rate | 1e-4 |
+| `--entropy` | Entropy regularization coefficient | 0.03 |
+| `--gae_lambda` | GAE smoothing coefficient | 0.95 |
+| `--clip_eps` | PPO clipping threshold | 0.2 |
+
+`--target-iteration` and `--additional-iterations` are mutually exclusive. Resume requires one
+of them explicitly; new training defaults to 1,000 additional iterations when both are omitted.
+`--model-prefix` accepts only letters, digits, underscores, and hyphens, and cannot override the
+checkpoint prefix during resume.
+
 **Examples**:
 
 ```bash
@@ -390,17 +410,17 @@ python main.py train \
   --batch_size 16384 \
   --mini_batch 512 \
   --workers 6 \
+  --device auto \
   --d_model 512 \
   --n_heads 8 \
   --n_layers 6 \
-  --async_infer \
   --no_compile
 
 # Resume training
 python main.py train \
   --resume ./models/galatea_iter_100.pth \
   --target-iteration 5000 \
-  --async_infer \
+  --device auto \
   --no_compile
 ```
 
@@ -517,11 +537,11 @@ Extract `.gkg` packages and import into current system:
 | Parameter | Description | Resource Impact |
 |-----------|-------------|-----------------|
 | `batch_size` | Steps per collection | ⬆️ **RAM** (primary) — larger = more stable but needs more memory |
-| `mini_batch` | GPU training batch | ⬆️ **VRAM** (primary) — larger = faster updates |
+| `mini_batch` | PPO update batch | Mainly VRAM in CUDA mode and RAM in CPU mode |
 | `workers` | Parallel processes | ⬆️ **RAM** (primary) — adjust by CPU cores, typically 4-12 |
 | `timeout` | Worker single-collection timeout | Prevents zombie processes, default 300s, large decks can use 600s |
-| `async_infer` | Async inference | ⬇️ **VRAM** (significant savings) — GPU centralized inference, workers don't load model |
-| `use_onnx` | ONNX inference acceleration | ⬆️ **Collection Speed** (30%+ faster) — Workers use ONNX Runtime for high-speed inference |
+| `device` | Main training device | `auto` prefers CUDA; `cpu` is CPU-only; workers always use CPU |
+| `use_onnx` | Historical-opponent ONNX inference | Exports complete ONNX artifacts synchronously at checkpoints and falls back to historical PTH on failure |
 | `no_compile` | Disable compilation | Recommended for Windows or legacy environments |
 
 #### RL Soul Hyperparameters (Deep Tuning)
@@ -532,7 +552,7 @@ These parameters can be adjusted in WebUI or CLI for fine-grained PPO algorithm 
 |-----------|----------|-------------|---------|---------------|
 | Discount Factor | `--gamma` | Future reward weighting | 0.998 | Higher = more emphasis on long-term, good for long games |
 | Learning Rate | `--lr` | Neural plasticity speed | 1e-4 | Too high = unstable, too low = slow convergence |
-| Exploration Coef | `--entropy` | Curiosity/exploration strength | 0.03 | Encourages trying new actions, auto-decays with training |
+| Exploration Coef | `--entropy` | Curiosity/exploration strength | 0.03 | Encourages trying new actions and stays at the configured value during training |
 | GAE Lambda | `--gae_lambda` | Generalized Advantage Estimation λ | 0.95 | Balances bias-variance tradeoff, generally don't change |
 | PPO Clip Epsilon | `--clip_eps` | Policy update clipping threshold | 0.2 | Limits single update magnitude, prevents overshooting |
 
@@ -545,8 +565,8 @@ These parameters can be adjusted in WebUI or CLI for fine-grained PPO algorithm 
 **Solutions**:
 
 ```bash
-# Option 1: Enable async inference (recommended)
-python main.py train --async_infer --worker_device cpu
+# Option 1: Switch to CPU-only training
+python main.py train --device cpu
 
 # Option 2: Reduce mini_batch
 python main.py train --mini_batch 256
@@ -575,15 +595,15 @@ python main.py train --batch_size 4096
 
 **Possible causes and solutions**:
 
-1. **No GPU**: Ensure PyTorch correctly detects CUDA
+1. **No GPU**: Use `--device auto` and ensure PyTorch detects CUDA
 2. **Too many workers**: Reduce `--workers`
-3. **Async inference not enabled**: Add `--async_infer`
+3. **CPU thread contention**: Reduce workers to leave cores for central inference and PPO updates
 
 ### Q5: Model not converging
 
 **Possible causes and solutions**:
 
-1. **Learning rate too high**: Adjust `LR` parameter in `trainer.py`
+1. **Learning rate too high**: Lower `--lr` or the corresponding WebUI value
 2. **Batch too small**: Increase `--batch_size`
 3. **Too few decks**: Add more decks to `decks/` directory
 

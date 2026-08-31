@@ -26,7 +26,7 @@ def validate_training_config(
     update_timesteps,
     mini_batch_size,
     num_workers,
-    worker_device,
+    training_device,
     worker_timeout,
     gamma,
     learning_rate,
@@ -52,8 +52,8 @@ def validate_training_config(
     if mini_batch_size > update_timesteps:
         raise ValueError("mini_batch_size must not exceed update_timesteps")
 
-    if worker_device not in {"cpu", "cuda"}:
-        raise ValueError("worker_device must be either 'cpu' or 'cuda'")
+    if training_device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("training_device must be 'auto', 'cpu' or 'cuda'")
 
     _require_finite_number("worker_timeout", worker_timeout)
     if worker_timeout <= 30:

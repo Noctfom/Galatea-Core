@@ -2,6 +2,8 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
+> 文档适用于 **Galatea-Core v3.4.0**。
+
 ---
 
 ## 📋 目录
@@ -91,6 +93,8 @@
 **存档加载器**：
 - 选择已有的 `.pth` 模型文件继续训练
 - 选择 "None" 从零开始训练
+- 新训练可设置模型前缀，`model_id` 由框架自动生成 UUID，不提供手动修改入口
+- 恢复训练会从检查点继承 UUID、前缀、内置轮次与网络架构，并校验目录中的身份冲突
 
 **模型架构参数**：
 | 参数 | 说明 | 默认值 |
@@ -106,13 +110,15 @@
 |------|------|--------|
 | 目标轮数 | 训练总迭代次数 | 5000 |
 | 总经验池 | 每次更新前采集的步数 | 4096 |
-| 切片大小 | GPU 训练批量 | 512 |
+| 切片大小 | PPO 单次训练批量 | 512 |
 | 进程数 | 并行采集进程数 | 4 |
-| 推理设备 | Worker 使用的设备 | cpu |
+| 训练设备 | auto / cpu / cuda | auto |
 
 **高级开关**：
-- **异步推断**：启用 GPU 服务器集中处理推理，大幅节省显存
-- **禁用编译**：Windows 系统必须开启
+- **中央批量推理**：固定启用；所有 Worker 固定使用 CPU
+- **禁用编译**：Windows 或编译器环境不完整时建议开启
+- **导出 ONNX**：每 10 轮保存点同步导出，供历史对手在 Worker 端使用
+- **标准内核**：自编译 OCGCore 不含幽灵字节时启用
 
 ##### 🏟️ 发起竞技 (Duel)
 
@@ -280,6 +286,9 @@
 时必须同时提供主图和其引用的 `.onnx.data`；删除轮次会同步删除该轮次的 PTH、
 ONNX、外置权重和制品清单。
 
+若目录中出现“同一前缀、不同 UUID”或“同一 UUID、多个前缀”，WebUI 会显示身份告警；
+恢复训练和覆盖写入始终以内置 UUID 为鉴权依据，而不是只相信文件名。
+
 ![存储与日志仓库](图片/存储与日志仓库.png)
 
 ---
@@ -368,13 +377,23 @@ python main.py train [选项]
 | `--n_layers` | Transformer 层数 | 2 |
 | `--resume` | 恢复训练的检查点 | - |
 | `--batch_size` | 采集总步数 | 4096 |
-| `--mini_batch` | GPU 训练批量 | 512 |
+| `--mini_batch` | PPO 单次训练批量 | 512 |
 | `--workers` | 并行进程数 | 4 |
-| `--worker_device` | Worker 设备 | cpu |
-| `--async_infer` | 启用异步推断 | - |
-| `--use_onnx` | 启用 ONNX 推理加速 | - |
+| `--device` | 训练主设备（auto / cpu / cuda） | auto |
+| `--timeout` | Worker 单轮采集超时（必须大于 30 秒） | 300 |
+| `--use_onnx` | 保存点同步导出 ONNX，并加速历史对手推理 | - |
 | `--no_compile` | 禁用编译 | - |
 | `--standard_core` | 关闭幽灵字节解析（自编译内核用） | - |
+| `--gamma` | 折扣因子 | 0.998 |
+| `--lr` | 学习率 | 1e-4 |
+| `--entropy` | 熵正则系数 | 0.03 |
+| `--gae_lambda` | GAE 平滑系数 | 0.95 |
+| `--clip_eps` | PPO 截断阈值 | 0.2 |
+
+`--target-iteration` 与 `--additional-iterations` 互斥。恢复训练必须显式选择其中一种；
+新训练两者都省略时默认追加 1000 轮。`--model-prefix` 只允许字母、数字、下划线和短横线，
+恢复训练时不得改写检查点中的前缀。
+
 **示例**：
 
 ```bash
@@ -389,17 +408,17 @@ python main.py train \
   --batch_size 16384 \
   --mini_batch 512 \
   --workers 6 \
+  --device auto \
   --d_model 512 \
   --n_heads 8 \
   --n_layers 6 \
-  --async_infer \
   --no_compile
 
 # 恢复训练
 python main.py train \
   --resume ./models/galatea_iter_100.pth \
   --target-iteration 5000 \
-  --async_infer \
+  --device auto \
   --no_compile
 ```
 
@@ -516,11 +535,11 @@ python deploy_tool.py
 | 参数 | 说明 | 调优关联 |
 |------|------|----------|
 | `batch_size` | 采集总步数 | ⬆️ **内存**（主要）—— 越大训练越稳定，但需要更多内存 |
-| `mini_batch` | GPU 训练批量 | ⬆️ **显存**（主要）—— 越大更新越快 |
+| `mini_batch` | PPO 单次训练批量 | CUDA 模式主要占用显存；CPU 模式主要占用内存 |
 | `workers` | 并行进程数 | ⬆️ **内存**（主要）—— 根据 CPU 核心数调整，通常 4-12 |
 | `timeout` | Worker 单次采集超时 | 防止进程僵死，默认 300s，大型卡组可设 600s |
-| `async_infer` | 异步推断 | ⬇️ **显存**（大幅节省）—— GPU 集中推理，Worker 不加载模型 |
-| `use_onnx` | ONNX 推理加速 | ⬆️ **采集速度**（提升 30%+）—— Worker 端使用 ONNX Runtime 进行极速推理 |
+| `device` | 训练主设备 | `auto` 优先 CUDA；`cpu` 仅用 CPU；Worker 始终使用 CPU |
+| `use_onnx` | 历史对手 ONNX 推理 | 保存点同步导出完整 ONNX 制品；运行失败时自动回退历史 PTH |
 | `no_compile` | 禁用编译 | Windows 或老旧环境建议启用 |
 
 #### RL 灵魂超参数（深层调优）
@@ -531,7 +550,7 @@ python deploy_tool.py
 |------|--------|------|--------|----------|
 | 目光长远度 | `--gamma` | 折扣因子 (Gamma) | 0.998 | 越高越重视远期收益，适合长盘对局 |
 | 学习率 | `--lr` | 大脑神经元重塑速度 (LR) | 1e-4 | 太高训练震荡，太低收敛缓慢 |
-| 探索系数 | `--entropy` | 探索欲/好奇心强度 | 0.03 | 鼓励 AI 尝试新操作，会随训练自动衰减 |
+| 探索系数 | `--entropy` | 探索欲/好奇心强度 | 0.03 | 鼓励 AI 尝试新操作；训练中保持设定值 |
 | 经验平滑度 | `--gae_lambda` | GAE (广义优势估计) λ | 0.95 | 平衡预测的偏差和方差，一般不用改 |
 | 单次顿悟上限 | `--clip_eps` | PPO 截断阈值 (Clip ε) | 0.2 | 限制单次策略更新幅度，防止学"飘"了 |
 
@@ -544,8 +563,8 @@ python deploy_tool.py
 **解决方案**：
 
 ```bash
-# 方案 1: 启用异步推断（推荐）
-python main.py train --async_infer --worker_device cpu
+# 方案 1: 切换为仅 CPU 训练
+python main.py train --device cpu
 
 # 方案 2: 降低mini_batch
 python main.py train --mini_batch 256
@@ -576,15 +595,15 @@ python main.py train --batch_size 4096
 
 **可能原因和解决方案**：
 
-1. **没有使用 GPU**：确保 PyTorch 正确识别了 CUDA
+1. **没有使用 GPU**：使用 `--device auto` 并确保 PyTorch 正确识别 CUDA
 2. **Worker 数量过多**：减少 `--workers` 参数
-3. **没有开启异步推断**：添加 `--async_infer` 参数
+3. **CPU 线程竞争**：减少 Worker 数量，为中央推理和 PPO 更新保留核心
 
 ### Q5: 模型训练不收敛
 
 **可能原因和解决方案**：
 
-1. **学习率过高**：修改 `trainer.py` 中的 `LR` 参数
+1. **学习率过高**：通过 `--lr` 或 WebUI 调低学习率
 2. **批量太小**：增大 `--batch_size` 参数
 3. **卡组太少**：添加更多卡组到 `decks/` 目录
 

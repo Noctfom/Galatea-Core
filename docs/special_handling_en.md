@@ -2,6 +2,8 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
+> This document applies to **Galatea-Core v3.4.0**.
+
 ---
 
 ## 📋 Table of Contents

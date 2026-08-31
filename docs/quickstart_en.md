@@ -2,6 +2,8 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
+> This document applies to **Galatea-Core v3.4.0**.
+
 ---
 
 ## 📋 Table of Contents
@@ -24,25 +26,24 @@
 
 ### Windows Users
 
-Double-click `一键包启动Webui.bat`. Browser opens automatically at `http://localhost:8501`.
+Double-click `一键包启动Webui.bat`. The launcher verifies and repairs dependencies before opening
+`http://127.0.0.1:8501`.
 
 ![One-Click Launch](图片/一键包启动窗口.png)
 
-> 💡 If browser doesn't open, manually visit `http://localhost:8501`
+> 💡 If the browser does not open, manually visit `http://127.0.0.1:8501`
 
 ### Linux Users
 
-Use the bundled Python environment to launch WebUI:
+Use the repository setup script to create the environment and launch the desired mode:
 
 ```bash
-# Enter project directory
 cd Galatea-Core
-
-# Use built-in python_env to launch Streamlit
-./python_env/bin/python -m streamlit run app.py --server.headless=true --browser.gatherUsageStats=false
+chmod +x setup.sh
+./setup.sh               # Install dependencies and launch WebUI
+./setup.sh --train       # Install dependencies and launch CLI training
+./setup.sh --duel        # Install dependencies and launch Arena
 ```
-
-> ⚠️ Linux `ocgcore.so` is not fully tested. Report engine issues on GitHub Issues.
 
 ---
 
@@ -147,28 +148,34 @@ Galatea-Core's training parameters are divided into three tiers:
 | Tier | Parameters | Characteristics |
 |------|-----------|-----------------|
 | 🧠 **Brain Structure** | `d_model`, `n_heads`, `n_layers` | Like AI's brain capacity — fixed after definition (model architecture is locked) |
-| ⚙️ **Training Config** | `batch_size`, `mini_batch`, `workers`, `timeout`, `async_infer`, `no_compile`, plus RL hyperparameters below | Can be freely adjusted when resuming training |
+| ⚙️ **Training Config** | `batch_size`, `mini_batch`, `workers`, `timeout`, `device`, `no_compile`, plus RL hyperparameters below | Can be freely adjusted when resuming training |
 | 🗂️ **Environment Config** | Deck weights, virtual pools, staple pool | Fully decoupled from training module, adjustable in real-time during training |
 
 > ℹ️ When resuming, brain structure params are auto-locked from checkpoint. Training and environment configs can be freely modified.
+
+> 🔐 New training automatically generates a read-only UUID. Resume inherits the UUID, model prefix,
+> and embedded iteration. Filenames are descriptive; resume progress follows embedded metadata. The
+> WebUI warns and rejects direct resume when the checkpoint protocol version differs.
 
 ### Parameter Quick Reference
 
 | Parameter | Description | Beginner | Memory/VRAM Impact |
 |-----------|-------------|----------|---------------------|
 | **Checkpoint Loader** | "None" = train from scratch | None | - |
-| **d_model** | 🧠 Feature dimension (bigger = smarter) | 256 | ⬆️ VRAM |
-| **n_heads** | 🧠 Attention heads (more = broader reference) | 4 | ⬆️ VRAM |
-| **n_layers** | 🧠 Transformer layers (more = deeper thinking) | 2 | ⬆️ VRAM |
-| **Target Iterations** | Total training iterations | 1000+ | - |
+| **Model Prefix** | Output prefix for new models; inherited on resume | galatea | - |
+| **d_model** | 🧠 Feature dimension (larger = more capacity) | 256 | ⬆️ RAM/VRAM |
+| **n_heads** | 🧠 Attention heads | 4 | ⬆️ RAM/VRAM |
+| **n_layers** | 🧠 Transformer layers | 2 | ⬆️ RAM/VRAM |
+| **Iteration Mode** | Train to an absolute iteration or add iterations from a checkpoint | Add 1000 | - |
 | **Batch Size** | Steps per collection | 4096 | ⬆️ RAM (primary) |
-| **Mini Batch** | GPU training batch | 256-512 | ⬆️ VRAM (primary) |
+| **Mini Batch** | PPO update batch | 256-512 | VRAM in CUDA mode; RAM in CPU mode |
 | **Workers** | Parallel worker processes | 4 (by CPU cores) | ⬆️ RAM (primary) |
 | **Timeout** | Worker single-collection timeout | 300s | - |
-| **Async Inference** | ✅ Enable (saves VRAM) | On | ⬇️ VRAM |
-| **Disable Compile** | ✅ Enable (Windows required) | On | - |
+| **Training Device** | auto / cpu / cuda | auto | Controls central inference and PPO device |
+| **Export ONNX** | Synchronous historical-opponent export at checkpoints | As needed | Extra storage |
+| **Disable Compile** | Recommended on Windows | On | - |
 
-> 💡 **RAM/VRAM Tuning Rule**: `batch_size` and `workers` consume RAM, `mini_batch` consumes VRAM. If RAM blows up, reduce workers first. If VRAM blows up, reduce mini_batch or enable async inference. batch_size relates to learning smoothness (total training data volume) — don't set it too low. workers and mini_batch are more about speed optimization. Worker count must not exceed physical CPU cores! Can reduce appropriately when async inference is enabled.
+> 💡 **RAM/VRAM Tuning Rule**: `batch_size` and `workers` mainly consume RAM. In CUDA mode, `mini_batch` mainly consumes VRAM. Reduce workers for RAM pressure, reduce mini_batch or use `device=cpu` for VRAM pressure. Central batched inference is always enabled, and worker count should not exceed physical CPU cores.
 
 ### Recommended Configurations
 
@@ -182,6 +189,7 @@ Galatea-Core's training parameters are divided into three tiers:
 | Batch Size | 2048 |
 | Mini Batch | 128 |
 | Workers | 2 |
+| Training Device | cpu or auto |
 | Timeout | 300 |
 
 #### 🏆 Full Training (Competitive)
@@ -194,13 +202,14 @@ Galatea-Core's training parameters are divided into three tiers:
 | Batch Size | 16384 |
 | Mini Batch | 256 |
 | Workers | 6-8 |
+| Training Device | auto (prefers CUDA) |
 | Timeout | 600 |
 
 Click **🔥 Start Training Process**.
 
 ![Launch & Monitor Hub](图片/启动与监控中枢.png)
 
-> 📖 Full CLI parameter reference: [Feature Guide - CLI Mode](features.md#命令行模式)
+> 📖 Full CLI parameter reference: [Feature Guide - CLI Mode](features_en.md#cli-mode)
 
 ---
 

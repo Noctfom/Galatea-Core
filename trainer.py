@@ -14,21 +14,16 @@ import numpy as np
 import random
 import gc
 import threading
-import queue
 import glob
 import pandas as pd
 import zmq
-import shutil
 import psutil
 import sys
-
-from torch.utils.data import DataLoader, Dataset
+from contextlib import nullcontext
 from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
-import struct
 
 from galatea_env import GalateaEnv
-from gamestate import MessageParser, DuelState
 from worker import worker_process
 from ai_bot import AiBot
 from checkpoint_utils import (
@@ -61,9 +56,6 @@ from training_validation import (
     validate_model_prefix,
     validate_training_config,
 )
-import deck_utils
-import rule_bot 
-from feature_encoder import MAX_CARDS as MAX_SEQ_LEN
 # [新增] 头部
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning) # 屏蔽 PyTorch 2.0 啰嗦的警告
@@ -88,6 +80,38 @@ VALUE_LOSS_COEF = 0.5   # 价值网络权中
 MAX_EPISODE_STEPS = 1500 # 单局最大步数，防止死循环
 
 
+def resolve_training_device(requested_device):
+    """解析训练设备，并在显式请求不可用 CUDA 时提前拒绝启动"""
+    if requested_device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("training_device must be 'auto', 'cpu' or 'cuda'")
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("已选择 CUDA 训练，但当前 PyTorch 环境无法使用 CUDA")
+    if requested_device == "auto":
+        requested_device = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.device(requested_device)
+
+
+def training_autocast(device, amp_dtype):
+    """仅在 CUDA 训练时启用混合精度，CPU 始终保持 FP32"""
+    if device.type == "cuda":
+        return torch.amp.autocast("cuda", dtype=amp_dtype)
+    return nullcontext()
+
+
+def select_league_opponent_config(roll, historical_models, model_id):
+    """按联盟权重选择 Worker 基础对手，新模型无历史池时自动回落到 self"""
+    if roll < 0.15:
+        return {"mode": "rule", "type": "rule", "path": None}
+    if roll < 0.40 and historical_models:
+        return {
+            "mode": "ai",
+            "type": "hist",
+            "path": random.choice(historical_models),
+            "model_id": model_id,
+        }
+    return {"mode": "ai", "type": "self", "path": None}
+
+
 def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
     """当本轮没有 Rule Worker 时，为轮换的 AI Worker 追加一局 Rule 配额。"""
     if not worker_opp_configs:
@@ -110,28 +134,19 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
     worker_opp_configs[worker_index] = worker_config
     return worker_index
 
-def worker_wrapper(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, result_q, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4):
-    """用于原生 Process 的安全包装器，防止 DLL 崩溃导致主进程死锁"""
-    try:
-        from worker import worker_process
-        res = worker_process(worker_id, net_config, weights, deck_dir, target_steps, device, req_q, resp_q, worker_timeout=worker_timeout, gamma=gamma, gae_lambda=gae_lambda, num_workers=num_workers)
-        result_q.put((worker_id, res))
-    except Exception as e:
-        print(f"Worker {worker_id} 发生异常退出: {e}")
-        result_q.put((worker_id, None))
-
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, worker_device='cpu', async_infer=False, compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
         self.mini_batch_size = mini_batch_size
         self.num_workers = num_workers
-        self.worker_device = worker_device
-        self.async_infer = async_infer
+        self.requested_training_device = training_device
         self.use_onnx = use_onnx
         self.server_stop_event = threading.Event()
+        self.infer_thread = None
+        self._closed = False
 
         # 默认配置
         if net_config is None:
@@ -191,7 +206,7 @@ class PPOTrainer:
             update_timesteps=self.update_timesteps,
             mini_batch_size=self.mini_batch_size,
             num_workers=self.num_workers,
-            worker_device=self.worker_device,
+            training_device=self.requested_training_device,
             worker_timeout=self.worker_timeout,
             gamma=self.gamma,
             learning_rate=self.lr,
@@ -226,12 +241,29 @@ class PPOTrainer:
                     f"{namespace_files}"
                 )
 
-        # 硬件检查与黑科技自动配置
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.amp_dtype = torch.float16 # 默认兼容老显卡
+        # 训练主进程可选 CPU/CUDA，所有采集 Worker 固定使用 CPU
+        self.device = resolve_training_device(self.requested_training_device)
+        self.amp_dtype = torch.float32
+        self.transfer_non_blocking = self.device.type == 'cuda'
         self.enable_compile = compile_model
+        self.physical_cpu_cores = psutil.cpu_count(logical=False) or 1
+        logical_cpu_threads = psutil.cpu_count(logical=True) or self.physical_cpu_cores
+        if self.device.type == 'cpu':
+            # CPU 训练时给中央推理和每个 Worker 各留一份物理核心预算
+            self.collection_cpu_threads = max(
+                1,
+                self.physical_cpu_cores // (self.num_workers + 1),
+            )
+            self.worker_cpu_threads = self.collection_cpu_threads
+        else:
+            self.collection_cpu_threads = torch.get_num_threads()
+            self.worker_cpu_threads = max(
+                1,
+                logical_cpu_threads // self.physical_cpu_cores,
+            )
 
         if self.device.type == 'cuda':
+            self.amp_dtype = torch.float16 # 默认兼容老显卡
             # 1. 开启 TF32 (30/40/50系福利)
             if torch.cuda.get_device_capability()[0] >= 8:
                 torch.backends.cuda.matmul.allow_tf32 = True
@@ -247,9 +279,13 @@ class PPOTrainer:
                 print("ℹ️ [Auto] 不支持 BF16: 回退至 Float16")
 
         # 探针：看看实例化模型前，显卡到底还有多少空余显存
-        if torch.cuda.is_available():
+        if self.device.type == 'cuda':
             free, total = torch.cuda.mem_get_info()
             print(f"🖥️ 探针报告 -> 当前显卡可用显存: {free / 1024**3:.2f} GB / {total / 1024**3:.2f} GB")
+        print(
+            f"🧭 训练设备: {self.device.type.upper()} | "
+            "Worker: CPU | 中央批量推理: 固定启用"
+        )
         
         # 清理上一次意外中断留下的临时文件
         print("🧹 正在清理上一次训练遗留的临时通讯文件...")
@@ -259,16 +295,18 @@ class PPOTrainer:
             except Exception as e: 
                 print(f"[trainer]⚠️ 无法删除临时文件 {f}: {e}")
 
-        # 始终先在未编译模型上严格恢复参数，再创建优化器并启用编译。
+        # 始终先在未编译模型上严格恢复参数，再创建优化器并启用编译
         self.agent = AiBot(device=self.device, net_config=self.net_config)
         self.agent.net.train()
         if resume_checkpoint is not None:
             restore_model_state_strict(self.agent.net, resume_checkpoint)
 
         self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
-        # 初始化 Scaler (BF16时其实不需要缩放，但为了代码通用，我们保留它)
-        # 使用新版 API，指定设备类型 'cuda'
-        self.scaler = torch.amp.GradScaler('cuda', enabled=(self.amp_dtype == torch.float16))
+        # 只有 CUDA FP16 需要梯度缩放；CPU 与 CUDA BF16 均保持关闭
+        self.scaler = torch.amp.GradScaler(
+            'cuda',
+            enabled=(self.device.type == 'cuda' and self.amp_dtype == torch.float16),
+        )
 
         self.global_step = 0
         self.iteration = 0
@@ -416,21 +454,27 @@ class PPOTrainer:
             self.shared_response_ids.append(response_id_t)
 
         self.pinned_batch_buffers = {}
-        print("📌 [Pinned Memory] 正在为主进程注入高效锁页多路聚合批处理器...")
+        if self.device.type == 'cuda':
+            print("📌 [Pinned Memory] 正在创建 CUDA 锁页聚合缓冲区...")
+        else:
+            print("📌 [CPU Staging] 正在创建 CPU 聚合缓冲区...")
         for k, (shape, dtype) in input_specs.items():
-            # 一次性开辟物理连续、支持极速 DMA 异步搬运的 (num_workers, *dims) 锁页张量
-            self.pinned_batch_buffers[k] = torch.zeros((self.num_workers, *shape), dtype=dtype).pin_memory()
+            # CUDA 使用锁页内存异步搬运；CPU 使用普通内存，避免无加速器环境报错
+            staging_buffer = torch.zeros(
+                (self.num_workers, *shape),
+                dtype=dtype,
+            )
+            if self.device.type == 'cuda':
+                staging_buffer = staging_buffer.pin_memory()
+            self.pinned_batch_buffers[k] = staging_buffer
 
         # [新增 ZMQ 配置]
         self.zmq_port = 55555  # 固定一个端口
 
-        if self.async_infer:
-            self._start_inference_server()
-        else:
-            self.req_q = None
+        self._start_inference_server()
 
     def _start_inference_server(self):
-        """启动异步推理线程，并接通宏动作第一遍推理所需的共享分数槽"""
+        """启动固定的中央批量推理线程，并接通所有共享结果槽"""
         self.infer_thread = threading.Thread(
             target=self.inference_server,
             args=(
@@ -445,16 +489,37 @@ class PPOTrainer:
         )
         self.infer_thread.start()
 
+    def _configure_cpu_threads(self, *, for_policy_update):
+        """按采集或 PPO 更新阶段调整 CPU 线程数，避免多进程过度争抢"""
+        if self.device.type != 'cpu':
+            return
+        desired_threads = (
+            self.physical_cpu_cores
+            if for_policy_update
+            else self.collection_cpu_threads
+        )
+        if torch.get_num_threads() != desired_threads:
+            torch.set_num_threads(desired_threads)
+
     def _restore_training_state(self, checkpoint):
         """严格恢复优化器、混合精度和训练进度状态"""
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        scaler_state = checkpoint['scaler_state_dict']
+        if self.scaler.is_enabled():
+            if scaler_state:
+                self.scaler.load_state_dict(scaler_state)
+            else:
+                print("ℹ️ 当前启用 CUDA FP16，但检查点没有缩放器状态，将使用全新状态。")
+        elif scaler_state:
+            print("ℹ️ 当前设备不需要梯度缩放，已忽略检查点中的缩放器状态。")
         self.iteration = int(checkpoint['iteration'])
         self.global_step = int(checkpoint['global_step'])
         self.train_step = int(checkpoint['train_step'])
         print(f"✅ 恢复成功! Iter: {self.iteration} | Train_Step: {self.train_step}")
 
     def collect_rollouts(self):
+        if self.device.type == 'cpu':
+            self._configure_cpu_threads(for_policy_update=False)
         print(f"📥 [Iter {self.iteration}] 唤醒 {self.num_workers} 个工人 | 目标: {self.update_timesteps} 步")
         t0 = time.time()
 
@@ -490,21 +555,13 @@ class PPOTrainer:
         
         worker_opp_configs = []
         for i in range(self.num_workers):
-            roll = random.random()
-            if roll < 0.15:
-                # 15% 几率：对抗 RuleBot (基准锚点)
-                worker_opp_configs.append({"mode": "rule", "type": "rule", "path": None})
-            elif roll < 0.40 and historical_models:
-                # 25% 几率：对抗历史随机模型 (防止策略退化)
-                worker_opp_configs.append({
-                    "mode": "ai",
-                    "type": "hist",
-                    "path": random.choice(historical_models),
-                    "model_id": self.model_id,
-                })
-            else:
-                # 60% 几率：自对局 (追求当前最优对抗)
-                worker_opp_configs.append({"mode": "ai", "type": "self", "path": weight_file})
+            worker_opp_configs.append(
+                select_league_opponent_config(
+                    random.random(),
+                    historical_models,
+                    self.model_id,
+                )
+            )
 
         forced_rule_worker = ensure_rule_opponent_coverage(
             worker_opp_configs,
@@ -519,10 +576,6 @@ class PPOTrainer:
         
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
 
-        if self.async_infer:
-            pass # 异步模式不需要额外的标记机制，服务器会根据 ZMQ 请求自动识别和处理最新的权重文件
-            #self.current_iter_id.value = self.iteration  # 更新当前轮次标记，供服务器过滤过期请求
-
         # 🚀 启动工人
         processes = []
         for i in range(self.num_workers):
@@ -535,13 +588,12 @@ class PPOTrainer:
                 weight_file,         
                 self.deck_dir, 
                 steps_per_worker,
-                self.worker_device,
                 self.zmq_port,
                 worker_opp_configs[i],
                 self.worker_timeout,
                 self.gamma,
                 self.gae_lambda,
-                self.num_workers,
+                self.worker_cpu_threads,
                 self.shared_buffers,  # 新增直传
                 self.shared_outputs,  
                 self.worker_events,
@@ -554,7 +606,7 @@ class PPOTrainer:
             p.start()
             processes.append(p)
             
-        print(f"   ... {'异步 GPU Server' if self.async_infer else '纯本地 CPU'} 运算中 ...")
+        print(f"   ... 中央批量推理服务 ({self.device.type.upper()}) 运算中 ...")
         
         # 等待工人自然死亡
         start_wait = time.time()
@@ -876,16 +928,27 @@ class PPOTrainer:
                     if not requests:
                         continue
 
-                    # --- 4. GPU 极限推推演 (动态切片) ---
+                    # --- 4. 中央设备微批推理 (动态切片) ---
                     for k in self.pinned_batch_buffers.keys():
                         for wid in requests:
                             self.pinned_batch_buffers[k][wid].copy_(shared_buffers[wid][k])
                     
                     active_indices = torch.tensor(requests, dtype=torch.long)
-                    batch_obs = {k: v[active_indices].to(self.device, non_blocking=True).detach() for k, v in self.pinned_batch_buffers.items()}
+                    transfer_non_blocking = getattr(
+                        self,
+                        'transfer_non_blocking',
+                        self.device.type == 'cuda',
+                    )
+                    batch_obs = {
+                        k: v[active_indices].to(
+                            self.device,
+                            non_blocking=transfer_non_blocking,
+                        ).detach()
+                        for k, v in self.pinned_batch_buffers.items()
+                    }
                     
                     # 核心大一统前向前向图计算
-                    with torch.amp.autocast('cuda', dtype=self.amp_dtype):
+                    with training_autocast(self.device, self.amp_dtype):
                         with torch.no_grad():
                             logits, values, v_input = self.agent.net(batch_obs)
                             
@@ -936,6 +999,7 @@ class PPOTrainer:
         在已启用训练模式的前提下，将 CPU 数据分批送入设备更新参数
         """
         print("🔥 Training PPO (Action Head Mode)...")
+        self._configure_cpu_threads(for_policy_update=True)
         
         # 直接从静态缓冲池中切出有效数据
         cpu_obs = self.merged_memory['obs']
@@ -984,16 +1048,19 @@ class PPOTrainer:
                 
                 #循环内：使用 .copy_() 零拷贝写入，绝对不改变内存指针
                 for k, v in cpu_obs.items():
-                    gpu_mb_obs[k].copy_(v[mb_idx], non_blocking=True)
-                
-                gpu_actions.copy_(cpu_actions[mb_idx], non_blocking=True)
-                gpu_old_log_probs.copy_(cpu_log_probs[mb_idx], non_blocking=True)
-                gpu_returns.copy_(cpu_returns[mb_idx], non_blocking=True)
-                gpu_advs.copy_(cpu_advantages[mb_idx], non_blocking=True)
+                    gpu_mb_obs[k].copy_(
+                        v[mb_idx],
+                        non_blocking=self.transfer_non_blocking,
+                    )
+
+                gpu_actions.copy_(cpu_actions[mb_idx], non_blocking=self.transfer_non_blocking)
+                gpu_old_log_probs.copy_(cpu_log_probs[mb_idx], non_blocking=self.transfer_non_blocking)
+                gpu_returns.copy_(cpu_returns[mb_idx], non_blocking=self.transfer_non_blocking)
+                gpu_advs.copy_(cpu_advantages[mb_idx], non_blocking=self.transfer_non_blocking)
                 
 
                 # --- 网络前向传播与反向传播 (完全保持原样) ---
-                with torch.amp.autocast('cuda', dtype=self.amp_dtype):
+                with training_autocast(self.device, self.amp_dtype):
                     logits, values, v_input = self.agent.net(gpu_mb_obs)
                     values = values.squeeze(1)
 
@@ -1071,7 +1138,7 @@ class PPOTrainer:
                 # 强制呼叫系统底层的垃圾车
                 import gc
                 gc.collect()
-                if torch.cuda.is_available(): 
+                if self.device.type == 'cuda':
                     torch.cuda.empty_cache()
 
             else:
@@ -1139,7 +1206,25 @@ class PPOTrainer:
             print(f"⏱️ Iteration {self.iteration} finished in {dt:.1f}s")
 
         print("🏁 训练结束！")
-    
+
+    def close(self):
+        """停止中央推理线程并释放日志、环境和设备资源"""
+        if self._closed:
+            return
+        self._closed = True
+        self.server_stop_event.set()
+        if self.infer_thread is not None:
+            self.infer_thread.join(timeout=5.0)
+            if self.infer_thread.is_alive():
+                print("⚠️ 中央推理线程未在 5 秒内退出，将随主进程结束。")
+        if hasattr(self, 'writer') and self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
+        if hasattr(self, 'env') and self.env is not None:
+            self.env._close_duel()
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+
     def _export_onnx_sync(self, clean_state, current_iter):
         """同步导出 ONNX，并核验所有外置权重文件均已生成"""
         artifact_stem = model_artifact_stem(self.model_prefix, current_iter)
@@ -1223,5 +1308,8 @@ if __name__ == "__main__":
 
     with TrainerProcessLock() as training_lock:
         trainer = PPOTrainer()
-        training_lock.set_run_id(trainer.run_id)
-        trainer.run_training_loop(additional_iterations=1000)
+        try:
+            training_lock.set_run_id(trainer.run_id)
+            trainer.run_training_loop(additional_iterations=1000)
+        finally:
+            trainer.close()

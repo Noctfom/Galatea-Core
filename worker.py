@@ -13,7 +13,6 @@ import os
 import gc
 import struct
 import zmq
-import psutil
 import sys
 
 from galatea_env import GalateaEnv
@@ -105,21 +104,51 @@ def _create_inference_socket(context, worker_id, zmq_port, generation):
     socket.connect(f"{ZMQ_ADDR}{zmq_port}")
     return socket
 
-def setup_optimal_cpu_threads():
-    # 获取物理核心数
-    physical_cores = psutil.cpu_count(logical=False) or 1
-    # 获取逻辑线程数
-    logical_threads = psutil.cpu_count(logical=True) or 1
-    
-    # 计算超线程倍率 (通常是 2)
-    ht_ratio = logical_threads // physical_cores
-    
-    threads_per_worker = ht_ratio 
-    
+def setup_optimal_cpu_threads(cpu_threads):
+    """按 Trainer 分配的预算限制单个 Worker 的 CPU 线程数"""
+    threads_per_worker = max(1, int(cpu_threads))
     torch.set_num_threads(threads_per_worker)
     torch.set_num_interop_threads(1)
-    
     return threads_per_worker
+
+
+def get_episode_abort_key(reason):
+    """提取异常局的稳定类别，避免动态错误细节绕过连续异常熔断"""
+    normalized = str(reason or "unknown episode error").strip()
+    return normalized.partition(":")[0]
+
+
+def create_worker_opponent_agent(current_agent, net_config, opp_config):
+    """按 self 或 hist 类型初始化 CPU 对手，并隔离临时权重与正式检查点"""
+    if opp_config.get("mode") != "ai":
+        return None
+
+    opponent_type = opp_config.get("type")
+    if opponent_type not in {"self", "hist"}:
+        raise ValueError(f"不支持的 AI 对手类型: {opponent_type!r}")
+    opponent_path = opp_config.get("path")
+    if opponent_type == "hist" and (
+        not opponent_path or not os.path.isfile(opponent_path)
+    ):
+        raise FileNotFoundError(f"历史对手检查点不存在: {opponent_path}")
+
+    opponent_agent = AiBot(device="cpu", net_config=net_config)
+    if opponent_type == "self":
+        current_state = {
+            key: value.detach().cpu()
+            for key, value in current_agent.net.state_dict().items()
+        }
+        opponent_agent.net.load_state_dict(current_state, strict=True)
+        opponent_agent.net.eval()
+        return opponent_agent
+
+    if opponent_type == "hist":
+        if not opponent_agent.load_model(
+            opponent_path,
+            expected_model_id=opp_config.get("model_id"),
+        ):
+            raise RuntimeError(f"无法加载历史对手检查点: {opponent_path}")
+        return opponent_agent
 
 def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
     """独立的跨进程安全黑匣子：只写入专用文件，绝不干涉主进程日志"""
@@ -158,8 +187,29 @@ def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
         # 哪怕发生极端情况的并发踩踏，也静默吞下异常，保证 Worker 能够顺利走完后续的销毁流程
         pass
 
-def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, target_steps, device='cpu',zmq_port=55555,opp_config=None, worker_timeout=300, gamma=GAMMA, gae_lambda=GAE_LAMBDA, num_workers=4,shared_buffers=None, shared_outputs=None, worker_events=None, use_onnx=False,shared_logits=None, standard_core=False, shared_response_ids=None):
-    
+def worker_process(
+    worker_id,
+    iteration,
+    net_config,
+    weight_file,
+    deck_dir,
+    target_steps,
+    zmq_port=55555,
+    opp_config=None,
+    worker_timeout=300,
+    gamma=GAMMA,
+    gae_lambda=GAE_LAMBDA,
+    cpu_threads=1,
+    shared_buffers=None,
+    shared_outputs=None,
+    worker_events=None,
+    use_onnx=False,
+    shared_logits=None,
+    standard_core=False,
+    shared_response_ids=None,
+):
+    """在固定 CPU Worker 中运行对局采集并请求中央模型推理"""
+
     try:
         from system_logger import setup_global_logger
         # 让每个 Worker 生成自己专属的日志文件，比如 worker_0_2023xxxx.log
@@ -183,14 +233,12 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
         ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
     # =========================================================================
     
-    setup_optimal_cpu_threads()
+    setup_optimal_cpu_threads(cpu_threads)
 
     seed = (int(time.time() * 1000) % (2**31)) + (os.getpid() * 100) + worker_id
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
     # [新增 ZMQ 连接初始化]
     context = zmq.Context()
@@ -200,7 +248,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
     next_inference_request_id = int(iteration) << 32
 
     def request_central_result(result_slot, phase):
-        """请求中心推理；连接异常时重建 Socket，并阻止读取旧共享结果。"""
+        """请求中心推理；连接异常时重建 Socket，并阻止读取旧共享结果"""
         nonlocal socket, socket_generation, next_inference_request_id
         next_inference_request_id += 1
         request_id = next_inference_request_id
@@ -254,35 +302,24 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
             return None
 
     try:
-        agent = AiBot(device=device, net_config=net_config)
+        agent = AiBot(device='cpu', net_config=net_config)
 
         #  从硬盘读取权重，斩断 Windows IPC 共享内存污染
         if weight_file and isinstance(weight_file, str) and os.path.exists(weight_file):
-            weights = torch.load(weight_file, map_location=device, weights_only=True)
+            weights = torch.load(weight_file, map_location='cpu', weights_only=True)
             agent.net.load_state_dict(weights, strict=True)
             agent.net.eval()
         
-        # --- 新增：对手代理 P1 初始化 ---
-        opp_agent = None
-        if opp_config["mode"] == "ai":
-            opp_agent = AiBot(device='cpu', net_config=net_config)
-            opp_path = opp_config["path"]
-            if opp_path and os.path.exists(opp_path):
-                if not opp_agent.load_model(
-                    opp_path,
-                    expected_model_id=opp_config.get("model_id"),
-                ):
-                    raise RuntimeError(f"无法加载历史对手检查点: {opp_path}")
-            else:
-                cpu_state_dict = {k: v.cpu() for k, v in agent.net.state_dict().items()}
-                opp_agent.net.load_state_dict(cpu_state_dict, strict=True)
-                opp_agent.net.eval()
+        # 对手类型在入口处分流，self 临时权重不会进入正式检查点加载器。
+        opp_agent = create_worker_opponent_agent(agent, net_config, opp_config)
 
         time.sleep(worker_id * 0.4) # 让 0~N 号工人错开 0.4 秒启动
         env = GalateaEnv()
         rollout_cursor = RolloutCursor()
         
         consecutive_ai_fails = 0 # 死亡熔断计数器
+        consecutive_aborted_episodes = 0
+        last_episode_abort_key = None
 
         worker_start_time = time.time()
         # 给 Worker 留出充足的保存时间 (至少 30s)，防止 torch.save 大文件时被 p.terminate() 抢先杀掉
@@ -721,7 +758,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                             # 混合推理架构
                             t_ipc_anchor = time.time()
                             
-                            # 【大一统分流点 B】主特工回合或自对局对手，全部绑上超导通道
+                            # 【大一统分流点 B】主特工回合或自对局对手，统一请求中央推理服务
                             if is_training_agent or (
                                 episode_opp_config["mode"] == "ai"
                                 and episode_opp_config["type"] == "self"
@@ -975,13 +1012,33 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                 rollout_cursor.rollback_episode()
                 game_buffer[0].clear()
                 game_buffer[1].clear()
+                abort_key = get_episode_abort_key(episode_abort_reason)
+                if abort_key == last_episode_abort_key:
+                    consecutive_aborted_episodes += 1
+                else:
+                    last_episode_abort_key = abort_key
+                    consecutive_aborted_episodes = 1
                 print(
                     f"⚠️ [Worker {worker_id}] 异常对局已回滚 {discarded_rows} 条未提交样本: "
                     f"{episode_abort_reason}"
                 )
+                try:
+                    env._close_duel()
+                except Exception:
+                    pass
                 if stop_worker_after_episode:
                     break
+                if consecutive_aborted_episodes >= 3:
+                    print(
+                        f"💀 [Worker {worker_id}] 连续 3 局发生同类异常 "
+                        f"({abort_key})，停止当前 Worker 防止日志和 CPU 空转。"
+                    )
+                    break
+                time.sleep(min(1.0, 0.2 * (2 ** (consecutive_aborted_episodes - 1))))
                 continue
+
+            consecutive_aborted_episodes = 0
+            last_episode_abort_key = None
 
             # --- 结算与 GAE ---
             if winner != -1 or ep_steps >= MAX_EPISODE_STEPS:
@@ -1085,7 +1142,7 @@ def worker_process(worker_id, iteration, net_config, weight_file, deck_dir, targ
                     print(f"对手类型: {opp_type} | 胜负结果: {'胜' if winner == train_p_id else '负' if winner == opp_p_id else '平'} | 最终奖励: {final_reward:.2f}")
                     print(f"   ├── 🧱 [环境/底盘] C++执行与解包: {perf_ledger['t_cpp_env']:.2f}s ({perf_ledger['t_cpp_env']/safe_t*100:.1f}%)")
                     print(f"   ├── 📐 [表征/特征] Encoder 矩阵生成: {perf_ledger['t_encoder']:.2f}s ({perf_ledger['t_encoder']/safe_t*100:.1f}%)")
-                    print(f"   ├── 📡 [多进程管道] ZMQ+GPU推理(P0): {perf_ledger['t_zmq_p0']:.2f}s ({perf_ledger['t_zmq_p0']/safe_t*100:.1f}%)")
+                    print(f"   ├── 📡 [多进程管道] ZMQ+中央推理(P0): {perf_ledger['t_zmq_p0']:.2f}s ({perf_ledger['t_zmq_p0']/safe_t*100:.1f}%)")
                     print(f"   ├── 💻 [本地推理] P1对手CPU推演 : {perf_ledger['t_cpu_p1']:.2f}s ({perf_ledger['t_cpu_p1']/safe_t*100:.1f}%)")
                     print(f"   ├── 👁️ [意图感知] Pass1 预查表耗时 : {perf_ledger['t_pass1_cpu']:.2f}s ({perf_ledger['t_pass1_cpu']/safe_t*100:.1f}%)")
                     print(f"   └── 🧠 [参谋部/规则] RuleBot 穷举打分: {perf_ledger['t_rule_bot']:.2f}s ({perf_ledger['t_rule_bot']/safe_t*100:.1f}%)")

@@ -2,6 +2,8 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
+> 文档适用于 **Galatea-Core v3.4.0**。
+
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
 ---
@@ -348,19 +350,27 @@ def _hash_code_block(self, code_block):
 | 历史模型 | 25% | 防止遗忘旧策略 |
 | RuleBot | 15% | 基准锚点，确保基本能力 |
 
-### 异步推断服务器
+对手类型先按 Worker 权重分配。若本轮没有抽到 RuleBot，系统会轮换选择一个 AI
+Worker，将它的首局临时改为 RuleBot 对局，提交后恢复原本的 self/hist 配置。这样既保留
+加权随机性，也避免 Worker 数量较少时连续多轮缺少规则基准局。没有历史检查点时，hist
+权重会自然回落到 self。
+
+### 中央批量推理服务
 
 ```
 Worker 1 ──┐
-Worker 2 ──┼──> 请求队列 ──> GPU 推断服务器 ──> 响应队列 ──┬──> Worker 1
+Worker 2 ──┼──> ZMQ 请求 ──> CPU/CUDA 中央推理 ──> 共享结果槽 ──┬──> Worker 1
 Worker 3 ──┘                                              ├──> Worker 2
                                                           └──> Worker 3
 ```
 
 **优势**：
-- Worker 进程不需要加载模型到显存
-- 多个 Worker 共享同一个 GPU 推理服务
-- 显存占用降低 70%+
+
+- Worker 固定使用 CPU，不创建重复 CUDA 模型与上下文
+- 多个 Worker 固定共享一个中央推理服务
+- `device=auto/cpu/cuda` 只决定中央推理和 PPO 更新设备
+- `auto` 优先使用可用 CUDA，否则回落 CPU；显式 `cuda` 在不可用时会提前拒绝启动
+- ZMQ 只传递 Worker/请求编号，观测与结果通过共享内存槽交换，并校验 64 位完成号
 
 ---
 
@@ -401,7 +411,7 @@ class DuelState:
 
 ## 性能优化技术
 
-### 1. 混合精度训练
+### 1. CUDA 混合精度训练
 
 ```python
 # 自动检测硬件能力
@@ -414,6 +424,8 @@ else:
 with torch.amp.autocast('cuda', dtype=self.amp_dtype):
     logits, values, v_input = self.agent.net(batch)
 ```
+
+CPU 模式使用 FP32，不启用 CUDA autocast、GradScaler 或锁页内存。
 
 ### 2. 静态内存池
 
@@ -431,18 +443,25 @@ class PPOTrainer:
         }
 ```
 
-### 3. 权重共享
+### 3. 共享内存槽与临时权重快照
 
-Windows Spawn 模式下，使用 `share_memory_()` 让所有子进程共享同一份模型权重：
+Windows Spawn 模式不直接跨进程传递模型 Tensor。每轮开始时，Trainer 将当前规范权重
+写入临时 CPU 快照，Worker 通过 `weights_only=True` 加载；观测、动作结果、完整 logits
+和请求完成号使用 `share_memory_()` 创建的固定槽位交换：
 
 ```python
-# 主进程
-weights = model.state_dict()
-for v in weights.values():
-    v.share_memory_()
+# Trainer：生成本轮 CPU 权重快照
+torch.save(canonical_model_state_dict(model, to_cpu=True), weight_file)
 
-# 子进程直接使用共享内存中的权重
+# Worker：受限加载，不把正式检查点协议用于内部临时文件
+weights = torch.load(weight_file, map_location="cpu", weights_only=True)
+
+# 高频观测与结果通过预分配共享内存槽传递
+shared_tensor.share_memory_()
 ```
+
+self 对手直接复制本轮权重；hist 对手只从同一 `model_id` 的正式 `.pth` 检查点加载，并在
+可用时优先挂载同轮次的完整 ONNX 制品。
 
 ### 4. TF32 加速
 
@@ -454,9 +473,9 @@ if torch.cuda.get_device_capability()[0] >= 8:
     torch.backends.cudnn.allow_tf32 = True
 ```
 
-### 5. ZMQ 零拷贝进程通信 (v3.2.0 新增)
+### 5. ZMQ 请求路由与共享内存通信
 
-使用 ZeroMQ ROUTER 微批处理架构替换原有管道通信，大幅降低采集延迟：
+使用 ZeroMQ ROUTER 路由请求，并将大体积 Tensor 保留在共享内存中，降低序列化和复制开销：
 
 ```python
 context = zmq.Context()
@@ -465,13 +484,14 @@ socket.setsockopt(zmq.ROUTER_HANDOVER, 1)  # 自动负载均衡
 ```
 
 **核心优势**：
-- **微批处理**：多个 Worker 的推理请求被聚合为一个批次，一次性送入 GPU，减少调度开销
-- **锁页内存 DMA**：数据预置于 pinned memory (`tensor.pin_memory()`)，通过 `non_blocking=True` 实现 CPU↔GPU 异步搬运，不阻塞主线程
-- **采集时间减半**：相比旧管道方案，整体数据采集耗时减少约 50%
+- **微批处理**：多个 Worker 的推理请求被聚合为一个批次，一次性送入所选训练设备，减少调度开销
+- **按设备优化**：CUDA 使用 pinned memory 和 `non_blocking=True`；CPU 使用普通内存与同步复制
+- **超时隔离**：请求携带轮次与局部序号；超时或响应号不匹配时重建 Worker Socket，不读取陈旧结果
 
 ### 6. ONNX 推理加速 (v3.2.0 新增)
 
-训练时自动将 PyTorch 模型导出为 ONNX 计算图，Worker 端通过 ONNX Runtime 进行极速推理：
+启用 `--use_onnx` 后，在每 10 轮检查点保存点同步导出 ONNX。Worker 只对历史对手使用
+ONNX Runtime；当前策略和 self 对手继续通过中央推理服务执行：
 
 ```python
 # 训练主进程同步导出 ONNX
@@ -487,13 +507,13 @@ class ONNXWrapper(torch.nn.Module):
         logits, values, _ = self.net(batch_dict)
         return logits, values
 
-# Worker 端加载 ONNX 模型进行推理，无需导入 PyTorch 模型
+# Worker 校验主图、外置权重、UUID 和轮次后加载历史 ONNX
 ```
 
 **核心优势**：
-- **零显存推理**：Worker 使用 ONNX Runtime 进行 CPU 推理，完全不占用 GPU 显存
-- **图优化**：ONNX 导出时进行计算图级融合优化，消除冗余算子
-- **提速显著**：在中低端 GPU 上，数据采集阶段整体吞吐量提升 30%+
+- **完整制品组**：`.onnx`、其引用的 `.onnx.data` 与 `.artifacts.json` 一并保存和鉴权
+- **输入类型适配**：根据 ONNX Runtime 会话声明转换 FP16/FP32 等输入类型
+- **安全回退**：ONNX 不完整、身份不匹配或运行失败时，该 Worker 回退到历史 PTH 的 CPU 推理
 
 ---
 

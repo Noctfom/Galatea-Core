@@ -7,7 +7,8 @@
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Release: v3.4.0](https://img.shields.io/badge/Release-v3.4.0-brightgreen.svg)](docs/changelog_en.md)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
 English | [简体中文](README.md)
@@ -21,7 +22,8 @@ English | [简体中文](README.md)
 - 🧠 **Universal AI Model** - Deck-agnostic, automatically parses Lua scripts to learn card effects
 - 🎮 **Complete WebUI** - All-in-one training, testing, and management console
 - 📦 **One-Click Package** - Built-in Python environment, just double-click to start
-- 🔥 **Efficient Training** - Async inference + Mixed precision + League training mechanism
+- 🔥 **Efficient Training** - Always-on central batching + CPU/CUDA modes + league training
+- 🔐 **Model Identity Management** - Dynamic prefixes, automatic UUIDs, embedded iterations, and complete ONNX artifact bundles
 - 👁️ **Decision Visualization** - Holographic replay system to understand AI thinking process
 
 ---
@@ -58,8 +60,9 @@ English | [简体中文](README.md)
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# Install dependencies (adjust PyTorch index-url for your CUDA version)
+# Install PyTorch (CUDA users should choose the index-url for their environment)
 pip install torch --index-url https://download.pytorch.org/whl/cu121
+# For CPU-only environments use: https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
 # Prepare resource files
@@ -127,7 +130,7 @@ streamlit run app.py
 
 ```bash
 # Training
-python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --async_infer --no_compile
+python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --device auto --no_compile
 
 # Arena
 python main.py duel --p0 ./models/galatea_iter_100.pth --num 100
@@ -145,8 +148,8 @@ python main.py parse --script_dir ./script
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| Python | 3.8+ | 3.10+ |
-| GPU | GTX 1060 6GB | RTX 3060 12GB+ |
+| Python | 3.9+ | 3.11 |
+| GPU | Optional (CPU-only training is supported) | RTX 3060 12GB+ |
 | RAM | 16GB | 32GB+ |
 | Disk | 10GB | SSD |
 | Linux | GLIBC ≥ 2.35 (Ubuntu 22.04+) | — |

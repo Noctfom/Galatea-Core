@@ -4,6 +4,43 @@
 
 ---
 
+## [v3.4.0] - 2026-08-31
+
+### 🧠 Central Inference Architecture Refactor
+
+- **Always-on central batched inference**: Removed the obsolete async-inference toggle. The current policy and self opponents now share one central inference service through ZMQ ROUTER routing, shared-memory slots, and request completion IDs
+- **CPU-only workers**: Collection workers no longer accept a pseudo device option and never create CUDA contexts. The current policy and self opponents are both evaluated by central inference
+- **Real CPU/CUDA training modes**: Replaced the old device controls with `--device auto|cpu|cuda`, which selects the device for both central inference and PPO updates. `auto` prefers CUDA and falls back to CPU
+- **Device-specific optimization paths**: CUDA retains pinned memory, non-blocking transfers, TF32, BF16/FP16, and optional `torch.compile`; CPU uses ordinary memory, FP32, and phase-aware thread budgets
+- **Correct self/hist opponent split**: New-training self opponents copy the iteration's temporary weights directly instead of sending internal `.pt` files through the formal `.pth` checkpoint loader. Hist opponents continue to use UUID-authenticated formal checkpoints
+
+### 📚 Interfaces and Documentation
+
+- Removed legacy `async_infer` and worker-device controls from both CLI and WebUI; training device choices are now `auto`, `cpu`, and `cuda`
+- Updated the bilingual READMEs, Quick Start, Feature Guide, Architecture, and Special Handling documents
+- Updated the displayed framework version and `version.txt` to `3.4.0`
+
+---
+
+## [v3.3.1] ~ [v3.3.10] - 2026-06 to 2026-08
+
+The development releases below follow Git commit order; higher versions are closer to v3.4.0:
+
+| Version | Date | Commit | Summary |
+|---------|------|--------|---------|
+| v3.3.10dev | 2026-08-30 | `85a244e` | Improved abnormal-episode handling and added a single-Trainer process lock to prevent competing training processes |
+| v3.3.9dev | 2026-08-27 | `3a9c35a` | Hardened external imports; completed ONNX/PTH package, import, and embedded UUID validation; added filename, path, and archive boundaries |
+| v3.3.8dev | 2026-08-26 | `85b0027` | Fixed ONNX import failures; introduced dynamic model prefixes, automatic model UUIDs, and embedded iteration validation; separated absolute targets from additional-iteration semantics |
+| v3.3.7dev | 2026-08-25 | `92f9a16` | Fixed PPO mode-state VRAM retention; unified the deck-pair return contract; completed ONNX/external-data saving; added centralized training-parameter validation |
+| v3.3.6dev | 2026-08-25 | `f983d2d` | Refactored the ZMQ request/response pipeline; fixed socket rebuild and stale-result isolation after timeouts; completed one-click dependency checking and repair |
+| v3.3.5dev | 2026-08-24 | `81dda52` | Refactored resumed training; fixed strict restore for compiled models; corrected Arena model loading, action packing, and initialization return-value compatibility |
+| v3.3.4dev | 2026-08-24 | `641ec81` | Improved abnormal-episode rollback; fixed P0/P1 perspective and global-resource swapping; corrected snapshot synchronization and hidden-information leakage |
+| v3.3.3dev | 2026-06-27 | `175893f` | Optimized semantic-knowledge mounting and caching to eliminate concurrent-read failures |
+| v3.3.2dev | 2026-06-25 | `434ab39` | Merged external effect-code semantic models into the existing hash-deduplication path and training features |
+| v3.3.1dev | 2026-06-02 | `d072b67` | Added in-turn card-effect activation history, fixed snapshot cleanup, and added positional features for unknown cards |
+
+---
+
 ## [v3.3.0] - 2026-06
 
 ### 🔧 Linux Platform Compatibility

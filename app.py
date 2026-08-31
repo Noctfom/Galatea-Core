@@ -51,7 +51,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.3.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.4.0"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -86,7 +86,7 @@ if "jump_to_update" not in st.session_state:
 CACHE_KEYS = {
     't_steps': 5000, 't_batch': 4096, 't_mini': 256, 't_workers': 6, 't_timeout': 300,
     't_gamma': 0.998, 't_lr': 0.0001, 't_entropy': 0.03, 't_gae': 0.95, 't_clip': 0.2,
-    't_device': 'cpu', 't_d_model': 256, 't_n_heads': 4, 't_n_layers': 2,
+    't_device': 'auto', 't_d_model': 256, 't_n_heads': 4, 't_n_layers': 2,
     't_model_prefix': DEFAULT_MODEL_PREFIX,
     'sp_games': 100, 'sp_freq': 50
 }
@@ -711,15 +711,20 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                                         key="widget_t_timeout", on_change=cache_val, args=('t_timeout',),
                                         help=_("单个 Worker 采集数据的最长等待时间，防止进程僵死。", "Max time to wait for a worker to collect data."))
         with col_r3:
-            t_mini = st.number_input(_("切片大小 (Mini Batch)", "Mini Batch"), 
-                                    value=st.session_state.ui_cache['t_mini'], step=64, 
+            t_mini = st.number_input(_("切片大小 (Mini Batch)", "Mini Batch"),
+                                    value=st.session_state.ui_cache['t_mini'], step=64,
                                     key="widget_t_mini", on_change=cache_val, args=('t_mini',),
-                                    help=_("PPO 梯度下降时每次送入 GPU 的数据量。", "Data slice size for GPU updates."))
-            # 🌟 补回丢失的 Device 选择
-            device_index = 0 if st.session_state.ui_cache['t_device'] == 'cpu' else 1
-            t_device = st.selectbox(_("推理设备 (Worker Device)", "Worker Device"), ["cpu", "cuda"], 
+                                    help=_("PPO 梯度下降时每次送入所选训练设备的数据量。", "Data slice size for updates on the selected training device."))
+            training_devices = ["auto", "cpu", "cuda"]
+            cached_device = st.session_state.ui_cache['t_device']
+            device_index = (
+                training_devices.index(cached_device)
+                if cached_device in training_devices
+                else 0
+            )
+            t_device = st.selectbox(_("训练设备", "Training Device"), training_devices,
                                     index=device_index, key="widget_t_device", on_change=cache_val, args=('t_device',),
-                                    help=_("Worker 自身的推理设备。开启异步推断(Async)时保持 cpu 即可。", "Device used by workers for local inference."))
+                                    help=_("auto 自动使用可用 CUDA，否则仅用 CPU；所有 Worker 始终使用 CPU。", "Auto uses CUDA when available; all workers always stay on CPU."))
 
         # 高级超参数区 (完整找回 t_gae 和 t_clip)
         with st.expander(_("🛠️ 深度学习核心超参数", "Advanced Hyperparameters")):
@@ -741,7 +746,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 t_entropy = st.number_input(_("探索系数 (Entropy)", "Entropy Coef"), 
                                             value=float(st.session_state.ui_cache['t_entropy']), format="%.3f", step=0.005, 
                                             key="widget_t_entropy", on_change=cache_val, args=('t_entropy',),
-                                            help=_("鼓励 AI 尝试新操作。会自动随着训练轮数衰减。", "Coefficient for entropy regularization."))
+                                            help=_("鼓励 AI 尝试新操作；训练期间保持所设定的系数。", "Encourages exploration and remains at the configured value during training."))
             with hc3:
                 t_gae = st.number_input(_("GAE Lambda", "GAE Lambda"), 
                                         value=float(st.session_state.ui_cache['t_gae']), format="%.2f", step=0.01, 
@@ -750,8 +755,10 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         
         # --- 高级开关 ---
         st.write(_("⚡ 高级开关", "⚡ Advanced Toggles"))
-        c_async = st.checkbox(_("开启异步推断 (--async_infer)", "Enable Async Inference"), value=True, 
-                                help=_("【强烈推荐】让主进程开一个全局 GPU 服务端集中处理推理。能节省成倍的显存！", "Use central GPU server for fast inference."))
+        st.caption(_(
+            "中央批量推理服务固定启用；采集 Worker 固定使用 CPU。",
+            "Central batched inference is always enabled; collection workers always use CPU.",
+        ))
         c_nocomp = st.checkbox(_("禁用模型编译 (--no_compile)", "Disable Torch Compile"), value=True, 
                                 help=_("Windows 系统下 PyTorch 2.0+ 的 compile 极易报错，勾选此项牺牲 5% 速度换取绝对稳定。", "Disable torch.compile for Windows compatibility."))
         c_onnx = st.checkbox(_("同时导出 ONNX 静态模型 (--use_onnx)", "Export ONNX Model (--use_onnx)"), value=True, 
@@ -766,6 +773,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             else:
                 launch_error = None
                 try:
+                    if t_device == "cuda" and not torch.cuda.is_available():
+                        raise RuntimeError("当前 PyTorch 环境无法使用 CUDA，请选择 auto 或 cpu")
                     validate_model_prefix(t_model_prefix)
                     if is_resume:
                         if resume_metadata_error:
@@ -789,7 +798,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                             current_iteration,
                             additional_iterations=int(t_steps),
                         )
-                except (ValueError, PermissionError) as error:
+                except (ValueError, PermissionError, RuntimeError) as error:
                     launch_error = str(error)
 
                 if launch_error:
@@ -811,7 +820,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     "--batch_size", str(t_batch),
                     "--mini_batch", str(t_mini),
                     "--workers", str(t_workers),
-                    "--worker_device", str(t_device),                # 🌟 补回
+                    "--device", str(t_device),
                     "--d_model", str(int(t_d_model)),                # 🌟 补回
                     "--n_heads", str(int(t_n_heads)),                # 🌟 补回
                     "--n_layers", str(int(t_n_layers)),              # 🌟 补回
@@ -820,11 +829,9 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     "--lr", str(t_lr),
                     "--entropy", str(t_entropy),
                     "--gae_lambda", str(t_gae),
-                    "--clip_eps", str(t_clip),
-                    "--async_infer"
+                    "--clip_eps", str(t_clip)
                 ]
                 if t_resume != "None": cmd.extend(["--resume", t_resume])
-                if c_async: cmd.append("--async_infer")
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
                 if c_std_core: cmd.append("--standard_core")

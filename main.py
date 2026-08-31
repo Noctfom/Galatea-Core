@@ -7,7 +7,7 @@ import torch
 
 # 引入功能模块
 import run_self_play
-from trainer import PPOTrainer
+from trainer import PPOTrainer, resolve_training_device
 from model_versus import ModelArena
 from system_logger import setup_global_logger
 from checkpoint_utils import load_training_checkpoint
@@ -66,7 +66,7 @@ except RuntimeError:
 #    - 类比: AI 在一次训练中收集的经验数量。
 #    - 调整建议: 越大越稳定，但需要更多内存。通常设为 4096 或 8192。
 #
-# 6. mini_batch (默认 512) -> [训练批量/GPU更新大小]
+# 6. mini_batch (默认 512) -> [训练批量/单次更新大小]
 #    - 含义: 每次模型更新时使用的样本数量。
 #    - 类比: AI 在每次学习时看的经验数量。
 #    - 调整建议: 越大PPO环节计算越快，但占用显存更大。通常设为 512 或 1024。
@@ -75,26 +75,21 @@ except RuntimeError:
 #    - 含义: 同时运行的环境采集进程数量。
 #    - 类比: AI 有几个"实习生"在帮它收集对局经验。
 #    - 调整建议: 越多采集越快，但CPU占用也越高。通常设为 4 或 8。
-#          如果开启异步推断，多线程传输开销影响会大于运算开销，因此建议适当减少采集进程数。
+#          中央批量推理固定启用，进程过多时通信与 CPU 争抢会增大，建议按物理核心数调整。
 #          注意:进程数应当小于等于 CPU 核心数，否则会报错。
 #
-# 8. worker_device (默认 'cpu') -> [采集设备/实习生工作站]
-#    - 含义: 采集进程中模型推理使用的设备。
-#    - 类比: 实习生是用高性能GPU还是普通CPU在帮忙。
-#    - 调整建议: 如果有多块GPU，可以设为 'cuda' 来加速采集；
-#          但仍然建议设置为'cpu'并开启异步推断来节省显存和提升速度。
+# 8. device (默认 'auto') -> [训练主设备]
+#    - auto: 有可用 CUDA 时使用 CUDA，否则自动使用 CPU。
+#    - cpu: 中央批量推理和 PPO 更新都只使用 CPU。
+#    - cuda: 中央批量推理和 PPO 更新使用 CUDA；不可用时启动前报错。
+#    - 所有采集 Worker 固定使用 CPU，中央批量推理服务固定启用。
 #
-# 9. async_infer (默认 False) -> [异步推断/独立推理服务器]
-#    - 含义: 是否启用独立的推断服务器来处理模型推理请求。
-#    - 类比: AI 是否有一个专门的"顾问"在负责分析局面，实习生们只负责收集数据。
-#    - 调整建议: 启用后可以大幅节省采集进程的显存占用，建议启用。
-#
-# 10. no_compile (默认 False) -> [禁用编译/兼容模式]
+# 9. no_compile (默认 False) -> [禁用编译/兼容模式]
 #    - 含义: 是否禁用 PyTorch 的 torch.compile 功能。
 #    - 调整建议: 如果你遇到了与 torch.compile 相关的兼容性问题，可以启用这个选项来禁用模型编译。虽然会牺牲一部分性能，但能确保程序正常运行。
 #          注意:windows用户请务必启用此选项。
-# 11. use_onnx (默认 False) -> [ONNX 极速推理/算力剥离]
-#    - 含义: 是否开启 ONNX 后台导出与 Worker 本地极速推理功能。
+# 10. use_onnx (默认 False) -> [ONNX 极速推理/算力剥离]
+#    - 含义: 是否在保存点同步导出 ONNX，并供历史对手在 Worker 本地推理。
 #    - 类比: AI 是否有一个专门的"引擎剥离器"，在后台将最新的模型转换成一个轻量级的推理引擎，供实习生们快速使用。
 #    - 调整建议: 启用后可以显著提升采集速度，尤其是在 CPU 上，强烈建议开启。需要安装 onnxruntime 包
 
@@ -102,10 +97,10 @@ except RuntimeError:
 #  tensorboard --logdir=runs    查看训练过程
 
 #  训练示例命令:
-#  python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --batch_size 16384 --mini_batch 256 --workers 6 --d_model 512 --n_heads 8 --n_layers 6 --async_infer --no_compile --use_onnx
+#  python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --batch_size 16384 --mini_batch 256 --workers 6 --device auto --d_model 512 --n_heads 8 --n_layers 6 --no_compile --use_onnx
 
 #  恢复训练命令示例:  从第 100 轮存档继续，目标是练到第 5000 轮
-#  python main.py train --resume ./models/galatea_iter_100.pth --target-iteration 5000 --batch_size 16384 --mini_batch 256 --workers 6 --async_infer --no_compile --use_onnx
+#  python main.py train --resume ./models/galatea_iter_100.pth --target-iteration 5000 --batch_size 16384 --mini_batch 256 --workers 6 --device auto --no_compile --use_onnx
 
 #  测试示例命令(每隔 5 局保存一次心声):
 #  python main.py duel --p0 ./models/galatea_iter_100.pth --thought_freq 5 --num 100
@@ -130,6 +125,11 @@ def run_training_command(args, parser):
         parser.error(str(error))
 
     try:
+        try:
+            resolve_training_device(args.device)
+        except (ValueError, RuntimeError) as error:
+            parser.error(str(error))
+
         if args.target_iteration is None and args.additional_iterations is None:
             if args.resume:
                 parser.error(
@@ -168,8 +168,7 @@ def run_training_command(args, parser):
             update_timesteps=args.batch_size,
             mini_batch_size=args.mini_batch,
             num_workers=args.workers,
-            worker_device=args.worker_device,
-            async_infer=args.async_infer,
+            training_device=args.device,
             compile_model=not args.no_compile,
             worker_timeout=args.timeout,
             gamma=args.gamma,
@@ -182,8 +181,11 @@ def run_training_command(args, parser):
             model_prefix=args.model_prefix,
             preloaded_resume_checkpoint=resume_checkpoint,
         )
-        training_lock.set_run_id(trainer.run_id)
-        trainer.run_training_loop(target_iteration=resolved_target_iteration)
+        try:
+            training_lock.set_run_id(trainer.run_id)
+            trainer.run_training_loop(target_iteration=resolved_target_iteration)
+        finally:
+            trainer.close()
     finally:
         training_lock.release()
 
@@ -230,16 +232,20 @@ def main():
     # 训练参数
     train_parser.add_argument('--resume', type=str, default=None, help='恢复训练的检查点')
     train_parser.add_argument('--batch_size', type=int, default=4096, help='采集总步数')
-    train_parser.add_argument('--mini_batch', type=int, default=512, help='GPU训练Batch')
+    train_parser.add_argument('--mini_batch', type=int, default=512, help='PPO 单次训练 Batch')
     train_parser.add_argument('--workers', type=int, default=4, help='CPU进程数')
-    train_parser.add_argument('--worker_device', type=str, default='cpu', choices=['cpu', 'cuda'], help="Worker 推理使用的设备 (cpu 或 cuda)")
+    train_parser.add_argument(
+        '--device',
+        type=str,
+        default='auto',
+        choices=['auto', 'cpu', 'cuda'],
+        help="训练主设备；Worker 始终使用 CPU (默认 auto)",
+    )
     train_parser.add_argument('--timeout', type=int, default=300, help='Worker 数据采集的最高容忍时间(秒)')
-    # 异步推断开关
-    train_parser.add_argument('--async_infer', action='store_true', help="启用异步推断服务器(大幅节省显存并提速)")
     # 添加禁用编译的开关 (防止win/老旧环境报错)
     train_parser.add_argument('--no_compile', action='store_true', help='禁用 torch.compile (兼容性模式)')
 
-    train_parser.add_argument('--use_onnx', action='store_true', help='开启 ONNX 后台导出与 Worker 本地极速推理')
+    train_parser.add_argument('--use_onnx', action='store_true', help='在保存点同步导出 ONNX，并加速历史对手本地推理')
     train_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
 
     # RL 灵魂超参数

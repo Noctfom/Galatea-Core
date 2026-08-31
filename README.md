@@ -7,7 +7,8 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Release: v3.4.0](https://img.shields.io/badge/Release-v3.4.0-brightgreen.svg)](docs/changelog.md)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
 [English](README_EN.md) | 简体中文
@@ -21,7 +22,8 @@
 - 🧠 **通用 AI 模型** - 不依赖特定卡组，自动解析 Lua 脚本学习卡片效果
 - 🎮 **完整 WebUI** - 一站式训练、测试、管理控制台
 - 📦 **一键包支持** - 内置 Python 环境，双击即可启动
-- 🔥 **高效训练** - 异步推断 + 混合精度 + 联盟训练机制
+- 🔥 **高效训练** - 固定中央批量推理 + CPU/CUDA 双模式 + 联盟训练机制
+- 🔐 **模型身份管理** - 动态文件前缀、自动 UUID、内置轮次与完整 ONNX 制品组
 - 👁️ **决策可视化** - 全息回放系统，深入理解 AI 思考过程
 
 ---
@@ -58,8 +60,9 @@
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# 安装依赖（根据 CUDA 版本调整 PyTorch index-url）
+# 安装 PyTorch（CUDA 用户按显卡环境选择对应 index-url）
 pip install torch --index-url https://download.pytorch.org/whl/cu121
+# 纯 CPU 环境可改用：https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
 # 准备资源文件
@@ -127,7 +130,7 @@ streamlit run app.py
 
 ```bash
 # 训练
-python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --async_infer --no_compile
+python main.py train --dir ./models --additional-iterations 1000 --model-prefix galatea --device auto --no_compile
 
 # 竞技场
 python main.py duel --p0 ./models/galatea_iter_100.pth --num 100
@@ -145,8 +148,8 @@ python main.py parse --script_dir ./script
 
 | 组件 | 最低配置 | 推荐配置 |
 |------|----------|----------|
-| Python | 3.8+ | 3.10+ |
-| GPU | GTX 1060 6GB | RTX 3060 12GB+ |
+| Python | 3.9+ | 3.11 |
+| GPU | 可选（支持纯 CPU 训练） | RTX 3060 12GB+ |
 | RAM | 16GB | 32GB+ |
 | 硬盘 | 10GB | SSD |
 | Linux | GLIBC ≥ 2.35（Ubuntu 22.04+） | — |
