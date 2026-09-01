@@ -13,6 +13,11 @@
 - **Fixed stepwise commit loss across iterations**: The trainer's merged trajectory pool now overwrites and reuses its valid prefix instead of being destroyed and reallocated every iteration. A low-headroom preflight may safely release the already-consumed old pool and retry once; trainer shutdown performs the final release
 - **Added staged memory auditing**: Logs now capture system commit, trainer private commit/RSS, merged-pool size, and CUDA usage around worker startup, worker reaping, trajectory merge, and PPO. Workers record process usage after opponent-backend initialization, allowing hist/ONNX peak cost to be distinguished from trainer-lifetime retention
 - The final gradient references are explicitly cleared after PPO; sampling, rewards, GAE, valid-sample bounds, and parameter-update results are unchanged
+- **Fixed Arena MSG 26 false aborts**: Loop detection now uses a complete state key covering the board, acting player, Select/Unselect semantics, target entities, and macro responses, preventing different selection phases with matching slots from sharing bans
+- **Separated Arena hard and soft bans**: Engine retries remain authoritative hard bans. Repeated model choices use soft loop bans that are withdrawn if they would exhaust the pool, so normal finite logits are no longer conflated with `all model actions are banned or non-finite`
+- **Made checkpoint architecture authoritative in Arena**: P0/P1 no longer allocate temporary networks from CLI defaults before loading. Each network is built directly from its checkpoint metadata, removing misleading logs and one redundant allocation. A 20-game AI-vs-RuleBot run with the same model completed all games normally
+- **Relaxed long-game reward shaping**: The tiny turn penalty now starts after turn 30 instead of 20, and the per-turn model-decision penalty starts after 300 decisions instead of 200. The 1,500-step truncation, `0.05` reward for wins after turn 40, and existing safety breakers remain intact
+- **Fixed false training-loop penalties**: Training and Arena now share a complete state key covering the board, acting player, action semantics, targets, and macro responses. This replaces the `action_type + index` shortcut that could penalize valid progress as repetition. A maximum-shape microbenchmark measured about `39.6 µs/call`, or `0.65s` for 16K calls
 
 ### 📦 Portable Environment and Release Packaging
 
@@ -22,7 +27,7 @@
 - **Added one-click packaging**: `构建一键包.bat` invokes `build_portable_package.py` to run release validation and package source, `python_env`, `cards.cdb`, `script`, and `decks` as `Galatea_Core_Vx.x.x.zip`
 - **Excluded user and development data**: Git metadata, models, training logs, replays, caches, tests, and engine build sources are omitted. Archives use one `Galatea_Core/` root, ZIP64, and atomic temporary-file replacement
 - **Compatibility boundary**: The current CUDA Wheel targets modern NVIDIA architectures and supports RTX 20/30/40/50 and GTX 16 series. GTX 10 and older GPUs require an older PyTorch environment or the framework falls back to CPU
-- Updated the displayed framework version, bilingual documentation, README badges, and `version.txt` to `3.4.2`; all 98 tests pass
+- Updated the displayed framework version, bilingual documentation, README badges, and `version.txt` to `3.4.2`; all 102 tests pass
 
 ---
 

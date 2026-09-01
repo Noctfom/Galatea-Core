@@ -19,7 +19,12 @@ import psutil
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
-from action_candidates import MACRO_ACTION_MSGS, MODEL_ACTION_MSGS, build_macro_action_pool
+from action_candidates import (
+    MACRO_ACTION_MSGS,
+    MODEL_ACTION_MSGS,
+    build_action_state_key,
+    build_macro_action_pool,
+)
 from inference_protocol import InferenceProtocolError, request_shared_inference_result
 from model_artifacts import describe_onnx_artifact
 import deck_utils
@@ -46,6 +51,8 @@ DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130
 GAMMA = 0.998
 GAE_LAMBDA = 0.95
 MAX_EPISODE_STEPS = 1500
+LONG_GAME_TURN_THRESHOLD = 30
+SINGLE_TURN_DECISION_THRESHOLD = 300
 
 ORT_NUMPY_DTYPES = {
     "tensor(bool)": np.bool_,
@@ -556,7 +563,7 @@ def worker_process(
             last_act_time = time.time()
 
             loop_tracker = {}
-            last_valid_hash = ""
+            last_action_state_key = None
 
             while ep_steps < MAX_EPISODE_STEPS:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
@@ -922,22 +929,22 @@ def worker_process(
                                 turn_steps = 0 # 切换回合，步数清零！
                             turn_steps += 1
 
-                            # 软性时间惩罚 (Soft Enrage)
-                            # 1. 超长盘疲劳：20回合以内绝对自由，20回合以后才施加极微小的推力
-                            if current_turn > 20:
+                            # 软性时间惩罚：30 回合以内不干预正常长盘。
+                            if current_turn > LONG_GAME_TURN_THRESHOLD:
                                 step_reward -= 0.0001
 
-                            if turn_steps > 200:
-                                step_reward -= 0.0005 # 如果单回合超过200步，说明可能卡在某个阶段了，施加额外惩罚
-                                
-                            # 2. 哈希查重：如果你当前的合法动作列表和上次一模一样，说明局势根本没推进
-                            current_hash = "|".join([f"{a.action_type}_{a.index}" for a in current_snap.valid_actions])
-                            if current_hash != last_valid_hash:
-                                last_valid_hash = current_hash
+                            if turn_steps > SINGLE_TURN_DECISION_THRESHOLD:
+                                # 现有实测单方极值远低于该阈值，只约束异常长连锁或单回合死锁。
+                                step_reward -= 0.0005
+
+                            # 2. 完整状态查重：仅在场面和动作身份均未变化时判定重复。
+                            current_state_key = build_action_state_key(current_snap, msg_type)
+                            if current_state_key != last_action_state_key:
+                                last_action_state_key = current_state_key
                                 loop_tracker.clear() # 局势变了，重置嫌疑
-                                
+
                             # 记录该局势下，这个选项被选了多少次
-                            loop_key = f"{current_hash}_{sel_idx}"
+                            loop_key = (current_state_key, sel_idx)
                             loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
                             
                             # 同一个局势下连选 10 次，是恶意拖延

@@ -16,6 +16,56 @@ _CANCEL_RESPONSE = b"\xff\xff\xff\xff"
 MIN_MACRO_OPTION_WEIGHT = 1e-4
 
 
+def build_action_state_key(snapshot, msg_type):
+    """构造包含场面与完整候选身份的状态键，供训练和竞技场识别真实循环"""
+    global_signature = tuple(vars(snapshot.global_data).values())
+    entity_signature = tuple(
+        (
+            entity.code,
+            entity.owner,
+            entity.location,
+            entity.sequence,
+            entity.position,
+            entity.current_atk,
+            entity.current_def,
+            entity.counter_count,
+            entity.overlay_count,
+            entity.is_equipped,
+            entity.used_effect_mask,
+        )
+        for entity in snapshot.entities
+    )
+    action_signature = tuple(
+        (
+            action.action_type,
+            action.index,
+            action.target_entity_idx,
+            action.desc_str,
+            action.desc_id,
+            bytes(getattr(action, "decision_bytes", b"")),
+            tuple(getattr(action, "macro_targets", None) or ()),
+            tuple(getattr(action, "macro_places", None) or ()),
+        )
+        for action in snapshot.valid_actions
+    )
+    chain_signature = tuple(
+        tuple(sorted(item.items()))
+        for item in snapshot.chain_stack
+    )
+    history_signature = tuple(
+        tuple(sorted(item.items()))
+        for item in snapshot.history_stack[-8:]
+    )
+    return (
+        int(msg_type),
+        global_signature,
+        entity_signature,
+        action_signature,
+        chain_signature,
+        history_signature,
+    )
+
+
 def _as_probabilities(action_probabilities):
     """将模型输出统一转换为一维双精度概率数组"""
     if hasattr(action_probabilities, "detach"):

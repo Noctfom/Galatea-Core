@@ -272,10 +272,10 @@ def main():
     duel_parser.add_argument('--device', type=str, default='cpu', help='推理设备')
     duel_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
     duel_parser.add_argument('--thought_freq', type=int, default=0, help='每隔几局保存一次AI心声 (0为不保存)')
-    # === 新增模型参数 ===
-    duel_parser.add_argument("--d_model", type=int, default=256, help="Model dimension")
-    duel_parser.add_argument("--n_heads", type=int, default=4, help="Attention heads")
-    duel_parser.add_argument("--n_layers", type=int, default=2, help="Transformer layers")
+    # 兼容既有命令行但不再参与竞技场构网；模型架构始终读取检查点内置配置。
+    duel_parser.add_argument("--d_model", type=int, default=256, help=argparse.SUPPRESS)
+    duel_parser.add_argument("--n_heads", type=int, default=4, help=argparse.SUPPRESS)
+    duel_parser.add_argument("--n_layers", type=int, default=2, help=argparse.SUPPRESS)
     duel_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
     # --- 4. 语义化提取模式 (Parse) ---
     parse_parser = subparsers.add_parser('parse', help='提取并更新卡片Lua脚本语义知识库')
@@ -333,14 +333,9 @@ def main():
         
     elif args.command == 'duel':
         print(f"🏟️ 启动竞技场模式...")
-        # 组装配置
+        # 竞技场控制参数与模型架构分离，模型结构由各自检查点决定。
         config = {
-            'd_model': args.d_model,
-            'n_heads': args.n_heads,
-            'n_layers': args.n_layers,
-            'vocab_size': 20000, # 这个通常不变，不需要传参
-            'thought_freq': args.thought_freq,  # [新增] 把参数传给竞技场
-            'standard_core': args.standard_core  # [新增] 把参数传给竞技场
+            'thought_freq': args.thought_freq,
         }
 
         arena = ModelArena(

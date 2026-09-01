@@ -439,6 +439,13 @@ python main.py duel [options]
 | `--deck_dir` | Deck directory | `./decks` |
 | `--thought_freq` | Thought log save frequency | 0 |
 | `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
+
+Arena loads the architecture embedded in each P0/P1 checkpoint and does not allow external
+architecture overrides. Loop protection uses a complete state key covering the board, acting
+player, Select/Unselect semantics, and target entities. Engine retries are hard bans, while repeated
+choices are soft bans that cannot exhaust the candidate pool by themselves, preventing finite
+model scores from being misreported as numerical failures.
+
 **Examples**:
 
 ```bash

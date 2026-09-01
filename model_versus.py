@@ -10,13 +10,52 @@ import traceback
 import torch.nn.functional as F
 
 import rule_bot
-from action_candidates import MACRO_ACTION_MSGS, MODEL_ACTION_MSGS, build_macro_action_pool
+from action_candidates import (
+    MACRO_ACTION_MSGS,
+    MODEL_ACTION_MSGS,
+    build_action_state_key,
+    build_macro_action_pool,
+)
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
 from feature_encoder import MAX_CARDS
 import deck_utils
 from thought_logger import AIThoughtLogger
+
+
+def select_arena_action_index(valid_logits, retry_bans, loop_bans):
+    """应用引擎硬禁用和防循环软禁用，并保证软禁用不会独自耗尽候选池"""
+    if valid_logits.dim() != 1 or valid_logits.numel() == 0:
+        raise RuntimeError("model produced no encodable actions")
+
+    finite_mask = torch.isfinite(valid_logits)
+    if not finite_mask.any():
+        raise RuntimeError("model produced no finite action logits")
+
+    # 网络内部使用极小值屏蔽 act_mask=False 的槽位；有效前缀不应全部落入该范围。
+    available_mask = finite_mask & (valid_logits > -64000.0)
+    if not available_mask.any():
+        raise RuntimeError("model or encoder masked every valid action")
+
+    for action_index in retry_bans:
+        if 0 <= action_index < available_mask.numel():
+            available_mask[action_index] = False
+    if not available_mask.any():
+        raise RuntimeError("all model actions were rejected by engine retry")
+
+    loop_filtered_mask = available_mask.clone()
+    for action_index in loop_bans:
+        if 0 <= action_index < loop_filtered_mask.numel():
+            loop_filtered_mask[action_index] = False
+
+    ignored_exhaustive_loop_bans = not loop_filtered_mask.any()
+    if ignored_exhaustive_loop_bans:
+        loop_filtered_mask = available_mask
+
+    masked_logits = valid_logits.clone()
+    masked_logits[~loop_filtered_mask] = -torch.inf
+    return int(torch.argmax(masked_logits).item()), ignored_exhaustive_loop_bans
 
 
 class ModelArena:
@@ -38,34 +77,31 @@ class ModelArena:
         else:
             self.device = torch.device(device)
             
-        # 2. 再配置网络参数
-        default_config = {
-            'd_model': 256,
-            'n_heads': 4,
-            'n_layers': 2,
-            'vocab_size': 20000
-        }
-        self.net_config = config if config else default_config
-        
-        # 3. 这时候再去取 thought_freq 就绝对安全了
-        self.thought_freq = self.net_config.get('thought_freq', 0)
+        # 2. 竞技场控制参数与模型架构分离；网络结构始终以检查点内置配置为准。
+        self.arena_config = dict(config or {})
+        self.thought_freq = self.arena_config.get('thought_freq', 0)
         
         # 4. 初始化记录器
         p0_name = os.path.basename(model_p0_path) if model_p0_path else "P0_AI"
         self.logger = AIThoughtLogger(player_name=p0_name)
         
-        print(f"⚙️ [Arena] 模型配置: {self.net_config}")
-        
         # P0
-        self.p0_bot = AiBot(device=self.device, net_config=self.net_config)
+        self.p0_bot = AiBot(device=self.device, initialize_network=False)
         self._require_model_loaded(self.p0_bot, model_p0_path, "P0")
         self.p0_bot.net.eval()
+        self.net_config = {
+            'd_model': self.p0_bot.net.d_model,
+            'n_heads': self.p0_bot.net.n_heads,
+            'n_layers': self.p0_bot.net.n_layers,
+            'vocab_size': self.p0_bot.net.vocab_size,
+        }
+        print(f"⚙️ [Arena] P0 模型架构（检查点）: {self.net_config}")
         print(f"🤖 [AiBot] 成功加载模型权重: {model_p0_path}")
 
         # P1: 对手
         self.p1_bot = None
         if model_p1_path:
-            self.p1_bot = AiBot(device=self.device)
+            self.p1_bot = AiBot(device=self.device, initialize_network=False)
             self._require_model_loaded(self.p1_bot, model_p1_path, "P1")
             self.p1_bot.net.eval()
             print(f"🤖 [Opponent] 成功加载模型权重: {model_p1_path}")
@@ -129,12 +165,14 @@ class ModelArena:
 
         ai_fallback_count = 0
 
-        last_valid_hash = ""
+        last_model_state_key = None
         action_history = []
 
         # 合法死锁断路器
         loop_tracker = {}
-        banned_actions_for_state = {}
+        retry_bans_for_state = {}
+        loop_bans_for_state = {}
+        loop_suppression_disabled_states = set()
         
         # 替换为最全的常量集合
         STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
@@ -171,7 +209,9 @@ class ModelArena:
                 current_step_ignore_list.clear()
                 if msg_type in [40, 41]:
                     loop_tracker.clear()
-                    banned_actions_for_state.clear()
+                    retry_bans_for_state.clear()
+                    loop_bans_for_state.clear()
+                    loop_suppression_disabled_states.clear()
             elif msg_type in INTERACTION_MSGS:
                 if consecutive_retries == 0:
                     current_step_ignore_list.clear()
@@ -207,8 +247,10 @@ class ModelArena:
                 if last_decision_value is not None:
                     current_step_ignore_list.append(last_decision_value)
 
-                if last_decision_index is not None and last_valid_hash:
-                    banned_actions_for_state.setdefault(last_valid_hash, set()).add(last_decision_index)
+                if last_decision_index is not None and last_model_state_key is not None:
+                    retry_bans_for_state.setdefault(last_model_state_key, set()).add(
+                        last_decision_index
+                    )
 
                 # [犯罪现场记录仪] 如果连 RuleBot 都卡死了，立刻在终端打印尸检报告
                 if consecutive_retries > 6:
@@ -277,13 +319,9 @@ class ModelArena:
                         if not snap.valid_actions:
                             raise RuntimeError(f"model received no valid actions for message {msg_type}")
 
-                        current_hash = "|".join(
-                            f"{action.action_type}_{action.index}_{action.desc_id}_"
-                            f"{bytes(getattr(action, 'decision_bytes', b'')).hex()}"
-                            for action in snap.valid_actions
-                        )
-                        if current_hash != last_valid_hash:
-                            last_valid_hash = current_hash
+                        current_state_key = build_action_state_key(snap, msg_type)
+                        if current_state_key != last_model_state_key:
+                            last_model_state_key = current_state_key
                             current_step_ignore_list.clear()
                             action_history.clear()
 
@@ -302,20 +340,32 @@ class ModelArena:
                             if valid_count == 0:
                                 raise RuntimeError("model produced no encodable actions")
                             valid_logits = logits[0, :valid_count].clone()
-                            for bad_idx in banned_actions_for_state.get(current_hash, set()):
-                                if 0 <= bad_idx < valid_count:
-                                    valid_logits[bad_idx] = -65000.0
+                            sel_idx, ignored_loop_bans = select_arena_action_index(
+                                valid_logits,
+                                retry_bans_for_state.get(current_state_key, set()),
+                                (
+                                    set()
+                                    if current_state_key in loop_suppression_disabled_states
+                                    else loop_bans_for_state.get(current_state_key, set())
+                                ),
+                            )
+                            if ignored_loop_bans:
+                                loop_bans_for_state.pop(current_state_key, None)
+                                loop_suppression_disabled_states.add(current_state_key)
+                                print(
+                                    "⚠️ [Arena] 防循环软禁用已覆盖全部候选，"
+                                    "本次已撤销软禁用并保留模型决策"
+                                )
 
-                            if not torch.isfinite(valid_logits).any() or torch.all(
-                                valid_logits <= -64000.0
-                            ):
-                                raise RuntimeError("all model actions are banned or non-finite")
-                            sel_idx = int(torch.argmax(valid_logits).item())
-
-                        loop_key = f"{current_hash}_{sel_idx}"
+                        loop_key = (current_state_key, sel_idx)
                         loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
-                        if loop_tracker[loop_key] >= 3:
-                            banned_actions_for_state.setdefault(current_hash, set()).add(sel_idx)
+                        if (
+                            loop_tracker[loop_key] >= 3
+                            and current_state_key not in loop_suppression_disabled_states
+                        ):
+                            loop_bans_for_state.setdefault(current_state_key, set()).add(
+                                sel_idx
+                            )
 
                         if is_p0_turn and self.logger.is_active:
                             probs = F.softmax(logits.squeeze(0), dim=-1)
