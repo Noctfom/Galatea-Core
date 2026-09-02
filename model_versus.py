@@ -20,6 +20,7 @@ from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
 from ai_bot import AiBot
 from feature_encoder import MAX_CARDS
+from checkpoint_utils import MODEL_PROTOCOL_VERSION
 import deck_utils
 from thought_logger import AIThoughtLogger
 
@@ -94,6 +95,7 @@ class ModelArena:
             'n_heads': self.p0_bot.net.n_heads,
             'n_layers': self.p0_bot.net.n_layers,
             'vocab_size': self.p0_bot.net.vocab_size,
+            'model_protocol_version': MODEL_PROTOCOL_VERSION,
         }
         print(f"⚙️ [Arena] P0 模型架构（检查点）: {self.net_config}")
         print(f"🤖 [AiBot] 成功加载模型权重: {model_p0_path}")

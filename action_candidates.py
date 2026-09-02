@@ -1,19 +1,57 @@
 # 构建训练与竞技场共用的复杂宏动作候选池
 
+import struct
+
 import numpy as np
 
 import rule_bot
-from data_types import GameAction
+from data_types import ActionOperation, GameAction
 from feature_encoder import MAX_ACTIONS
 from game_constants import LocationInfo
 
 
-MACRO_ACTION_MSGS = frozenset({15, 18, 20, 22, 23, 24, 25})
+MACRO_ACTION_MSGS = frozenset({15, 18, 20, 22, 23, 24, 25, 140, 141})
 MODEL_ACTION_MSGS = frozenset(
     {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143}
 )
 _CANCEL_RESPONSE = b"\xff\xff\xff\xff"
 MIN_MACRO_OPTION_WEIGHT = 1e-4
+
+
+def _freeze_action_value(value):
+    """把动作中的嵌套列表转换为可哈希元组，供循环状态键稳定比较"""
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_action_value(item) for item in value)
+    return value
+
+
+def _read_macro_constraints(msg_type, msg_payload):
+    """提取复杂消息的数量约束，供每个最终宏动作共享"""
+    payload = bytes(msg_payload)
+    constraints = {
+        "selection_min": 0,
+        "selection_max": 0,
+        "cancelable": False,
+        "context_value": 0,
+    }
+    if msg_type in (15, 20) and len(payload) >= 4:
+        constraints.update(
+            selection_min=payload[2],
+            selection_max=payload[3],
+            cancelable=bool(payload[1]),
+        )
+    elif msg_type in (18, 24) and len(payload) >= 2:
+        constraints.update(selection_min=payload[1], selection_max=payload[1])
+    elif msg_type == 22 and len(payload) >= 5:
+        quantity = struct.unpack('<H', payload[3:5])[0]
+        constraints.update(context_value=quantity)
+    elif msg_type == 23 and len(payload) >= 8:
+        constraints.update(selection_min=payload[6], selection_max=payload[7])
+    elif msg_type in (25, 140, 141) and len(payload) >= 2:
+        constraints.update(selection_min=payload[1], selection_max=payload[1])
+        if msg_type in (140, 141):
+            constraints["context_value"] = payload[1]
+    return constraints
 
 
 def build_action_state_key(snapshot, msg_type):
@@ -42,9 +80,26 @@ def build_action_state_key(snapshot, msg_type):
             action.target_entity_idx,
             action.desc_str,
             action.desc_id,
+            getattr(action, "code", 0),
             bytes(getattr(action, "decision_bytes", b"")),
-            tuple(getattr(action, "macro_targets", None) or ()),
-            tuple(getattr(action, "macro_places", None) or ()),
+            getattr(action, "decision_value", None),
+            getattr(action, "operation_id", 0),
+            getattr(action, "response_value", None),
+            getattr(action, "target_location_raw", -1),
+            getattr(action, "selection_min", 0),
+            getattr(action, "selection_max", 0),
+            getattr(action, "selection_count", 0),
+            bool(getattr(action, "finishable", False)),
+            bool(getattr(action, "cancelable", False)),
+            getattr(action, "context_value", 0),
+            getattr(action, "prompt_flags", 0),
+            getattr(action, "prompt_value", 0),
+            getattr(action, "prompt_value2", 0),
+            _freeze_action_value(getattr(action, "macro_targets", None) or ()),
+            _freeze_action_value(getattr(action, "macro_places", None) or ()),
+            _freeze_action_value(getattr(action, "macro_target_codes", None) or ()),
+            _freeze_action_value(getattr(action, "macro_target_values", None) or ()),
+            _freeze_action_value(getattr(action, "macro_target_locations", None) or ()),
         )
         for action in snapshot.valid_actions
     )
@@ -93,6 +148,7 @@ def build_macro_action_pool(
 
     probabilities = _as_probabilities(action_probabilities)
     base_actions = list(base_actions)
+    macro_constraints = _read_macro_constraints(msg_type, msg_payload)
 
     code_preferences = {}
     index_probabilities = np.zeros(256, dtype=np.float64)
@@ -130,7 +186,8 @@ def build_macro_action_pool(
 
     scored_options = []
     for option in options:
-        response = bytes(option["bytes"])
+        response = bytes(option.get("bytes", b""))
+        response_value = option.get("value")
         # 给每个合法组合保留最低探索权重，避免低分选项被永久排除
         score = MIN_MACRO_OPTION_WEIGHT
 
@@ -148,6 +205,17 @@ def build_macro_action_pool(
                 score += target_probabilities.get(
                     (controller, location, sequence), 0.0
                 )
+        elif option.get("indices"):
+            score += sum(
+                index_probabilities[index]
+                for index in option["indices"]
+                if 0 <= index < len(index_probabilities)
+            )
+        elif option.get("codes"):
+            score += sum(
+                code_preferences.get(code, 0.0)
+                for code in option["codes"]
+            )
         elif len(response) > 1:
             # Last-resort support for index-based response formats.
             response_indices = np.frombuffer(response, dtype=np.uint8, offset=1)
@@ -176,16 +244,47 @@ def build_macro_action_pool(
 
     macro_actions = []
     for pool_index, option in enumerate(selected_options):
-        response = bytes(option["bytes"])
+        response = bytes(option.get("bytes", b""))
+        response_value = option.get("value")
         description = "Cancel" if response == _CANCEL_RESPONSE else f"Macro Action {pool_index}"
+        if response == _CANCEL_RESPONSE:
+            operation = ActionOperation.CANCEL
+        elif msg_type == 25:
+            operation = ActionOperation.MACRO_SORT
+        elif msg_type == 22:
+            operation = ActionOperation.REMOVE_COUNTER
+        elif msg_type in (18, 24):
+            operation = ActionOperation.PLACE
+        elif msg_type in (140, 141):
+            operation = ActionOperation.ANNOUNCE
+        else:
+            operation = ActionOperation.MACRO_SELECT
+
+        locations = list(option.get("locs", []))
+        places = list(option.get("places", []))
+        codes = list(option.get("codes", []))
+        values = list(option.get("values", []))
+        selected_count = len(locations) or len(places) or len(option.get("indices", []))
         macro_actions.append(
             GameAction(
                 action_type=msg_type,
                 index=pool_index,
                 desc_str=description,
-                macro_targets=list(option.get("locs", [])) or None,
-                macro_places=list(option.get("places", [])) or None,
+                operation_id=int(operation),
+                response_value=response_value,
+                target_location_raw=locations[0] if locations else -1,
+                selection_min=macro_constraints["selection_min"],
+                selection_max=macro_constraints["selection_max"],
+                selection_count=selected_count,
+                cancelable=macro_constraints["cancelable"],
+                context_value=macro_constraints["context_value"],
+                macro_targets=locations or None,
+                macro_places=places or None,
+                macro_target_codes=codes or None,
+                macro_target_values=values or None,
+                macro_target_locations=locations or None,
                 decision_bytes=response,
+                decision_value=response_value,
             )
         )
 

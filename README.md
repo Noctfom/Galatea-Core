@@ -7,7 +7,7 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.4.2](https://img.shields.io/badge/Release-v3.4.2-brightgreen.svg)](docs/changelog.md)
+[![Release: v3.5.0](https://img.shields.io/badge/Release-v3.5.0-brightgreen.svg)](docs/changelog.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -24,6 +24,7 @@
 - 📦 **一键包支持** - 内置 Python 环境，双击即可启动
 - 🔥 **高效训练** - 固定中央批量推理 + CPU/CUDA 双模式 + 联盟训练机制
 - 🔐 **模型身份管理** - 动态文件前缀、自动 UUID、内置轮次与完整 ONNX 制品组
+- 🧩 **动作协议 V2** - 顺序多选、宏动作组合、响应语义与约束特征统一进入策略网络
 - 👁️ **决策可视化** - 全息回放系统，深入理解 AI 思考过程
 
 ---

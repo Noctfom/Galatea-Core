@@ -4,8 +4,14 @@
 
 import torch
 import numpy as np
-from data_types import GameSnapshot
-from game_constants import Zone
+from data_types import (
+    ACTION_CONTEXT_DIM,
+    ACTION_RESPONSE_BUCKETS,
+    ACTION_SIGNATURE_BYTES,
+    ACTION_TARGET_SLOTS,
+    GameSnapshot,
+)
+from game_constants import LocationInfo, Zone
 from semantic_kb import SemanticKnowledgeBase  # 导入语义库
 
 # --- 配置参数 ---
@@ -42,6 +48,86 @@ class GalateaEncoder:
         if code == 0:
             return UNK_CODE_IDX
         return (code % (self.vocab_size - self.reserved_ids)) + self.reserved_ids
+
+    @staticmethod
+    def _hash_action_response(value):
+        """把任意整数响应稳定映射到动作响应词表，并保留 0 作为空值"""
+        if value is None:
+            return 0
+        return 1 + (int(value) & 0xFFFFFFFF) % (ACTION_RESPONSE_BUCKETS - 1)
+
+    @staticmethod
+    def _scale_action_context(value):
+        """压缩动作约束数值，避免异常大值破坏网络数值范围"""
+        return max(-4.0, min(4.0, float(value) / 16.0))
+
+    @staticmethod
+    def _split_target_value(value):
+        """把素材的普通值或双值字段拆成两个紧凑的无符号特征"""
+        if isinstance(value, (tuple, list)):
+            low = int(value[0]) if value else 0
+            high = int(value[1]) if len(value) > 1 else 0
+        else:
+            raw = int(value or 0) & 0xFFFFFFFF
+            low = raw & 0xFFFF
+            high = (raw >> 16) & 0xFFFF
+        return [max(0, min(low, 255)), max(0, min(high, 255))]
+
+    @staticmethod
+    def _action_signature(action):
+        """对完整动作语义生成稳定签名，继续区分超过显式目标槽的组合"""
+        values = [
+            action.action_type,
+            getattr(action, 'operation_id', 0),
+            getattr(action, 'response_value', None),
+            getattr(action, 'desc_id', 0),
+            getattr(action, 'code', 0),
+            getattr(action, 'selection_min', 0),
+            getattr(action, 'selection_max', 0),
+            getattr(action, 'selection_count', 0),
+            int(bool(getattr(action, 'finishable', False))),
+            int(bool(getattr(action, 'cancelable', False))),
+            getattr(action, 'context_value', 0),
+            getattr(action, 'prompt_flags', 0),
+            getattr(action, 'prompt_value', 0),
+            getattr(action, 'prompt_value2', 0),
+            getattr(action, 'decision_value', None),
+        ]
+        values.extend(bytes(getattr(action, 'decision_bytes', b'')))
+        for attr_name in (
+            'macro_targets',
+            'macro_target_codes',
+            'macro_target_values',
+            'macro_target_locations',
+            'macro_places',
+        ):
+            for item in getattr(action, attr_name, None) or ():
+                if isinstance(item, (tuple, list)):
+                    values.extend(item)
+                else:
+                    values.append(item)
+
+        # FNV-1a 避免 Python hash 的进程随机盐导致 Worker 间编码不一致
+        signature = 2166136261
+        for value in values:
+            normalized = -1 if value is None else int(value)
+            signature ^= normalized & 0xFFFFFFFF
+            signature = (signature * 16777619) & 0xFFFFFFFF
+        return [
+            (signature >> (byte_index * 8)) & 0xFF
+            for byte_index in range(ACTION_SIGNATURE_BYTES)
+        ]
+
+    @staticmethod
+    def _encode_target_location(action, player_id):
+        """把引擎原始位置转成行动方视角的控制者、区域与序号"""
+        raw_location = getattr(action, 'target_location_raw', -1)
+        if raw_location is None or raw_location < 0:
+            return 0, 0, 0
+        controller, location, sequence, _ = LocationInfo.decode(raw_location)
+        relative_controller = 1 if controller == player_id else 2
+        location_index = location.bit_length() if location > 0 else 0
+        return relative_controller, min(location_index, 8), min(int(sequence), 31) + 1
 
     @staticmethod
     def _encode_global_vector(g, player_id):
@@ -121,66 +207,118 @@ class GalateaEncoder:
                 
         return x, y
 
-    def encode_actions(self, valid_actions, snapshot):
-        MAX_MATERIALS = 5 # 最多融合同调 5 张素材
+    def encode_actions(self, valid_actions, snapshot, player_id):
+        """把合法动作编码为动作协议 V2 的固定形状张量"""
+        max_materials = ACTION_TARGET_SLOTS
         act_card_idxs, act_types, act_descs, masks = [], [], [], []
-        act_races, act_attrs, act_codes = [], [], [] 
-        act_places = [] # 新增：空间坐标数组
+        act_races, act_attrs, act_codes, act_places = [], [], [], []
+        act_operations, act_responses, act_signatures = [], [], []
+        act_contexts, act_target_codes, act_target_values = [], [], []
+        act_controllers, act_locations, act_sequences = [], [], []
 
         for act in valid_actions[:MAX_ACTIONS]:
-            # 1. 提取多目标实体/素材 (支持 5 张卡)
-            if hasattr(act, 'macro_targets') and act.macro_targets:
-                t_idxs = [t if (0 <= t < MAX_CARDS) else MAX_CARDS for t in act.macro_targets][:MAX_MATERIALS]
-                t_idxs.extend([MAX_CARDS] * (MAX_MATERIALS - len(t_idxs)))
+            if getattr(act, 'macro_targets', None):
+                t_idxs = [
+                    target if 0 <= target < MAX_CARDS else MAX_CARDS
+                    for target in act.macro_targets[:max_materials]
+                ]
+                t_idxs.extend([MAX_CARDS] * (max_materials - len(t_idxs)))
             else:
-                t_idx = act.target_entity_idx if (0 <= act.target_entity_idx < MAX_CARDS) else MAX_CARDS
-                t_idxs = [t_idx] + [MAX_CARDS] * (MAX_MATERIALS - 1)
+                target = act.target_entity_idx
+                target = target if 0 <= target < MAX_CARDS else MAX_CARDS
+                t_idxs = [target] + [MAX_CARDS] * (max_materials - 1)
             act_card_idxs.append(t_idxs)
-            
-            # 2. 提取多重格子坐标 (支持同时锁 5 个格子)
-            if hasattr(act, 'macro_places') and act.macro_places:
-                p_vals = act.macro_places[:MAX_MATERIALS]
-                p_vals.extend([0] * (MAX_MATERIALS - len(p_vals)))
+
+            if getattr(act, 'macro_places', None):
+                places = list(act.macro_places[:max_materials])
+                places.extend([0] * (max_materials - len(places)))
             else:
-                p_val = (act.desc_id % 32) + 1 if act.action_type in [18, 24] else 0
-                p_vals = [p_val] + [0] * (MAX_MATERIALS - 1)
-            act_places.append(p_vals)
-            
+                place = (act.desc_id % 32) + 1 if act.action_type in [18, 24] else 0
+                places = [place] + [0] * (max_materials - 1)
+            act_places.append(places)
+
+            raw_codes = list(getattr(act, 'macro_target_codes', None) or ())[:max_materials]
+            target_codes = [self._hash_code(code) if code else 0 for code in raw_codes]
+            target_codes.extend([0] * (max_materials - len(target_codes)))
+            act_target_codes.append(target_codes)
+
+            raw_values = list(getattr(act, 'macro_target_values', None) or ())[:max_materials]
+            target_values = [self._split_target_value(value) for value in raw_values]
+            target_values.extend([[0, 0]] * (max_materials - len(target_values)))
+            act_target_values.append(target_values)
+
             act_types.append(act.action_type)
             act_descs.append(act.desc_id % 1024)
             masks.append(True)
-            
-            # 3. 宣言类附加语义
-            r_val, a_val, c_val = 0, 0, 0
-            if act.action_type == 140: r_val = (act.desc_id.bit_length() - 1) % 30
-            elif act.action_type == 141: a_val = (act.desc_id.bit_length() - 1) % 10
-            elif act.action_type == 142: c_val = self._hash_code(act.desc_id)
-                
-            act_races.append(r_val)
-            act_attrs.append(a_val)
-            act_codes.append(c_val)
-            
-        # 4. 长度对齐 Padding
+            act_operations.append(int(getattr(act, 'operation_id', 0)))
+            act_responses.append(
+                self._hash_action_response(getattr(act, 'response_value', None))
+            )
+            act_signatures.append(self._action_signature(act))
+            act_contexts.append([
+                self._scale_action_context(getattr(act, 'selection_min', 0)),
+                self._scale_action_context(getattr(act, 'selection_max', 0)),
+                self._scale_action_context(getattr(act, 'selection_count', 0)),
+                float(bool(getattr(act, 'finishable', False))),
+                float(bool(getattr(act, 'cancelable', False))),
+                self._scale_action_context(getattr(act, 'context_value', 0)),
+            ])
+            controller, location, sequence = self._encode_target_location(act, player_id)
+            act_controllers.append(controller)
+            act_locations.append(location)
+            act_sequences.append(sequence)
+
+            race_value, attr_value, code_value = 0, 0, 0
+            if act.action_type == 140 and act.desc_id > 0:
+                race_value = (act.desc_id.bit_length() - 1) % 30
+            elif act.action_type == 141 and act.desc_id > 0:
+                attr_value = (act.desc_id.bit_length() - 1) % 10
+            elif act.action_type == 142:
+                code_value = self._hash_code(act.desc_id)
+            elif getattr(act, 'code', 0):
+                code_value = self._hash_code(act.code)
+            act_races.append(race_value)
+            act_attrs.append(attr_value)
+            act_codes.append(code_value)
+
         pad_len = MAX_ACTIONS - len(act_card_idxs)
         if pad_len > 0:
-            act_card_idxs.extend([[120]*MAX_MATERIALS] * pad_len) # 二维 Padding
-            act_places.extend([[0]*MAX_MATERIALS] * pad_len)    # 二维 Padding
+            act_card_idxs.extend([[MAX_CARDS] * max_materials] * pad_len)
+            act_places.extend([[0] * max_materials] * pad_len)
             act_types.extend([0] * pad_len)
             act_descs.extend([0] * pad_len)
             masks.extend([False] * pad_len)
             act_races.extend([0] * pad_len)
             act_attrs.extend([0] * pad_len)
             act_codes.extend([0] * pad_len)
-            
+            act_operations.extend([0] * pad_len)
+            act_responses.extend([0] * pad_len)
+            act_signatures.extend([[0] * ACTION_SIGNATURE_BYTES] * pad_len)
+            act_contexts.extend([[0.0] * ACTION_CONTEXT_DIM] * pad_len)
+            act_target_codes.extend([[0] * max_materials] * pad_len)
+            act_target_values.extend([[[0, 0]] * max_materials] * pad_len)
+            act_controllers.extend([0] * pad_len)
+            act_locations.extend([0] * pad_len)
+            act_sequences.extend([0] * pad_len)
+
         return {
-            'act_card_idx': torch.tensor(act_card_idxs, dtype=torch.long).unsqueeze(0), # [1, 80, 5]
+            'act_card_idx': torch.tensor(act_card_idxs, dtype=torch.long).unsqueeze(0),
             'act_type': torch.tensor(act_types, dtype=torch.long).unsqueeze(0),
             'act_desc': torch.tensor(act_descs, dtype=torch.long).unsqueeze(0),
             'act_mask': torch.tensor(masks, dtype=torch.bool).unsqueeze(0),
             'act_race': torch.tensor(act_races, dtype=torch.long).unsqueeze(0),
             'act_attr': torch.tensor(act_attrs, dtype=torch.long).unsqueeze(0),
             'act_code': torch.tensor(act_codes, dtype=torch.long).unsqueeze(0),
-            'act_place': torch.tensor(act_places, dtype=torch.long).unsqueeze(0)        # 🌟 挂载 2D 坐标 [1, 80, 5]
+            'act_place': torch.tensor(act_places, dtype=torch.long).unsqueeze(0),
+            'act_operation': torch.tensor(act_operations, dtype=torch.uint8).unsqueeze(0),
+            'act_response': torch.tensor(act_responses, dtype=torch.int16).unsqueeze(0),
+            'act_signature': torch.tensor(act_signatures, dtype=torch.uint8).unsqueeze(0),
+            'act_context': torch.tensor(act_contexts, dtype=torch.float16).unsqueeze(0),
+            'act_target_code': torch.tensor(act_target_codes, dtype=torch.int32).unsqueeze(0),
+            'act_target_value': torch.tensor(act_target_values, dtype=torch.uint8).unsqueeze(0),
+            'act_controller': torch.tensor(act_controllers, dtype=torch.uint8).unsqueeze(0),
+            'act_location': torch.tensor(act_locations, dtype=torch.uint8).unsqueeze(0),
+            'act_sequence': torch.tensor(act_sequences, dtype=torch.uint8).unsqueeze(0),
         }
 
     def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:
@@ -383,7 +521,7 @@ class GalateaEncoder:
         # ==========================================
         # 3. 最终打包 (直接包装为 Tensor)
         # ==========================================
-        act_dict = self.encode_actions(snapshot.valid_actions, snapshot)
+        act_dict = self.encode_actions(snapshot.valid_actions, snapshot, player_id)
 
         # 哨兵雷达：在强转和 clip 之前，进行深度数值自检，绝不静默隐藏 Bug
         has_nan = np.isnan(card_feats).any()

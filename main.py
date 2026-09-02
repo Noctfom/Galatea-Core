@@ -328,7 +328,11 @@ def main():
             print(f"❌ 致命错误: 找不到核心动态库 {core_path}。")
             sys.exit(1)
             
-        manager = DuelManager(core_path, args.deck_dir)
+        manager = DuelManager(
+            core_path,
+            args.deck_dir,
+            standard_core=args.standard_core,
+        )
         manager.run_tournament(args.num)
         
     elif args.command == 'duel':

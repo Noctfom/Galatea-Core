@@ -1,5 +1,5 @@
 # ========================================================
-# Galatea-Core v3.4.2 Dependencies
+# Galatea-Core v3.5.0 Dependencies
 # ========================================================
 # Install: pip install -r requirements.txt
 # PyTorch must be installed for the target CPU/CUDA runtime before this file.

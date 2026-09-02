@@ -4,6 +4,38 @@
 
 ---
 
+## [v3.5.0] - 2026-09-02
+
+### 🧩 Model Action Protocol V2
+
+- **Unified action semantics**: `GameAction` now formally carries operation kind, response value, raw location, selection limits, resulting count, finish/cancel conditions, prompt fields, macro target codes, and material values. Critical meaning no longer exists only in model-invisible indices, debug text, or raw response bytes
+- **Refactored action-head inputs**: Added operation, response, full semantic signature, constraint context, target code/value, and actor-relative location tensors. A stable 32-bit semantic signature continues to distinguish the remainder of combinations that exceed the five explicit target slots
+- **Fixed deterministic but unlearnable choices**: Type 12/13 Yes/No, Type 14 option descriptions, Type 19 battle positions and card code now produce distinct model features. Type 10 direct-attack flags and candidate codes are also preserved
+- **Exposed Type 11 shuffle**: `can_shuffle` now creates Core action type 8, so this legal command can enter the model action pool
+
+### 🔁 Sequential Selection and Combination Legality
+
+- **Native sequential Type 26 decisions**: Every Select/Unselect action encodes the resulting selected set, candidate code/location, min/max, and finishable/cancelable state; Finish and Cancel are distinct semantic operations. The model interacts with Core one step at a time, each decision enters the PPO trajectory, and terminal reward propagates through GAE without requiring RuleBot control or MCTS
+- **Preserved the static-macro boundary**: Types 15/18/20/22/23/24/25 still use the legal enumerator to produce complete responses. Candidates now retain codes, ordering, tribute values, dual level values, and counter allocations so legal packages no longer collapse in the action head
+- **Fixed Type 20 tribute legality**: Matches Core's rule that selected count must not exceed `max` and summed `release_param` must reach `min`, supporting one double-tribute card while excluding count-only invalid packages
+- **Fixed Type 140/141 multi-value announcements**: When Core requests multiple races or attributes, the pool returns one OR mask containing exactly `count` bits instead of submitting an invalid single bit
+- **Bounded combination cost**: Equivalent off-field copies with the same code and parameters generate canonical count representatives. The existing 5,000-option enumeration cap, 120-option weighted sampling, and minimum exploration weight remain in place
+
+### 📨 Core Message Boundaries and Model Artifact Protocol
+
+- **Fixed Type 16 byte alignment**: Restored the bundled Core header layout `spe_count + global forced + hint_timing[2]` and correctly skips the separator byte before every candidate after the first. Standard Core uses the no-separator layout. Cancel is offered only when the global header flag is not forced
+- **Independent model protocol version**: Added `MODEL_PROTOCOL_VERSION = 2` and raised `CHECKPOINT_FORMAT_VERSION` to 2. PTH top-level metadata, `net_config`, model `state_dict`, ONNX metadata, and artifact manifests all record and validate the model protocol; WebUI displays and rejects mismatches during resume
+- Because network inputs and the action head changed, 3.5.0 accepts only Model Protocol V2 weights and never silently applies an older action protocol to the new tensors
+- **Resource impact**: New trajectory fields add about 6.1 KiB per step, or roughly 133 MiB for a 22,384-step pool. Action embeddings and temporary tensors for one six-worker inference batch remain small relative to the existing model and commit budget; rewards, commit boundaries, GAE, and PPO equations are unchanged
+- **Validation**: 114 automated tests cover message parsing, default/Standard Type 16, Type 26 transitions, Type 20 legality, counter allocation, multi-bit announcements, network forward, checkpoint/ONNX protocol checks, and a real ONNXRuntime run. A temporary V2 model completed 20 real Core + Lua + deck games against RuleBot, and a 50-game RuleBot self-play stress test completed without any Type 16 retry cascade, parser error, or circuit breaker
+
+### 📚 Version and Documentation
+
+- Updated the displayed framework version, `version.txt`, README badges, and all bilingual document applicability markers to `3.5.0`
+- Architecture and special-handling guides now distinguish static legal macro actions from native sequential Type 26 decisions and document Action Protocol V2 tensors and version boundaries
+
+---
+
 ## [v3.4.2] - 2026-08-31
 
 ### 🐛 Training Hotfix

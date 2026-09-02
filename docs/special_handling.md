@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 中为解决框架固有局限性而特殊构建的模块，这些模块是框架的核心竞争力之一。
 
-> 文档适用于 **Galatea-Core v3.4.2**。
+> 文档适用于 **Galatea-Core v3.5.0**。
 
 ---
 
@@ -142,56 +142,66 @@ def get_priority_score(c):
 
 ---
 
-## 多选题组块包装逻辑
+## 多选与顺序选择逻辑
 
 ### 问题背景
 
-YGOPro 的某些交互消息（如 `MSG_SELECT_CARD` type=15）允许玩家**多元选择/取消选择**多张卡片，直到满足条件后才提交。传统 RL 框架难以处理这种"多步组合动作"，因为每步可选动作集合会动态变化。
+OCGCore 有两类容易混淆的选择协议：Type 15/20/22/23 等消息要求客户端**一次返回完整组合**；Type 26 (`MSG_SELECT_UNSELECT_CARD`) 才会在每次 Select/Unselect 后由引擎重新计算候选并发出下一条消息。二者不能使用同一种静态包装方式。
 
-### 解决方案：宏动作（Macro Action）系统
+### 静态组合：宏动作（Macro Action）
 
-Galatea-Core 引入了 **宏动作包装器**，将多步选择操作封装成一个"原子动作"：
+对一次提交完整响应的消息，合法性枚举器先构造可直接发给 Core 的候选套餐，策略网络再从套餐中选择：
 
 ```
-原始交互流程：
-Step 1: 选择卡片A → 可选卡片变化
-Step 2: 选择卡片B → 可选卡片变化  
-Step 3: 取消选择卡片A → 可选卡片变化
-Step 4: 选择卡片C → 满足条件，提交
-
-宏动作包装后：
-一个动作 = 选择 {B, C}，进入指定区域
+Core 请求：从 {A, B, C} 中选择 2 张
+合法性枚举器：{A,B} / {A,C} / {B,C}
+策略网络：选择一个完整套餐
+响应封包：count + 原始候选索引列表
 ```
 
-#### 核心实现
+宏动作不仅保存 `decision_bytes`，还向模型公开目标卡密、顺序、位置和规则数值：
 
 ```python
-class MacroAction:
-    def __init__(self):
-        self.macro_targets = []    # 最终选中的卡片列表
-        self.decision_bytes = b''  # 原始决策字节流（用于回放）
-        self.macro_places = []     # 放置位置列表
+action.macro_targets = [...]        # 可见实体索引
+action.macro_target_codes = [...]   # 隐藏区/卡组选项卡密
+action.macro_target_values = [...]  # 祭品值、双星级、指示物分配
+action.macro_places = [...]         # 格子组合
+action.decision_bytes = b'...'      # Core 原始完整响应
 ```
 
-#### 优势
+Type 20 会按 Core 的 `release_param` 总和判定祭品值，不再按选中卡片张数近似；Type 140/141 的多种族/多属性宣言也会组合成恰好包含 `count` 个 bit 的整数响应。
 
-1. **动作空间稳定**：神经网络始终面对固定维度动作，不会因多步操作膨胀
-2. **训练收敛更快**：不需要学习"组合选择"的复杂策略
-3. **回放一致性**：通过 `decision_bytes` 记录原始决策，回放时精确还原
+### Type 26：引擎原生顺序决策
+
+Type 26 不做静态终局组合。任意 Lua `special_check` 只有引擎知道，单个数据包不足以可靠枚举所有终局集合；强行用 RuleBot 遍历会改变训练主体，并可能遗漏合法路径。
+
+框架因此保留原生流程：
+
+```
+快照 N：当前已选 {A}，可 Select B/C，可 Unselect A，可 Finish
+模型动作：Select B
+Core 校验并执行 Lua 约束
+快照 N+1：当前已选 {A,B}，候选和 finishable 状态重新生成
+模型动作：Finish
+```
+
+每个动作都编码 Select/Unselect/Finish/Cancel 语义、动作后的完整已选集合、候选卡密与位置、min/max、finishable/cancelable，并单独写入 PPO 轨迹。网络虽然没有循环隐状态，但观测已包含当前选择状态，终局奖励会通过 GAE 回传到同一连贯过程中的各步，所以完成这种动作不依赖 MCTS。
 
 #### 适用场景
 
-| 消息类型 | 场景 | 宏动作处理 |
-|----------|------|------------|
+| 消息类型 | 场景 | 处理方式 |
+|----------|------|----------|
 | `MSG_SELECT_CARD/TRIBUTE` (15/20) | 常规多选效果 | 包装合法选项/祭品组合 |
-| `MSG_SELECT_PLACE/DISFIELD` (18) | 位置选择/封锁 | 包装合法位置组合池 |
-| `MSG_SELECT_COUNTER` (22) | 指示物选择 | 包装合法选择池 |
-| `MSG_SELECT_SUM` (23) | 凑星逻辑(同调/link) | 包装合法选择池 |
-| `MSG_SORT_CARD` (23) | 排序逻辑 | 包装合法次序组合 |
+| `MSG_SELECT_PLACE/DISFIELD` (18/24) | 位置选择/封锁 | 包装合法位置组合 |
+| `MSG_SELECT_COUNTER` (22) | 指示物选择 | 包装完整数量分配 |
+| `MSG_SELECT_SUM` (23) | 同调/仪式等凑值 | 包装通过 Core 同等求和规则的组合 |
+| `MSG_SORT_CARD` (25) | 排序 | 包装合法次序 |
+| `MSG_ANNOUNCE_RACE/ATTRIB` (140/141) | 多项宣言 | 包装完整 bitmask |
+| `MSG_SELECT_UNSELECT_CARD` (26) | 动态选择/撤销 | 模型逐消息顺序决策 |
 
 #### 额外优化
 
-针对MSG_SELECT_CARD这类很可能出现过大可能项(例如23选5，可能组合数量会是一个恐怖的数值)导致运算卡死，并且框架同时处理的选项也有限，对此在进行dfs计算时设置了5000组合数量的上限，并在传入dfs计算前令框架打分单卡进行权重计算组合，并在传入组合时同样经过权重筛选，让ai能够学习并尽可能的选择到想要的选项组。
+静态组合枚举最多保留 5000 项，最终动作池最多 120 项。单卡 Pass1 分数用于加权随机缩减，每个合法组合保留最低探索权重；非场上同名同参数副本按“选择数量”生成规范代表，避免重复副本挤占组合池。该缩减仍保留随机性，不会固定为 RuleBot 的最高分答案。
 
 ---
 

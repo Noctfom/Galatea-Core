@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.4.2**.
+> This document applies to **Galatea-Core v3.5.0**.
 
 ---
 
@@ -142,56 +142,66 @@ In **🗃️ Assets & Deck Management → 🃏 Meta Staples (142 Cache)**:
 
 ---
 
-## Multi-Select Chunk Wrapper Logic
+## Multi-Select and Sequential Selection Logic
 
 ### Problem Background
 
-YGOPro interaction messages like `MSG_SELECT_CARD` (type=15) allow players to **multi-select / deselect** multiple cards until conditions are met. Traditional RL frameworks struggle with these "multi-step combinatorial actions" because the available action set changes dynamically each step.
+OCGCore exposes two easily confused protocols. Types 15/20/22/23 require the client to **return a complete combination in one response**. Type 26 (`MSG_SELECT_UNSELECT_CARD`) is the protocol where Core recomputes candidates and sends another message after each Select/Unselect. They must not share one static wrapper.
 
-### Solution: Macro Action System
+### Static Combinations: Macro Actions
 
-Galatea-Core introduces a **Macro Action Wrapper** that encapsulates multi-step selection operations into an "atomic action":
+For messages that expect one complete response, the legality enumerator builds Core-ready packages and the policy chooses among them:
 
 ```
-Original interaction flow:
-Step 1: Select Card A → options change
-Step 2: Select Card B → options change  
-Step 3: Deselect Card A → options change
-Step 4: Select Card C → conditions met, submit
-
-After Macro Action wrapping:
-One action = Select {B, C}, place in designated zone
+Core request: choose 2 from {A, B, C}
+Legal enumerator: {A,B} / {A,C} / {B,C}
+Policy: choose one complete package
+Response: count + original candidate indices
 ```
 
-#### Core Implementation
+Macros retain the exact Core response while exposing codes, order, locations, and rule values to the model:
 
 ```python
-class MacroAction:
-    def __init__(self):
-        self.macro_targets = []    # Final selected card list
-        self.decision_bytes = b''  # Original decision byte stream (for replay)
-        self.macro_places = []     # Placement position list
+action.macro_targets = [...]        # Visible entity indices
+action.macro_target_codes = [...]   # Hidden-zone/deck option codes
+action.macro_target_values = [...]  # Tribute, dual-level, counter values
+action.macro_places = [...]         # Zone combination
+action.decision_bytes = b'...'      # Complete raw Core response
 ```
 
-#### Advantages
+Type 20 follows Core's summed `release_param` rule instead of approximating tribute value by card count. Multi-race/attribute Types 140/141 likewise return an integer mask with exactly `count` bits.
 
-1. **Stable action space**: Neural network always faces fixed-dimension actions, no expansion from multi-step operations
-2. **Faster training convergence**: No need to learn complex "combinatorial selection" strategies
-3. **Replay consistency**: Original decisions recorded via `decision_bytes`, precisely restored on replay
+### Type 26: Native Sequential Decisions
+
+Type 26 is not converted into static terminal packages. Arbitrary Lua `special_check` logic exists only inside Core, so one packet cannot reliably enumerate every terminal set; using RuleBot search would change the learning actor and may miss legal paths.
+
+The framework preserves the native flow:
+
+```
+Snapshot N: selected {A}; Select B/C, Unselect A, or Finish
+Model action: Select B
+Core validates and runs Lua constraints
+Snapshot N+1: selected {A,B}; candidates and finishable are recomputed
+Model action: Finish
+```
+
+Every action encodes Select/Unselect/Finish/Cancel semantics, the resulting selected set, candidate code/location, min/max, and finishable/cancelable. Each step becomes its own PPO trajectory row. The network has no recurrent state, but the observation now contains the current selection state, and terminal reward propagates through GAE across the sequence, so MCTS is not required to complete it.
 
 #### Applicable Scenarios
 
-| Message Type | Scenario | Macro Action Handling |
-|--------------|----------|-----------------------|
+| Message Type | Scenario | Handling |
+|--------------|----------|----------|
 | `MSG_SELECT_CARD/TRIBUTE` (15/20) | General multi-select effects | Wrap legal options/tribute combinations |
-| `MSG_SELECT_PLACE/DISFIELD` (18) | Position selection/lock | Wrap legal position combination pool |
-| `MSG_SELECT_COUNTER` (22) | Counter selection | Wrap legal choice pool |
-| `MSG_SELECT_SUM` (23) | Sum logic (Synchro/Link) | Wrap legal choice pool |
-| `MSG_SORT_CARD` (25) | Sorting logic | Wrap legal ordering combinations |
+| `MSG_SELECT_PLACE/DISFIELD` (18/24) | Position selection/lock | Wrap legal position combinations |
+| `MSG_SELECT_COUNTER` (22) | Counter selection | Wrap complete quantity allocations |
+| `MSG_SELECT_SUM` (23) | Synchro/Ritual value selection | Wrap combinations passing Core-equivalent sum rules |
+| `MSG_SORT_CARD` (25) | Sorting | Wrap legal orders |
+| `MSG_ANNOUNCE_RACE/ATTRIB` (140/141) | Multi-value announcement | Wrap complete bitmasks |
+| `MSG_SELECT_UNSELECT_CARD` (26) | Dynamic select/deselect | Model decides sequentially per Core message |
 
 #### Additional Optimization
 
-For `MSG_SELECT_CARD` scenarios where extremely large option counts are possible (e.g., pick 5 from 23, horrific number of combinations), a 5000-combination ceiling is set during DFS calculation to prevent computation deadlock. Before entering DFS, the framework rates individual cards by weight to form weighted combinations, and applies weight-based filtering again when passing combinations through — allowing AI to learn and select desired option groups as efficiently as possible.
+Static enumeration is capped at 5,000 legal combinations and the final action pool at 120. Pass-1 card scores drive weighted random reduction while every legal package keeps a minimum exploration weight. Equivalent off-field copies with identical code and parameters use canonical count representatives so duplicates do not consume the pool. Reduction remains stochastic and does not turn RuleBot's top score into a fixed answer.
 
 ---
 

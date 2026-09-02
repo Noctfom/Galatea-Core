@@ -13,12 +13,15 @@ from training_validation import validate_model_prefix
 
 
 # 仅表示训练检查点数据协议，必须独立于 app.py 中的框架版本维护
-CHECKPOINT_FORMAT_VERSION = 1
+CHECKPOINT_FORMAT_VERSION = 2
+# 模型输入/动作语义协议独立维护；变更会使网络结构与训练张量不兼容
+MODEL_PROTOCOL_VERSION = 2
 DEFAULT_MODEL_PREFIX = "galatea"
 MAX_CHECKPOINT_FILE_BYTES = 32 * 1024 * 1024 * 1024
 
 REQUIRED_TRAINING_CHECKPOINT_KEYS = {
     "checkpoint_format_version",
+    "model_protocol_version",
     "model_id",
     "model_prefix",
     "run_id",
@@ -63,6 +66,22 @@ def get_checkpoint_format_warning(checkpoint):
         "检查点协议版本不兼容: "
         f"文件={actual!r}, 当前={CHECKPOINT_FORMAT_VERSION}。"
         "该版本独立于 Galatea 框架版本，且当前没有对应迁移规则。"
+    )
+
+
+def get_model_protocol_warning(checkpoint):
+    """返回模型内部协议版本告警；一致时返回空值"""
+    actual = checkpoint.get("model_protocol_version")
+    if (
+        isinstance(actual, int)
+        and not isinstance(actual, bool)
+        and actual == MODEL_PROTOCOL_VERSION
+    ):
+        return None
+    return (
+        "模型输入/动作协议版本不兼容: "
+        f"文件={actual!r}, 当前={MODEL_PROTOCOL_VERSION}。"
+        "该协议决定网络权重与动作张量结构，不能混用。"
     )
 
 
@@ -132,9 +151,18 @@ def inspect_training_checkpoint(path, map_location="cpu"):
     if not isinstance(checkpoint, dict):
         raise TypeError("training checkpoint must be a dictionary")
     format_warning = get_checkpoint_format_warning(checkpoint)
-    if format_warning is None:
+    model_protocol_warning = get_model_protocol_warning(checkpoint)
+    if format_warning is None and model_protocol_warning is None:
         validate_model_id(checkpoint.get("model_id"))
         validate_model_prefix(checkpoint.get("model_prefix"))
+        net_config = checkpoint.get("net_config")
+        if (
+            not isinstance(net_config, dict)
+            or net_config.get("model_protocol_version") != MODEL_PROTOCOL_VERSION
+        ):
+            raise ValueError(
+                "checkpoint net_config model_protocol_version is invalid"
+            )
         if (
             isinstance(checkpoint.get("iteration"), bool)
             or not isinstance(checkpoint.get("iteration"), int)
@@ -143,7 +171,9 @@ def inspect_training_checkpoint(path, map_location="cpu"):
             raise ValueError("checkpoint iteration must be a non-negative integer")
     return {
         "checkpoint_format_version": checkpoint.get("checkpoint_format_version"),
+        "model_protocol_version": checkpoint.get("model_protocol_version"),
         "format_warning": format_warning,
+        "model_protocol_warning": model_protocol_warning,
         "model_id": checkpoint.get("model_id"),
         "model_prefix": checkpoint.get("model_prefix"),
         "iteration": checkpoint.get("iteration"),
@@ -162,6 +192,11 @@ def validate_training_checkpoint(checkpoint, *, source_path=None):
         warnings.warn(format_warning, RuntimeWarning, stacklevel=2)
         raise ValueError(format_warning)
 
+    model_protocol_warning = get_model_protocol_warning(checkpoint)
+    if model_protocol_warning:
+        warnings.warn(model_protocol_warning, RuntimeWarning, stacklevel=2)
+        raise ValueError(model_protocol_warning)
+
     missing = sorted(REQUIRED_TRAINING_CHECKPOINT_KEYS.difference(checkpoint))
     if missing:
         raise KeyError(f"training checkpoint is missing required keys: {missing}")
@@ -179,6 +214,14 @@ def validate_training_checkpoint(checkpoint, *, source_path=None):
 
     validate_model_id(checkpoint["model_id"])
     validate_model_prefix(checkpoint["model_prefix"])
+    net_config = checkpoint["net_config"]
+    if not isinstance(net_config, dict):
+        raise ValueError("checkpoint net_config must be a dictionary")
+    if net_config.get("model_protocol_version") != MODEL_PROTOCOL_VERSION:
+        raise ValueError(
+            "checkpoint net_config model_protocol_version does not match "
+            "the current model protocol"
+        )
     if (
         isinstance(checkpoint["iteration"], bool)
         or not isinstance(checkpoint["iteration"], int)

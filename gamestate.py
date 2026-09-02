@@ -5,13 +5,20 @@ gamestate模块
 
 import struct
 import io
-import traceback 
+import traceback
 import json
 import os
+from copy import copy
 from game_constants import LocationInfo, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
-from data_types import GameSnapshot, GlobalFeature, CardEntity, GameAction
+from data_types import (
+    ActionOperation,
+    CardEntity,
+    GameAction,
+    GameSnapshot,
+    GlobalFeature,
+)
 
 _META_STAPLES = None
 
@@ -122,11 +129,12 @@ class MessageParser:
                 stream.read(1); length += 1 # P
                 b = stream.read(1); length += 1 # Count
                 count = struct.unpack('<B', b)[0]
-                stream.read(10); length += 10 # Spe, forced, h1, h2
-                
-                # [额外修复] 元素之间有 1 个字节的定界符 (共 count-1 个)
-                extra_bytes = max(0, count - 1) if CORE_HAS_GHOST_BYTE else 0
-                stream.read(count * 13 + extra_bytes); length += count * 13 + extra_bytes
+                stream.read(10); length += 10 # Spe, forced, hint1, hint2
+
+                # 内置 Core 在第二项起插入 1 字节定界符；标准内核没有该字节。
+                separator_count = max(0, count - 1) if CORE_HAS_GHOST_BYTE else 0
+                stream.read(count * 13 + separator_count)
+                length += count * 13 + separator_count
 
             # 18/24: PLACE / DISFIELD
             elif msg_type in [18, 24]:
@@ -649,7 +657,15 @@ class DuelState:
                         
                         loc_raw = LocationInfo.encode(c, l, s, 0)
                         self.current_valid_actions.append(
-                            GameAction(action_type=at, index=i, target_entity_idx=loc_raw, desc_id=desc)
+                            GameAction(
+                                action_type=at,
+                                index=i,
+                                target_entity_idx=loc_raw,
+                                desc_id=desc,
+                                code=code,
+                                operation_id=int(ActionOperation.ACTIVATE),
+                                target_location_raw=loc_raw,
+                            )
                         )
                 
                 # Phase Buttons (尝试读取)
@@ -661,10 +677,30 @@ class DuelState:
                 b = stream.read(1)
                 if b: ep = struct.unpack('<B', b)[0]
                 
-                # shuf 读不读无所谓
-                
-                if bp: self.current_valid_actions.append(GameAction(action_type=6, index=0, desc_str="To BP"))
-                if ep: self.current_valid_actions.append(GameAction(action_type=7, index=0, desc_str="To EP"))
+                b = stream.read(1)
+                can_shuffle = struct.unpack('<B', b)[0] if b else 0
+
+                if bp:
+                    self.current_valid_actions.append(GameAction(
+                        action_type=6,
+                        index=0,
+                        desc_str="To BP",
+                        operation_id=int(ActionOperation.PHASE),
+                    ))
+                if ep:
+                    self.current_valid_actions.append(GameAction(
+                        action_type=7,
+                        index=0,
+                        desc_str="To EP",
+                        operation_id=int(ActionOperation.PHASE),
+                    ))
+                if can_shuffle:
+                    self.current_valid_actions.append(GameAction(
+                        action_type=8,
+                        index=0,
+                        desc_str="Shuffle Hand",
+                        operation_id=int(ActionOperation.SHUFFLE),
+                    ))
 
             # 2. MSG_SELECT_CHAIN (16)
             elif msg_type == 16:
@@ -672,25 +708,51 @@ class DuelState:
                 count = struct.unpack('<B', stream.read(1))[0]
                 spe_count = struct.unpack('<B', stream.read(1))[0]
                 forced = struct.unpack('<B', stream.read(1))[0]
-                stream.read(8) # 跳过 hint1 (4), hint2 (4)
-                
+                hint_timing = struct.unpack('<I', stream.read(4))[0]
+                opponent_hint_timing = struct.unpack('<I', stream.read(4))[0]
+
                 for i in range(count):
-                    # 【定界符】C++ 在多个项目之间会隐式插入一个 0x00
                     if i > 0 and CORE_HAS_GHOST_BYTE:
-                        stream.read(1) 
-                        
-                    stream.read(1) # Flag
+                        stream.read(1) # 内置 Core 的候选定界符
+                    effect_flag = struct.unpack('<B', stream.read(1))[0]
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     desc = struct.unpack('<I', stream.read(4))[0]
                     
-                    act = GameAction(action_type=16, index=i, target_entity_idx=loc_val, desc_id=desc, desc_str=f"Chain {code}")
-                    act.code = code 
+                    act = GameAction(
+                        action_type=16,
+                        index=i,
+                        target_entity_idx=loc_val,
+                        desc_id=desc,
+                        desc_str=f"Chain {code}",
+                        code=code,
+                        operation_id=int(ActionOperation.CHAIN),
+                        response_value=i,
+                        target_location_raw=loc_val,
+                        selection_count=count,
+                        cancelable=False,
+                        context_value=spe_count,
+                        prompt_flags=(effect_flag & 0xFF) | ((forced & 0xFF) << 8),
+                        prompt_value=hint_timing,
+                        prompt_value2=opponent_hint_timing,
+                    )
                     self.current_valid_actions.append(act)
-                    
-                # 只有非强制发动 (forced == 0) 时，才允许 AI 取消
+
+                # 只有头部全局 forced 为 0 时，Core 才接受取消连锁。
                 if not forced:
-                    self.current_valid_actions.append(GameAction(action_type=16, index=-1, desc_str="Cancel"))
+                    for action in self.current_valid_actions:
+                        action.cancelable = True
+                    self.current_valid_actions.append(GameAction(
+                        action_type=16,
+                        index=-1,
+                        desc_str="Cancel",
+                        operation_id=int(ActionOperation.CANCEL),
+                        selection_count=count,
+                        cancelable=True,
+                        context_value=spe_count,
+                        prompt_value=hint_timing,
+                        prompt_value2=opponent_hint_timing,
+                    ))
                 
                 return True
 
@@ -699,19 +761,40 @@ class DuelState:
             elif msg_type == 15:
                 stream.read(1) # P
                 can_cancel = struct.unpack('<B', stream.read(1))[0]
-                stream.read(2) # Min, Max
+                min_count = struct.unpack('<B', stream.read(1))[0]
+                max_count = struct.unpack('<B', stream.read(1))[0]
                 count = struct.unpack('<B', stream.read(1))[0]
                 
                 for i in range(count):
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     
-                    act = GameAction(action_type=15, index=i, target_entity_idx=loc_val, desc_str=f"Select {code}")
-                    act.code = code
+                    act = GameAction(
+                        action_type=15,
+                        index=i,
+                        target_entity_idx=loc_val,
+                        desc_str=f"Select {code}",
+                        code=code,
+                        operation_id=int(ActionOperation.SELECT),
+                        response_value=i,
+                        target_location_raw=loc_val,
+                        selection_min=min_count,
+                        selection_max=max_count,
+                        selection_count=1,
+                        cancelable=bool(can_cancel),
+                    )
                     self.current_valid_actions.append(act)
-                
+
                 if can_cancel or count == 0:
-                    self.current_valid_actions.append(GameAction(action_type=15, index=-1, desc_str="Cancel"))
+                    self.current_valid_actions.append(GameAction(
+                        action_type=15,
+                        index=-1,
+                        desc_str="Cancel",
+                        operation_id=int(ActionOperation.CANCEL),
+                        selection_min=min_count,
+                        selection_max=max_count,
+                        cancelable=bool(can_cancel),
+                    ))
             
             # 4. MSG_SELECT_BATTLECMD (10)
             elif msg_type == 10:
@@ -735,7 +818,15 @@ class DuelState:
                     
                     # [修正] action_type 必须是 0 (C++ t=0)
                     self.current_valid_actions.append(
-                        GameAction(action_type=0, index=i, target_entity_idx=loc_raw, desc_id=desc)
+                        GameAction(
+                            action_type=0,
+                            index=i,
+                            target_entity_idx=loc_raw,
+                            desc_id=desc,
+                            code=code,
+                            operation_id=int(ActionOperation.ACTIVATE),
+                            target_location_raw=loc_raw,
+                        )
                     )
 
                 # --- B. Attackable (攻击宣言) ---
@@ -757,7 +848,20 @@ class DuelState:
                     # [修正] action_type 必须是 1 (C++ t=1)
                     desc_str = "Direct Attack" if direct else f"Attack {code}"
                     self.current_valid_actions.append(
-                        GameAction(action_type=1, index=i, target_entity_idx=loc_raw, desc_str=desc_str)
+                        GameAction(
+                            action_type=1,
+                            index=i,
+                            target_entity_idx=loc_raw,
+                            desc_str=desc_str,
+                            code=code,
+                            operation_id=int(
+                                ActionOperation.DIRECT_ATTACK
+                                if direct
+                                else ActionOperation.ATTACK
+                            ),
+                            response_value=int(bool(direct)),
+                            target_location_raw=loc_raw,
+                        )
                     )
 
                 # --- C. Phase Transition ---
@@ -765,8 +869,20 @@ class DuelState:
                 ep = struct.unpack('<B', stream.read(1))[0]
                 
                 # [修正] M2=2, EP=3 (C++ t=2, t=3)
-                if m2: self.current_valid_actions.append(GameAction(action_type=2, index=0, desc_str="To M2"))
-                if ep: self.current_valid_actions.append(GameAction(action_type=3, index=0, desc_str="To EP"))
+                if m2:
+                    self.current_valid_actions.append(GameAction(
+                        action_type=2,
+                        index=0,
+                        desc_str="To M2",
+                        operation_id=int(ActionOperation.PHASE),
+                    ))
+                if ep:
+                    self.current_valid_actions.append(GameAction(
+                        action_type=3,
+                        index=0,
+                        desc_str="To EP",
+                        operation_id=int(ActionOperation.PHASE),
+                    ))
 
             # 5. MSG_SELECT_YESNO (13) / EFFECTYN (12)
             elif msg_type == 12:
@@ -784,10 +900,30 @@ class DuelState:
                 
                 # Index 1=Yes, 0=No
                 self.current_valid_actions.append(
-                    GameAction(action_type=msg_type, index=1, target_entity_idx=loc_raw, desc_id=desc, desc_str="Yes")
+                    GameAction(
+                        action_type=msg_type,
+                        index=1,
+                        target_entity_idx=loc_raw,
+                        desc_id=desc,
+                        desc_str="Yes",
+                        code=code,
+                        operation_id=int(ActionOperation.YES),
+                        response_value=1,
+                        target_location_raw=loc_raw,
+                    )
                 )
                 self.current_valid_actions.append(
-                    GameAction(action_type=msg_type, index=0, target_entity_idx=loc_raw, desc_id=desc, desc_str="No")
+                    GameAction(
+                        action_type=msg_type,
+                        index=0,
+                        target_entity_idx=loc_raw,
+                        desc_id=desc,
+                        desc_str="No",
+                        code=code,
+                        operation_id=int(ActionOperation.NO),
+                        response_value=0,
+                        target_location_raw=loc_raw,
+                    )
                 )
 
             elif msg_type == 13:
@@ -796,36 +932,78 @@ class DuelState:
                 stream.read(1)
                 desc = struct.unpack('<I', stream.read(4))[0]
                 # target_entity_idx = -1
-                self.current_valid_actions.append(GameAction(action_type=msg_type, index=1, desc_id=desc, desc_str="Yes"))
-                self.current_valid_actions.append(GameAction(action_type=msg_type, index=0, desc_id=desc, desc_str="No"))
+                self.current_valid_actions.append(GameAction(
+                    action_type=msg_type,
+                    index=1,
+                    desc_id=desc,
+                    desc_str="Yes",
+                    operation_id=int(ActionOperation.YES),
+                    response_value=1,
+                ))
+                self.current_valid_actions.append(GameAction(
+                    action_type=msg_type,
+                    index=0,
+                    desc_id=desc,
+                    desc_str="No",
+                    operation_id=int(ActionOperation.NO),
+                    response_value=0,
+                ))
 
             # 6. MSG_SELECT_OPTION (14)
             elif msg_type == 14:
                 stream.read(1) # P
                 count = struct.unpack('<B', stream.read(1))[0]
                 for i in range(count):
-                    self.current_valid_actions.append(GameAction(action_type=14, index=i, desc_str=f"Option {i}"))
+                    description = struct.unpack('<I', stream.read(4))[0]
+                    self.current_valid_actions.append(GameAction(
+                        action_type=14,
+                        index=i,
+                        desc_id=description,
+                        desc_str=f"Option {i}: {description}",
+                        operation_id=int(ActionOperation.OPTION),
+                        response_value=i,
+                        selection_count=count,
+                    ))
 
             # 7. MSG_SELECT_POSITION (19)
             elif msg_type == 19:
-                stream.read(5) # P + Code
+                stream.read(1) # P
+                code = struct.unpack('<I', stream.read(4))[0]
                 mask = struct.unpack('<B', stream.read(1))[0]
                 # 0x1:ATK, 0x2:ATK_down(N/A), 0x4:DEF, 0x8:DEF_down
-                if mask & 0x1: self.current_valid_actions.append(GameAction(action_type=19, index=1, desc_str="ATK"))
-                if mask & 0x2: self.current_valid_actions.append(GameAction(action_type=19, index=2, desc_str="ATK_Down"))
-                if mask & 0x4: self.current_valid_actions.append(GameAction(action_type=19, index=4, desc_str="DEF"))
-                if mask & 0x8: self.current_valid_actions.append(GameAction(action_type=19, index=8, desc_str="Set"))
+                position_actions = (
+                    (0x1, ActionOperation.POSITION_ATTACK, "ATK"),
+                    (0x2, ActionOperation.POSITION_ATTACK_DOWN, "ATK_Down"),
+                    (0x4, ActionOperation.POSITION_DEFENSE, "DEF"),
+                    (0x8, ActionOperation.POSITION_SET, "Set"),
+                )
+                for position, operation, description in position_actions:
+                    if mask & position:
+                        self.current_valid_actions.append(GameAction(
+                            action_type=19,
+                            index=position,
+                            desc_str=description,
+                            code=code,
+                            operation_id=int(operation),
+                            response_value=position,
+                        ))
 
-            # 8. MSG_SELECT_PLACE (18) / DISFIELD (24) - [攻克难点！]
+            # 8. MSG_SELECT_PLACE (18) / DISFIELD (24)
             elif msg_type in [18, 24]:
                 stream.read(1); count = struct.unpack('<B', stream.read(1))[0]
                 mask = struct.unpack('<I', stream.read(4))[0]
                 for i in range(32):
                     if not (mask & (1 << i)):
                         self.current_valid_actions.append(GameAction(
-                            action_type=msg_type, 
-                            index=i,  # 🌟 修复：直接传 i，千万别传 1<<i
-                            desc_id=i, desc_str=f"Place Grid {i}"
+                            action_type=msg_type,
+                            index=i,  # 修复：直接传 i
+                            desc_id=i,
+                            desc_str=f"Place Grid {i}",
+                            operation_id=int(ActionOperation.PLACE),
+                            response_value=i,
+                            selection_min=count,
+                            selection_max=count,
+                            selection_count=1,
                         ))
             
             # 9. MSG_SELECT_UNSELECT (26)
@@ -833,27 +1011,100 @@ class DuelState:
                 stream.read(1) # P
                 finishable = struct.unpack('<B', stream.read(1))[0]
                 cancelable = struct.unpack('<B', stream.read(1))[0]
-                stream.read(2) # min, max
-                
+                min_count = struct.unpack('<B', stream.read(1))[0]
+                max_count = struct.unpack('<B', stream.read(1))[0]
+
                 # 可选卡片 (Select)
                 count_sel = struct.unpack('<B', stream.read(1))[0]
+                selectable_cards = []
                 for i in range(count_sel):
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
-                    self.current_valid_actions.append(GameAction(action_type=26, index=i, target_entity_idx=loc_val, desc_str="Select"))
-                
+                    selectable_cards.append((code, loc_val))
+
                 # 可取消卡片 (Unselect)
                 count_unsel = struct.unpack('<B', stream.read(1))[0]
+                selected_cards = []
                 for i in range(count_unsel):
                     code = struct.unpack('<I', stream.read(4))[0]
                     loc_val = struct.unpack('<I', stream.read(4))[0]
+                    selected_cards.append((code, loc_val))
+
+                selected_codes = [code for code, _ in selected_cards]
+                selected_locations = [location for _, location in selected_cards]
+                for i, (code, loc_val) in enumerate(selectable_cards):
+                    result_codes = selected_codes + [code]
+                    result_locations = selected_locations + [loc_val]
+                    self.current_valid_actions.append(GameAction(
+                        action_type=26,
+                        index=i,
+                        target_entity_idx=loc_val,
+                        desc_str=f"Select {code}",
+                        code=code,
+                        operation_id=int(ActionOperation.SELECT),
+                        response_value=i,
+                        target_location_raw=loc_val,
+                        selection_min=min_count,
+                        selection_max=max_count,
+                        selection_count=len(result_codes),
+                        finishable=bool(finishable),
+                        cancelable=bool(cancelable),
+                        macro_targets=result_locations,
+                        macro_target_locations=result_locations,
+                        macro_target_codes=result_codes,
+                    ))
+
+                for i, (code, loc_val) in enumerate(selected_cards):
+                    result_cards = selected_cards[:i] + selected_cards[i + 1:]
                     # 给 unselect 的 index 加上偏移量，方便动作翻译时区分
-                    self.current_valid_actions.append(GameAction(action_type=26, index=i + count_sel, target_entity_idx=loc_val, desc_str="Unselect"))
-                
+                    self.current_valid_actions.append(GameAction(
+                        action_type=26,
+                        index=i + count_sel,
+                        target_entity_idx=loc_val,
+                        desc_str=f"Unselect {code}",
+                        code=code,
+                        operation_id=int(ActionOperation.UNSELECT),
+                        response_value=i + count_sel,
+                        target_location_raw=loc_val,
+                        selection_min=min_count,
+                        selection_max=max_count,
+                        selection_count=len(result_cards),
+                        finishable=bool(finishable),
+                        cancelable=bool(cancelable),
+                        macro_targets=[location for _, location in result_cards],
+                        macro_target_locations=[location for _, location in result_cards],
+                        macro_target_codes=[result_code for result_code, _ in result_cards],
+                    ))
+
                 if finishable:
-                    self.current_valid_actions.append(GameAction(action_type=26, index=-1, desc_str="Finish"))
+                    self.current_valid_actions.append(GameAction(
+                        action_type=26,
+                        index=-1,
+                        desc_str="Finish",
+                        operation_id=int(ActionOperation.FINISH),
+                        selection_min=min_count,
+                        selection_max=max_count,
+                        selection_count=len(selected_cards),
+                        finishable=True,
+                        cancelable=bool(cancelable),
+                        macro_targets=selected_locations,
+                        macro_target_locations=selected_locations,
+                        macro_target_codes=selected_codes,
+                    ))
                 elif cancelable:
-                    self.current_valid_actions.append(GameAction(action_type=26, index=-1, desc_str="Cancel"))
+                    self.current_valid_actions.append(GameAction(
+                        action_type=26,
+                        index=-1,
+                        desc_str="Cancel",
+                        operation_id=int(ActionOperation.CANCEL),
+                        selection_min=min_count,
+                        selection_max=max_count,
+                        selection_count=len(selected_cards),
+                        cancelable=True,
+                        macro_targets=selected_locations,
+                        macro_target_locations=selected_locations,
+                        macro_target_codes=selected_codes,
+                    ))
 
             # =================================================================
             # [阶段一追加] 9. 宣言类消息解析
@@ -868,7 +1119,18 @@ class DuelState:
                     for i in range(32):
                         bit = 1 << i
                         if mask & bit:
-                            self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=bit, desc_str=f"Announce Bit {i}"))
+                            self.current_valid_actions.append(GameAction(
+                                action_type=msg_type,
+                                index=i,
+                                desc_id=bit,
+                                desc_str=f"Announce Bit {i}",
+                                operation_id=int(ActionOperation.ANNOUNCE),
+                                response_value=bit,
+                                selection_min=count,
+                                selection_max=count,
+                                selection_count=1,
+                                context_value=count,
+                            ))
                 
                 # 卡名 (142) / 数字 (143)
                 elif msg_type == 142: # 卡名宣言：启动微型 RPN 虚拟机
@@ -1042,14 +1304,29 @@ class DuelState:
                     
                     # 此时，交给 AI 的选项将是 100% 完美的
                     for i, code in enumerate(self.announce_card_candidates):
-                        self.current_valid_actions.append(GameAction(action_type=142, index=i, desc_id=code, desc_str=f"Announce_Blind_{code}"))
+                        self.current_valid_actions.append(GameAction(
+                            action_type=142,
+                            index=i,
+                            desc_id=code,
+                            desc_str=f"Announce_Blind_{code}",
+                            code=code,
+                            operation_id=int(ActionOperation.ANNOUNCE),
+                            response_value=code,
+                        ))
                 
                 elif msg_type == 143: # 数字宣言
                     for i in range(count):
                         buf = stream.read(4)
                         if len(buf) < 4: break
                         val = struct.unpack('<I', buf)[0]
-                        self.current_valid_actions.append(GameAction(action_type=msg_type, index=i, desc_id=val, desc_str=f"Announce Val {val}"))
+                        self.current_valid_actions.append(GameAction(
+                            action_type=msg_type,
+                            index=i,
+                            desc_id=val,
+                            desc_str=f"Announce Val {val}",
+                            operation_id=int(ActionOperation.ANNOUNCE),
+                            response_value=val,
+                        ))
 
 
         except Exception as e:
@@ -1164,15 +1441,20 @@ class DuelState:
         # 把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"
         final_actions = []
         for act in self.current_valid_actions:
-            # 深拷贝一下，因为要修改
-            new_act = GameAction(act.action_type, act.index, act.target_entity_idx, act.desc_str)
-            
-            # 1. 继承基础标识 (用于宣言类和匹配)
-            if hasattr(act, 'desc_id'): new_act.desc_id = act.desc_id
-            if hasattr(act, 'code'): new_act.code = act.code
+            # 浅拷贝保留完整动作协议字段，再单独复制可变列表
+            new_act = copy(act)
+            for list_field in (
+                'macro_targets',
+                'macro_places',
+                'macro_target_codes',
+                'macro_target_values',
+                'macro_target_locations',
+            ):
+                value = getattr(act, list_field, None)
+                setattr(new_act, list_field, list(value) if value is not None else None)
             
             # 2. 单目标指针映射 (绝对不能删！防止 GPU 越界 NaN 的核心)
-            if new_act.target_entity_idx > 0 and new_act.index != -1:
+            if new_act.target_entity_idx >= 0 and new_act.index != -1:
                 c, l, s, _ = LocationInfo.decode(new_act.target_entity_idx)
                 if (c, l, s) in loc_to_idx_map:
                     new_act.target_entity_idx = loc_to_idx_map[(c, l, s)]
@@ -1182,24 +1464,15 @@ class DuelState:
                 new_act.target_entity_idx = -1
 
             # 3. 宏动作多重靶点映射及字节继承
-            if hasattr(act, 'macro_targets') and act.macro_targets:
-                setattr(new_act, 'macro_targets', [])
-                setattr(new_act, 'decision_bytes', act.decision_bytes) 
+            if act.macro_targets is not None:
+                new_act.macro_targets = []
                 for m_loc in act.macro_targets:
                     c, l, s, _ = LocationInfo.decode(m_loc)
                     if (c, l, s) in loc_to_idx_map:
                         new_act.macro_targets.append(loc_to_idx_map[(c, l, s)])
                     else:
                         new_act.macro_targets.append(-1)
-            
-            elif hasattr(act, 'macro_places') and act.macro_places:
-                setattr(new_act, 'macro_places', act.macro_places)
-                setattr(new_act, 'decision_bytes', act.decision_bytes)
-                
-            # 4. 兜底字节继承 (专门针对 Cancel 这类没有目标也没有格子的孤灵操作)
-            elif hasattr(act, 'decision_bytes'):
-                setattr(new_act, 'decision_bytes', act.decision_bytes)
-                
+
             final_actions.append(new_act)
 
         # 用一个临时变量接住

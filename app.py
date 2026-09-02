@@ -20,6 +20,7 @@ from card_reader import CardReader
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
     DEFAULT_MODEL_PREFIX,
+    MODEL_PROTOCOL_VERSION,
     inspect_training_checkpoint,
 )
 from model_artifacts import (
@@ -51,7 +52,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.4.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.5.0"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -584,6 +585,9 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         saved_cfg = saved_meta.get('net_config', {})
         resume_metadata_error = saved_meta.get('load_error') if is_resume else None
         resume_format_warning = saved_meta.get('format_warning') if is_resume else None
+        resume_model_protocol_warning = (
+            saved_meta.get('model_protocol_warning') if is_resume else None
+        )
 
         if resume_metadata_error:
             st.error(_(
@@ -594,6 +598,11 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             st.warning(_(
                 f"⚠️ {resume_format_warning}",
                 f"⚠️ {resume_format_warning}",
+            ))
+        elif resume_model_protocol_warning:
+            st.warning(_(
+                f"⚠️ {resume_model_protocol_warning}",
+                f"⚠️ {resume_model_protocol_warning}",
             ))
         
         # 将读取到的配置安全转化为整数，防止格式报错
@@ -653,8 +662,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
 
             if is_resume and saved_meta.get('model_id'):
                 st.caption(_(
-                    f"模型 UUID（只读）: {saved_meta['model_id']} | 当前轮次: {saved_meta.get('iteration')} | 检查点协议: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION}",
-                    f"Model UUID (read-only): {saved_meta['model_id']} | Current iteration: {saved_meta.get('iteration')} | Checkpoint protocol: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION}",
+                    f"模型 UUID（只读）: {saved_meta['model_id']} | 当前轮次: {saved_meta.get('iteration')} | 检查点协议: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION} | 模型协议: {saved_meta.get('model_protocol_version')}/{MODEL_PROTOCOL_VERSION}",
+                    f"Model UUID (read-only): {saved_meta['model_id']} | Current iteration: {saved_meta.get('iteration')} | Checkpoint protocol: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION} | Model protocol: {saved_meta.get('model_protocol_version')}/{MODEL_PROTOCOL_VERSION}",
                 ))
             
             m1, m2, m3 = st.columns(3)
@@ -781,6 +790,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                             raise ValueError(resume_metadata_error)
                         if resume_format_warning:
                             raise ValueError(resume_format_warning)
+                        if resume_model_protocol_warning:
+                            raise ValueError(resume_model_protocol_warning)
                         if not saved_meta.get('model_id'):
                             raise ValueError("检查点缺少自动生成的 model_id")
                     elif identity_conflicts or prefix_namespace_files:

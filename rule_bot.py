@@ -756,7 +756,7 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         trigger_card = f"【{card_db.get_card_name(brain.history_stack[0]['code'])}】"
     
     try:
-        # 1. 普通选卡 / 祭品 (Link, Xyz, 融合)
+        # 1. 普通选卡 / 祭品：两种消息的第八字节语义和合法性条件不同
         if msg_type in [MSG_SELECT_CARD, MSG_SELECT_TRIBUTE]:
             stream.read(1) # P
             cancelable = struct.unpack('<B', stream.read(1))[0]
@@ -770,73 +770,110 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 c = struct.unpack('<B', stream.read(1))[0]
                 l = struct.unpack('<B', stream.read(1))[0]
                 s = struct.unpack('<B', stream.read(1))[0]
-                stream.read(1) 
-                loc_raw = LocationInfo.encode(c, l, s, 0)
-                cards.append({'idx': i, 'loc': loc_raw, 'code': code})
+                extra_value = struct.unpack('<B', stream.read(1))[0]
+                release_param = extra_value if msg_type == MSG_SELECT_TRIBUTE else 0
+                position = extra_value if msg_type == MSG_SELECT_CARD else 0
+                loc_raw = LocationInfo.encode(c, l, s, position)
+                cards.append({
+                    'idx': i,
+                    'loc': loc_raw,
+                    'code': code,
+                    'release_param': release_param,
+                })
             
             # 保持网络意志：权重越高的卡片在 DFS 穷举时越先被组合
             cards.sort(key=lambda x: pref_weights.get(x['code'], 0.0), reverse=True)
 
             real_max = min(max_c, count)
-            real_min = min(min_c, count)
-            if real_min > real_max: real_min = real_max
-            
+            if msg_type == MSG_SELECT_CARD:
+                candidate_sizes = range(min_c, real_max + 1)
+            else:
+                # Core 对祭品要求“选中张数不超过 max，release_param 总和不少于 min”
+                candidate_sizes = range(1, real_max + 1)
+
             groups = {}
-            for cd in cards:
-                c, l, s, _ = LocationInfo.decode(cd['loc'])
-                if l == 0x04 or l == 0x08: 
-                    key = ('FIELD', cd['idx']) 
-                else: 
-                    key = ('NON_FIELD', cd['code'], l) 
-                    
-                if key not in groups: groups[key] = []
-                groups[key].append(cd)
-                
+            for card in cards:
+                _, location, _, position = LocationInfo.decode(card['loc'])
+                if location in (0x04, 0x08):
+                    key = ('FIELD', card['idx'])
+                else:
+                    # 隐藏区同名同参数卡只保留每种数量的一个等价代表，避免组合池膨胀
+                    key = (
+                        'NON_FIELD',
+                        card['code'],
+                        location,
+                        position,
+                        card['release_param'],
+                    )
+                groups.setdefault(key, []).append(card)
             group_lists = list(groups.values())
+
             all_combos = []
-            
-            # 定义局部异常用于瞬间震碎递归堆栈
-            class LimitUnwindException(Exception): pass
+            limit_reached = False
 
-            def dfs(group_idx, current_combo, needed):
-                if needed == 0:
-                    all_combos.append(current_combo)
+            def collect_group_combinations(group_index, needed, current_combo):
+                """按等价卡组递归生成一个规范组合，避免重复副本挤占候选池"""
+                nonlocal limit_reached
+                if limit_reached:
                     return
-                if group_idx >= len(group_lists): return
-                
-                #  核心修复：一旦大池子蓄满 5000 个，立刻打印雷达，直接高空抛出异常抛出，全栈强行落地
-                if len(all_combos) >= limit: 
-                    sample_names = [card_db.get_card_name(c['code']) for c in cards[:4]]
-                    print(f"📡 [RuleBot 截断雷达] Type {msg_type} (选卡/祭品) 组合超 {limit}，触发全栈强力熔断成功。")
-                    print(f"   -> 🎯 发动源头: {trigger_card}")
-                    print(f"   -> 📊 引擎要求: 从 {len(cards)} 张备选卡中挑选 {real_min} ~ {real_max} 张")
-                    print(f"   -> 🃏 候选样本: {sample_names}...")
-                    raise LimitUnwindException()
-                
-                group = group_lists[group_idx]
-                max_pick = min(needed, len(group))
-                
-                for i in range(max_pick, -1, -1):
-                    dfs(group_idx + 1, current_combo + group[:i], needed - i)
+                if needed == 0:
+                    if (
+                        msg_type != MSG_SELECT_TRIBUTE
+                        or sum(card['release_param'] for card in current_combo) >= min_c
+                    ):
+                        all_combos.append(tuple(current_combo))
+                        limit_reached = len(all_combos) >= limit
+                    return
+                if group_index >= len(group_lists):
+                    return
+                group = group_lists[group_index]
+                max_take = min(needed, len(group))
+                for take in range(max_take, -1, -1):
+                    collect_group_combinations(
+                        group_index + 1,
+                        needed - take,
+                        current_combo + group[:take],
+                    )
+                    if limit_reached:
+                        return
 
-            # 安全执行外层循环，用 try-except 瞬间截断
-            try:
-                for r in range(real_min, real_max + 1):
-                    dfs(0, [], r)
-            except LimitUnwindException:
-                pass # 优雅承接，all_combos 此时完美停留在 5000 组
+            for size in candidate_sizes:
+                collect_group_combinations(0, size, [])
+                if limit_reached:
+                    break
+
+            if limit_reached:
+                sample_names = [card_db.get_card_name(card['code']) for card in cards[:4]]
+                print(f"📡 [RuleBot 截断雷达] Type {msg_type} (选卡/祭品) 组合达到 {limit}，安全截断。")
+                print(f"   -> 🎯 发动源头: {trigger_card}")
+                print(f"   -> 📊 候选={len(cards)}，min={min_c}，max={real_max}")
+                print(f"   -> 🃏 候选样本: {sample_names}...")
 
             # 打包组合给 Worker
             for combo in all_combos:
                 resp_buf = bytearray([len(combo)])
                 locs = []
+                codes = []
+                values = []
                 for cd in combo:
                     resp_buf.append(cd['idx'])
                     locs.append(cd['loc'])
-                options.append({'bytes': bytes(resp_buf), 'locs': locs})
-                
+                    codes.append(cd['code'])
+                    values.append(cd['release_param'] if msg_type == MSG_SELECT_TRIBUTE else 0)
+                options.append({
+                    'bytes': bytes(resp_buf),
+                    'locs': locs,
+                    'codes': codes,
+                    'values': values,
+                })
+
             if cancelable:
-                options.append({'bytes': struct.pack('<i', -1), 'locs': []})
+                options.append({
+                    'bytes': struct.pack('<i', -1),
+                    'locs': [],
+                    'codes': [],
+                    'values': [],
+                })
                 
         # 2. 星级凑数求和 (同调, 仪式, 以及械刀等特殊SumEqual卡)
         elif msg_type == MSG_SELECT_SUM:
@@ -849,8 +886,9 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
             
             must_vals = []
             must_locs = []
+            must_codes = []
             for _ in range(must_count):
-                stream.read(4) # Code
+                must_codes.append(struct.unpack('<I', stream.read(4))[0])
                 c = struct.unpack('<B', stream.read(1))[0]
                 l = struct.unpack('<B', stream.read(1))[0]
                 s = struct.unpack('<B', stream.read(1))[0]
@@ -954,12 +992,26 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 resp_buf = bytearray([must_count + len(sol_sorted)])
                 for _ in range(must_count): resp_buf.append(0)
                 locs = list(must_locs)
+                codes = list(must_codes)
+                values = list(must_vals)
                 for cd in sol_sorted:
                     resp_buf.append(cd['index'])
                     locs.append(cd['loc'])
-                options.append({'bytes': bytes(resp_buf), 'locs': locs})
-                
-            options.append({'bytes': struct.pack('<i', -1), 'locs': []})
+                    codes.append(cd['code'])
+                    values.append(cd['val'])
+                options.append({
+                    'bytes': bytes(resp_buf),
+                    'locs': locs,
+                    'codes': codes,
+                    'values': values,
+                })
+
+            options.append({
+                'bytes': struct.pack('<i', -1),
+                'locs': [],
+                'codes': [],
+                'values': [],
+            })
 
         # 3. 移除指示物大一统解析
         elif msg_type == MSG_SELECT_COUNTER:
@@ -984,10 +1036,20 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                     if remaining_qty == 0:
                         resp_buf = bytearray()
                         locs = []
+                        codes = []
+                        values = []
                         for i, count_val in enumerate(current_distribution):
                             resp_buf.extend(struct.pack('<H', count_val))
-                            if count_val > 0: locs.append(cards[i]['loc'])
-                        options.append({'bytes': bytes(resp_buf), 'locs': locs})
+                            if count_val > 0:
+                                locs.append(cards[i]['loc'])
+                                codes.append(cards[i]['code'])
+                                values.append(count_val)
+                        options.append({
+                            'bytes': bytes(resp_buf),
+                            'locs': locs,
+                            'codes': codes,
+                            'values': values,
+                        })
                     return
                 
                 max_take = min(cards[card_idx]['avail'], remaining_qty)
@@ -1031,13 +1093,20 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
             for sol in valid_solutions:
                 resp_buf = bytearray()
                 locs = []
+                codes = []
                 for cd in sol:
-                    resp_buf.append(cd['idx'])   
+                    resp_buf.append(cd['idx'])
                     locs.append(cd['loc'])
-                options.append({'bytes': bytes(resp_buf), 'locs': locs})
+                    codes.append(cd['code'])
+                options.append({
+                    'bytes': bytes(resp_buf),
+                    'locs': locs,
+                    'codes': codes,
+                    'values': list(range(1, len(codes) + 1)),
+                })
 
         # 5. 格子/区域封锁
-        elif msg_type in [18, 24]: 
+        elif msg_type in [18, 24]:
             stream.read(1) # P
             count = struct.unpack('<B', stream.read(1))[0]
             mask = struct.unpack('<I', stream.read(4))[0]
@@ -1072,7 +1141,34 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                     resp_buf.extend([final_p, l, s])
                     places.append(i)
                 options.append({'bytes': bytes(resp_buf), 'places': places})
-                
+
+        # 6. 种族/属性宣言必须一次返回恰好 count 个 bit 的按位或结果
+        elif msg_type in [MSG_ANNOUNCE_RACE, MSG_ANNOUNCE_ATTRIB]:
+            stream.read(1) # P
+            required_count = struct.unpack('<B', stream.read(1))[0]
+            available_mask = struct.unpack('<I', stream.read(4))[0]
+            available_bits = [
+                bit_index
+                for bit_index in range(32)
+                if available_mask & (1 << bit_index)
+            ]
+            for option_index, bit_indices in enumerate(
+                itertools.combinations(available_bits, required_count)
+            ):
+                if option_index >= limit:
+                    print(
+                        f"📡 [RuleBot 截断雷达] Type {msg_type} 宣言组合达到 {limit}，安全截断。"
+                    )
+                    break
+                response_value = 0
+                for bit_index in bit_indices:
+                    response_value |= 1 << bit_index
+                options.append({
+                    'value': response_value,
+                    'indices': list(bit_indices),
+                    'values': [bit_index + 1 for bit_index in bit_indices],
+                })
+
     except Exception as e:
         print(f"⚠️ [参谋部] get_macro_options 解析错误: {e}")
         import traceback

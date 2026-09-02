@@ -8,6 +8,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import numpy as np
+from data_types import (
+    ACTION_CONTEXT_DIM,
+    ACTION_OPERATION_COUNT,
+    ACTION_RESPONSE_BUCKETS,
+    ACTION_SIGNATURE_BYTES,
+    ACTION_TARGET_SLOTS,
+)
+from checkpoint_utils import MODEL_PROTOCOL_VERSION
 
 class RunningMeanStd(nn.Module):
     # 动态记录输入的均值和方差，用于 RND 归一化
@@ -161,6 +169,19 @@ class RNDModule(nn.Module): # 内在奖励模块：随机网络蒸馏 (RND),暂�
 class GalateaNet(nn.Module):
     def __init__(self, config):
         super().__init__()
+        configured_protocol = config.get(
+            'model_protocol_version', MODEL_PROTOCOL_VERSION
+        )
+        if configured_protocol != MODEL_PROTOCOL_VERSION:
+            raise ValueError(
+                "model_protocol_version does not match the current network protocol"
+            )
+        self.model_protocol_version = MODEL_PROTOCOL_VERSION
+        self.register_buffer(
+            '_model_protocol_version',
+            torch.tensor(MODEL_PROTOCOL_VERSION, dtype=torch.int32),
+            persistent=True,
+        )
         self.d_model = config.get('d_model', 512)
         self.n_heads = config.get('n_heads', 8)
         self.n_layers = config.get('n_layers', 6)
@@ -247,9 +268,25 @@ class GalateaNet(nn.Module):
         )
 
         # --- 4. Action Head (动作评估中枢) ---
-        self.act_type_embed = nn.Embedding(256, self.d_model) 
-        self.desc_embed = nn.Embedding(1024, self.d_model) 
+        self.act_type_embed = nn.Embedding(256, self.d_model)
+        self.desc_embed = nn.Embedding(1024, self.d_model)
         self.place_embed = nn.Embedding(33, self.d_model, padding_idx=0)
+        self.action_operation_embed = nn.Embedding(
+            ACTION_OPERATION_COUNT, self.d_model, padding_idx=0
+        )
+        self.action_response_embed = nn.Embedding(
+            ACTION_RESPONSE_BUCKETS, self.d_model, padding_idx=0
+        )
+        self.action_signature_embeds = nn.ModuleList(
+            [nn.Embedding(256, self.d_model) for _ in range(ACTION_SIGNATURE_BYTES)]
+        )
+        self.action_context_proj = nn.Linear(
+            ACTION_CONTEXT_DIM, self.d_model, bias=False
+        )
+        self.action_target_value_proj = nn.Linear(2, self.d_model, bias=False)
+        self.action_controller_embed = nn.Embedding(3, self.d_model, padding_idx=0)
+        self.action_location_embed = nn.Embedding(9, self.d_model, padding_idx=0)
+        self.action_sequence_embed = nn.Embedding(33, self.d_model, padding_idx=0)
         
         # 使用 SwiGLU 将 15 维的全局状态精准升维
         self.intent_proj = SwiGLU(in_features=self.d_model, hidden_features=512, out_features=self.d_model)
@@ -262,7 +299,12 @@ class GalateaNet(nn.Module):
         # 设定为 MAX_HISTORY = 8 (需要与 feature_encoder.py 里的常量保持绝对一致)
         self.history_pos_embed = nn.Parameter(torch.randn(1, 8, self.d_model) * 0.02)
 
-        self.register_buffer("place_weights", torch.tensor([1.0, 0.8, 0.6, 0.4, 0.2]).view(1, 1, 5, 1))
+        self.register_buffer(
+            "place_weights",
+            torch.linspace(1.0, 0.2, ACTION_TARGET_SLOTS).view(
+                1, 1, ACTION_TARGET_SLOTS, 1
+            ),
+        )
 
         # 新代码：处理拼接后的两倍特征 (d_model * 2)，执行更深度的逻辑门控
         self.policy_head = nn.Sequential(
@@ -460,13 +502,13 @@ class GalateaNet(nn.Module):
         value = self.value_head(v_input.squeeze(1)) 
 
         # === Action Head (因果决策) ===
-        act_card_idx = batch_dict['act_card_idx'] # 新形状: [B, 80, 5]
-        act_mask = batch_dict['act_mask']         # 形状: [B, 80]
+        act_card_idx = batch_dict['act_card_idx'] # 新形状: [B, 120, 5]
+        act_mask = batch_dict['act_mask']         # 形状: [B, 120]
         
         B, A, M = act_card_idx.shape
         D = self.d_model
         
-        # 1. 把索引展平 [B, 80, 5] -> [B, 400]
+        # 1. 把索引展平 [B, 120, 5] -> [B, 600]
         flat_idx = act_card_idx.view(B, A * M)
         # 2. 扩充最后一个维度对接 d_model -> [B, 400, 512]
         flat_idx_expanded = flat_idx.unsqueeze(-1).expand(-1, -1, D)
@@ -477,17 +519,17 @@ class GalateaNet(nn.Module):
 
         # 3. 直接从原始 memory [B, 120, 512] 中捞取，彻底规避 4D 梯度爆炸
         gathered_flat = torch.gather(memory_padded, 1, flat_idx_expanded) # [B, 400, 512]
-        # 4. 重新捏回需要的形状 -> [B, 80, 5, 512]
+        # 4. 重新捏回需要的形状 -> [B, 120, 5, 512]
         gathered_vecs = gathered_flat.view(B, A, M, D)
         # =========================================================
 
-        is_sort = (batch_dict['act_type'] == 25).unsqueeze(-1).unsqueeze(-1).float() # [B, 80, 1, 1]
+        is_sort = (batch_dict['act_type'] == 25).unsqueeze(-1).unsqueeze(-1).float() # [B, 120, 1, 1]
         # 创建衰减权重阵：1.0, 0.8, 0.6, 0.4, 0.2
         weights = self.place_weights
         # 巧妙融合：如果是 25，应用权重；如果不是，全部按 1.0 (等价于 Sum Pooling)
         w = is_sort * weights + (1.0 - is_sort) * 1.0
         
-        target_card_vecs = (gathered_vecs * w).sum(dim=2) # [B, 80, 512]
+        target_card_vecs = (gathered_vecs * w).sum(dim=2) # [B, 120, 512]
 
         type_vecs = self.act_type_embed(batch_dict['act_type']) 
         desc_vecs = self.desc_embed(batch_dict['act_desc'])     
@@ -496,8 +538,38 @@ class GalateaNet(nn.Module):
         act_attr_vecs = self.attr_embed(batch_dict['act_attr'])
         act_code_vecs = self.card_embed(batch_dict['act_code'])
 
-        place_vecs_raw = self.place_embed(batch_dict['act_place']) # [B, 80, 5, 512]
-        place_vecs = place_vecs_raw.sum(dim=2)                     # [B, 80, 512]
+        place_vecs_raw = self.place_embed(batch_dict['act_place']) # [B, 120, 5, 512]
+        place_vecs = place_vecs_raw.sum(dim=2)                     # [B, 120, 512]
+
+        # 动作协议 V2：显式融合响应语义、约束、隐藏目标代码与素材数值
+        operation_vecs = self.action_operation_embed(
+            batch_dict['act_operation'].long()
+        )
+        response_vecs = self.action_response_embed(
+            batch_dict['act_response'].long()
+        )
+        signature_bytes = batch_dict['act_signature'].long()
+        signature_vecs = sum(
+            embedding(signature_bytes[..., byte_index])
+            for byte_index, embedding in enumerate(self.action_signature_embeds)
+        )
+        context_vecs = self.action_context_proj(
+            batch_dict['act_context'].to(torch.float32)
+        )
+        location_vecs = (
+            self.action_controller_embed(batch_dict['act_controller'].long())
+            + self.action_location_embed(batch_dict['act_location'].long())
+            + self.action_sequence_embed(batch_dict['act_sequence'].long())
+        )
+
+        target_code_vecs = self.card_embed(batch_dict['act_target_code'].long())
+        target_value_vecs = self.action_target_value_proj(
+            batch_dict['act_target_value'].to(torch.float32) / 255.0
+        )
+        # 代码与数量必须保持槽位关联，避免不同指示物分配在求和后再次折叠
+        target_semantic_vecs = (
+            (target_code_vecs + target_value_vecs) * self.place_weights
+        ).sum(dim=2)
 
         # 终极双塔匹配机制 (Dual-Tower Matching)
         # 1. 意图塔 (Intent)：全局底蕴决定了ai想干什么
@@ -505,7 +577,21 @@ class GalateaNet(nn.Module):
         intent_vec = intent_vec.expand(-1, act_mask.shape[1], -1) 
         
         # 2. 选项塔 (Option)：把目标卡片、类型、隐藏语义全部融合
-        raw_option = target_card_vecs + type_vecs + desc_vecs + act_race_vecs + act_attr_vecs + act_code_vecs + place_vecs
+        raw_option = (
+            target_card_vecs
+            + type_vecs
+            + desc_vecs
+            + act_race_vecs
+            + act_attr_vecs
+            + act_code_vecs
+            + place_vecs
+            + operation_vecs
+            + response_vecs
+            + signature_vecs
+            + context_vecs
+            + location_vecs
+            + target_semantic_vecs
+        )
         option_vec = self.option_proj(raw_option)
         
         # 3. 交汇：意图与选项碰撞

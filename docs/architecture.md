@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.4.2**。
+> 文档适用于 **Galatea-Core v3.5.0**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -175,7 +175,7 @@ class SwiGLU(nn.Module):
 ┌─────────────┐                   ┌─────────────┐
 │ 全局局面    │                   │ 目标卡片    │
 │ 特征向量    │                   │ 动作类型    │
-│ (v_input)   │                   │ 效果描述    │
+│ (v_input)   │                   │ 响应/约束   │
 └──────┬──────┘                   └──────┬──────┘
        │                                 │
        └────────────┬────────────────────┘
@@ -235,16 +235,29 @@ feat_numeric = [
 
 ```python
 act_dict = {
-    'act_card_idx': [...],   # 目标卡片索引 [80, 5]
+    'act_card_idx': [...],   # 可见目标实体索引 [120, 5]
     'act_type': [...],       # 动作类型
     'act_desc': [...],       # 效果描述 Hash
     'act_mask': [...],       # 有效动作掩码
     'act_race': [...],       # 宣言种族
     'act_attr': [...],       # 宣言属性
-    'act_code': [...],       # 宣言卡片
-    'act_place': [...],      # 放置位置
+    'act_code': [...],       # 候选/宣言卡片代码
+    'act_place': [...],      # 放置位置 [120, 5]
+    'act_operation': [...],  # Yes/No/Select/Unselect/Finish/Cancel 等真实操作
+    'act_response': [...],   # 语义响应值
+    'act_signature': [...],  # 完整动作语义的 4 字节稳定签名
+    'act_context': [...],    # min/max/结果数量/完成与取消条件 [120, 6]
+    'act_target_code': [...],# 隐藏区或宏动作目标卡密 [120, 5]
+    'act_target_value': [...],# 祭品值/双星级/指示物分配 [120, 5, 2]
+    'act_controller': [...], # 行动方视角控制者
+    'act_location': [...],   # 引擎区域
+    'act_sequence': [...],   # 区域内序号
 }
 ```
+
+动作协议 V2 不把 `GameAction.index` 当作学习语义。`index` 与 `decision_bytes` 只负责把最终选择翻译回 Core；策略头看到的是操作、卡密、位置、约束和结果集合。Type 26 保持 Core 原生的逐次 Select/Unselect 过程，每一步都生成新快照并进入轨迹；Type 15/20/22/23/25 等静态组合消息则先由合法性枚举器生成完整响应，再由策略头选择。
+
+`MODEL_PROTOCOL_VERSION` 独立于框架版本和检查点容器版本维护。它同时写入 PTH 顶层、`net_config`、模型状态、ONNX 元数据与制品清单；版本不同表示输入张量或动作头权重不兼容，加载器会直接拒绝。
 
 ---
 

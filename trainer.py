@@ -26,9 +26,15 @@ import torch.multiprocessing as mp
 from galatea_env import GalateaEnv
 from worker import worker_process
 from ai_bot import AiBot
+from data_types import (
+    ACTION_CONTEXT_DIM,
+    ACTION_SIGNATURE_BYTES,
+    ACTION_TARGET_SLOTS,
+)
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
     DEFAULT_MODEL_PREFIX,
+    MODEL_PROTOCOL_VERSION,
     canonical_model_state_dict,
     generate_model_id,
     load_training_checkpoint,
@@ -249,8 +255,17 @@ class PPOTrainer:
         # 默认配置
         if net_config is None:
             net_config = {'d_model': 256, 'n_heads': 4, 'n_layers': 2, 'vocab_size': 20000}
-        
-        self.net_config = net_config 
+        net_config = dict(net_config)
+        configured_protocol = net_config.get(
+            'model_protocol_version', MODEL_PROTOCOL_VERSION
+        )
+        if configured_protocol != MODEL_PROTOCOL_VERSION:
+            raise ValueError(
+                "net_config model_protocol_version does not match the current model protocol"
+            )
+        net_config['model_protocol_version'] = MODEL_PROTOCOL_VERSION
+
+        self.net_config = net_config
         self.worker_timeout = worker_timeout
         self.gamma = gamma
         self.lr = lr
@@ -438,7 +453,10 @@ class PPOTrainer:
         self.run_id = time_str
         os.environ['GALATEA_RUN_ID'] = self.run_id
         print(f"📊 TensorBoard 日志将保存至: ./runs/{self.model_prefix}_{time_str}")
-        print(f"🔐 模型身份: {self.model_prefix} | UUID: {self.model_id}")
+        print(
+            f"🔐 模型身份: {self.model_prefix} | UUID: {self.model_id} | "
+            f"检查点协议: {CHECKPOINT_FORMAT_VERSION} | 模型协议: {MODEL_PROTOCOL_VERSION}"
+        )
 
         # Windows 必须设置
         try:
@@ -516,14 +534,23 @@ class PPOTrainer:
             'h_sem_attr': ((8, 8, 4), torch.int16),
             'h_sem_code_idx': ((8, 8), torch.long), # [新增]
             'h_sem_mask': ((8, 8), torch.bool),
-            'act_card_idx': ((120, 5), torch.long),
+            'act_card_idx': ((120, ACTION_TARGET_SLOTS), torch.long),
             'act_type': ((120,), torch.long),
             'act_desc': ((120,), torch.long),
             'act_mask': ((120,), torch.bool),
             'act_race': ((120,), torch.long),
             'act_attr': ((120,), torch.long),
             'act_code': ((120,), torch.long),
-            'act_place': ((120, 5), torch.long),
+            'act_place': ((120, ACTION_TARGET_SLOTS), torch.long),
+            'act_operation': ((120,), torch.uint8),
+            'act_response': ((120,), torch.int16),
+            'act_signature': ((120, ACTION_SIGNATURE_BYTES), torch.uint8),
+            'act_context': ((120, ACTION_CONTEXT_DIM), torch.float16),
+            'act_target_code': ((120, ACTION_TARGET_SLOTS), torch.int32),
+            'act_target_value': ((120, ACTION_TARGET_SLOTS, 2), torch.uint8),
+            'act_controller': ((120,), torch.uint8),
+            'act_location': ((120,), torch.uint8),
+            'act_sequence': ((120,), torch.uint8),
         }
         self.input_specs = input_specs
 
@@ -1320,6 +1347,7 @@ class PPOTrainer:
                 # 补全生命周期字段，确保 TensorBoard 曲线 100% 无缝对接
                 checkpoint = {
                     'checkpoint_format_version': CHECKPOINT_FORMAT_VERSION,
+                    'model_protocol_version': MODEL_PROTOCOL_VERSION,
                     'model_id': self.model_id,
                     'model_prefix': self.model_prefix,
                     'run_id': self.run_id,

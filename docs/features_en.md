@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.4.2**.
+> This document applies to **Galatea-Core v3.5.0**.
 
 ---
 
@@ -120,6 +120,11 @@ Configure and launch AI training tasks.
 - **Disable Compile**: Recommended on Windows or when the compiler toolchain is incomplete
 - **Export ONNX**: Export synchronously at every 10-iteration checkpoint for historical opponents in workers
 - **Standard Core**: Enable for custom OCGCore builds without ghost bytes
+
+**Model Action Protocol**:
+- v3.5.0 uses the independently maintained Model Protocol V2. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
+- Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
+- A protocol mismatch is rejected before loading so structurally different weights cannot be applied silently to the current action head
 
 ##### 🏟️ Start Arena (Duel)
 

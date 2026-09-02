@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
+    MODEL_PROTOCOL_VERSION,
     inspect_training_checkpoint,
     validate_training_checkpoint_file,
     validate_model_id,
@@ -47,6 +48,7 @@ ONNX_IDENTITY_KEYS = {
     "model_id": "galatea.model_id",
     "model_prefix": "galatea.model_prefix",
     "iteration": "galatea.iteration",
+    "model_protocol_version": "galatea.model_protocol_version",
 }
 
 
@@ -169,13 +171,22 @@ def _iter_onnx_tensors(graph):
                 yield from _iter_onnx_tensors(child_graph)
 
 
-def tag_onnx_model_identity(onnx_path, *, model_id, model_prefix, iteration):
-    """把模型 UUID、前缀和轮次写入 ONNX 主图元数据并原子替换"""
+def tag_onnx_model_identity(
+    onnx_path,
+    *,
+    model_id,
+    model_prefix,
+    iteration,
+    model_protocol_version=MODEL_PROTOCOL_VERSION,
+):
+    """把模型身份与模型协议版本写入 ONNX 主图并原子替换"""
     import onnx
 
     validate_model_id(model_id)
     validate_model_prefix(model_prefix)
     model_artifact_stem(model_prefix, iteration)
+    if model_protocol_version != MODEL_PROTOCOL_VERSION:
+        raise ValueError("ONNX model protocol version does not match the current protocol")
     source_graph_path = Path(onnx_path)
     if source_graph_path.is_symlink():
         raise ValueError("symbolic-link ONNX graphs are not allowed")
@@ -188,6 +199,9 @@ def tag_onnx_model_identity(onnx_path, *, model_id, model_prefix, iteration):
             ONNX_IDENTITY_KEYS["model_id"]: model_id,
             ONNX_IDENTITY_KEYS["model_prefix"]: model_prefix,
             ONNX_IDENTITY_KEYS["iteration"]: str(iteration),
+            ONNX_IDENTITY_KEYS["model_protocol_version"]: str(
+                model_protocol_version
+            ),
         }
     )
     onnx.helper.set_model_props(model, properties)
@@ -239,6 +253,12 @@ def _read_artifact_manifest(marker_path):
         or checkpoint_version != CHECKPOINT_FORMAT_VERSION
     ):
         raise ValueError(f"checkpoint format version mismatch: {marker_path.name}")
+    model_protocol_version = payload.get("model_protocol_version")
+    if (
+        isinstance(model_protocol_version, bool)
+        or model_protocol_version != MODEL_PROTOCOL_VERSION
+    ):
+        raise ValueError(f"model protocol version mismatch: {marker_path.name}")
     validate_model_id(payload.get("model_id"))
     validate_model_prefix(payload.get("model_prefix"))
     iteration = payload.get("iteration")
@@ -279,7 +299,7 @@ def _validate_onnx_artifact_manifest(graph_path, record, expected_model_id=None)
         )
     if onnx_record.get("files") != record["files"]:
         raise ValueError(f"ONNX artifact file list mismatch: {marker_path.name}")
-    for key in ("model_id", "model_prefix", "iteration"):
+    for key in ("model_id", "model_prefix", "iteration", "model_protocol_version"):
         if onnx_record.get(key) != payload.get(key):
             raise ValueError(
                 f"ONNX artifact {key} mismatch: {marker_path.name}"
@@ -299,6 +319,7 @@ def describe_onnx_artifact(
     model_id=None,
     model_prefix=None,
     iteration=None,
+    model_protocol_version=None,
 ):
     """读取 ONNX 主图引用并返回主图与全部外置权重的完整记录"""
     import onnx
@@ -318,22 +339,37 @@ def describe_onnx_artifact(
     embedded_model_id = properties.get(ONNX_IDENTITY_KEYS["model_id"])
     embedded_model_prefix = properties.get(ONNX_IDENTITY_KEYS["model_prefix"])
     embedded_iteration = properties.get(ONNX_IDENTITY_KEYS["iteration"])
+    embedded_model_protocol = properties.get(
+        ONNX_IDENTITY_KEYS["model_protocol_version"]
+    )
     if embedded_iteration is not None:
         try:
             embedded_iteration = int(embedded_iteration)
         except ValueError as error:
             raise ValueError("ONNX embedded iteration must be an integer") from error
+    if embedded_model_protocol is not None:
+        try:
+            embedded_model_protocol = int(embedded_model_protocol)
+        except ValueError as error:
+            raise ValueError(
+                "ONNX embedded model_protocol_version must be an integer"
+            ) from error
 
     embedded_identity = (
         embedded_model_id,
         embedded_model_prefix,
         embedded_iteration,
+        embedded_model_protocol,
     )
     if any(value is not None for value in embedded_identity):
         if any(value is None for value in embedded_identity):
             raise ValueError("ONNX embedded model identity is incomplete")
         validate_model_id(embedded_model_id)
         validate_model_prefix(embedded_model_prefix)
+        if embedded_model_protocol != MODEL_PROTOCOL_VERSION:
+            raise ValueError(
+                "ONNX embedded model protocol does not match the current protocol"
+            )
     if expected_model_id is not None and embedded_model_id != expected_model_id:
         raise PermissionError(
             f"ONNX embedded model_id mismatch: expected {expected_model_id}, "
@@ -343,6 +379,11 @@ def describe_onnx_artifact(
         ("model_id", model_id, embedded_model_id),
         ("model_prefix", model_prefix, embedded_model_prefix),
         ("iteration", iteration, embedded_iteration),
+        (
+            "model_protocol_version",
+            model_protocol_version,
+            embedded_model_protocol,
+        ),
     ):
         if requested is not None and requested != embedded:
             raise ValueError(
@@ -374,6 +415,7 @@ def describe_onnx_artifact(
         "model_id": embedded_model_id,
         "model_prefix": embedded_model_prefix,
         "iteration": embedded_iteration,
+        "model_protocol_version": embedded_model_protocol,
         "primary": graph_path.name,
         "files": files,
         "external_data": files[1:],
@@ -427,6 +469,9 @@ def discover_checkpoint_artifacts(
                     "checkpoint_format_version": payload.get(
                         "checkpoint_format_version"
                     ),
+                    "model_protocol_version": payload.get(
+                        "model_protocol_version"
+                    ),
                     "checkpoint_path": str(checkpoint_path),
                     "manifest_path": str(marker_path),
                 }
@@ -442,7 +487,10 @@ def discover_checkpoint_artifacts(
                 continue
             try:
                 metadata = inspect_training_checkpoint(checkpoint_path)
-                if metadata["format_warning"] is not None:
+                if (
+                    metadata["format_warning"] is not None
+                    or metadata["model_protocol_warning"] is not None
+                ):
                     continue
                 if (
                     model_prefix is not None
@@ -458,6 +506,9 @@ def discover_checkpoint_artifacts(
                         "iteration": int(metadata["iteration"]),
                         "checkpoint_format_version": metadata[
                             "checkpoint_format_version"
+                        ],
+                        "model_protocol_version": metadata[
+                            "model_protocol_version"
                         ],
                         "checkpoint_path": str(checkpoint_path.resolve()),
                         "manifest_path": None,
@@ -601,7 +652,12 @@ def build_package_model_records(model_dir, selected_models):
             marker_path = checkpoint_artifact_manifest_path(primary_path)
             if marker_path.is_file():
                 payload = _read_artifact_manifest(marker_path)
-                for key in ("model_id", "model_prefix", "iteration"):
+                for key in (
+                    "model_id",
+                    "model_prefix",
+                    "iteration",
+                    "model_protocol_version",
+                ):
                     if payload[key] != checkpoint[key]:
                         raise ValueError(
                             f"checkpoint internal {key} does not match "
@@ -621,6 +677,9 @@ def build_package_model_records(model_dir, selected_models):
                     "model_id": checkpoint["model_id"],
                     "model_prefix": checkpoint["model_prefix"],
                     "iteration": checkpoint["iteration"],
+                    "model_protocol_version": checkpoint[
+                        "model_protocol_version"
+                    ],
                     "primary": name,
                     "files": [name],
                     "status": "complete",
@@ -655,7 +714,10 @@ def validate_package_model_records(records, *, expected_model_id=None):
         raise ValueError("model artifact records must be a list")
     model_ids = {record.get("model_id") for record in records}
     prefixes = {record.get("model_prefix") for record in records}
-    if None in model_ids or None in prefixes:
+    model_protocol_versions = {
+        record.get("model_protocol_version") for record in records
+    }
+    if None in model_ids or None in prefixes or None in model_protocol_versions:
         raise ValueError("model artifact identity is incomplete")
     for model_id in model_ids:
         validate_model_id(model_id)
@@ -665,6 +727,8 @@ def validate_package_model_records(records, *, expected_model_id=None):
         raise ValueError("one deployment package cannot mix different model_id pools")
     if len(prefixes) > 1:
         raise ValueError("one model_id pool cannot contain different model prefixes")
+    if model_protocol_versions != {MODEL_PROTOCOL_VERSION}:
+        raise ValueError("deployment package model protocol version is incompatible")
     if expected_model_id is not None and model_ids and model_ids != {expected_model_id}:
         raise PermissionError("selected models do not belong to the requested model_id pool")
     artifact_keys = [
@@ -703,7 +767,12 @@ def discover_model_repository(model_dir):
                 marker_path = checkpoint_artifact_manifest_path(primary_path)
                 if marker_path.is_file():
                     payload = _read_artifact_manifest(marker_path)
-                    for key in ("model_id", "model_prefix", "iteration"):
+                    for key in (
+                        "model_id",
+                        "model_prefix",
+                        "iteration",
+                        "model_protocol_version",
+                    ):
                         if payload[key] != checkpoint[key]:
                             raise ValueError(
                                 f"checkpoint internal {key} does not match "
@@ -720,6 +789,9 @@ def discover_model_repository(model_dir):
                         "model_id": checkpoint["model_id"],
                         "model_prefix": checkpoint["model_prefix"],
                         "iteration": checkpoint["iteration"],
+                        "model_protocol_version": checkpoint[
+                            "model_protocol_version"
+                        ],
                         "primary": primary_path.name,
                         "files": [primary_path.name, marker_path.name],
                         "identity_source": "checkpoint",
@@ -731,6 +803,9 @@ def discover_model_repository(model_dir):
                         "model_id": checkpoint["model_id"],
                         "model_prefix": checkpoint["model_prefix"],
                         "iteration": checkpoint["iteration"],
+                        "model_protocol_version": checkpoint[
+                            "model_protocol_version"
+                        ],
                         "primary": primary_path.name,
                         "files": [primary_path.name],
                         "identity_source": "checkpoint",
@@ -867,12 +942,17 @@ def write_checkpoint_artifact_manifest(
     model_id,
     model_prefix,
     checkpoint_format_version=CHECKPOINT_FORMAT_VERSION,
+    model_protocol_version=MODEL_PROTOCOL_VERSION,
     onnx_record=None,
     onnx_error=None,
 ):
     """在保存检查点时写入同轮次产物清单，并标记 ONNX 是否完整"""
     validate_model_id(model_id)
     validate_model_prefix(model_prefix)
+    if checkpoint_format_version != CHECKPOINT_FORMAT_VERSION:
+        raise ValueError("artifact checkpoint format version does not match the current format")
+    if model_protocol_version != MODEL_PROTOCOL_VERSION:
+        raise ValueError("artifact model protocol version does not match the current protocol")
     checkpoint = Path(checkpoint_path).resolve()
     manifest_path = checkpoint_artifact_manifest_path(checkpoint)
     if onnx_error == "export_in_progress":
@@ -888,11 +968,13 @@ def write_checkpoint_artifact_manifest(
                 "model_id": model_id,
                 "model_prefix": model_prefix,
                 "iteration": int(iteration),
+                "model_protocol_version": int(model_protocol_version),
             }
         )
     payload = {
         "artifact_manifest_version": ARTIFACT_MANIFEST_FORMAT_VERSION,
         "checkpoint_format_version": int(checkpoint_format_version),
+        "model_protocol_version": int(model_protocol_version),
         "model_id": model_id,
         "model_prefix": model_prefix,
         "iteration": int(iteration),

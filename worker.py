@@ -51,7 +51,7 @@ DECISION_MSGS = [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130
 GAMMA = 0.998
 GAE_LAMBDA = 0.95
 MAX_EPISODE_STEPS = 1500
-LONG_GAME_TURN_THRESHOLD = 30
+LONG_GAME_TURN_THRESHOLD = 40
 SINGLE_TURN_DECISION_THRESHOLD = 300
 
 ORT_NUMPY_DTYPES = {
@@ -764,7 +764,9 @@ def worker_process(
                                     option_limit=5000,
                                 )
                                 if not current_macro_pool:
-                                    current_macro_pool = brain.current_valid_actions
+                                    raise RuntimeError(
+                                        f"消息 {msg_type} 未生成任何合法宏动作，拒绝提交不完整响应"
+                                    )
 
                                 perf_ledger['t_rule_bot'] += (time.time() - t_rule_anchor) # 计时器4
 
@@ -929,7 +931,7 @@ def worker_process(
                                 turn_steps = 0 # 切换回合，步数清零！
                             turn_steps += 1
 
-                            # 软性时间惩罚：30 回合以内不干预正常长盘。
+                            # 软性时间惩罚：40 回合以内不干预正常长盘。
                             if current_turn > LONG_GAME_TURN_THRESHOLD:
                                 step_reward -= 0.0001
 
@@ -1189,7 +1191,7 @@ def worker_process(
                             turns = brain.turn
                             if ai_is_broken[train_p_id]:
                                 final_reward = -1.0
-                            elif turns <= 40: 
+                            elif turns <= 50: 
                                 final_reward = 1.0
                             else: 
                                 final_reward = 0.05

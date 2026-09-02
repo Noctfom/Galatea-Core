@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.4.2**.
+> This document applies to **Galatea-Core v3.5.0**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -175,7 +175,7 @@ Intent Tower                        Option Tower
 ┌─────────────┐                   ┌─────────────┐
 │ Global state│                   │ Target card │
 │ feat vector │                   │ Action type │
-│ (v_input)   │                   │ Effect desc │
+│ (v_input)   │                   │Response/limit│
 └──────┬──────┘                   └──────┬──────┘
        │                                 │
        └────────────┬────────────────────┘
@@ -235,16 +235,29 @@ feat_numeric = [
 
 ```python
 act_dict = {
-    'act_card_idx': [...],   # Target card indices [80, 5]
+    'act_card_idx': [...],   # Visible target entity indices [120, 5]
     'act_type': [...],       # Action types
     'act_desc': [...],       # Effect description Hash
     'act_mask': [...],       # Valid action mask
     'act_race': [...],       # Announced race
     'act_attr': [...],       # Announced attribute
-    'act_code': [...],       # Announced card
-    'act_place': [...],      # Placement position
+    'act_code': [...],       # Candidate/announced card code
+    'act_place': [...],      # Placement positions [120, 5]
+    'act_operation': [...],  # Yes/No/Select/Unselect/Finish/Cancel semantics
+    'act_response': [...],   # Semantic response value
+    'act_signature': [...],  # Four-byte stable full-action signature
+    'act_context': [...],    # min/max/result count/finish/cancel [120, 6]
+    'act_target_code': [...],# Hidden-zone or macro target codes [120, 5]
+    'act_target_value': [...],# Tribute/dual-level/counter values [120, 5, 2]
+    'act_controller': [...], # Actor-relative controller
+    'act_location': [...],   # Engine zone
+    'act_sequence': [...],   # Sequence within the zone
 }
 ```
+
+Action Protocol V2 does not treat `GameAction.index` as learned semantics. `index` and `decision_bytes` only translate the final choice back to Core; the policy sees operation, card code, location, constraints, and resulting selection set. Type 26 retains Core's native sequential Select/Unselect flow, producing a new snapshot and trajectory row at each step. Static combinatorial messages such as Types 15/20/22/23/25 first enumerate complete legal responses and then let the policy choose one.
+
+`MODEL_PROTOCOL_VERSION` is maintained independently from both the framework release and checkpoint-container version. It is embedded in PTH top-level metadata, `net_config`, model state, ONNX metadata, and artifact manifests. A mismatch means the input tensors or action-head weights are incompatible and is rejected.
 
 ---
 

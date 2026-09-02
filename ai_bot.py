@@ -93,7 +93,7 @@ class AiBot:
         with torch.no_grad():
             gpu_dict = {k: v.to(self.device) for k, v in tensor_dict.items()}
             
-            # Logits 现在直接就是 [1, 80] 的动作分数
+            # Logits 现在直接就是 [1, 120] 的动作分数
             logits, value = self.net(gpu_dict) 
             
             # 网络已经内置了 act_mask 并把无效槽位变成了 -1e9
@@ -119,6 +119,8 @@ class AiBot:
         # ==========================================================
         if hasattr(action, 'decision_bytes') and action.decision_bytes:
             return action.decision_bytes
+        if getattr(action, 'decision_value', None) is not None:
+            return int(action.decision_value)
         # ==========================================================
         # 1. 整型槽类 (调用 C++ set_responsei) - 绝对不能返回 bytes
         # 包含: 10(Battle), 11(Idle), 12(EffectYN), 13(YesNo), 
