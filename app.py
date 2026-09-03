@@ -15,6 +15,8 @@ import socket
 import time
 import sys
 import tempfile
+import inspect
+import html
 from collections import deque
 from card_reader import CardReader
 from checkpoint_utils import (
@@ -38,6 +40,18 @@ from managed_processes import (
     purge_managed_processes,
 )
 from training_validation import resolve_training_target, validate_model_prefix
+from replay_utils import (
+    format_action_semantics,
+    get_replay_frame_state,
+    get_replay_decklists,
+    get_frame_visuals,
+    get_replay_frames,
+    get_selected_replay_option_index,
+    group_replay_card_codes,
+    queue_replay_cursor,
+    set_replay_cursor,
+    sync_replay_session,
+)
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -47,12 +61,23 @@ PROJECT_ROOT = os.path.realpath(os.path.dirname(__file__))
 # 强制使用绝对路径挂载 CDB，防止 WebUI 运行目录错位导致查不到卡名
 card_db_ui = CardReader(db_path=os.path.abspath(os.path.join(os.path.dirname(__file__), 'cards.cdb')))
 
+
+def get_stretch_width_args(widget):
+    """按当前 Streamlit 版本选择无弃用警告的拉伸宽度参数。"""
+    if "width" in inspect.signature(widget).parameters:
+        return {"width": "stretch"}
+    return {"use_container_width": True}
+
+
+REPLAY_BUTTON_WIDTH = get_stretch_width_args(st.button)
+REPLAY_DATAFRAME_WIDTH = get_stretch_width_args(st.dataframe)
+
 st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wide")
 
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.5.0"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.5.1"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -179,6 +204,10 @@ if 'running_process_create_time' not in st.session_state:
     st.session_state.running_process_create_time = None
 if 'auto_refresh' not in st.session_state:
     st.session_state.auto_refresh = False
+if 'tensorboard_pid' not in st.session_state:
+    st.session_state.tensorboard_pid = None
+if 'tensorboard_process_create_time' not in st.session_state:
+    st.session_state.tensorboard_process_create_time = None
 
 if st.session_state.running_pid:
     if st.session_state.running_process_create_time is None:
@@ -2230,14 +2259,12 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             try: replay_data = json.load(f)
             except Exception: replay_data = {}
             
-        decisions = replay_data.get("decisions", [])
-        if not decisions:
+        replay_frames = get_replay_frames(replay_data)
+        if not replay_frames:
             st.warning(_("录像格式过旧或损坏。", "Replay is empty or old format."))
         else:
-            max_steps = len(decisions) - 1
-            if "replay_step" not in st.session_state: st.session_state.replay_step = 0
-            if "is_playing" not in st.session_state: st.session_state.is_playing = False
-            if st.session_state.replay_step > max_steps: st.session_state.replay_step = max_steps
+            max_steps = len(replay_frames) - 1
+            sync_replay_session(st.session_state, sel_file, max_steps)
             
             # 提前注册透视开关状态，防止回收
             if "tgl_p1_hand" not in st.session_state: st.session_state.tgl_p1_hand = False
@@ -2245,6 +2272,7 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             if "tgl_p1_set" not in st.session_state: st.session_state.tgl_p1_set = False
             if "tgl_p0_set" not in st.session_state: st.session_state.tgl_p0_set = True
             if "tgl_rotate_p1" not in st.session_state: st.session_state.tgl_rotate_p1 = True
+            if "tgl_p1_confidence" not in st.session_state: st.session_state.tgl_p1_confidence = True
 
             st.markdown(f"**🤖 {_('模型', 'Model')}:** `{replay_data.get('model_name', 'Unknown')}` &nbsp;|&nbsp; **🏆 {_('胜者', 'Winner')}:** `P{replay_data.get('winner', '?')} ({replay_data.get('win_reason', '结束')})`")
             
@@ -2253,10 +2281,10 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([1,1,1,2,5])
             
             def step_prev():
-                st.session_state.replay_step = max(0, st.session_state.replay_step - 1)
+                set_replay_cursor(st.session_state, st.session_state.replay_step - 1, max_steps)
                 st.session_state.is_playing = False
             def step_next():
-                st.session_state.replay_step = min(max_steps, st.session_state.replay_step + 1)
+                set_replay_cursor(st.session_state, st.session_state.replay_step + 1, max_steps)
                 st.session_state.is_playing = False
             def toggle_play():
                 st.session_state.is_playing = not st.session_state.is_playing
@@ -2264,29 +2292,55 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                 st.session_state.replay_step = st.session_state.step_slider_widget
                 st.session_state.is_playing = False
             
-            ctrl1.button("⏮️ 上一步", use_container_width=True, key="btn_prev_step", on_click=step_prev)
+            ctrl1.button("⏮️ 上一步", key="btn_prev_step", on_click=step_prev, **REPLAY_BUTTON_WIDTH)
             play_label = "⏸️ 暂停播放" if st.session_state.is_playing else "▶️ 自动播放"
-            ctrl2.button(play_label, type="primary" if st.session_state.is_playing else "secondary", use_container_width=True, key="btn_toggle_play", on_click=toggle_play)
-            ctrl3.button("⏭️ 下一步", use_container_width=True, key="btn_next_step", on_click=step_next)
-                
+            ctrl2.button(play_label, type="primary" if st.session_state.is_playing else "secondary", key="btn_toggle_play", on_click=toggle_play, **REPLAY_BUTTON_WIDTH)
+            ctrl3.button("⏭️ 下一步", key="btn_next_step", on_click=step_next, **REPLAY_BUTTON_WIDTH)
+
             play_speed = ctrl4.slider("⏱️ 播放间隔", 0.5, 5.0, 1.5, 0.5, label_visibility="collapsed", key="slider_play_speed")
-            st.slider("时间轴", 0, max_steps, st.session_state.replay_step, format="Step %d", label_visibility="collapsed", key="step_slider_widget", on_change=on_slider)
+            if max_steps > 0:
+                st.slider("时间轴", 0, max_steps, format="Step %d", label_visibility="collapsed", key="step_slider_widget", on_change=on_slider)
+            else:
+                st.caption(_("该录像仅包含一个有效帧。", "This replay contains one frame."))
                 
-            t_col1, t_col2, t_col3, t_col4, t_col5 = st.columns(5)
+            t_col1, t_col2, t_col3, t_col4, t_col5, t_col6 = st.columns(6)
             t_col1.toggle("👁️ P1 手牌", key="tgl_p1_hand")
             t_col2.toggle("👁️ P0 手牌", key="tgl_p0_hand")
             t_col3.toggle("👁️ P1 盖卡", key="tgl_p1_set")
             t_col4.toggle("👁️ P0 盖卡", key="tgl_p0_set")
             t_col5.toggle("🔄 P1 翻转180°", key="tgl_rotate_p1")
+            t_col6.toggle(_("📊 P1 置信度", "📊 P1 Confidence"), key="tgl_p1_confidence")
 
-            step_data = decisions[st.session_state.replay_step]
-            state = step_data.get("state", {})
+            step_data = replay_frames[st.session_state.replay_step]
+            state = get_replay_frame_state(replay_data, step_data)
+            replay_decklists = get_replay_decklists(replay_data)
             api_lang = "sc" if lang == "🇨🇳 中文" else "en"
-            
-            chosen_opt = next((o for o in step_data.get("options", []) if o.get("is_chosen")), {})
+
+            frame_player = step_data.get("player")
+            show_option_table = (
+                frame_player != 1 or st.session_state.tgl_p1_confidence
+            )
+            preview_frame_id = f"{sel_file}:{st.session_state.replay_step}"
+            if st.session_state.get("replay_preview_frame_id") != preview_frame_id:
+                st.session_state.replay_preview_frame_id = preview_frame_id
+                st.session_state.replay_preview_option_index = None
+            preview_option_index = (
+                st.session_state.get("replay_preview_option_index")
+                if show_option_table
+                else None
+            )
+            frame_visuals = get_frame_visuals(step_data, preview_option_index)
+            chosen_opt = frame_visuals["chosen"]
+            preview_opt = frame_visuals["preview"]
             action_desc = chosen_opt.get("desc", "")
-            actor_data = chosen_opt.get("actor")
-            target_data = chosen_opt.get("target")
+            actor_data = frame_visuals["actor"]
+            target_data = frame_visuals["targets"][0] if frame_visuals["targets"] else None
+            target_keys = {
+                (target.get("owner"), target.get("loc"), target.get("seq"))
+                for target in frame_visuals["targets"]
+                if target
+            }
+            event_data = frame_visuals["event"]
 
             css_style = """
             <style>
@@ -2331,6 +2385,11 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             .svg-overlay { position: absolute; top: 20px; left: 20px; width: calc(100% - 40px); height: calc(100% - 40px); pointer-events: none; z-index: 50; overflow: visible; }
             .dash-line { stroke-dasharray: 10; animation: dashAnim 1s linear infinite; }
             @keyframes dashAnim { to { stroke-dashoffset: -20; } }
+            .deck-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 7px; padding: 8px 2px; }
+            .deck-card-item { position: relative; min-width: 0; }
+            .deck-card-item a { display: block; }
+            .deck-card-count { position: absolute; right: -3px; bottom: -3px; min-width: 22px; padding: 1px 4px; border-radius: 10px; background: #00a9c7; color: white; font-size: 11px; font-weight: 700; text-align: center; box-shadow: 0 1px 4px #000; }
+            .deck-list-empty { color: #888; padding: 12px; text-align: center; }
             [data-testid="column"] { padding: 0.2rem !important; }
             </style>
             """
@@ -2339,6 +2398,8 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             RACE_MAP = {1:"战士", 2:"魔法师", 4:"天使", 8:"恶魔", 16:"不死", 32:"机械", 64:"水", 128:"炎", 256:"岩石", 512:"鸟兽", 1024:"植物", 2048:"昆虫", 4096:"雷", 8192:"龙", 16384:"兽", 32768:"兽战士", 65536:"恐龙", 131072:"鱼", 262144:"海龙", 524288:"爬虫", 1048576:"念动力", 2097152:"幻神兽", 4194304:"创造神", 8388608:"幻龙", 16777216:"电子界", 33554432:"幻想魔"}
 
             def get_grid_pos(owner, loc, seq):
+                if loc == 0x100:
+                    return (3, 6) if owner == 0 else (3, 2)
                 if owner == 0:
                     if loc == 0x04:
                         if seq < 5: return (4, seq + 2)
@@ -2393,7 +2454,7 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                 hl_class = ""
                 if actor_data and actor_data.get('owner') == owner and actor_data.get('loc') == loc and actor_data.get('seq') == seq:
                     hl_class = " hl-actor"
-                elif target_data and target_data.get('owner') == owner and target_data.get('loc') == loc and target_data.get('seq') == seq:
+                elif (owner, loc, seq) in target_keys:
                     hl_class = " hl-target"
 
                 # 🌟 核心优化：透视特效仅作用于场上的里侧卡片 (排除手牌)
@@ -2428,6 +2489,29 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                     # 🌟 注入幽灵特效类 xray_class
                     return f'<div class="ygo-card-wrapper"><a href="https://ygocdb.com/card/{code}" target="_blank" style="display:block; width:100%; height:100%;"><img src="{img_url}" class="ygo-card{hl_class}{xray_class}" style="{transform_style}" title="{title}"></a></div>'
 
+            def render_carried_deck(codes):
+                """把完整卡组按同名卡合并为带数量角标的卡图网格。"""
+                cards_html = []
+                for code, count in group_replay_card_codes(codes):
+                    card_name = html.escape(
+                        card_db_ui.get_card_name(code) or str(code),
+                        quote=True,
+                    )
+                    img_url = f"https://cdn.233.momobako.com/ygoimg/{api_lang}/{code}.webp!half"
+                    count_badge = (
+                        f'<span class="deck-card-count">×{count}</span>'
+                        if count > 1 else ""
+                    )
+                    cards_html.append(
+                        '<div class="deck-card-item">'
+                        f'<a href="https://ygocdb.com/card/{code}" target="_blank">'
+                        f'<img src="{img_url}" class="ygo-card" loading="lazy" title="【{card_name}】 ({code}) ×{count}">'
+                        f'</a>{count_badge}</div>'
+                    )
+                if not cards_html:
+                    return '<div class="deck-list-empty">无卡片 / Empty</div>'
+                return '<div class="deck-card-grid">' + "".join(cards_html) + '</div>'
+
             grid_html = { (r, c): '<div class="ygo-cell"></div>' for r in range(1, 6) for c in range(1, 8) }
             for c in [2, 4, 6]: grid_html[(3, c)] = '<div class="ygo-cell empty-space"></div>'
 
@@ -2439,24 +2523,30 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             grid_html[(3, 2)] = f'<div class="ygo-cell empty-space" style="display:flex; flex-direction:column; color:#ff4444; font-weight:bold; font-size:18px; text-shadow: 1px 1px 2px #000;"><span>P1 LP</span><span>{state.get("p1_lp", 8000)}</span></div>'
             grid_html[(3, 6)] = f'<div class="ygo-cell empty-space" style="display:flex; flex-direction:column; color:#44ff44; font-weight:bold; font-size:18px; text-shadow: 1px 1px 2px #000;"><span>P0 LP</span><span>{state.get("p0_lp", 8000)}</span></div>'
 
+            occupied_cells = set()
+
             def fill_board(zone_list, owner, loc):
+                """填充场地区卡片并记录已占用坐标。"""
                 for c in zone_list:
                     rc = get_grid_pos(owner, loc, c['seq'])
-                    if rc: grid_html[rc] = f'<div class="ygo-cell">{render_card(c, loc, owner)}</div>'
+                    if rc:
+                        occupied_cells.add(rc)
+                        grid_html[rc] = f'<div class="ygo-cell">{render_card(c, loc, owner)}</div>'
                     
             fill_board(state.get('p0_mzone', []), 0, 0x04); fill_board(state.get('p0_szone', []), 0, 0x08)
             fill_board(state.get('p1_mzone', []), 1, 0x04); fill_board(state.get('p1_szone', []), 1, 0x08)
 
             # 🌟 修复魔法区越界 Bug：强制检查 expected_seq
             def fixed_cell(r, c, label, count, loc_id, owner_id, expected_seq=-1):
+                """绘制固定区域计数，并在事件命中时显示对应卡片。"""
                 active_c = None
-                for act_data in [actor_data, target_data]:
+                for act_data in [actor_data] + frame_visuals["targets"]:
                     if act_data and act_data.get('loc') == loc_id and act_data.get('owner') == owner_id:
                         if expected_seq == -1 or act_data.get('seq') == expected_seq:
                             active_c = act_data
                             break
                 if active_c:
-                    content = render_card({"code": active_c['code'], "pos": 0, "seq": 0}, loc_id, owner_id, force_faceup=True)
+                    content = render_card(active_c, loc_id, owner_id, force_faceup=True)
                 else:
                     content = f'<div style="color:gray;font-weight:bold;text-align:center;width:100%;">{label}<br>{count}</div>'
                 grid_html[(r, c)] = f'<div class="ygo-cell" style="border: 2px solid #555;">{content}</div>'
@@ -2477,24 +2567,62 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             fixed_cell(4, 1, "Field", "", 0x08, 0, expected_seq=5)
             fixed_cell(2, 7, "Field", "", 0x08, 1, expected_seq=5)
 
-            # 🏹 SVG 连线计算
+            # 离场移动后源卡已经不在快照中，使用事件幽灵卡保留移动起点。
+            for event_card in [actor_data] + frame_visuals["targets"]:
+                if not event_card or event_card.get("loc") not in (0x04, 0x08):
+                    continue
+                rc = get_grid_pos(
+                    event_card.get("owner", -1),
+                    event_card.get("loc", 0),
+                    event_card.get("seq", 0),
+                )
+                if rc and rc not in occupied_cells:
+                    grid_html[rc] = (
+                        '<div class="ygo-cell" style="opacity:0.72;">'
+                        + render_card(
+                            event_card,
+                            event_card.get("loc", 0),
+                            event_card.get("owner", -1),
+                            force_faceup=True,
+                        )
+                        + '</div>'
+                    )
+
+            # 🏹 按动作、连锁、攻击和移动类型绘制多目标有向箭头。
             svg_html = ""
-            if actor_data and target_data:
-                arc = get_grid_pos(actor_data['owner'], actor_data['loc'], actor_data['seq'])
-                trc = get_grid_pos(target_data['owner'], target_data['loc'], target_data['seq'])
-                if arc and trc:
-                    ax = (arc[1] - 1) * 81 + 37.5; ay = (arc[0] - 1) * 112 + 53
-                    tx = (trc[1] - 1) * 81 + 37.5; ty = (trc[0] - 1) * 112 + 53
-                    svg_html = f"""
-                    <svg class="svg-overlay">
-                        <defs>
-                            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                                <polygon points="0 0, 10 3.5, 0 7" fill="#f00" />
-                            </marker>
-                        </defs>
-                        <line x1="{ax}" y1="{ay}" x2="{tx}" y2="{ty}" stroke="#f00" stroke-width="4" class="dash-line" marker-end="url(#arrowhead)" />
-                    </svg>
-                    """
+            arrow_colors = {
+                "move": "#00d4ff", "attack": "#ff3b30", "chain": "#c65cff",
+                "equip": "#ffd60a", "card_target": "#ff9500", "action": "#ff3b30",
+            }
+            svg_lines = []
+            svg_markers = []
+            for arrow_index, arrow in enumerate(frame_visuals["arrows"]):
+                source = arrow.get("from") or {}
+                target = arrow.get("to") or {}
+                arc = get_grid_pos(source.get('owner'), source.get('loc'), source.get('seq', 0))
+                trc = get_grid_pos(target.get('owner'), target.get('loc'), target.get('seq', 0))
+                if not arc or not trc or arc == trc:
+                    continue
+                color = arrow_colors.get(arrow.get("kind"), "#ff3b30")
+                marker_id = f"arrowhead-{arrow_index}"
+                ax = (arc[1] - 1) * 81 + 37.5; ay = (arc[0] - 1) * 112 + 53
+                tx = (trc[1] - 1) * 81 + 37.5; ty = (trc[0] - 1) * 112 + 53
+                svg_markers.append(
+                    f'<marker id="{marker_id}" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">'
+                    f'<polygon points="0 0, 10 3.5, 0 7" fill="{color}" /></marker>'
+                )
+                svg_lines.append(
+                    f'<line x1="{ax}" y1="{ay}" x2="{tx}" y2="{ty}" stroke="{color}" '
+                    f'stroke-width="4" class="dash-line" marker-end="url(#{marker_id})" />'
+                )
+            if svg_lines:
+                svg_html = (
+                    '<svg class="svg-overlay"><defs>'
+                    + ''.join(svg_markers)
+                    + '</defs>'
+                    + ''.join(svg_lines)
+                    + '</svg>'
+                )
 
             board_html = '<div class="ygo-board-wrapper"><div class="ygo-board">'
             for r in range(1, 6):
@@ -2511,7 +2639,39 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                 st.markdown(p1_hand_html, unsafe_allow_html=True)
                 st.markdown(board_html, unsafe_allow_html=True)
                 st.markdown(p0_hand_html, unsafe_allow_html=True)
-                
+
+                with st.expander("📚 " + _("查看双方完整卡组", "View Both Full Decks")):
+                    st.caption(_(
+                        "这里显示开局携带清单，仅用于赛后审计，不会进入模型观测。",
+                        "Initial carried lists for post-game review only; they are not model observations.",
+                    ))
+                    if replay_decklists:
+                        deck_tabs = []
+                        deck_sections = []
+                        for player in ("0", "1"):
+                            deck_entry = replay_decklists.get(player, {})
+                            deck_name = deck_entry.get("name") or _("未命名卡组", "Unnamed Deck")
+                            for section, section_label in (
+                                ("main", _("主卡组", "Main")),
+                                ("extra", _("额外卡组", "Extra")),
+                            ):
+                                codes = deck_entry.get(section, [])
+                                deck_tabs.append(
+                                    f"P{player} {section_label} · {deck_name} ({len(codes)})"
+                                )
+                                deck_sections.append(codes)
+                        for tab, codes in zip(st.tabs(deck_tabs), deck_sections):
+                            with tab:
+                                st.markdown(
+                                    render_carried_deck(codes),
+                                    unsafe_allow_html=True,
+                                )
+                    else:
+                        st.info(_(
+                            "这份旧录像没有保存开局卡组；重新录制的对局会自动包含该信息。",
+                            "This older replay has no initial deck list; newly recorded games include it automatically.",
+                        ))
+
                 with st.expander("📂 " + _("展开查看 墓地 / 除外 / 额外 详情", "Expand Grave / Banished / Extra View")):
                     col_p1, col_p0 = st.columns(2)
                     with col_p1:
@@ -2524,6 +2684,33 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                         st.write("P0 额外 Extra"); st.markdown('<div class="ygo-hand" style="flex-wrap:wrap;">' + "".join([f'<div style="width:50px;">{render_card(c, 0x40, 0, force_faceup=True)}</div>' for c in state.get('p0_extra', [])]) + '</div>', unsafe_allow_html=True)
 
             with c_right:
+                frame_agent = step_data.get("agent") or (
+                    replay_data.get("players", {}).get(str(frame_player), "Core")
+                    if frame_player is not None else "Core"
+                )
+                st.caption(
+                    f"Frame {st.session_state.replay_step + 1}/{len(replay_frames)} · "
+                    f"{step_data.get('frame_type', 'decision')} · "
+                    f"{('P' + str(frame_player) + ' / ') if frame_player is not None else ''}{frame_agent} · "
+                    f"MsgType {step_data.get('msg_type', '?')}"
+                )
+
+                if event_data:
+                    st.subheader("🎬 " + _("Core 事件", "Core Event"))
+                    st.info(event_data.get("label", f"Core {event_data.get('msg_type', '?')}"))
+                    if event_data.get("kind") == "lp":
+                        lp_before = event_data.get("lp_before")
+                        lp_after = event_data.get("lp_after")
+                        lp_delta = event_data.get("lp_delta")
+                        delta_text = f"{lp_delta:+d}" if isinstance(lp_delta, int) else None
+                        st.metric(
+                            f"P{event_data.get('player', '?')} LP",
+                            lp_after,
+                            delta=delta_text,
+                        )
+                        if lp_before is not None:
+                            st.caption(f"{lp_before} → {lp_after}")
+
                 chain_list = state.get("chain", [])
                 hist_list = state.get("history", [])
                 
@@ -2537,17 +2724,83 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                         h_names = [card_db_ui.get_card_name(h.get('code', 0)) for h in hist_list[:5]]
                         st.caption(f"最近动作: {' ➡️ '.join(h_names)}")
                         
-                st.subheader("🧠 " + _("AI 决策动作推演", "AI Operations"))
+                st.subheader("🧠 " + _("双方决策与动作推演", "Both Players' Operations"))
                 if action_desc:
-                    arr_hint = " 🎯 [红色虚线指向锁定目标]" if svg_html else ""
-                    st.info(f"👉 **AI 最终决定:** {action_desc}{arr_hint}")
+                    arr_hint = " 🎯 [箭头方向：发起者 → 目标]" if svg_html else ""
+                    player_label = f"P{frame_player}" if frame_player is not None else "AI"
+                    st.info(f"👉 **{player_label} 最终决定:** {action_desc}{arr_hint}")
+                    semantic_details = format_action_semantics(chosen_opt.get("semantic"))
+                    if semantic_details:
+                        st.caption(" ｜ ".join(semantic_details))
+
+                if preview_option_index is not None and preview_opt:
+                    preview_desc = preview_opt.get("desc", "") or _(
+                        "未命名候选",
+                        "Unnamed option",
+                    )
+                    st.info(_(
+                        f"🔎 当前候选预览：[{preview_option_index}] {preview_desc}",
+                        f"🔎 Candidate preview: [{preview_option_index}] {preview_desc}",
+                    ))
+                    preview_semantics = format_action_semantics(
+                        preview_opt.get("semantic")
+                    )
+                    if preview_semantics:
+                        st.caption(" ｜ ".join(preview_semantics))
+
+                    # 候选涉及的卡片在表格下直接展示，同时在左侧棋盘标亮对应位置。
+                    preview_cards = []
+                    seen_preview_cards = set()
+                    for role, card in [
+                        (_("发起者", "Actor"), frame_visuals["actor"]),
+                        *[
+                            (_("目标/素材", "Target/Material"), target)
+                            for target in frame_visuals["targets"]
+                        ],
+                    ]:
+                        if not card:
+                            continue
+                        identity = (
+                            card.get("owner"),
+                            card.get("loc"),
+                            card.get("seq"),
+                            card.get("code"),
+                        )
+                        if identity in seen_preview_cards:
+                            continue
+                        seen_preview_cards.add(identity)
+                        preview_cards.append((role, card))
+                    if preview_cards:
+                        preview_card_html = '<div class="ygo-hand" style="flex-wrap:wrap;">'
+                        for role, card in preview_cards[:8]:
+                            preview_card_html += (
+                                '<div style="width:76px;text-align:center;color:#bbb;">'
+                                f'<div style="font-size:11px;margin-bottom:3px;">{role}</div>'
+                                + render_card(
+                                    card,
+                                    card.get("loc", 0),
+                                    card.get("owner", -1),
+                                    force_faceup=True,
+                                )
+                                + '</div>'
+                            )
+                        preview_card_html += '</div>'
+                        st.markdown(preview_card_html, unsafe_allow_html=True)
+                        if len(preview_cards) > 8:
+                            st.caption(_(
+                                f"另有 {len(preview_cards) - 8} 个目标/素材未展开。",
+                                f"{len(preview_cards) - 8} more targets/materials are hidden.",
+                            ))
                 
                 df_data = []
                 for opt in step_data.get("options", []):
                     df_data.append({
                         _("采纳", "Action"): "✅" if opt.get("is_chosen") else "",
                         _("信心", "Confidence"): f"{opt.get('confidence', 0)*100:.1f}%",
-                        _("动作推演", "Operation Detail"): opt.get("desc", "")
+                        _("动作推演", "Operation Detail"): opt.get("desc", ""),
+                        _("协议语义", "Protocol Semantics"): " ｜ ".join(
+                            format_action_semantics(opt.get("semantic"))
+                        ),
                     })
                 
                 df = pd.DataFrame(df_data)
@@ -2555,12 +2808,39 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                     if row[_("采纳", "Action")] == "✅": return ['background-color: rgba(0, 255, 255, 0.2); font-weight: bold'] * len(row)
                     return [''] * len(row)
                 
-                st.dataframe(df.style.apply(highlight_row, axis=1), use_container_width=True, height=550, hide_index=True)
+                if not df.empty and show_option_table:
+                    option_table_key = (
+                        f"replay_option_table::{sel_file}::"
+                        f"{st.session_state.replay_step}"
+                    )
+                    table_event = st.dataframe(
+                        df.style.apply(highlight_row, axis=1),
+                        height=550,
+                        hide_index=True,
+                        key=option_table_key,
+                        on_select="rerun",
+                        selection_mode="single-row",
+                        **REPLAY_DATAFRAME_WIDTH,
+                    )
+                    selected_option_index = get_selected_replay_option_index(
+                        table_event,
+                        len(df_data),
+                    )
+                    if selected_option_index != preview_option_index:
+                        st.session_state.replay_preview_option_index = selected_option_index
+                        st.session_state.is_playing = False
+                        st.rerun()
+                elif not df.empty and frame_player == 1:
+                    st.caption(_(
+                        "P1 候选置信度表已隐藏；可使用顶部开关重新显示。",
+                        "P1 confidence table is hidden; use the top toggle to show it.",
+                    ))
 
             if st.session_state.is_playing:
                 time.sleep(play_speed)
                 if st.session_state.replay_step < max_steps:
-                    st.session_state.replay_step += 1
+                    # 滑块已经在本轮实例化，只推进逻辑游标并交给下一轮同步控件键。
+                    queue_replay_cursor(st.session_state, st.session_state.replay_step + 1, max_steps)
                     st.rerun()
                 else:
                     st.session_state.is_playing = False
@@ -2579,6 +2859,88 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(('127.0.0.1', port)) == 0
 
+    def clear_tensorboard_registration():
+        """清除当前 WebUI 会话登记的 TensorBoard 进程身份。"""
+        st.session_state.tensorboard_pid = None
+        st.session_state.tensorboard_process_create_time = None
+
+    def launch_tensorboard_service(port=6006):
+        """使用当前便携 Python 启动 TensorBoard，避免依赖系统 PATH。"""
+        command = [
+            sys.executable,
+            "-m",
+            "tensorboard.main",
+            "--logdir",
+            os.path.join(PROJECT_ROOT, "runs"),
+            "--port",
+            str(port),
+            "--host",
+            "127.0.0.1",
+            "--samples_per_plugin",
+            "scalars=500,images=0,audio=0",
+            "--max_reload_threads",
+            "1",
+            "--reload_interval",
+            "60",
+        ]
+        process_options = {
+            "cwd": PROJECT_ROOT,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "env": build_managed_process_env(PROJECT_ROOT),
+        }
+        if os.name == "nt":
+            process_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        process = subprocess.Popen(command, **process_options)
+        st.session_state.tensorboard_pid = process.pid
+        try:
+            st.session_state.tensorboard_process_create_time = psutil.Process(
+                process.pid
+            ).create_time()
+        except psutil.Error:
+            st.session_state.tensorboard_process_create_time = None
+        return process
+
+    def adopt_managed_tensorboard_service(port=6006):
+        """重新登记同项目先前启动的 TensorBoard，兼容 WebUI 页面重连。"""
+        port_text = str(port)
+        for process in psutil.process_iter(["pid", "cmdline"]):
+            if process.pid == os.getpid() or not process_matches_project(
+                process,
+                PROJECT_ROOT,
+            ):
+                continue
+            try:
+                command = list(process.cmdline())
+                module_index = command.index("-m") if "-m" in command else -1
+                port_index = command.index("--port") if "--port" in command else -1
+                is_tensorboard = (
+                    module_index >= 0
+                    and module_index + 1 < len(command)
+                    and command[module_index + 1] == "tensorboard.main"
+                    and port_index >= 0
+                    and port_index + 1 < len(command)
+                    and command[port_index + 1] == port_text
+                )
+                if not is_tensorboard:
+                    continue
+                st.session_state.tensorboard_pid = process.pid
+                st.session_state.tensorboard_process_create_time = process.create_time()
+                return True
+            except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+                continue
+        return False
+
+    if not st.session_state.tensorboard_pid:
+        adopt_managed_tensorboard_service(6006)
+
+    registered_tb_alive = is_process_alive(
+        st.session_state.tensorboard_pid,
+        st.session_state.tensorboard_process_create_time,
+    )
+    if st.session_state.tensorboard_pid and not registered_tb_alive:
+        clear_tensorboard_registration()
+
     tb_running = is_tb_running(6006)
 
     # 顶部的控制按钮 (去除了 use_container_width 以防后续版本报错)
@@ -2586,30 +2948,46 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
     with col1:
         if not tb_running:
             if st.button(_("🚀 启动 TensorBoard", "🚀 Start TensorBoard"), type="primary"):
-                # 🌟 修复 2: 后台静默启动，将标准输出和报错全部扔进黑洞，终端彻底清静！
-                subprocess.Popen(
-                    [
-                        "tensorboard", "--logdir", "./runs", "--port", "6006", "--host", "127.0.0.1",
-                        "--samples_per_plugin", "scalars=500,images=0,audio=0", # 强制压缩采样率，抛弃无用的多媒体日志
-                        "--max_reload_threads", "1",                            # 限制为单线程读取，防止 CPU 瞬间飙升100%
-                        "--reload_interval", "60"                               # 把自动刷新间隔拉长到 60 秒
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=build_managed_process_env(PROJECT_ROOT),
-                )
-                import time
-                time.sleep(2.5) # 给服务器 2.5 秒的启动时间
-                st.rerun()
+                try:
+                    process = launch_tensorboard_service(6006)
+                    # 最多等待 5 秒，兼容首次扫描日志稍慢的机器。
+                    for _ in range(20):
+                        if process.poll() is not None or is_tb_running(6006):
+                            break
+                        time.sleep(0.25)
+                    if process.poll() is not None or not is_tb_running(6006):
+                        terminate_process(
+                            st.session_state.tensorboard_pid,
+                            st.session_state.tensorboard_process_create_time,
+                        )
+                        clear_tensorboard_registration()
+                        st.error(_(
+                            "TensorBoard 启动失败，请确认一键环境中的 tensorboard 依赖完整。",
+                            "TensorBoard failed to start. Check the bundled tensorboard dependency.",
+                        ))
+                    else:
+                        st.rerun()
+                except (OSError, subprocess.SubprocessError) as error:
+                    clear_tensorboard_registration()
+                    st.error(_(
+                        f"TensorBoard 启动失败：{error}",
+                        f"TensorBoard failed to start: {error}",
+                    ))
         else:
             if st.button(_("🛑 关闭 TensorBoard", "🛑 Stop TensorBoard")):
-                if os.name == 'nt':
-                    os.system("taskkill /F /IM tensorboard.exe")
+                if registered_tb_alive:
+                    terminate_process(
+                        st.session_state.tensorboard_pid,
+                        st.session_state.tensorboard_process_create_time,
+                    )
+                    clear_tensorboard_registration()
+                    time.sleep(1)
+                    st.rerun()
                 else:
-                    os.system("pkill -f tensorboard")
-                import time
-                time.sleep(1)
-                st.rerun()
+                    st.warning(_(
+                        "6006 端口上的服务不是由当前 WebUI 会话启动，已拒绝跨进程强制结束。",
+                        "The service on port 6006 was not started by this WebUI session and will not be terminated.",
+                    ))
     with col2:
         if tb_running:
             if st.button(_("🔄 刷新图表", "🔄 Refresh Charts")):

@@ -22,11 +22,19 @@ from ai_bot import AiBot
 from feature_encoder import MAX_CARDS
 from checkpoint_utils import MODEL_PROTOCOL_VERSION
 import deck_utils
-from thought_logger import AIThoughtLogger
+from thought_logger import AIThoughtLogger, REPLAY_EVENT_MSGS
 
 
-def select_arena_action_index(valid_logits, retry_bans, loop_bans):
-    """应用引擎硬禁用和防循环软禁用，并保证软禁用不会独自耗尽候选池"""
+ARENA_LOOP_SOFT_BAN_THRESHOLD = 5
+
+
+def select_arena_action_index(
+    valid_logits,
+    retry_bans,
+    loop_bans,
+    loop_counts=None,
+):
+    """应用硬/软禁用；软禁用耗尽时改选访问次数最低的合法候选。"""
     if valid_logits.dim() != 1 or valid_logits.numel() == 0:
         raise RuntimeError("model produced no encodable actions")
 
@@ -53,10 +61,46 @@ def select_arena_action_index(valid_logits, retry_bans, loop_bans):
     ignored_exhaustive_loop_bans = not loop_filtered_mask.any()
     if ignored_exhaustive_loop_bans:
         loop_filtered_mask = available_mask
+        if loop_counts is not None:
+            available_indices = torch.nonzero(
+                available_mask,
+                as_tuple=False,
+            ).flatten().tolist()
+            minimum_count = min(
+                int(loop_counts.get(index, 0))
+                for index in available_indices
+            )
+            for action_index in available_indices:
+                if int(loop_counts.get(action_index, 0)) != minimum_count:
+                    loop_filtered_mask[action_index] = False
 
     masked_logits = valid_logits.clone()
     masked_logits[~loop_filtered_mask] = -torch.inf
     return int(torch.argmax(masked_logits).item()), ignored_exhaustive_loop_bans
+
+
+def describe_arena_loop_state(snapshot, msg_type, state_key, loop_tracker):
+    """生成防循环软禁用耗尽时的候选与重复次数摘要。"""
+    details = []
+    for index, action in enumerate(snapshot.valid_actions):
+        description = action.desc_str or f"Type={action.action_type}"
+        count = loop_tracker.get((state_key, index), 0)
+        details.append(f"[{index}] {description}×{count}")
+    return f"MsgType={msg_type} | " + "; ".join(details[:12])
+
+
+def find_matching_action_index(snapshot, response, msg_type, msg_args, packer):
+    """按真实 Core 响应反查 RuleBot 选择的普通候选索引。"""
+    expected = bytes(response) if isinstance(response, (bytes, bytearray)) else response
+    for index, action in enumerate(snapshot.valid_actions):
+        try:
+            packed = packer._pack_response(action, msg_type=msg_type, msg_args=msg_args)
+            actual = bytes(packed) if isinstance(packed, (bytes, bytearray)) else packed
+            if actual == expected:
+                return index
+        except Exception:
+            continue
+    return None
 
 
 class ModelArena:
@@ -84,7 +128,10 @@ class ModelArena:
         
         # 4. 初始化记录器
         p0_name = os.path.basename(model_p0_path) if model_p0_path else "P0_AI"
-        self.logger = AIThoughtLogger(player_name=p0_name)
+        p1_name = os.path.basename(model_p1_path) if model_p1_path else "RuleBot"
+        self.p0_name = p0_name
+        self.p1_name = p1_name
+        self.logger = AIThoughtLogger(player_name=p0_name, opponent_name=p1_name)
         
         # P0
         self.p0_bot = AiBot(device=self.device, initialize_network=False)
@@ -152,6 +199,14 @@ class ModelArena:
                 return -1, -3, 0
 
             brain = DuelState(d1.main, d1.extra, d2.main, d2.extra)
+            self.logger.set_decklists(
+                d1.main,
+                d1.extra,
+                d2.main,
+                d2.extra,
+                p0_name=d1_name,
+                p1_name=d2_name,
+            )
             msg_queue = MessageParser.parse(raw_data)
         except Exception as error:
             print(f"\n❌ [Arena] 对局初始化失败: {error}")
@@ -174,7 +229,6 @@ class ModelArena:
         loop_tracker = {}
         retry_bans_for_state = {}
         loop_bans_for_state = {}
-        loop_suppression_disabled_states = set()
         
         # 替换为最全的常量集合
         STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
@@ -201,6 +255,17 @@ class ModelArena:
             msg_type = msg[0]
             brain.update(msg_type, msg[1:])
 
+            # 回放 V2 同时记录 Core 状态事件，避免只看到模型决策而看不到移动与结算。
+            if self.logger.is_active and msg_type in REPLAY_EVENT_MSGS:
+                event_snapshot = brain.get_snapshot()
+                self.logger.log_core_event(
+                    turn=brain.turn,
+                    phase_id=brain.phase,
+                    snapshot=event_snapshot,
+                    msg_type=msg_type,
+                    payload=msg[1:],
+                )
+
             if msg_type in DECISION_MSGS:
                 current_macro_pool = None
                 last_interaction_msg = msg
@@ -213,7 +278,6 @@ class ModelArena:
                     loop_tracker.clear()
                     retry_bans_for_state.clear()
                     loop_bans_for_state.clear()
-                    loop_suppression_disabled_states.clear()
             elif msg_type in INTERACTION_MSGS:
                 if consecutive_retries == 0:
                     current_step_ignore_list.clear()
@@ -345,31 +409,37 @@ class ModelArena:
                             sel_idx, ignored_loop_bans = select_arena_action_index(
                                 valid_logits,
                                 retry_bans_for_state.get(current_state_key, set()),
-                                (
-                                    set()
-                                    if current_state_key in loop_suppression_disabled_states
-                                    else loop_bans_for_state.get(current_state_key, set())
-                                ),
+                                loop_bans_for_state.get(current_state_key, set()),
+                                loop_counts={
+                                    index: loop_tracker.get(
+                                        (current_state_key, index),
+                                        0,
+                                    )
+                                    for index in range(valid_count)
+                                },
                             )
                             if ignored_loop_bans:
                                 loop_bans_for_state.pop(current_state_key, None)
-                                loop_suppression_disabled_states.add(current_state_key)
+                                fallback_action = snap.valid_actions[sel_idx]
+                                fallback_description = (
+                                    fallback_action.desc_str
+                                    or f"Type={fallback_action.action_type}"
+                                )
                                 print(
                                     "⚠️ [Arena] 防循环软禁用已覆盖全部候选，"
-                                    "本次已撤销软禁用并保留模型决策"
+                                    "本次改选重复次数最低的合法候选\n"
+                                    f"   ↳ 本次选择: [{sel_idx}] {fallback_description}\n"
+                                    f"   ↳ {describe_arena_loop_state(snap, msg_type, current_state_key, loop_tracker)}"
                                 )
 
                         loop_key = (current_state_key, sel_idx)
                         loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
-                        if (
-                            loop_tracker[loop_key] >= 3
-                            and current_state_key not in loop_suppression_disabled_states
-                        ):
+                        if loop_tracker[loop_key] >= ARENA_LOOP_SOFT_BAN_THRESHOLD:
                             loop_bans_for_state.setdefault(current_state_key, set()).add(
                                 sel_idx
                             )
 
-                        if is_p0_turn and self.logger.is_active:
+                        if self.logger.is_active:
                             probs = F.softmax(logits.squeeze(0), dim=-1)
                             self.logger.log_decision(
                                 turn=brain.turn,
@@ -377,6 +447,9 @@ class ModelArena:
                                 snapshot=snap,
                                 probs=probs,
                                 chosen_index=sel_idx,
+                                player_id=player_to_act,
+                                msg_type=msg_type,
+                                agent_name=self.p0_name if is_p0_turn else self.p1_name,
                             )
 
                         chosen = snap.valid_actions[sel_idx]
@@ -416,6 +489,25 @@ class ModelArena:
                         clean_ignore,
                     )
                     last_decision_value = resp
+                    if self.logger.is_active:
+                        rule_snapshot = brain.get_snapshot(self.env)
+                        rule_chosen_index = find_matching_action_index(
+                            rule_snapshot,
+                            resp,
+                            msg_type,
+                            msg[1:],
+                            self.p0_bot,
+                        )
+                        self.logger.log_external_decision(
+                            turn=brain.turn,
+                            phase_id=brain.phase,
+                            snapshot=rule_snapshot,
+                            msg_type=msg_type,
+                            response=resp,
+                            player_id=player_to_act,
+                            agent_name="RuleBot",
+                            chosen_index=rule_chosen_index,
+                        )
 
                 self.env.send_action(resp)
                 msg_queue = []
@@ -456,6 +548,10 @@ class ModelArena:
 
             w, r, fallback_cnt = self.run_duel(game_idx=i+1)
 
+            # 初始化阶段若未产生任何帧，也必须关闭本局录像状态，避免串入下一局。
+            if self.logger.is_active:
+                self.logger.save(-1, i + 1, "对局未产生可保存的回放帧")
+
             total_ai_fallbacks += fallback_cnt
             
             reason_str = "Unknown"
@@ -488,7 +584,7 @@ class ModelArena:
                 # 正常局使用 \r 覆盖打印，保持控制台整洁
                 print(f"   Game {i+1}: Winner P{w} ({reason_str}) | {score_str}{fallback_info}", end="\r")
         
-        print(f"\n\n🏆 最终比分: AI(P0) {p0_wins} : {p1_wins} RuleBot(P1)")
+        print(f"\n\n🏆 最终比分: {self.p0_name}(P0) {p0_wins} : {p1_wins} {self.p1_name}(P1)")
         print("📊 胜负原因统计:")
         for k, v in reasons.items():
             if v > 0: print(f"   - {k}: {v}")

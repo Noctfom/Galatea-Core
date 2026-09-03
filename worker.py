@@ -27,6 +27,7 @@ from action_candidates import (
 )
 from inference_protocol import InferenceProtocolError, request_shared_inference_result
 from model_artifacts import describe_onnx_artifact
+from data_types import ActionOperation
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
@@ -53,6 +54,13 @@ GAE_LAMBDA = 0.95
 MAX_EPISODE_STEPS = 1500
 LONG_GAME_TURN_THRESHOLD = 40
 SINGLE_TURN_DECISION_THRESHOLD = 300
+BACKTRACK_REPEAT_PENALTY_THRESHOLD = 5
+GENERAL_REPEAT_PENALTY_THRESHOLD = 10
+REPEATED_ACTION_STEP_PENALTY = -0.005
+BACKTRACK_OPERATIONS = frozenset({
+    int(ActionOperation.UNSELECT),
+    int(ActionOperation.CANCEL),
+})
 
 ORT_NUMPY_DTYPES = {
     "tensor(bool)": np.bool_,
@@ -68,6 +76,24 @@ ORT_NUMPY_DTYPES = {
     "tensor(float)": np.float32,
     "tensor(double)": np.float64,
 }
+
+
+def get_repeated_action_penalty(action, repeat_count):
+    """仅惩罚同一完整局势中的重复动作，并更早识别取消/撤选往返"""
+    operation_id = int(getattr(action, "operation_id", ActionOperation.DEFAULT))
+    threshold = (
+        BACKTRACK_REPEAT_PENALTY_THRESHOLD
+        if operation_id in BACKTRACK_OPERATIONS
+        else GENERAL_REPEAT_PENALTY_THRESHOLD
+    )
+    if int(repeat_count) >= threshold:
+        return REPEATED_ACTION_STEP_PENALTY
+    return 0.0
+
+
+def build_training_loop_key(state_key, action_index):
+    """压缩完整状态键用于局内计数，避免长期保留大型场面元组"""
+    return hash(state_key), int(action_index)
 
 
 def get_worker_process_memory_status():
@@ -563,7 +589,6 @@ def worker_process(
             last_act_time = time.time()
 
             loop_tracker = {}
-            last_action_state_key = None
 
             while ep_steps < MAX_EPISODE_STEPS:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
@@ -939,19 +964,14 @@ def worker_process(
                                 # 现有实测单方极值远低于该阈值，只约束异常长连锁或单回合死锁。
                                 step_reward -= 0.0005
 
-                            # 2. 完整状态查重：仅在场面和动作身份均未变化时判定重复。
+                            # 2. 完整状态查重：保留整局访问计数，识别 A→B→A 的取消往返
                             current_state_key = build_action_state_key(current_snap, msg_type)
-                            if current_state_key != last_action_state_key:
-                                last_action_state_key = current_state_key
-                                loop_tracker.clear() # 局势变了，重置嫌疑
-
-                            # 记录该局势下，这个选项被选了多少次
-                            loop_key = (current_state_key, sel_idx)
+                            loop_key = build_training_loop_key(current_state_key, sel_idx)
                             loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
-                            
-                            # 同一个局势下连选 10 次，是恶意拖延
-                            if loop_tracker[loop_key] >= 10:
-                                step_reward -= 0.005  # 重罚！
+                            step_reward += get_repeated_action_penalty(
+                                chosen,
+                                loop_tracker[loop_key],
+                            )
 
                             # --- 动作翻译 ---
                             resp = b''#如果数据包返回b''，说明 ai没有操作

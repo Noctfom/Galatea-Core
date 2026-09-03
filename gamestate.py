@@ -521,7 +521,14 @@ class DuelState:
                         self.field_map[tc][tl][ts]['used_effect_mask'] = current_mask | (1 << effect_slot_idx)
                 
                 # 压入堆栈记事本
-                self.chain_stack.append({'code': code, 'c': tc, 'l': tl, 's': ts, 'desc': desc})
+                self.chain_stack.append({
+                    'code': code,
+                    'c': tc,
+                    'l': tl,
+                    's': ts,
+                    'desc': desc,
+                    'ct': ct,
+                })
                 # 压入历史记事本 (最近发生的在最前面)
                 self.history_stack.insert(0, {'code': code})
                 # 保持记忆容量为 8
@@ -553,22 +560,19 @@ class DuelState:
                     if pure_code in target_deck:
                         target_deck.remove(pure_code)
 
-            elif msg_type in [91, 92, 94]: # 伤害 / 回复 / LP直接更新
+            elif msg_type in [91, 92, 94, 100]: # 伤害 / 回复 / LP直接更新 / 支付LP
                 # [录像修复 A] 加上 '<' 强制对齐，并监听 91 和 92！
                 p, val = struct.unpack('<BI', stream.read(5))
                 if p == 0:
                     if msg_type == 91: self.my_lp = max(0, self.my_lp - val)
                     elif msg_type == 92: self.my_lp += val
+                    elif msg_type == 100: self.my_lp = max(0, self.my_lp - val)
                     else: self.my_lp = val
                 else:
                     if msg_type == 91: self.op_lp = max(0, self.op_lp - val)
                     elif msg_type == 92: self.op_lp += val
+                    elif msg_type == 100: self.op_lp = max(0, self.op_lp - val)
                     else: self.op_lp = val
-
-            elif msg_type == 94: # LP
-                p, lp = struct.unpack('<BI', stream.read(5))
-                if p == 0: self.my_lp = lp
-                else: self.op_lp = lp
 
             # [新增] 指示物雷达 (101: 加, 102: 减)
             elif msg_type == 101: 

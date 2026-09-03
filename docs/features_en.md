@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.5.0**.
+> This document applies to **Galatea-Core v3.5.1**.
 
 ---
 
@@ -76,6 +76,8 @@
 2. Click **🚀 Start TensorBoard**
 3. Wait for TensorBoard service to start
 4. View curves in embedded window, or open link in new tab
+
+TensorBoard is launched as a module by the active bundled Python, so no separate command is required on the system `PATH`. The Stop button only terminates a service verified as belonging to this project; if another program owns port 6006, it is left running and the UI reports the conflict.
 
 ![TensorBoard](图片/TensorBoard.png)
 
@@ -301,24 +303,36 @@ Resume and overwrite authorization always use the embedded UUID rather than trus
 
 ### Holographic Replay
 
-**Overview**: Visualize AI decision process to deeply understand AI "thinking".
+**Overview**: Replay Format V2 presents both players' decisions, Core resolution events, and action-protocol semantics as one synchronized timeline.
 
 #### Interface Components
 
 1. **Board View**
    - True coordinate card layout
    - Dynamic display of hand, field, graveyard zones
-   - Highlight AI-selected cards and targets
+   - Highlight both players' acting cards and every target
+   - Directional arrows for chains, attacks, movement, equips, and targeting; direct attacks point to opposing LP
+   - LP before/after/delta display and ghost origins for cards that have already moved away
+   - Expand either player's complete initial Main and Extra Deck; duplicate cards are grouped with counts, while older recordings show a compatibility notice when this metadata is absent
 
 2. **Decision List**
    - Show all available actions
-   - Show confidence (probability) for each action
-   - Highlight AI's final chosen action
+   - Show probabilities for both P0 and P1 models and the actual RuleBot response
+   - Highlight each player's final chosen action
+   - Expose Select/Unselect/Finish/Cancel, selection bounds, result sets, material values, and Core prompt fields
+   - Click any candidate row to preview its card images and highlight the actor, targets, and materials on the board without changing the recorded decision
+   - Main Phase operations name their concrete card target; Extra Deck Special Summon entries further distinguish Link, Xyz, Synchro, and Fusion Summons
 
 3. **Playback Controls**
    - Previous/Next step
    - Auto-play (adjustable speed)
    - Timeline slider
+   - Selecting another replay stops playback and returns to frame 0
+
+4. **Event Timeline**
+   - Records moves, summons, sets, chain construction/resolution, attacks, draws, counters, and LP events
+   - Board snapshots are deduplicated through a state table so abnormal long games do not copy the full board into every frame
+   - Older JSON recordings with inline states and P0-only decisions remain readable
 
 #### Vision Toggles
 
@@ -327,6 +341,9 @@ Resume and overwrite authorization always use the embedded UUID rather than trus
 - 👁️ P1 Set: Show/hide opponent face-downs
 - 👁️ P0 Set: Show/hide own face-downs
 - 🔄 P1 Flip: Rotate opponent perspective 180°
+- 📊 P1 Confidence: Show/hide the P1 model or RuleBot candidate-confidence table
+
+Full deck lists are post-game audit metadata only. They are never exposed to the Arena model and do not change training observations.
 
 ![Holographic Replay](图片/全息回放.png)
 
@@ -448,8 +465,9 @@ python main.py duel [options]
 Arena loads the architecture embedded in each P0/P1 checkpoint and does not allow external
 architecture overrides. Loop protection uses a complete state key covering the board, acting
 player, Select/Unselect semantics, and target entities. Engine retries are hard bans, while repeated
-choices are soft bans that cannot exhaust the candidate pool by themselves, preventing finite
-model scores from being misreported as numerical failures.
+choices are soft bans that cannot exhaust the candidate pool by themselves. If an abnormal loop
+pushes every candidate past the threshold, Arena explores the least-visited legal choice in that
+state instead of permanently disabling protection or reporting finite scores as numerical failures.
 
 **Examples**:
 

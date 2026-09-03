@@ -4,6 +4,46 @@
 
 ---
 
+## [v3.5.1] - 2026-09-02
+
+### 🎞️ Holographic Replay V2
+
+- **Complete two-sided timeline**: Replays no longer capture only P0 model decisions. P0/P1 model probabilities, RuleBot responses, and Core move, summon, set, chain, attack, targeting, counter, draw, and LP events are recorded in their actual order
+- **Correct arrow semantics and direction**: A chain response points from the newly activated card to the previous chain link; an attack points from attacker to target or opposing LP; card movement points from source zone to destination. Equip, targeting, and multi-target choices support one-to-many arrows, with a ghost source retained after a card leaves its old zone
+- **Action Protocol V2 visualization**: The option panel exposes Select/Unselect/Finish/Cancel, selection bounds and result count, target codes/material values, finish/cancel conditions, and prompt fields, making the information introduced in 3.5.0 directly inspectable
+- **Interactive candidate preview**: Clicking any row in the confidence table highlights its actor, targets, and materials on the board and shows related card images and protocol semantics above the table. Previewing never rewrites the action actually recorded in the replay
+- **P1 confidence visibility toggle**: The P1 model or RuleBot candidate table can be hidden while retaining its final decision, board events, and timeline frames
+- **Full two-sided deck quick view**: New recordings store each player's deck name, Main Deck, and Extra Deck once in replay metadata. The UI groups duplicate cards and displays all four lists. This post-game audit data never enters model observations, and older recordings remain readable when the optional field is absent
+- **Detailed Special Summon descriptions**: Type 11 now uses the candidate code and raw location to recover actors not yet present in the entity table, naming the target and identifying Link, Xyz, Synchro, Fusion, or other Special Summon entries. When Core reports only the result without a proper-summon reason, the replay conservatively labels the monster category instead of misreporting a revival as a proper summon
+- **Synchronized playback controls**: Previous/next buttons and the timeline now share one cursor. Selecting another replay stops autoplay and returns to frame 0; single-frame recordings no longer create an invalid slider range
+- **Independent replay format**: Added `REPLAY_FORMAT_VERSION = 2`. Full boards are deduplicated into a state table and frames reference `state_id`, with compact JSON output to prevent abnormal long games from copying the board into every frame. A real 574-frame two-sided recording measured about 1.09 MB. The UI still reads older inline-state recordings
+- Replay widgets use Streamlit's `width="stretch"` API, removing the `use_container_width` deprecation warnings from this page
+
+### 🧩 Core and Arena Fixes
+
+- **Fixed Type 16 byte alignment**: Restored the bundled Core header `spe_count + global forced + hint_timing[2]`, including separator bytes before candidates after the first. Standard Core uses the no-separator layout, and Cancel is offered only when global forced is zero
+- **Fixed missing LP-cost state updates**: `MSG_PAY_LPCOST` (Type 100) now deducts P0/P1 LP in DuelState, so model observations and replays do not retain stale LP after paying a cost
+- Chain-stack entries retain the Core chain index, so replay and diagnostics no longer show an unknown link number
+- **Expanded loop diagnostics**: When soft bans cover the entire pool, Arena prints MsgType, action descriptions, and repeat counts. Real runs confirmed the warnings were genuine Type 26 Select/Unselect oscillation rather than merged state keys
+- **Fixed exhausted Arena soft bans**: Once every candidate reaches the repeat threshold, Arena no longer disables loop suppression permanently for that state. Only abnormal loop states rotate to the least-visited legal candidate, giving Cancel, Select, Unselect, and Finish a chance while ordinary states keep greedy model decisions
+- **Added training feedback for cancel round-trips**: Full-state visit counts now survive A→B→A transitions. The first four Cancel/Unselect choices in an identical full state remain untouched; from the fifth visit they receive the existing `-0.005` step reward, while ordinary actions retain the tenth-visit threshold. Training remains stochastic and never masks a legal Cancel, preserving normal retreats and PPO behavior-policy consistency
+- **Further relaxed long-game shaping**: Based on a 50-iteration run that still converged normally, the tiny per-step turn penalty now starts only after turn 40. The 1,500-step hard truncation, turn-40 slow-win reward of `0.05`, and 300-decisions-per-turn threshold remain unchanged, keeping the pressure focused on extreme long games
+
+### 🖥️ WebUI Stability Fixes
+
+- **Fixed TensorBoard startup**: The WebUI now launches `sys.executable -m tensorboard.main` from the active bundled `python_env` with an absolute log path, instead of requiring `tensorboard.exe` on the system `PATH`. Startup failures are reported in-page rather than as a full traceback
+- **Safe TensorBoard process ownership**: PID and creation time are registered, and a service previously started by this project's WebUI can be safely re-adopted after a page reconnect. Global process-name killing was removed; an unrelated service on port 6006 is explicitly left untouched
+- **Fixed replay autoplay traceback**: After the slider widget is instantiated, autoplay advances only the logical cursor and synchronizes the widget key on the next rerun, avoiding Streamlit's post-instantiation state mutation error
+
+### ✅ Validation and Compatibility
+
+- 127 automated tests completed (one environment-dependent skip), covering replay cursor state, candidate previews, initial deck lists, Special Summon categories, P1 decisions, RuleBot response mapping, chain/attack direction, move and LP events, state deduplication, cancel round-trip shaping, and Arena candidate rotation
+- A real model-vs-RuleBot replay completed with 574 frames, both players' decisions, and 393 Core events. A dual-model stress game confirmed P1 probability distributions and Type 26 semantics are recorded
+- Bundled TensorBoard 2.20.0 completed a real start/stop smoke test on an isolated port without any system-level Streamlit or TensorBoard executable
+- Network input shapes, PPO equations, and checkpoint structures are unchanged; only the repeated-action accounting and localized Cancel/Unselect threshold receive the shaping changes described above. `MODEL_PROTOCOL_VERSION` and `CHECKPOINT_FORMAT_VERSION` remain 2. Deck lists are optional Replay V2 metadata written once per recording, and Arena games without recording pay no replay-serialization cost
+
+---
+
 ## [v3.5.0] - 2026-09-02
 
 ### 🧩 Model Action Protocol V2
@@ -21,13 +61,12 @@
 - **Fixed Type 140/141 multi-value announcements**: When Core requests multiple races or attributes, the pool returns one OR mask containing exactly `count` bits instead of submitting an invalid single bit
 - **Bounded combination cost**: Equivalent off-field copies with the same code and parameters generate canonical count representatives. The existing 5,000-option enumeration cap, 120-option weighted sampling, and minimum exploration weight remain in place
 
-### 📨 Core Message Boundaries and Model Artifact Protocol
+### 📨 Model Artifact Protocol
 
-- **Fixed Type 16 byte alignment**: Restored the bundled Core header layout `spe_count + global forced + hint_timing[2]` and correctly skips the separator byte before every candidate after the first. Standard Core uses the no-separator layout. Cancel is offered only when the global header flag is not forced
 - **Independent model protocol version**: Added `MODEL_PROTOCOL_VERSION = 2` and raised `CHECKPOINT_FORMAT_VERSION` to 2. PTH top-level metadata, `net_config`, model `state_dict`, ONNX metadata, and artifact manifests all record and validate the model protocol; WebUI displays and rejects mismatches during resume
 - Because network inputs and the action head changed, 3.5.0 accepts only Model Protocol V2 weights and never silently applies an older action protocol to the new tensors
 - **Resource impact**: New trajectory fields add about 6.1 KiB per step, or roughly 133 MiB for a 22,384-step pool. Action embeddings and temporary tensors for one six-worker inference batch remain small relative to the existing model and commit budget; rewards, commit boundaries, GAE, and PPO equations are unchanged
-- **Validation**: 114 automated tests cover message parsing, default/Standard Type 16, Type 26 transitions, Type 20 legality, counter allocation, multi-bit announcements, network forward, checkpoint/ONNX protocol checks, and a real ONNXRuntime run. A temporary V2 model completed 20 real Core + Lua + deck games against RuleBot, and a 50-game RuleBot self-play stress test completed without any Type 16 retry cascade, parser error, or circuit breaker
+- **Validation**: 114 automated tests cover message parsing, Type 26 transitions, Type 20 legality, counter allocation, multi-bit announcements, network forward, checkpoint/ONNX protocol checks, and a real ONNXRuntime run. A temporary V2 model completed a real Core + Lua + deck smoke duel against RuleBot
 
 ### 📚 Version and Documentation
 
