@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.5.1**。
+> 文档适用于 **Galatea-Core v3.6.0**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -95,7 +95,7 @@ class GalateaNet(nn.Module):
     def __init__(self, config):
         # 1. 基础物理感知层
         self.card_embed = nn.Embedding(vocab_size, d_model)      # 卡片 ID 嵌入
-        self.feat_proj = nn.Linear(58, d_model)                   # 数值特征投影
+        self.feat_proj = nn.Linear(66, d_model)                   # 数值特征投影
         self.race_embed = nn.Embedding(30, d_model)               # 种族嵌入
         self.attr_embed = nn.Embedding(10, d_model)               # 属性嵌入
         self.setcode_embed = nn.Embedding(4096, d_model)          # 字段嵌入
@@ -103,6 +103,7 @@ class GalateaNet(nn.Module):
         # 2. 语义解析皮层
         self.sem_cat_embed = nn.Embedding(4000, d_sem)            # 效果类型嵌入
         self.sem_req_proj = nn.Linear(128, d_sem)                 # 发动条件投影
+        self.effect_slot_embed = nn.Embedding(8, d_model)         # 效果槽身份
         self.sem_fusion_proj = nn.Sequential(...)                 # 语义融合
 
         # 3. FiLM 全局调制器
@@ -111,9 +112,9 @@ class GalateaNet(nn.Module):
         # 4. Transformer Encoder (每层含 FiLM 调制 + SwiGLU 门控)
         self.transformer = GalateaTransformerStack(d_model, n_heads, n_layers)
 
-        # 5. 位置编码
-        self.chain_pos_embed = nn.Parameter(...)                  # 连锁堆栈位置编码(12槽)
-        self.history_pos_embed = nn.Parameter(...)                # 历史动作位置编码(8槽)
+        # 5. 顺序上下文编码
+        self.chain_context_pool = OrderedContextPool(d_model, 12) # 连锁先后关系
+        self.history_context_pool = OrderedContextPool(d_model, 8)# 最近发动先后关系
         self.place_weights = buffer([1.0, 0.8, 0.6, 0.4, 0.2])   # 排序操作加权
         
         # 6. 输出头 (SwiGLU 门控)
@@ -203,7 +204,7 @@ GalateaCore 主要通过 **熵正则化** 和 **历史模型对战联盟** 来�
 | 特征类型 | 维度 | 说明 |
 |----------|------|------|
 | 全局特征 | 15 | 回合数、阶段、LP、各区域卡片数 |
-| 卡片特征 | 58 | 数值属性 + 类型掩码 + 连接箭头 |
+| 卡片特征 | 66 | 数值属性 + 已发动效果位 + 类型掩码 + 连接箭头 |
 | 语义特征 | 128×8 | 每张卡最多 8 个效果槽 |
 
 ### 卡片特征详解
@@ -226,6 +227,7 @@ feat_numeric = [
     overlay_count / 5,  # 超量素材数
     counter_count / 10, # 指示物数
     is_equipped,        # 是否装备
+    used_effect_mask[0:8], # 本回合已发动的效果槽位
 ]
 # + 32 维类型掩码 (怪兽/魔法/陷阱/效果/融合/同调/超量/灵摆/连接...)
 # + 9 维连接箭头
@@ -255,6 +257,28 @@ act_dict = {
 }
 ```
 
+### 顺序上下文聚合（Model Protocol V3）
+
+连锁和最近发动历史不能使用“位置向量相加后求均值”。因为
+`Σ(语义ᵢ + 位置ᵢ) = Σ语义ᵢ + Σ位置ᵢ`，交换两个事件不会改变结果。
+`OrderedContextPool` 改为以下流程：
+
+```text
+语义 token + 固定槽位向量
+           ↓
+深度可分离的一维局部卷积（区分前项/当前项/后项）
+           ↓
+通道混合 + 残差归一化
+           ↓
+带有效项掩码的注意力汇聚
+           ↓
+顺序敏感的单个上下文向量
+```
+
+连锁第 1～12 项保持 Core 入栈顺序；每项还编码卡号、效果描述、链序、处理卡位置、触发位置和双方相对控制者。历史第 0 槽仍表示最近一次发动。双向局部混合只处理已经发生的事件，不会读取未来信息。全空上下文返回零向量，填充槽无法参与卷积输入或最终权重。
+
+每张卡的 8 个效果槽另有独立槽位嵌入。这样 `used_effect_mask` 的第 N 位才能与 Lua Parser 的第 N 个效果语义建立可学习对应，而不会在 Slot Attention 中退化为无序效果集合。
+
 动作协议 V2 不把 `GameAction.index` 当作学习语义。`index` 与 `decision_bytes` 只负责把最终选择翻译回 Core；策略头看到的是操作、卡密、位置、约束和结果集合。Type 26 保持 Core 原生的逐次 Select/Unselect 过程，每一步都生成新快照并进入轨迹；Type 15/20/22/23/25 等静态组合消息则先由合法性枚举器生成完整响应，再由策略头选择。
 
 `MODEL_PROTOCOL_VERSION` 独立于框架版本和检查点容器版本维护。它同时写入 PTH 顶层、`net_config`、模型状态、ONNX 元数据与制品清单；版本不同表示输入张量或动作头权重不兼容，加载器会直接拒绝。
@@ -278,7 +302,8 @@ Lua 脚本 (c12345678.lua)
     │ 特殊 Hash   │  ← 代码块聚类
     └──────┬──────┘
            ↓
-    knowledge_base.json
+    knowledge_base.json + hash_mapping_report.json
+    code_embeddings.npy + code_embeddings_idx.json
 ```
 
 ### 语义特征结构
@@ -294,6 +319,8 @@ Lua 脚本 (c12345678.lua)
 | ref_codes | 4 | 关联卡片 ID |
 | race | 4 | 关联种族 |
 | attr | 4 | 关联属性 |
+
+效果槽除表中内容外还包含 0～7 的显式槽位身份。GitHub 同步会以同一目录中的四个语义资产为一组：结构化知识库负责可解释字段，Hash 映射用于继续聚类，代码语义矩阵及索引用于恢复已有 Lua 向量。向量生成器会在资产一致时只追加新效果槽；这属于真正的增量接续，而不是重新编码全部旧脚本。
 
 ### Hash 聚类算法
 

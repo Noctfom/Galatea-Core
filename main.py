@@ -281,13 +281,13 @@ def main():
     parse_parser = subparsers.add_parser('parse', help='提取并更新卡片Lua脚本语义知识库')
     parse_parser.add_argument('--script_dir', type=str, default='./script', help='Lua脚本所在目录')
     parse_parser.add_argument('--output', type=str, default='knowledge_base.json', help='输出的知识库文件路径')
-    parse_parser.add_argument('--clear', action='store_true', help='清空本地知识库，从头开始重新解析') 
+    parse_parser.add_argument('--clear', action='store_true', help='清空本地知识库、Hash 映射和代码语义向量后重新解析')
     
-    parse_parser.add_argument('--sync', action='store_true', help='从主仓库拉取最新知识库作为基座') 
+    parse_parser.add_argument('--sync', action='store_true', help='从主仓库拉取完整语义资产组作为基座')
     parse_parser.add_argument('--remote_url', type=str, 
                               default='https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json', 
                               help='指定其他的 Github Raw URL')
-    parse_parser.add_argument('--embed', action='store_true', help='为知识库中的自定义效果生成深度代码语义向量')
+    parse_parser.add_argument('--embed', action='store_true', help='为新增效果槽接续生成代码语义向量，必要时全量重建')
 
     # --- 5. 更新同步模式 (Update) ---
     update_parser = subparsers.add_parser('update', help='更新本地代码、卡片数据库(CDB)与脚本库')
@@ -361,11 +361,19 @@ def main():
         actual_remote_url = args.remote_url if args.sync else None
         
         parser.run_batch(output_file=args.output, clear_existing=args.clear, remote_url=actual_remote_url)
-        if args.embed:
-            print("🧬 启动代码语义向量化提取...")
+        if args.embed or args.sync:
+            print("🧬 启动代码语义向量接续检查...")
             from code_embedder import CodeSemanticEmbedder
             embedder = CodeSemanticEmbedder()
-            embedder.generate_embeddings(kb_file='knowledge_base.json', output_file='code_embeddings.npy')
+            embedding_path = os.path.join(
+                os.path.dirname(os.path.abspath(args.output)),
+                'code_embeddings.npy',
+            )
+            embedder.generate_embeddings(
+                kb_file=args.output,
+                output_file=embedding_path,
+                incremental=not args.clear,
+            )
         
     elif args.command == 'update':
         print("🌐 启动自动同步更新模块...")

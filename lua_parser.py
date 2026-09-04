@@ -3,12 +3,37 @@ import re
 import json
 import hashlib
 from collections import defaultdict
+from pathlib import Path
+
+from semantic_assets import (
+    CODE_SEMANTIC_FILENAMES,
+    HASH_MAPPING_FILENAME,
+    download_remote_semantic_bundle,
+)
+
+
+def _stable_unique(values):
+    """按首次出现顺序去重，避免集合随机顺序污染固定槽位"""
+    return list(dict.fromkeys(values))
 
 class YGOProLuaParser:
     def __init__(self, script_dir='./script'):
         self.script_dir = script_dir
         self.hash_registry = defaultdict(lambda: {"cards": [], "sample_code": ""})
-        
+
+    def _rebuild_hash_registry(self, knowledge_base):
+        """从知识库中的自定义标签重建可供增量解析接续的 Hash 索引"""
+        for card_id, card_data in knowledge_base.items():
+            for effect in card_data.get("effects", []):
+                slot = int(effect.get("slot", 1) or 1)
+                card_label = f"{card_id}_E{slot}"
+                for category in effect.get("categories", []):
+                    if not str(category).startswith("CUSTOM_HASH_"):
+                        continue
+                    record = self.hash_registry[str(category)]
+                    if card_label not in record["cards"]:
+                        record["cards"].append(card_label)
+
     def _hash_code_block(self, code_block, card_id, slot_idx):
         """将特殊的代码块转化为统一的 Hash 标签，使用深度词法规范化榨干冗余变种"""
         if not code_block: return "CUSTOM_HASH_EMPTY", {"numbers": [], "hexes": []}
@@ -212,16 +237,16 @@ class YGOProLuaParser:
             effect_slot['requirements']['positions'].extend(re.findall(r'POS_[A-Z_]+', func_bodies_text))
 
             # 去重清洗
-            effect_slot['categories'] = list(set(effect_slot['categories']))
-            effect_slot['requirements']['setcodes'] = list(set(effect_slot['requirements']['setcodes']))
-            effect_slot['requirements']['races'] = list(set(effect_slot['requirements']['races']))
-            effect_slot['requirements']['attributes'] = list(set(effect_slot['requirements']['attributes']))
-            effect_slot['requirements']['types'] = list(set(effect_slot['requirements']['types']))
-            effect_slot['requirements']['summon_types'] = list(set(effect_slot['requirements']['summon_types']))
-            effect_slot['requirements']['locations'] = list(set(effect_slot['requirements']['locations']))
-            effect_slot['requirements']['phases'] = list(set(effect_slot['requirements']['phases']))
-            effect_slot['requirements']['reasons'] = list(set(effect_slot['requirements']['reasons']))
-            effect_slot['requirements']['positions'] = list(set(effect_slot['requirements']['positions']))
+            effect_slot['categories'] = _stable_unique(effect_slot['categories'])
+            effect_slot['requirements']['setcodes'] = _stable_unique(effect_slot['requirements']['setcodes'])
+            effect_slot['requirements']['races'] = _stable_unique(effect_slot['requirements']['races'])
+            effect_slot['requirements']['attributes'] = _stable_unique(effect_slot['requirements']['attributes'])
+            effect_slot['requirements']['types'] = _stable_unique(effect_slot['requirements']['types'])
+            effect_slot['requirements']['summon_types'] = _stable_unique(effect_slot['requirements']['summon_types'])
+            effect_slot['requirements']['locations'] = _stable_unique(effect_slot['requirements']['locations'])
+            effect_slot['requirements']['phases'] = _stable_unique(effect_slot['requirements']['phases'])
+            effect_slot['requirements']['reasons'] = _stable_unique(effect_slot['requirements']['reasons'])
+            effect_slot['requirements']['positions'] = _stable_unique(effect_slot['requirements']['positions'])
             
             # --- C. 特殊效果兜底机制 (Hash 聚类) ---
             # 如果找遍了属性和函数，都没有官方的 Category，触发聚类机制
@@ -249,15 +274,20 @@ class YGOProLuaParser:
         """批量处理所有脚本并导出 (支持 Github 同步、断点续传与物理清空)"""
         print(f"🚀 开始知识库构建任务...")
         knowledge_base = {}
-        mapping_file = 'hash_mapping_report.json'
+        output_path = Path(output_file).resolve()
+        mapping_file = output_path.with_name(HASH_MAPPING_FILENAME)
         
         # =======================================================
         # 1. 物理清空逻辑 (--clear)
         # =======================================================
         if clear_existing:
             print("🧨 [--clear] 清空指令触发，正在物理删除本地旧数据...")
-            if os.path.exists(output_file): os.remove(output_file)
-            if os.path.exists(mapping_file): os.remove(mapping_file)
+            if output_path.exists(): output_path.unlink()
+            if mapping_file.exists(): mapping_file.unlink()
+            for filename in CODE_SEMANTIC_FILENAMES:
+                semantic_path = output_path.with_name(filename)
+                if semantic_path.exists():
+                    semantic_path.unlink()
             knowledge_base = {}
             self.hash_registry.clear()
         else:
@@ -265,12 +295,24 @@ class YGOProLuaParser:
             # 2. Github 远程同步逻辑 (--sync)
             # =======================================================
             if remote_url:
-                print(f"🌐 正在从 Github 获取基础卡库: {remote_url}")
+                print(f"🌐 正在从 Github 获取完整语义基座: {remote_url}")
                 try:
-                    import urllib.request
-                    req = urllib.request.Request(remote_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req) as response:
-                        knowledge_base = json.loads(response.read().decode('utf-8'))
+                    bundle = download_remote_semantic_bundle(
+                        remote_url,
+                        output_path.parent,
+                    )
+                    knowledge_base = bundle["knowledge_base"]
+                    remote_mapping = bundle["hash_mapping"]
+                    if remote_mapping is not None:
+                        for key, value in remote_mapping.items():
+                            self.hash_registry[key] = value
+                    else:
+                        self._rebuild_hash_registry(knowledge_base)
+                        print("⚠️ 远程仓库缺少 Hash 映射，已从知识库重建接续索引。")
+                    if bundle["installed_code_semantics"]:
+                        print("✅ 代码语义向量与索引已同步，可继续增量提取。")
+                    else:
+                        print("⚠️ 远程代码语义向量不完整，本次仅接续结构化语义。")
                     print(f"✅ 成功合并远程仓库数据: 包含 {len(knowledge_base)} 张卡片语义！")
                 except Exception as e:
                     print(f"❌ 远程拉取失败: {e}，将退回本地模式...")
@@ -278,10 +320,10 @@ class YGOProLuaParser:
             # =======================================================
             # 3. 本地断点续传读取
             # =======================================================
-            if not knowledge_base and os.path.exists(output_file):
-                print(f"📂 检测到本地知识库 {output_file}，开启增量更新模式...")
+            if not knowledge_base and output_path.exists():
+                print(f"📂 检测到本地知识库 {output_path}，开启增量更新模式...")
                 try:
-                    with open(output_file, 'r', encoding='utf-8') as f:
+                    with open(output_path, 'r', encoding='utf-8') as f:
                         knowledge_base = json.load(f)
                     print(f"✅ 已加载本地 {len(knowledge_base)} 张卡片数据，将仅解析新脚本。")
                     
@@ -308,7 +350,7 @@ class YGOProLuaParser:
         count = 0
         skip_count = 0
         
-        for filename in os.listdir(self.script_dir):
+        for filename in sorted(os.listdir(self.script_dir)):
             if filename.endswith('.lua'):
                 match = re.search(r'c(\d+)\.lua', filename)
                 if not match: continue
@@ -346,7 +388,7 @@ class YGOProLuaParser:
         # =======================================================
         # 5. 覆写输出结果
         # =======================================================
-        with open(output_file, 'w', encoding='utf-8') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(knowledge_base, f, indent=2, ensure_ascii=False)
             
         with open(mapping_file, 'w', encoding='utf-8') as f:

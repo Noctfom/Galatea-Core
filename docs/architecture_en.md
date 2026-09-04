@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.5.1**.
+> This document applies to **Galatea-Core v3.6.0**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -95,7 +95,7 @@ class GalateaNet(nn.Module):
     def __init__(self, config):
         # 1. Base physical perception layer
         self.card_embed = nn.Embedding(vocab_size, d_model)      # Card ID embedding
-        self.feat_proj = nn.Linear(58, d_model)                   # Numeric feature projection
+        self.feat_proj = nn.Linear(66, d_model)                   # Numeric feature projection
         self.race_embed = nn.Embedding(30, d_model)               # Race embedding
         self.attr_embed = nn.Embedding(10, d_model)               # Attribute embedding
         self.setcode_embed = nn.Embedding(4096, d_model)          # Archetype embedding
@@ -103,6 +103,7 @@ class GalateaNet(nn.Module):
         # 2. Semantic parsing cortex
         self.sem_cat_embed = nn.Embedding(4000, d_sem)            # Effect type embedding
         self.sem_req_proj = nn.Linear(128, d_sem)                 # Condition projection
+        self.effect_slot_embed = nn.Embedding(8, d_model)         # Effect-slot identity
         self.sem_fusion_proj = nn.Sequential(...)                 # Semantic fusion
 
         # 3. FiLM global modulator
@@ -111,9 +112,9 @@ class GalateaNet(nn.Module):
         # 4. Transformer Encoder (each layer with FiLM modulation + SwiGLU gating)
         self.transformer = GalateaTransformerStack(d_model, n_heads, n_layers)
 
-        # 5. Position encodings
-        self.chain_pos_embed = nn.Parameter(...)                  # Chain stack position embed (12 slots)
-        self.history_pos_embed = nn.Parameter(...)                # History action position embed (8 slots)
+        # 5. Ordered context encoding
+        self.chain_context_pool = OrderedContextPool(d_model, 12) # Chain order
+        self.history_context_pool = OrderedContextPool(d_model, 8)# Recent activation order
         self.place_weights = buffer([1.0, 0.8, 0.6, 0.4, 0.2])   # Sort operation weighting
         
         # 6. Output heads (SwiGLU gated)
@@ -203,7 +204,7 @@ GalateaCore primarily drives exploration through **entropy regularization** and 
 | Feature Type | Dimensions | Description |
 |--------------|------------|-------------|
 | Global Features | 15 | Turn count, phase, LP, zone card counts |
-| Card Features | 58 | Numeric attributes + type masks + link arrows |
+| Card Features | 66 | Numeric attributes + used-effect bits + type masks + link arrows |
 | Semantic Features | 128×8 | Up to 8 effect slots per card |
 
 ### Card Feature Details
@@ -226,6 +227,7 @@ feat_numeric = [
     overlay_count / 5,  # Xyz material count
     counter_count / 10, # Counter count
     is_equipped,        # Whether equipped
+    used_effect_mask[0:8], # Effect slots already activated this turn
 ]
 # + 32-dim type mask (Monster/Spell/Trap/Effect/Fusion/Synchro/Xyz/Pendulum/Link...)
 # + 9-dim link arrows
@@ -255,6 +257,26 @@ act_dict = {
 }
 ```
 
+### Ordered Context Aggregation (Model Protocol V3)
+
+Chains and recent activation history cannot be represented by adding positions and then taking a mean: `Σ(semanticᵢ + positionᵢ) = Σsemanticᵢ + Σpositionᵢ`, so swapping two events leaves the result unchanged. `OrderedContextPool` uses this path instead:
+
+```text
+semantic token + fixed-slot vector
+              ↓
+depthwise 1D local convolution (distinct previous/current/next weights)
+              ↓
+channel mixing + residual normalization
+              ↓
+valid-item-masked attention pooling
+              ↓
+one order-sensitive context vector
+```
+
+Chain slots 1–12 retain Core insertion order. Each link also encodes card ID, effect description, chain index, handler location, triggering location, and relative controllers. History slot 0 remains the most recent activation. Bidirectional local mixing only sees already-observed events and does not expose future information. Empty contexts return zero and padding cannot enter either convolution input or final attention weights.
+
+Each card's eight effects also carry explicit slot embeddings. Bit N in `used_effect_mask` can therefore learn a direct relationship with semantic effect N instead of collapsing the Slot Attention input into an unordered effect set.
+
 Action Protocol V2 does not treat `GameAction.index` as learned semantics. `index` and `decision_bytes` only translate the final choice back to Core; the policy sees operation, card code, location, constraints, and resulting selection set. Type 26 retains Core's native sequential Select/Unselect flow, producing a new snapshot and trajectory row at each step. Static combinatorial messages such as Types 15/20/22/23/25 first enumerate complete legal responses and then let the policy choose one.
 
 `MODEL_PROTOCOL_VERSION` is maintained independently from both the framework release and checkpoint-container version. It is embedded in PTH top-level metadata, `net_config`, model state, ONNX metadata, and artifact manifests. A mismatch means the input tensors or action-head weights are incompatible and is rejected.
@@ -278,7 +300,8 @@ Lua Script (c12345678.lua)
     │ Special Hash│  ← Code block clustering
     └──────┬──────┘
            ↓
-    knowledge_base.json
+    knowledge_base.json + hash_mapping_report.json
+    code_embeddings.npy + code_embeddings_idx.json
 ```
 
 ### Semantic Feature Structure
@@ -294,6 +317,8 @@ Each card has up to 8 effect slots, each containing:
 | ref_codes | 4 | Associated card IDs |
 | race | 4 | Associated races |
 | attr | 4 | Associated attributes |
+
+In addition to the table above, every effect has an explicit slot identity from zero through seven. GitHub sync treats the four files in the same remote directory as one semantic bundle: the structured KB provides interpretable fields, the Hash map resumes clustering, and the code-semantic matrix plus index resume existing Lua vectors. When the assets are coherent, vector generation appends only new effect slots instead of re-encoding all existing scripts.
 
 ### Hash Clustering Algorithm
 

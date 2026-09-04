@@ -9,6 +9,7 @@ from data_types import (
     ACTION_RESPONSE_BUCKETS,
     ACTION_SIGNATURE_BYTES,
     ACTION_TARGET_SLOTS,
+    CHAIN_CONTEXT_DIM,
     GameSnapshot,
 )
 from game_constants import LocationInfo, Zone
@@ -128,6 +129,37 @@ class GalateaEncoder:
         relative_controller = 1 if controller == player_id else 2
         location_index = location.bit_length() if location > 0 else 0
         return relative_controller, min(location_index, 8), min(int(sequence), 31) + 1
+
+    @staticmethod
+    def _encode_chain_context(item, player_id):
+        """把连锁处理卡位置、触发位置和效果编号压缩为行动方视角特征"""
+        trigger_controller = int(item.get('c', -1))
+        trigger_location = int(item.get('l', 0))
+        trigger_sequence = int(item.get('s', 0))
+        handler_controller = int(item.get('hc', trigger_controller))
+        handler_location = int(item.get('hl', trigger_location))
+        handler_sequence = int(item.get('hs', trigger_sequence))
+        handler_position = int(item.get('hp', 0))
+        desc = int(item.get('desc', 0))
+        chain_index = int(item.get('ct', 0))
+
+        def relative_controller(controller):
+            """把绝对玩家编号转换为己方、对方或未知标量"""
+            if controller not in (0, 1):
+                return 0.0
+            return 1.0 if controller == player_id else -1.0
+
+        return [
+            relative_controller(handler_controller),
+            handler_location / 100.0,
+            min(max(handler_sequence, 0), 31) / 10.0,
+            handler_position / 10.0,
+            relative_controller(trigger_controller),
+            trigger_location / 100.0,
+            min(max(trigger_sequence, 0), 31) / 10.0,
+            min(max(chain_index, 0), 12) / 12.0,
+            (desc & 0xF) / 15.0,
+        ]
 
     @staticmethod
     def _encode_global_vector(g, player_id):
@@ -483,6 +515,9 @@ class GalateaEncoder:
         c_sem_attrs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
         c_sem_code_idx = np.zeros((MAX_CHAIN, 8), dtype=np.int32)
         c_sem_mask = np.zeros((MAX_CHAIN, 8), dtype=np.bool_)
+        c_card_idx = np.zeros(MAX_CHAIN, dtype=np.int64)
+        c_desc = np.zeros(MAX_CHAIN, dtype=np.int64)
+        c_context = np.zeros((MAX_CHAIN, CHAIN_CONTEXT_DIM), dtype=np.float16)
         c_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
         if hasattr(snapshot, 'chain_stack'):
             for i, item in enumerate(snapshot.chain_stack[:MAX_CHAIN]):
@@ -491,6 +526,9 @@ class GalateaEncoder:
                 c_sem_nums[i] = cn_out; c_sem_refs[i] = cref_out; c_sem_races[i] = crace_out; c_sem_attrs[i] = cattr_out
                 c_sem_code_idx[i] = ccode_out
                 c_sem_mask[i] = self._get_sem_mask(cc_out, ccode_out)
+                c_card_idx[i] = self._hash_code(item['code'])
+                c_desc[i] = int(item.get('desc', 0)) % 1024
+                c_context[i] = self._encode_chain_context(item, player_id)
                 c_masks[i] = True
 
         # ==========================================
@@ -597,6 +635,9 @@ class GalateaEncoder:
             'd_sem_mask': torch.from_numpy(d_sem_mask).unsqueeze(0),
 
             'c_mask': torch.from_numpy(c_masks).unsqueeze(0),
+            'c_card_idx': torch.from_numpy(c_card_idx).unsqueeze(0),
+            'c_desc': torch.from_numpy(c_desc).unsqueeze(0),
+            'c_context': torch.from_numpy(c_context).unsqueeze(0),
             'c_sem_category': torch.from_numpy(c_sem_cats).unsqueeze(0),
             'c_sem_req': torch.from_numpy(c_sem_reqs).unsqueeze(0),
             'c_sem_setcode': torch.from_numpy(c_sem_scs).unsqueeze(0),

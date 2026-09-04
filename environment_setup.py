@@ -29,6 +29,9 @@ MANUALLY_MANAGED_PACKAGES = {"torch"}
 REQUIRED_RUNTIME_FILES = (
     "cards.cdb",
     "knowledge_base.json",
+    "hash_mapping_report.json",
+    "code_embeddings.npy",
+    "code_embeddings_idx.json",
     "meta_staples.json",
     "requirements.txt",
     "version.txt",
@@ -159,6 +162,12 @@ def find_runtime_asset_issues(project_root=None, require_portable_python=False):
         path = project_root / relative_name
         if not path.is_dir() or not any(item.is_file() for item in path.rglob("*")):
             issues.append(f"缺少或为空的运行目录: {relative_name}")
+
+    try:
+        from semantic_assets import validate_code_semantic_assets
+        validate_code_semantic_assets(project_root, required=True)
+    except (OSError, ValueError) as exc:
+        issues.append(f"代码语义资产无效: {exc}")
 
     engine_name = "ocgcore.dll" if os.name == "nt" else "ocgcore.so"
     engine_path = project_root / engine_name

@@ -14,6 +14,7 @@ from data_types import (
     ACTION_RESPONSE_BUCKETS,
     ACTION_SIGNATURE_BYTES,
     ACTION_TARGET_SLOTS,
+    CHAIN_CONTEXT_DIM,
 )
 from checkpoint_utils import MODEL_PROTOCOL_VERSION
 
@@ -135,6 +136,56 @@ class GalateaTransformerStack(nn.Module):
             x = layer(x, padding_mask, gamma, beta)
         return self.final_norm(x)
 
+
+class OrderedContextPool(nn.Module):
+    """用局部顺序混合和注意力池化保留短序列中的先后关系"""
+
+    def __init__(self, d_model, max_length):
+        super().__init__()
+        score_hidden = max(8, d_model // 4)
+        self.position_embed = nn.Parameter(
+            torch.randn(1, max_length, d_model) * 0.02
+        )
+        self.input_norm = nn.LayerNorm(d_model)
+        self.local_mixer = nn.Conv1d(
+            d_model,
+            d_model,
+            kernel_size=3,
+            padding=1,
+            groups=d_model,
+            bias=False,
+        )
+        self.channel_mixer = nn.Linear(d_model, d_model, bias=False)
+        self.output_norm = nn.LayerNorm(d_model)
+        self.attention_score = nn.Sequential(
+            nn.Linear(d_model, score_hidden),
+            nn.Tanh(),
+            nn.Linear(score_hidden, 1, bias=False),
+        )
+
+    def forward(self, tokens, valid_mask):
+        """按固定槽位编码相邻关系，并只汇聚掩码标记的有效项"""
+        sequence_length = tokens.shape[1]
+        mask = valid_mask.bool()
+        mask_values = mask.unsqueeze(-1).to(tokens.dtype)
+
+        ordered = (
+            tokens + self.position_embed[:, :sequence_length, :]
+        ) * mask_values
+        local_context = self.local_mixer(
+            self.input_norm(ordered).transpose(1, 2)
+        ).transpose(1, 2)
+        local_context = self.channel_mixer(F.gelu(local_context))
+        mixed = self.output_norm(ordered + local_context) * mask_values
+
+        scores = self.attention_score(mixed).squeeze(-1).float()
+        scores = scores.masked_fill(~mask, -1.0e9)
+        weights = torch.softmax(scores, dim=-1) * mask.to(scores.dtype)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1.0e-6)
+        return (
+            mixed * weights.unsqueeze(-1).to(mixed.dtype)
+        ).sum(dim=1)
+
 class RNDModule(nn.Module): # 内在奖励模块：随机网络蒸馏 (RND),暂时不使用了，先留着代码
     def __init__(self, input_dim=512, hidden_dim=256, out_dim=128): 
         super().__init__()
@@ -240,6 +291,7 @@ class GalateaNet(nn.Module):
         self.sem_num_proj = nn.Linear(4, self.d_sem)
 
         self.final_slot_norm = nn.LayerNorm(self.d_model)
+        self.effect_slot_embed = nn.Embedding(8, self.d_model)
 
         self.slot_attention = nn.MultiheadAttention(
             embed_dim=self.d_model,  # 你的特征融合后维度 (假设 d_sem 等拼接后是 512)
@@ -294,10 +346,14 @@ class GalateaNet(nn.Module):
 
         self.v_norm = nn.LayerNorm(self.d_model)
         self.fusion_norm = nn.LayerNorm(self.d_model * 2) # 双塔拼接后是 d_model * 2
-        # 链式效果位置编码，最大长度 12 (需要与 feature_encoder.py 里的常量保持绝对一致)
-        self.chain_pos_embed = nn.Parameter(torch.randn(1, 12, self.d_model) * 0.02)
-        # 设定为 MAX_HISTORY = 8 (需要与 feature_encoder.py 里的常量保持绝对一致)
-        self.history_pos_embed = nn.Parameter(torch.randn(1, 8, self.d_model) * 0.02)
+        # 连锁与历史使用顺序敏感聚合，避免位置向量在普通均值中被数学抵消
+        self.chain_context_pool = OrderedContextPool(self.d_model, 12)
+        self.history_context_pool = OrderedContextPool(self.d_model, 8)
+        self.chain_metadata_proj = nn.Linear(
+            CHAIN_CONTEXT_DIM,
+            self.d_model,
+            bias=False,
+        )
 
         self.register_buffer(
             "place_weights",
@@ -366,7 +422,15 @@ class GalateaNet(nn.Module):
         race_v = self.race_embed(sem_race.long()).sum(dim=-2)
         attr_v = self.attr_embed(sem_attr.long()).sum(dim=-2)
         
-        slot_v = sem_base_512 + ref_v + race_v + attr_v  # [B, N, 8, 512]
+        slot_positions = torch.arange(
+            sem_base_512.shape[2],
+            device=sem_base_512.device,
+        )
+        slot_position_v = self.effect_slot_embed(slot_positions).view(
+            1, 1, -1, self.d_model
+        )
+        # 效果槽身份使 used_effect_mask 的第 N 位能够对应到第 N 个语义效果
+        slot_v = sem_base_512 + ref_v + race_v + attr_v + slot_position_v
         
         B, N, S, D = slot_v.shape
         slot_v_flat = slot_v.view(B * N, S, D)           
@@ -464,15 +528,19 @@ class GalateaNet(nn.Module):
                 batch_dict['c_sem_ref'], batch_dict['c_sem_race'], batch_dict['c_sem_attr'],
                 batch_dict['c_sem_code_idx'], batch_dict['c_sem_mask'], None
             ) # [B, 5, 512]
+            c_sem = (
+                c_sem
+                + self.card_embed(batch_dict['c_card_idx'].long())
+                + self.desc_embed(batch_dict['c_desc'].long())
+                + self.chain_metadata_proj(
+                    batch_dict['c_context'].to(torch.float32)
+                )
+            )
             
-            seq_len = c_sem.shape[1]
-            c_sem = c_sem + self.chain_pos_embed[:, :seq_len, :]
-
-            # 使用 mask 求平均
-            c_mask_f = batch_dict['c_mask'].float().unsqueeze(-1)
-            c_sem_sum = (c_sem * c_mask_f).sum(dim=1)
-            c_count = c_mask_f.sum(dim=1).clamp(min=1e-5)
-            chain_pooled = (c_sem_sum / c_count).unsqueeze(1) # [B, 1, 512]
+            chain_pooled = self.chain_context_pool(
+                c_sem,
+                batch_dict['c_mask'],
+            ).unsqueeze(1)
         else:
             chain_pooled = 0
         
@@ -485,14 +553,10 @@ class GalateaNet(nn.Module):
                 batch_dict['h_sem_code_idx'], batch_dict['h_sem_mask'], None
             ) # [B, 8, 512]
 
-            # 注入历史时序 (近期发生的在前面，远期发生的在后面)
-            seq_len = h_sem.shape[1] 
-            h_sem = h_sem + self.history_pos_embed[:, :seq_len, :]
-            
-            h_mask_f = batch_dict['h_mask'].float().unsqueeze(-1)
-            h_sem_sum = (h_sem * h_mask_f).sum(dim=1)
-            h_count = h_mask_f.sum(dim=1).clamp(min=1e-5)
-            history_pooled = (h_sem_sum / h_count).unsqueeze(1) # [B, 1, 512]
+            history_pooled = self.history_context_pool(
+                h_sem,
+                batch_dict['h_mask'],
+            ).unsqueeze(1)
         else:
             history_pooled = 0
 

@@ -18,11 +18,19 @@ from checkpoint_utils import (
     validate_model_id,
 )
 from training_validation import validate_model_prefix
+from semantic_assets import (
+    CODE_EMBEDDINGS_FILENAME,
+    CODE_EMBEDDINGS_INDEX_FILENAME,
+    HASH_MAPPING_FILENAME,
+    KNOWLEDGE_BASE_FILENAME,
+    SEMANTIC_ASSET_FILENAMES,
+    validate_code_semantic_assets,
+)
 
 
 ARTIFACT_MANIFEST_FORMAT_VERSION = 2
 # 仅表示 .gkg 部署包协议，必须独立于 WebUI/框架版本维护
-DEPLOY_PACKAGE_FORMAT_VERSION = 1
+DEPLOY_PACKAGE_FORMAT_VERSION = 2
 MAX_ONNX_GRAPH_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_FILE_BYTES = 32 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
@@ -43,7 +51,11 @@ WINDOWS_RESERVED_FILENAMES = {
     *(f"LPT{index}" for index in range(1, 10)),
 }
 MODEL_ARTIFACT_SUFFIXES = (".artifacts.json", ".onnx.data", ".onnx", ".pth")
-DEPLOY_ROOT_JSON_FILES = {"knowledge_base.json", "meta_staples.json"}
+DEPLOY_ROOT_FILES = {*SEMANTIC_ASSET_FILENAMES, "meta_staples.json"}
+CODE_SEMANTIC_FILE_SET = {
+    CODE_EMBEDDINGS_FILENAME,
+    CODE_EMBEDDINGS_INDEX_FILENAME,
+}
 ONNX_IDENTITY_KEYS = {
     "model_id": "galatea.model_id",
     "model_prefix": "galatea.model_prefix",
@@ -712,6 +724,8 @@ def validate_package_model_records(records, *, expected_model_id=None):
     """校验部署包只能包含同一 UUID 的模型，且双格式轮次必须成对一致"""
     if not isinstance(records, list):
         raise ValueError("model artifact records must be a list")
+    if not records:
+        return records
     model_ids = {record.get("model_id") for record in records}
     prefixes = {record.get("model_prefix") for record in records}
     model_protocol_versions = {
@@ -1023,7 +1037,7 @@ def create_deployment_package(
     model_total_size = validate_model_artifact_file_set(model_dir, model_files)
     extras = {}
     for archive_name, source_path in (extra_files or {}).items():
-        if archive_name not in DEPLOY_ROOT_JSON_FILES:
+        if archive_name not in DEPLOY_ROOT_FILES:
             raise ValueError(f"unsupported deployment root file: {archive_name!r}")
         raw_source = Path(source_path)
         if raw_source.is_symlink():
@@ -1039,6 +1053,27 @@ def create_deployment_package(
             raise ValueError("deployment package inputs exceed the 64 GiB safety limit")
         extras[archive_name] = source
 
+    included_code_semantics = CODE_SEMANTIC_FILE_SET.intersection(extras)
+    if included_code_semantics and included_code_semantics != CODE_SEMANTIC_FILE_SET:
+        raise ValueError("code semantic vectors and their index must be packaged together")
+    if included_code_semantics:
+        if KNOWLEDGE_BASE_FILENAME not in extras:
+            raise ValueError("code semantic vectors require knowledge_base.json")
+        semantic_root = extras[CODE_EMBEDDINGS_FILENAME].parent
+        validated_semantics = validate_code_semantic_assets(
+            semantic_root,
+            required=True,
+        )
+        if (
+            validated_semantics["embedding_path"]
+            != extras[CODE_EMBEDDINGS_FILENAME]
+            or validated_semantics["index_path"]
+            != extras[CODE_EMBEDDINGS_INDEX_FILENAME]
+        ):
+            raise ValueError("code semantic assets must come from one coherent directory")
+    if HASH_MAPPING_FILENAME in extras and KNOWLEDGE_BASE_FILENAME not in extras:
+        raise ValueError("hash mapping requires knowledge_base.json")
+
     manifest = {
         "package_format_version": DEPLOY_PACKAGE_FORMAT_VERSION,
         "package_name": package_name,
@@ -1046,8 +1081,10 @@ def create_deployment_package(
         "models_included": selected_models,
         "model_artifacts": records,
         "model_files_included": model_files,
-        "includes_kb": "knowledge_base.json" in extras,
+        "includes_kb": KNOWLEDGE_BASE_FILENAME in extras,
         "includes_staples": "meta_staples.json" in extras,
+        "includes_hash_mapping": HASH_MAPPING_FILENAME in extras,
+        "includes_code_semantics": included_code_semantics == CODE_SEMANTIC_FILE_SET,
     }
 
     temporary = tempfile.NamedTemporaryFile(
@@ -1120,7 +1157,7 @@ def validate_deployment_package(stage_dir):
     validate_package_name(manifest.get("package_name"))
 
     actual_names = {path.name for path in staged_paths}
-    allowed_names = {"manifest.json", *DEPLOY_ROOT_JSON_FILES}
+    allowed_names = {"manifest.json", *DEPLOY_ROOT_FILES}
     for name in actual_names.difference(allowed_names):
         validate_model_artifact_filename(name)
     primary_models = sorted(name for name in actual_names if is_primary_model_filename(name))
@@ -1149,14 +1186,28 @@ def validate_deployment_package(stage_dir):
 
     expected_names = {"manifest.json", *actual_model_files}
     for filename, flag in (
-        ("knowledge_base.json", "includes_kb"),
+        (KNOWLEDGE_BASE_FILENAME, "includes_kb"),
         ("meta_staples.json", "includes_staples"),
+        (HASH_MAPPING_FILENAME, "includes_hash_mapping"),
     ):
         included = filename in actual_names
         if manifest.get(flag) is not included:
             raise ValueError(f"manifest {flag} does not match package contents")
         if included:
             expected_names.add(filename)
+    actual_code_semantics = CODE_SEMANTIC_FILE_SET.intersection(actual_names)
+    includes_code_semantics = manifest.get("includes_code_semantics")
+    if actual_code_semantics and actual_code_semantics != CODE_SEMANTIC_FILE_SET:
+        raise ValueError("deployment package contains an incomplete code semantic pair")
+    if includes_code_semantics is not (actual_code_semantics == CODE_SEMANTIC_FILE_SET):
+        raise ValueError("manifest includes_code_semantics does not match package contents")
+    if actual_code_semantics:
+        if KNOWLEDGE_BASE_FILENAME not in actual_names:
+            raise ValueError("code semantic vectors require knowledge_base.json")
+        validate_code_semantic_assets(stage_root, required=True)
+        expected_names.update(CODE_SEMANTIC_FILE_SET)
+    if HASH_MAPPING_FILENAME in actual_names and KNOWLEDGE_BASE_FILENAME not in actual_names:
+        raise ValueError("hash mapping requires knowledge_base.json")
     if actual_names != expected_names:
         raise ValueError(
             f"deployment package contains undeclared files: {sorted(actual_names - expected_names)}"

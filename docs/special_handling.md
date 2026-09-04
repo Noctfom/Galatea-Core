@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 中为解决框架固有局限性而特殊构建的模块，这些模块是框架的核心竞争力之一。
 
-> 文档适用于 **Galatea-Core v3.5.1**。
+> 文档适用于 **Galatea-Core v3.6.0**。
 
 ---
 
@@ -34,7 +34,8 @@ Lua 脚本 → Lua Parser → 效果分类 (CATEGORY_XXX)
                         → 发动条件 (RACE/ATTR/SETCODE)
                         → 特殊 Hash (代码块聚类)
                                  ↓
-                        knowledge_base.json
+                        knowledge_base.json + hash_mapping_report.json
+                        code_embeddings.npy + code_embeddings_idx.json
 ```
 
 每张卡片最多提取 **8 个效果槽**，每个效果槽包含：
@@ -71,9 +72,11 @@ def _hash_code_block(self, code_block):
 ### 在 WebUI 中操作
 
 在 **🧠 语义知识库引擎** 模块中：
-1. 勾选 **🌐 从 Github 拉取基础卡库同步**（首次使用必须）
-2. 点击 **开始提取卡片语义**
-3. 等待解析完成
+1. 勾选 **🌐 从 Github 拉取基础卡库同步**，同步同目录下的完整四文件语义基座
+2. 同步完成后会自动检查并追加新增效果槽；不使用同步、只更新本地脚本时才需要另行勾选 **提取代码语义特征**
+3. 点击 **开始提取卡片语义** 并等待解析完成
+
+Hash 聚类标签由规范化代码的 MD5 决定，本身是确定性的。v3.6.0 修复的是字段去重使用无序 `set` 后再截断造成的非确定性，并让 GitHub 同步同时继承 Hash 映射和代码语义向量，再自动接续本地新增槽位。远程没有 Hash 映射时，框架会从知识库已有的 `CUSTOM_HASH_*` 标签重建接续记录。
 
 ---
 

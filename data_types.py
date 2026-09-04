@@ -9,6 +9,8 @@ ACTION_OPERATION_COUNT = 32
 ACTION_RESPONSE_BUCKETS = 512
 ACTION_SIGNATURE_BYTES = 4
 ACTION_CONTEXT_DIM = 6
+# 连锁条目保留处理卡位置、触发位置、链序和效果槽等 9 项结构化信息
+CHAIN_CONTEXT_DIM = 9
 
 
 class ActionOperation(IntEnum):

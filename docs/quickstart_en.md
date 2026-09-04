@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.5.1**.
+> This document applies to **Galatea-Core v3.6.0**.
 
 ---
 
@@ -72,14 +72,15 @@ Wait a few minutes. This pulls the latest `cards.cdb` and `script/` from officia
 
 Go to **🧠 Semantic Knowledge Engine**:
 
-1. ⚠️ **Important**: Check **🌐 Sync Base KB from Github** (must for first time, greatly speeds up parsing)
-2. Click **🧠 Start Extracting Card Semantics**
+1. ⚠️ **Important**: Check **🌐 Sync Base KB from Github** to retrieve the KB, Hash map, and code-semantic vectors
+2. Sync mode automatically appends vectors for newer local scripts; enable **Extract Code Semantic Features** separately only for a local-only update
+3. Click **🧠 Start Extracting Card Semantics**
 
 ![Semantic KB](图片/语义知识库.png)
 
 > 📖 See [Special Handling - Semantic KB](special_handling.md#语义化模块semantic-kb) for Hash clustering details.
 
-Wait for parsing to complete (first time may take several minutes). Results saved to `knowledge_base.json`.
+Wait for parsing to complete (first time may take several minutes). Structured knowledge, the Hash continuation index, and code-semantic vectors are stored together in the project root.
 
 ---
 

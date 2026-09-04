@@ -4,6 +4,27 @@
 
 ---
 
+## [v3.6.0] - 2026-09-03
+
+### 🧠 Ordered Context and Model Protocol V3
+
+- **Fixed ineffective chain/history ordering**: The old path added position vectors and immediately averaged the sequence, so swapping A→B into B→A left the sum unchanged. `OrderedContextPool` now binds positions, models neighboring relations with an asymmetric local convolution, and performs masked attention pooling. The 12-slot chain and eight-entry recent activation history therefore produce order-sensitive representations
+- **Strict padding and empty-sequence handling**: Padding is masked before and after local mixing, so even corrupted padding values cannot leak into context. A sequence with no valid items returns a finite zero vector
+- **Bound effect-slot identity**: The eight Lua effect slots now carry explicit slot embeddings, allowing bit N of an entity's `used_effect_mask` to correspond to semantic effect N instead of treating a card's effects as freely interchangeable
+- **Completed active-chain context**: Each chain link now contributes its card ID, effect description, chain index, handler location, triggering location, and relative controllers in addition to card semantics; all public fields are encoded from the acting player's perspective before ordered aggregation
+- **Raised Model Protocol to V3**: Chain input tensors and network structure are expanded while PPO equations remain unchanged. Existing weights are structurally incompatible, so `MODEL_PROTOCOL_VERSION` moves from 2 to 3 while the checkpoint-container format remains 2
+- In the default 512×6 network, ordered pooling, effect-slot identity, and chain metadata projection add 681,984 parameters, about 1.37% of the current model. A local batch-512 microbenchmark measured the ordered branches at roughly 14.5 ms on CPU and 1.0 ms on CUDA BF16 without changing Worker, central-inference, or ONNX call flows
+
+### 🧬 Resumable Semantic Assets
+
+- **Fixed nondeterministic Lua semantics**: Field deduplication now preserves first occurrence instead of using unordered sets, preventing Python hash randomization from changing which values survive fixed-slot truncation; script scanning is stable as well
+- **Complete GitHub semantic sync**: `--sync` now retrieves the knowledge base, Hash map, code-semantic matrix, and vector index, then automatically appends missing vectors after parsing newer local scripts. If the remote Hash map is absent, continuation records can be reconstructed from custom tags already stored in the KB; the embedding model is not loaded when no slots are missing
+- **Incremental code semantics**: With a valid matrix/index pair, `--embed` computes only newly added effect slots. `--clear` removes stale vectors, while dimension, row-count, or index mismatches trigger a safe full rebuild
+- **Deployment Package V2**: WebUI, CLI, and `.gkg` manifests support `hash_mapping_report.json`, `code_embeddings.npy`, and `code_embeddings_idx.json`. Matrix and index must appear together with their KB, and one-click release validation now requires the complete semantic asset set
+- **Full regression**: 138 automated tests completed (one environment-dependent skip). Order swapping, effect-slot identity, chain packet/view encoding, incremental vectors, semantic-package round trips, full PyTorch forward, `torch.compile`, ONNX export, and ONNX Runtime inference all passed
+
+---
+
 ## [v3.5.1] - 2026-09-02
 
 ### 🎞️ Holographic Replay V2

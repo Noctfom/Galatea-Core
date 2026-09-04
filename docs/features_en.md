@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.5.1**.
+> This document applies to **Galatea-Core v3.6.0**.
 
 ---
 
@@ -124,7 +124,7 @@ Configure and launch AI training tasks.
 - **Standard Core**: Enable for custom OCGCore builds without ghost bytes
 
 **Model Action Protocol**:
-- v3.5.0 uses the independently maintained Model Protocol V2. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
+- v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
 - A protocol mismatch is rejected before loading so structurally different weights cannot be applied silently to the current action head
 
@@ -250,8 +250,9 @@ Create cross-pool mixing recipes, allowing decks from different physical pools t
 Scan all Lua scripts in `script/` directory to extract semantic information.
 
 **Options**:
-- **Physical Clear**: Delete local old data, re-parse everything
-- **Github Sync**: Pull base KB from remote repository
+- **Physical Clear**: Delete the local KB, Hash map, and code-semantic vectors before a full rebuild
+- **Github Sync**: Pull structured knowledge, the Hash map, code-semantic vectors, and their index from the same remote directory, then append locally missing slots automatically
+- **Code Semantic Extraction**: Append only new effect slots when the local `.npy` pair is coherent; rebuild fully if its index or dimension is incompatible
 
 #### 🧬 Custom Hash Explorer
 
@@ -360,7 +361,8 @@ Package models as .gkg format:
 - Select an embedded `model_id` pool first, then choose `.pth`/`.onnx` primaries from that pool
 - Referenced `.onnx.data` files are included automatically
 - When both PTH and ONNX are selected, their embedded iteration sets must match
-- Optionally include knowledge base (`knowledge_base.json`) and staple pool (`meta_staples.json`)
+- Optionally include structured semantics (`knowledge_base.json` + `hash_mapping_report.json`), code semantics (`code_embeddings.npy` + `code_embeddings_idx.json`), and the staple pool (`meta_staples.json`)
+- The code matrix and index must appear together with their matching KB; the manifest records and validates these dependencies
 - Always generate and validate `manifest.json`
 - Custom package name support
 
@@ -518,7 +520,9 @@ python main.py parse [options]
 | `--script_dir` | Lua script directory | `./script` |
 | `--output` | Output file path | `knowledge_base.json` |
 | `--clear` | Clear local KB | - |
-| `--sync` | Pull base library from remote | - |
+| `--sync` | Pull the complete remote semantic baseline and append missing vectors | - |
+| `--remote_url` | Remote `knowledge_base.json`; sibling semantic URLs are derived automatically | Main repository Raw URL |
+| `--embed` | Encode only new effect slots, rebuilding fully when necessary | - |
 
 ---
 
@@ -539,6 +543,8 @@ python deploy_tool.py
 Package trained models into `.gkg` deployment packages containing:
 - Model files from one `model_id` pool (`.pth`/`.onnx`/`.onnx.data`)
 - Knowledge base (`knowledge_base.json`)
+- Hash continuation index (`hash_mapping_report.json`)
+- Code-semantic matrix and index (`code_embeddings.npy`, `code_embeddings_idx.json`)
 - Staple pool (`meta_staples.json`)
 - Manifest file (`manifest.json`)
 

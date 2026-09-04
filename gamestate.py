@@ -512,6 +512,7 @@ class DuelState:
                 ts = struct.unpack('<B', stream.read(1))[0]      # 触发编号
                 desc = struct.unpack('<I', stream.read(4))[0]   # 效果描述
                 ct = struct.unpack('<B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
+                hc, hl, hs, hp = LocationInfo.decode(info_loc)
 
                 # 【新增】提取效果槽位索引 (0-15) 并写入实体的记忆字典
                 effect_slot_idx = desc & 0xF  # 获取 0-15 的效果槽位
@@ -523,6 +524,10 @@ class DuelState:
                 # 压入堆栈记事本
                 self.chain_stack.append({
                     'code': code,
+                    'hc': hc,
+                    'hl': hl,
+                    'hs': hs,
+                    'hp': hp,
                     'c': tc,
                     'l': tl,
                     's': ts,

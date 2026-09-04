@@ -106,6 +106,14 @@ def pack_model():
         extra_files = {}
         if os.path.exists("knowledge_base.json"):
             extra_files["knowledge_base.json"] = "knowledge_base.json"
+            if os.path.exists("hash_mapping_report.json"):
+                extra_files["hash_mapping_report.json"] = "hash_mapping_report.json"
+        code_semantic_files = ("code_embeddings.npy", "code_embeddings_idx.json")
+        if all(os.path.exists(filename) for filename in code_semantic_files):
+            for filename in code_semantic_files:
+                extra_files[filename] = filename
+        elif any(os.path.exists(filename) for filename in code_semantic_files):
+            raise FileNotFoundError("代码语义向量或索引缺失，拒绝打包不完整语义资产")
         if os.path.exists("meta_staples.json"):
             extra_files["meta_staples.json"] = "meta_staples.json"
         create_deployment_package(
@@ -188,7 +196,13 @@ def unpack_model():
                 for filename in installed["files"]:
                     print(f"  -> 提取模型产物至 ./models/: {filename}")
 
-            for filename in ("knowledge_base.json", "meta_staples.json"):
+            for filename in (
+                "knowledge_base.json",
+                "hash_mapping_report.json",
+                "code_embeddings.npy",
+                "code_embeddings_idx.json",
+                "meta_staples.json",
+            ):
                 source = os.path.join(stage_dir, filename)
                 if os.path.isfile(source):
                     print(f"  -> 覆盖系统基座文件: {filename}")

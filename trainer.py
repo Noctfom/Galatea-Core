@@ -30,6 +30,7 @@ from data_types import (
     ACTION_CONTEXT_DIM,
     ACTION_SIGNATURE_BYTES,
     ACTION_TARGET_SLOTS,
+    CHAIN_CONTEXT_DIM,
 )
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
@@ -511,7 +512,10 @@ class PPOTrainer:
             'd_sem_mask': ((75, 8), torch.bool),
             
             'c_mask': ((12,), torch.bool),
-            
+            'c_card_idx': ((12,), torch.long),
+            'c_desc': ((12,), torch.long),
+            'c_context': ((12, CHAIN_CONTEXT_DIM), torch.float16),
+
             # --- 瞬间时点连锁堆栈 语义槽位 ---
             'c_sem_category': ((12, 8, 8), torch.int16),
             'c_sem_req': ((12, 8, 16), torch.int8),

@@ -7,7 +7,7 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.5.1](https://img.shields.io/badge/Release-v3.5.1-brightgreen.svg)](docs/changelog.md)
+[![Release: v3.6.0](https://img.shields.io/badge/Release-v3.6.0-brightgreen.svg)](docs/changelog.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -133,6 +133,7 @@ streamlit run app.py
 | [📚 功能详解](docs/features.md) | WebUI 和命令行完整指南 |
 | [🔧 架构设计](docs/architecture.md) | 技术原理和核心算法 |
 | [🧬 特殊处理逻辑](docs/special_handling.md) | 框架独特特性的实现细节 |
+| [🗺️ 后续路线](docs/roadmap.md) | 主框架认知与组卡模块 TODO |
 | [📝 更新日志](docs/changelog.md) | 版本更新历史 |
 
 ---

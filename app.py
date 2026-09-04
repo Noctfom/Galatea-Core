@@ -77,7 +77,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.5.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.6.0"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1157,16 +1157,16 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
         with st.form("parse_form"):
             st.info(_("一键扫描 `./script` 目录下的所有 Lua 脚本，利用正则与降维算法提取出所有卡片的动作条件与种类。", 
                       "Scan all Lua scripts to extract semantic requirements and categories."))
-            p_clear = st.checkbox(_("🧨 物理清空本地旧数据 (--clear)", "Clear Local KB"), value=False, 
-                                  help=_("彻底删除本地的知识库与映射表，重新全量解析。", "Delete local JSON files and re-parse everything."))
+            p_clear = st.checkbox(_("🧨 物理清空本地旧数据 (--clear)", "Clear Local KB"), value=False,
+                                  help=_("彻底删除本地知识库、映射表和代码语义向量，重新全量解析。", "Delete the local KB, mapping, and code-semantic vectors before a full rebuild."))
             p_sync = st.checkbox(_("🌐 从 Github 拉取基础卡库同步 (--sync)", "Sync Base KB from Github"), value=False,
-                                 help=_("以主仓库的知识库作为基础字典，跳过已有的卡片，大幅加快本地解析速度。", "Use remote KB as baseline to skip existing cards and speed up parsing."))
+                                 help=_("同步主仓库的知识库、Hash 映射、代码语义向量和索引，解析新增卡片后自动接续代码向量。", "Sync the remote KB, Hash map, code-semantic matrix, and index, then automatically append vectors for newly parsed cards."))
             p_url = st.text_input(_("远程基座 URL (可选)", "Remote Base URL (Optional)"), value="https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json")
             
             # 👇 [新增] 代码语义化特征提取开关
-            p_embed = st.checkbox(_("🧬 提取代码语义特征 (--embed)", "Extract Code Semantic Features"), value=False, 
-                                  help=_("调用 SentenceTransformer 提取 Lua 源码的高维语义向量。耗时较长，建议在 GPU 环境下开启。", 
-                                         "Uses SentenceTransformer to extract high-dimensional semantic vectors of Lua source code. Takes longer, GPU recommended."))
+            p_embed = st.checkbox(_("🧬 提取代码语义特征 (--embed)", "Extract Code Semantic Features"), value=False,
+                                  help=_("用于不启用同步的本地更新；同步模式已自动接续。仅提取新增 Lua 效果槽，资产不一致时才全量重建。",
+                                         "For local updates without sync; sync mode already continues automatically. Only new Lua effect slots are encoded unless assets are incompatible."))
             
             if st.form_submit_button("🧠 " + _("开始提取卡片语义", "Start Semantic Parsing"), use_container_width=True):
                 cmd = [sys.executable, "main.py", "parse"]
@@ -3188,10 +3188,11 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
 
             with st.form("pack_form"):
                 st.markdown("##### 🗂️ 附加数据组件")
-                c1, c2, c3 = st.columns(3)
-                with c1: inc_kb = st.checkbox("包含 知识库", value=True, help="knowledge_base.json")
-                with c2: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
-                with c3: st.checkbox("强制安全清单", value=True, disabled=True, help="manifest.json")
+                c1, c2, c3, c4 = st.columns(4)
+                with c1: inc_kb = st.checkbox("包含 结构语义", value=True, help="knowledge_base.json + hash_mapping_report.json")
+                with c2: inc_code_semantics = st.checkbox("包含 代码语义", value=True, help="code_embeddings.npy + code_embeddings_idx.json")
+                with c3: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
+                with c4: st.checkbox("强制安全清单", value=True, disabled=True, help="manifest.json")
                 
                 st.markdown("##### 🏷️ 包体信息")
                 pkg_name = st.text_input(_("自定义包名 (留空默认自动生成)", "Package Name"), placeholder="e.g. Galatea_V3_Full")
@@ -3204,11 +3205,17 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 ):
                     missing = []
                     if inc_kb and not os.path.exists("knowledge_base.json"): missing.append("knowledge_base.json")
+                    if inc_code_semantics:
+                        for semantic_filename in ("code_embeddings.npy", "code_embeddings_idx.json"):
+                            if not os.path.exists(semantic_filename):
+                                missing.append(semantic_filename)
                     if inc_staples and not os.path.exists("meta_staples.json"): missing.append("meta_staples.json")
 
                     if missing:
                         st.error(_(f"缺少勾选的组件: {', '.join(missing)}。请先生成或取消勾选！", f"Missing files: {', '.join(missing)}."))
-                    elif not sel_models and not (inc_kb or inc_staples):
+                    elif inc_code_semantics and not inc_kb:
+                        st.error(_("代码语义必须和对应知识库一起打包。", "Code semantics must be packaged with their knowledge base."))
+                    elif not sel_models and not (inc_kb or inc_code_semantics or inc_staples):
                         st.error("包体不能为空，请至少选择一个模型或组件！")
                     else:
                         try:
@@ -3217,7 +3224,13 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                 validate_package_name(final_name)
                                 target_zip = os.path.join(deploy_dir, f"{final_name}.gkg")
                                 extra_files = {}
-                                if inc_kb: extra_files["knowledge_base.json"] = "knowledge_base.json"
+                                if inc_kb:
+                                    extra_files["knowledge_base.json"] = "knowledge_base.json"
+                                    if os.path.exists("hash_mapping_report.json"):
+                                        extra_files["hash_mapping_report.json"] = "hash_mapping_report.json"
+                                if inc_code_semantics:
+                                    extra_files["code_embeddings.npy"] = "code_embeddings.npy"
+                                    extra_files["code_embeddings_idx.json"] = "code_embeddings_idx.json"
                                 if inc_staples: extra_files["meta_staples.json"] = "meta_staples.json"
                                 create_deployment_package(
                                     target_zip,
@@ -3366,25 +3379,51 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     ):
                                         selected_stage_models.append(model_name)
 
-                            root_files_in_stage = [
-                                filename
-                                for filename in ("knowledge_base.json", "meta_staples.json")
-                                if filename in staged_files
+                            root_file_groups = [
+                                (
+                                    "结构化语义（知识库 + Hash 接续索引）",
+                                    [
+                                        filename
+                                        for filename in ("knowledge_base.json", "hash_mapping_report.json")
+                                        if filename in staged_files
+                                    ],
+                                ),
+                                (
+                                    "代码语义向量（向量 + 索引）",
+                                    [
+                                        filename
+                                        for filename in ("code_embeddings.npy", "code_embeddings_idx.json")
+                                        if filename in staged_files
+                                    ],
+                                ),
+                                (
+                                    "142 泛用宣言池",
+                                    ["meta_staples.json"] if "meta_staples.json" in staged_files else [],
+                                ),
                             ]
-                            if root_files_in_stage:
+                            root_file_groups = [group for group in root_file_groups if group[1]]
+                            if root_file_groups:
                                 st.markdown("📝 **字典文件（将覆盖系统根目录同名文件）**")
-                                for filename in root_files_in_stage:
+                                for group_label, group_files in root_file_groups:
                                     if st.checkbox(
-                                        f"⚙️ {filename}",
+                                        f"⚙️ {group_label}: {', '.join(group_files)}",
                                         value=True,
-                                        key=f"chk_{sel_stage}_{filename}",
+                                        key=f"chk_{sel_stage}_{group_files[0]}",
                                     ):
-                                        selected_root_files.append(filename)
+                                        selected_root_files.extend(group_files)
 
                             st.write("")
                             if st.form_submit_button("📥 " + _("执行精准导入", "Execute Import"), type="primary", use_container_width=True):
                                 if not selected_stage_models and not selected_root_files:
                                     st.warning("未勾选任何文件！")
+                                elif (
+                                    "code_embeddings.npy" in selected_root_files
+                                    and "knowledge_base.json" not in selected_root_files
+                                ):
+                                    st.warning(_(
+                                        "导入代码语义时必须同时导入同包知识库，避免向量索引错配。",
+                                        "Import the matching knowledge base together with code semantics to avoid index mismatches.",
+                                    ))
                                 else:
                                     try:
                                         if selected_stage_models:
