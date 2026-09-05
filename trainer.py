@@ -67,6 +67,15 @@ from training_validation import (
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning) # 屏蔽 PyTorch 2.0 啰嗦的警告
 
+
+def cuda_compile_backend_available():
+    """检查 CUDA Inductor 所需的 Triton 后端是否能够实际使用"""
+    try:
+        from torch.utils._triton import has_triton
+        return bool(has_triton())
+    except (ImportError, RuntimeError):
+        return False
+
 if sys.platform == 'win32':
     # Windows 不完全支持 IPC，使用 TCP
     ZMQ_ADDR = "tcp://127.0.0.1:" 
@@ -432,11 +441,16 @@ class PPOTrainer:
 
         # 编译必须发生在严格恢复之后；OptimizedModule 与基础模型共享参数对象。
         if self.enable_compile and self.device.type == 'cuda':
-            try:
-                print("🚀 [编译] 正在启用 torch.compile...")
-                self.agent.net = torch.compile(self.agent.net, mode='default')
-            except Exception as e:
-                print(f"⚠️ 编译跳过: {e}")
+            if not cuda_compile_backend_available():
+                self.enable_compile = False
+                print("ℹ️ [编译] 当前环境缺少可用 Triton，已安全使用 CUDA eager 模式")
+            else:
+                try:
+                    print("🚀 [编译] 正在启用 torch.compile...")
+                    self.agent.net = torch.compile(self.agent.net, mode='default')
+                except Exception as e:
+                    self.enable_compile = False
+                    print(f"⚠️ 编译跳过: {e}")
 
         # 初始化环境 (仅用于参数查询等，不参与对战)
         self.env = GalateaEnv()
@@ -541,6 +555,7 @@ class PPOTrainer:
             'act_card_idx': ((120, ACTION_TARGET_SLOTS), torch.long),
             'act_type': ((120,), torch.long),
             'act_desc': ((120,), torch.long),
+            'act_effect_slot': ((120,), torch.uint8),
             'act_mask': ((120,), torch.bool),
             'act_race': ((120,), torch.long),
             'act_attr': ((120,), torch.long),

@@ -10,6 +10,7 @@ from semantic_assets import (
     HASH_MAPPING_FILENAME,
     download_remote_semantic_bundle,
 )
+from effect_slot_binding import apply_runtime_effect_bindings
 
 
 def _stable_unique(values):
@@ -33,6 +34,16 @@ class YGOProLuaParser:
                     record = self.hash_registry[str(category)]
                     if card_label not in record["cards"]:
                         record["cards"].append(card_label)
+
+    @staticmethod
+    def _refresh_card_runtime_bindings(filepath, card_data, card_id):
+        """只刷新已有卡片的 Lua 对象绑定，不重新生成哈希或代码语义"""
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as stream:
+                lua_source = stream.read()
+        except OSError:
+            return False
+        return apply_runtime_effect_bindings(card_data, lua_source, card_id)
 
     def _hash_code_block(self, code_block, card_id, slot_idx):
         """将特殊的代码块转化为统一的 Hash 标签，使用深度词法规范化榨干冗余变种"""
@@ -268,6 +279,7 @@ class YGOProLuaParser:
             card_data["effects"].append(effect_slot)
             slot_idx += 1
             
+        apply_runtime_effect_bindings(card_data, content, card_id)
         return card_data
 
     def run_batch(self, output_file='knowledge_base.json', clear_existing=False, remote_url=None):
@@ -349,6 +361,7 @@ class YGOProLuaParser:
         print(f"🔍 扫描 {self.script_dir} 目录下的增量更新...")
         count = 0
         skip_count = 0
+        binding_update_count = 0
         
         for filename in sorted(os.listdir(self.script_dir)):
             if filename.endswith('.lua'):
@@ -356,12 +369,19 @@ class YGOProLuaParser:
                 if not match: continue
                 card_id = str(match.group(1)) 
                 
-                # 跳过已有卡片
+                filepath = os.path.join(self.script_dir, filename)
+
+                # 已有卡片只刷新运行时效果标识到代码语义槽的绑定
                 if card_id in knowledge_base:
+                    if self._refresh_card_runtime_bindings(
+                        filepath,
+                        knowledge_base[card_id],
+                        int(card_id),
+                    ):
+                        binding_update_count += 1
                     skip_count += 1
                     continue
-                
-                filepath = os.path.join(self.script_dir, filename)
+
                 res = self.parse_file(filepath)
                 if res and res['effects']:
                     knowledge_base[card_id] = res
@@ -390,10 +410,10 @@ class YGOProLuaParser:
         # =======================================================
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(knowledge_base, f, indent=2, ensure_ascii=False)
-            
+
         with open(mapping_file, 'w', encoding='utf-8') as f:
             json.dump(self.hash_registry, f, indent=2, ensure_ascii=False)
-            
+
         # =======================================================
         # 6. 终极清晰报告
         # =======================================================
@@ -401,6 +421,7 @@ class YGOProLuaParser:
         print("🏁 语义知识库 (Semantic Knowledge Base) 构建完成！")
         print("==============================================")
         print(f"📄 [卡片统计] 继承/跳过 {skip_count} 张，本次新增解析 {count} 张。")
+        print(f"🔗 [效果绑定] 已刷新 {binding_update_count} 张既有卡的运行时标识映射。")
         print(f"📁 [卡片库总容量] 当前知识库共计 {len(knowledge_base)} 张卡片。")
         print("----------------------------------------------")
         

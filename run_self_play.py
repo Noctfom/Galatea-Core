@@ -89,7 +89,13 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
         msg_queue = MessageParser.parse(raw_data)
         
         brain_0 = DuelState(deck1.main, deck1.extra, deck2.main, deck2.extra)
-        brain_1 = DuelState(deck1.main, deck1.extra, deck2.main, deck2.extra)
+        brain_1 = DuelState(
+            deck1.main,
+            deck1.extra,
+            deck2.main,
+            deck2.extra,
+            audit_enabled=False,
+        )
 
         encoder = GalateaEncoder()
         

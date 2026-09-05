@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+from effect_slot_binding import build_runtime_effect_binding_catalog
+
 
 KNOWLEDGE_BASE_FILENAME = "knowledge_base.json"
 HASH_MAPPING_FILENAME = "hash_mapping_report.json"
@@ -25,6 +27,7 @@ SEMANTIC_ASSET_FILENAMES = (
 )
 MAX_CODE_EMBEDDINGS_BYTES = 2 * 1024 * 1024 * 1024
 MAX_CODE_EMBEDDING_INDEX_BYTES = 256 * 1024 * 1024
+MAX_KNOWLEDGE_BASE_BYTES = 512 * 1024 * 1024
 
 
 def semantic_sibling_url(base_url, filename):
@@ -105,6 +108,90 @@ def validate_code_semantic_assets(directory, *, required=False):
         "index": index,
         "embedding_path": embedding_path,
         "index_path": index_path,
+    }
+
+
+def build_expected_code_semantic_keys(knowledge_base):
+    """从结构化知识库生成模型实际使用的卡号与效果槽键集合"""
+    if not isinstance(knowledge_base, dict):
+        raise ValueError("knowledge_base.json must be a JSON object")
+    expected_keys = set()
+    for raw_card_id, card_data in knowledge_base.items():
+        card_id = str(raw_card_id)
+        if not card_id.isdigit() or not isinstance(card_data, dict):
+            raise ValueError(f"invalid knowledge-base card record: {raw_card_id!r}")
+        effects = card_data.get("effects", [])
+        if not isinstance(effects, list):
+            raise ValueError(f"knowledge-base effects must be a list: {card_id}")
+        seen_slots = set()
+        for fallback_slot, effect in enumerate(effects, start=1):
+            if not isinstance(effect, dict):
+                raise ValueError(f"knowledge-base effect must be an object: {card_id}")
+            raw_slot = effect.get("slot", fallback_slot)
+            if isinstance(raw_slot, bool):
+                raise ValueError(f"invalid semantic slot for card {card_id}: {raw_slot!r}")
+            try:
+                slot = int(raw_slot)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"invalid semantic slot for card {card_id}: {raw_slot!r}"
+                ) from error
+            if slot < 1:
+                raise ValueError(f"semantic slot must be positive for card {card_id}")
+            if slot > 8:
+                continue
+            if slot in seen_slots:
+                raise ValueError(f"duplicate semantic slot {slot} for card {card_id}")
+            seen_slots.add(slot)
+            expected_keys.add(f"{card_id}_{slot - 1}")
+    return expected_keys
+
+
+def validate_semantic_bundle(
+    directory,
+    *,
+    knowledge_base_filename=KNOWLEDGE_BASE_FILENAME,
+    knowledge_base=None,
+):
+    """交叉校验知识库效果槽与代码向量索引必须完整且无过期项"""
+    root = Path(directory).resolve()
+    knowledge_base_path = root / knowledge_base_filename
+    if knowledge_base is None:
+        knowledge_base = _load_json_object(
+            knowledge_base_path,
+            max_bytes=MAX_KNOWLEDGE_BASE_BYTES,
+            label=knowledge_base_filename,
+        )
+    elif not isinstance(knowledge_base, dict):
+        raise ValueError("knowledge base must be a JSON object")
+
+    code_assets = validate_code_semantic_assets(root, required=True)
+    expected_keys = build_expected_code_semantic_keys(knowledge_base)
+    # 运行时效果标识必须与 Lua 语义槽保持一对一，禁止歧义资产进入训练
+    runtime_effect_bindings = build_runtime_effect_binding_catalog(knowledge_base)
+    actual_keys = set(code_assets["index"])
+    missing_keys = sorted(expected_keys.difference(actual_keys))
+    stale_keys = sorted(actual_keys.difference(expected_keys))
+    if missing_keys or stale_keys:
+        details = []
+        if missing_keys:
+            details.append(
+                f"missing={len(missing_keys)} sample={missing_keys[:5]}"
+            )
+        if stale_keys:
+            details.append(
+                f"stale={len(stale_keys)} sample={stale_keys[:5]}"
+            )
+        raise ValueError(
+            "knowledge base and code semantic index do not match: "
+            + "; ".join(details)
+        )
+    return {
+        "knowledge_base": knowledge_base,
+        "knowledge_base_path": knowledge_base_path,
+        "effect_slot_count": len(expected_keys),
+        "runtime_effect_binding_count": len(runtime_effect_bindings),
+        **code_assets,
     }
 
 
@@ -194,12 +281,20 @@ def download_remote_semantic_bundle(remote_kb_url, target_directory):
                 "remote code semantic vectors were incomplete and were not installed"
             )
         if downloaded_vectors == vector_names:
-            validate_code_semantic_assets(temp_root, required=True)
-            for filename in CODE_SEMANTIC_FILENAMES:
-                _replace_file_atomically(
-                    downloaded[filename],
-                    target_root / filename,
+            try:
+                validate_semantic_bundle(
+                    temp_root,
+                    knowledge_base=knowledge_base,
                 )
+            except (OSError, ValueError) as error:
+                downloaded_vectors.clear()
+                errors["code_semantic_pair"] = str(error)
+            else:
+                for filename in CODE_SEMANTIC_FILENAMES:
+                    _replace_file_atomically(
+                        downloaded[filename],
+                        target_root / filename,
+                    )
 
     return {
         "knowledge_base": knowledge_base,

@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.6.0**。
+> 文档适用于 **Galatea-Core v3.6.2**。
 
 ---
 
@@ -124,6 +124,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 
 **模型动作协议**：
 - v3.5.0 引入动作语义 V2；v3.6.0 使用 Model Protocol V3，为效果槽绑定身份，并为当前连锁和最近发动历史加入真正顺序敏感的上下文聚合。检查点、网络权重、ONNX 与制品清单会共同记录并校验该版本
+- v3.6.2 以 Lua `Effect.CreateEffect(c)` 对象为身份，把完整运行时 `desc` 绑定到已有代码语义槽；候选动作可直接取得对应效果向量，连锁、历史和本回合已用标记使用同一映射。Stringid 只用于生成 Core 标识，不再被解释成槽序号
 - 动作编码包含操作类型、真实响应、选择约束、目标卡密/位置/素材数值以及稳定语义签名；Type 26 由模型按 Core 原生 Select/Unselect 流程逐步决策
 - 协议版本不一致时会在加载前明确拒绝，避免将结构不同的权重静默用于当前动作头
 
@@ -265,6 +266,14 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 
 输入卡片密码，查看 AI 视角下的语义特征。
 
+#### 🧪 V3 观测审计
+
+- 训练 Worker、竞技场和 RuleBot 自检自动生成独立审计报告
+- 报告目录为 `system_logs/protocol_v3_audit/`
+- 可主动检查知识库效果槽、代码向量行与索引是否完全一致
+- 可按运行来源筛选连锁结构异常与效果槽映射结果
+- Lua `Stringid` 仅在打开审计页时离线解析，不增加训练时脚本 I/O
+
 ![语义知识库](图片/语义知识库.png)
 
 ---
@@ -360,8 +369,8 @@ ONNX、外置权重和制品清单。
 - 先按内置 `model_id` 选择模型池，再选择该池内的 `.pth`/`.onnx` 主文件
 - ONNX 引用的 `.onnx.data` 会自动补齐，不能单独遗漏
 - 同时选择 PTH 与 ONNX 时，两种格式的内置轮次集合必须一致
-- 可选包含结构语义 (`knowledge_base.json` + `hash_mapping_report.json`)、代码语义 (`code_embeddings.npy` + `code_embeddings_idx.json`) 和泛用卡池 (`meta_staples.json`)
-- 代码向量与索引必须成对出现并和对应知识库一起打包；清单会记录并校验这些依赖
+- 可选包含完整运行时语义组（`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`，存在时附带 `hash_mapping_report.json`）和泛用卡池 (`meta_staples.json`)
+- 运行时语义三件套不可拆分导入或导出；清单会记录并交叉校验知识库效果槽、向量行与索引键
 - 强制生成并校验清单文件 (`manifest.json`)
 - 支持自定义包名
 

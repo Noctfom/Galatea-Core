@@ -24,9 +24,10 @@ class AiBot:
         if net_config is None:
             net_config = {'d_model': 256, 'n_heads': 4, 'n_layers': 2, 'vocab_size': 20000}
 
-        self.net = GalateaNet(net_config).to(device) if initialize_network else None
         self.device = device
+        # 先让编码器严格核验语义资产，再分配模型参数
         self.encoder = FeatureEncoder()
+        self.net = GalateaNet(net_config).to(device) if initialize_network else None
         if self.net is not None:
             self.net.eval() # 默认推理模式
 

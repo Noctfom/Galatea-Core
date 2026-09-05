@@ -7,8 +7,10 @@ import tempfile
 from pathlib import Path
 
 from semantic_assets import (
+    build_expected_code_semantic_keys,
     CODE_EMBEDDINGS_INDEX_FILENAME,
     validate_code_semantic_assets,
+    validate_semantic_bundle,
 )
 
 class CodeSemanticEmbedder:
@@ -103,7 +105,7 @@ class CodeSemanticEmbedder:
             kb = json.load(f)
             
         entries = self._collect_effect_code(kb)
-        current_keys = {key for key, _ in entries}
+        current_keys = build_expected_code_semantic_keys(kb)
         output_path = Path(output_file).resolve()
         existing = None
         if incremental:
@@ -163,7 +165,10 @@ class CodeSemanticEmbedder:
                 return
 
         self._write_embedding_pair(output_path, embeddings, key_to_idx)
-        validate_code_semantic_assets(output_path.parent, required=True)
+        validate_semantic_bundle(
+            output_path.parent,
+            knowledge_base_filename=Path(kb_file).resolve().name,
+        )
         print(f"[代码语义] 提取完成，已保存至 {output_path} (维度: {embeddings.shape})")
 
 if __name__ == "__main__":

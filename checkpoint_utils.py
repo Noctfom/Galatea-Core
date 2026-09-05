@@ -14,7 +14,7 @@ from training_validation import validate_model_prefix
 
 # 仅表示训练检查点数据协议，必须独立于 app.py 中的框架版本维护
 CHECKPOINT_FORMAT_VERSION = 2
-# 模型输入/网络结构协议独立维护；V3 为连锁与历史增加顺序敏感聚合器
+# 模型输入/网络结构协议独立维护；V3 含顺序上下文及 Lua 效果槽绑定
 MODEL_PROTOCOL_VERSION = 3
 DEFAULT_MODEL_PREFIX = "galatea"
 MAX_CHECKPOINT_FILE_BYTES = 32 * 1024 * 1024 * 1024

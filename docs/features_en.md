@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.6.0**.
+> This document applies to **Galatea-Core v3.6.2**.
 
 ---
 
@@ -125,6 +125,7 @@ Configure and launch AI training tasks.
 
 **Model Action Protocol**:
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
+- v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
 - A protocol mismatch is rejected before loading so structurally different weights cannot be applied silently to the current action head
 
@@ -266,6 +267,14 @@ View special effects compressed through Hash clustering.
 
 Enter card code to view AI-perspective semantic features.
 
+#### 🧪 V3 Observation Audit
+
+- Training workers, Arena, and RuleBot self-check generate independent audit reports automatically
+- Reports are stored under `system_logs/protocol_v3_audit/`
+- Full-bundle validation cross-checks KB effect slots, code-vector rows, and index keys
+- Reports can be filtered by source to inspect chain-structure anomalies and effect-slot mappings
+- Lua `Stringid` is parsed offline only when the audit tab is opened, adding no script I/O to training
+
 ![Semantic KB](图片/语义知识库.png)
 
 ---
@@ -361,8 +370,8 @@ Package models as .gkg format:
 - Select an embedded `model_id` pool first, then choose `.pth`/`.onnx` primaries from that pool
 - Referenced `.onnx.data` files are included automatically
 - When both PTH and ONNX are selected, their embedded iteration sets must match
-- Optionally include structured semantics (`knowledge_base.json` + `hash_mapping_report.json`), code semantics (`code_embeddings.npy` + `code_embeddings_idx.json`), and the staple pool (`meta_staples.json`)
-- The code matrix and index must appear together with their matching KB; the manifest records and validates these dependencies
+- Optionally include the complete runtime semantic bundle (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, plus `hash_mapping_report.json` when present) and the staple pool (`meta_staples.json`)
+- The three runtime semantic files cannot be imported or exported separately; the manifest cross-checks KB effect slots, vector rows, and index keys
 - Always generate and validate `manifest.json`
 - Custom package name support
 

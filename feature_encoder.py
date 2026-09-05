@@ -132,7 +132,7 @@ class GalateaEncoder:
 
     @staticmethod
     def _encode_chain_context(item, player_id):
-        """把连锁处理卡位置、触发位置和效果编号压缩为行动方视角特征"""
+        """把连锁位置与已确认的 Lua 效果槽压缩为行动方视角特征"""
         trigger_controller = int(item.get('c', -1))
         trigger_location = int(item.get('l', 0))
         trigger_sequence = int(item.get('s', 0))
@@ -140,7 +140,7 @@ class GalateaEncoder:
         handler_location = int(item.get('hl', trigger_location))
         handler_sequence = int(item.get('hs', trigger_sequence))
         handler_position = int(item.get('hp', 0))
-        desc = int(item.get('desc', 0))
+        effect_slot = int(item.get('effect_slot', -1))
         chain_index = int(item.get('ct', 0))
 
         def relative_controller(controller):
@@ -158,7 +158,7 @@ class GalateaEncoder:
             trigger_location / 100.0,
             min(max(trigger_sequence, 0), 31) / 10.0,
             min(max(chain_index, 0), 12) / 12.0,
-            (desc & 0xF) / 15.0,
+            (effect_slot + 1) / 8.0 if 0 <= effect_slot < 8 else 0.0,
         ]
 
     @staticmethod
@@ -206,6 +206,19 @@ class GalateaEncoder:
                 m[j] = True
         if not np.any(m): m[0] = True
         return m
+
+    @staticmethod
+    def _focus_semantic_mask(base_mask, effect_slot):
+        """精确槽可用时只关注该 Lua 效果，否则保留整卡语义回退"""
+        try:
+            slot_index = int(effect_slot)
+        except (TypeError, ValueError):
+            return base_mask
+        if not 0 <= slot_index < 8 or not bool(base_mask[slot_index]):
+            return base_mask
+        focused = np.zeros(8, dtype=np.bool_)
+        focused[slot_index] = True
+        return focused
     
     def _get_coords(self, player_id, owner, location, sequence):
         """将一维的 location 和 sequence 转换为二维平面坐标 (X, Y)"""
@@ -242,7 +255,7 @@ class GalateaEncoder:
     def encode_actions(self, valid_actions, snapshot, player_id):
         """把合法动作编码为动作协议 V2 的固定形状张量"""
         max_materials = ACTION_TARGET_SLOTS
-        act_card_idxs, act_types, act_descs, masks = [], [], [], []
+        act_card_idxs, act_types, act_descs, act_effect_slots, masks = [], [], [], [], []
         act_races, act_attrs, act_codes, act_places = [], [], [], []
         act_operations, act_responses, act_signatures = [], [], []
         act_contexts, act_target_codes, act_target_values = [], [], []
@@ -281,6 +294,8 @@ class GalateaEncoder:
 
             act_types.append(act.action_type)
             act_descs.append(act.desc_id % 1024)
+            effect_slot = int(getattr(act, 'effect_slot', -1))
+            act_effect_slots.append(effect_slot + 1 if 0 <= effect_slot < 8 else 0)
             masks.append(True)
             act_operations.append(int(getattr(act, 'operation_id', 0)))
             act_responses.append(
@@ -319,6 +334,7 @@ class GalateaEncoder:
             act_places.extend([[0] * max_materials] * pad_len)
             act_types.extend([0] * pad_len)
             act_descs.extend([0] * pad_len)
+            act_effect_slots.extend([0] * pad_len)
             masks.extend([False] * pad_len)
             act_races.extend([0] * pad_len)
             act_attrs.extend([0] * pad_len)
@@ -337,6 +353,7 @@ class GalateaEncoder:
             'act_card_idx': torch.tensor(act_card_idxs, dtype=torch.long).unsqueeze(0),
             'act_type': torch.tensor(act_types, dtype=torch.long).unsqueeze(0),
             'act_desc': torch.tensor(act_descs, dtype=torch.long).unsqueeze(0),
+            'act_effect_slot': torch.tensor(act_effect_slots, dtype=torch.uint8).unsqueeze(0),
             'act_mask': torch.tensor(masks, dtype=torch.bool).unsqueeze(0),
             'act_race': torch.tensor(act_races, dtype=torch.long).unsqueeze(0),
             'act_attr': torch.tensor(act_attrs, dtype=torch.long).unsqueeze(0),
@@ -525,7 +542,11 @@ class GalateaEncoder:
                 c_sem_cats[i] = cc_out; c_sem_reqs[i] = cr_out; c_sem_scs[i] = cs_out
                 c_sem_nums[i] = cn_out; c_sem_refs[i] = cref_out; c_sem_races[i] = crace_out; c_sem_attrs[i] = cattr_out
                 c_sem_code_idx[i] = ccode_out
-                c_sem_mask[i] = self._get_sem_mask(cc_out, ccode_out)
+                base_mask = self._get_sem_mask(cc_out, ccode_out)
+                c_sem_mask[i] = self._focus_semantic_mask(
+                    base_mask,
+                    item.get('effect_slot', -1),
+                )
                 c_card_idx[i] = self._hash_code(item['code'])
                 c_desc[i] = int(item.get('desc', 0)) % 1024
                 c_context[i] = self._encode_chain_context(item, player_id)
@@ -553,7 +574,11 @@ class GalateaEncoder:
                 h_sem_cats[i] = hc_out; h_sem_reqs[i] = hr_out; h_sem_scs[i] = hs_out
                 h_sem_nums[i] = hn_out; h_sem_refs[i] = href_out; h_sem_races[i] = hrace_out; h_sem_attrs[i] = hattr_out
                 h_sem_code_idx[i] = hcode_out
-                h_sem_mask[i] = self._get_sem_mask(hc_out, hcode_out)
+                base_mask = self._get_sem_mask(hc_out, hcode_out)
+                h_sem_mask[i] = self._focus_semantic_mask(
+                    base_mask,
+                    item.get('effect_slot', -1),
+                )
                 h_masks[i] = True
 
         # ==========================================

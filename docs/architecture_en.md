@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.6.0**.
+> This document applies to **Galatea-Core v3.6.2**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -319,6 +319,8 @@ Each card has up to 8 effect slots, each containing:
 | attr | 4 | Associated attributes |
 
 In addition to the table above, every effect has an explicit slot identity from zero through seven. GitHub sync treats the four files in the same remote directory as one semantic bundle: the structured KB provides interpretable fields, the Hash map resumes clustering, and the code-semantic matrix plus index resume existing Lua vectors. When the assets are coherent, vector generation appends only new effect slots instead of re-encoding all existing scripts.
+
+In 3.6.1, encoder initialization began cross-checking every modeled KB slot against code-vector rows and index keys. In 3.6.2, semantic generation additionally tracks each `Effect.CreateEffect(c)` object to its `SetDescription(aux.Stringid(...))` call and binds the complete runtime `desc` to that same Lua code-semantic slot. GameState, action candidates, chain/history context, and `used_effect_mask` share this mapping; dynamic forms that cannot be proven statically fall back to whole-card semantics. Neither printed card text nor the numeric Stringid index defines slot identity.
 
 ### Hash Clustering Algorithm
 

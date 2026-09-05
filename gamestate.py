@@ -19,6 +19,8 @@ from data_types import (
     GameSnapshot,
     GlobalFeature,
 )
+from protocol_v3_audit import record_protocol_chain, record_protocol_message
+from effect_slot_binding import resolve_runtime_effect_slot
 
 _META_STAPLES = None
 
@@ -368,7 +370,15 @@ class MessageParser:
 
 class DuelState:
     # [新增参数] 传入初始的主卡组和额外卡组
-    def __init__(self, p0_main=None, p0_extra=None, p1_main=None, p1_extra=None):
+    def __init__(
+        self,
+        p0_main=None,
+        p0_extra=None,
+        p1_main=None,
+        p1_extra=None,
+        audit_enabled=True,
+    ):
+        """初始化单局状态；双状态镜像模式可关闭其中一份重复审计"""
         self.entities = {}
         self.current_valid_actions = []
         self.turn_player = 0
@@ -391,6 +401,7 @@ class DuelState:
         self.history_stack = []
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
+        self.audit_enabled = bool(audit_enabled)
 
     def reset(self):
         self.turn = 0
@@ -412,6 +423,8 @@ class DuelState:
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
         try:
+            if self.audit_enabled:
+                record_protocol_message(msg_type)
             stream = io.BytesIO(msg_payload)
             
             # --- 状态维护 ---
@@ -514,12 +527,13 @@ class DuelState:
                 ct = struct.unpack('<B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
                 hc, hl, hs, hp = LocationInfo.decode(info_loc)
 
-                # 【新增】提取效果槽位索引 (0-15) 并写入实体的记忆字典
-                effect_slot_idx = desc & 0xF  # 获取 0-15 的效果槽位
-                if effect_slot_idx < 8:
-                    if tc in [0, 1] and ts in self.field_map[tc].get(tl, {}):
-                        current_mask = self.field_map[tc][tl][ts].get('used_effect_mask', 0)
-                        self.field_map[tc][tl][ts]['used_effect_mask'] = current_mask | (1 << effect_slot_idx)
+                # 只接受 Lua 对象级精确绑定，desc 低位不是效果创建顺序
+                effect_slot_idx = resolve_runtime_effect_slot(code, desc)
+                if effect_slot_idx is not None:
+                    # 已用标记属于效果处理卡当前实体，而不是可能已经不同的触发位置
+                    if hc in [0, 1] and hs in self.field_map[hc].get(hl, {}):
+                        current_mask = self.field_map[hc][hl][hs].get('used_effect_mask', 0)
+                        self.field_map[hc][hl][hs]['used_effect_mask'] = current_mask | (1 << effect_slot_idx)
                 
                 # 压入堆栈记事本
                 self.chain_stack.append({
@@ -532,10 +546,27 @@ class DuelState:
                     'l': tl,
                     's': ts,
                     'desc': desc,
+                    'effect_slot': -1 if effect_slot_idx is None else effect_slot_idx,
                     'ct': ct,
                 })
+                if self.audit_enabled:
+                    record_protocol_chain(
+                        code=code,
+                        desc=desc,
+                        chain_index=ct,
+                        chain_depth=len(self.chain_stack),
+                        handler_controller=hc,
+                        handler_location=hl,
+                        handler_sequence=hs,
+                        trigger_controller=tc,
+                        trigger_location=tl,
+                        trigger_sequence=ts,
+                    )
                 # 压入历史记事本 (最近发生的在最前面)
-                self.history_stack.insert(0, {'code': code})
+                self.history_stack.insert(0, {
+                    'code': code,
+                    'effect_slot': -1 if effect_slot_idx is None else effect_slot_idx,
+                })
                 # 保持记忆容量为 8
                 if len(self.history_stack) > 8:
                     self.history_stack.pop()
@@ -613,6 +644,7 @@ class DuelState:
             if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
                 self.active_player = struct.unpack('<B', msg_payload[0:1])[0]
                 self._parse_valid_actions(msg_type, stream)
+                self._bind_action_effect_slots()
             # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
             # 否则重演时无法用上一次的选项去验证人类的修正点击
             elif msg_type != 1: 
@@ -622,6 +654,15 @@ class DuelState:
             print(f"⚠️ [GameState] update消息解析失败: {e}")
             # 抛出异常，击毙这局烂尾游戏
             raise RuntimeError(f"GameState 解析错位，拒绝产生幻觉: {e}")
+
+    def _bind_action_effect_slots(self):
+        """把带卡号与 desc 的合法动作绑定到 Lua 代码语义槽"""
+        for action in self.current_valid_actions:
+            slot_index = resolve_runtime_effect_slot(
+                getattr(action, 'code', 0),
+                getattr(action, 'desc_id', 0),
+            )
+            action.effect_slot = -1 if slot_index is None else slot_index
 
     def _parse_valid_actions(self, msg_type, stream):
         """

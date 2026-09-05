@@ -120,6 +120,7 @@ class GameAction:
     desc_str: str = ""
 
     desc_id: int = 0      # 效果ID，用于区分同一张卡的不同效果
+    effect_slot: int = -1 # Lua 代码语义槽（零基）；无法精确绑定时保持 -1
 
     # 动作协议 V2：把过去只存在于 index/文字/原始响应里的语义显式交给模型。
     code: int = 0

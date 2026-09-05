@@ -164,8 +164,8 @@ def find_runtime_asset_issues(project_root=None, require_portable_python=False):
             issues.append(f"缺少或为空的运行目录: {relative_name}")
 
     try:
-        from semantic_assets import validate_code_semantic_assets
-        validate_code_semantic_assets(project_root, required=True)
+        from semantic_assets import validate_semantic_bundle
+        validate_semantic_bundle(project_root)
     except (OSError, ValueError) as exc:
         issues.append(f"代码语义资产无效: {exc}")
 

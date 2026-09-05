@@ -31,6 +31,10 @@ from data_types import ActionOperation
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
+from protocol_v3_audit import (
+    configure_protocol_v3_audit,
+    flush_protocol_v3_audit,
+)
 import warnings # [新增]
 # [新增] 屏蔽 PyTorch 的 Nested Tensor 警告
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules.transformer")
@@ -306,6 +310,11 @@ def worker_process(
         setup_global_logger(prefix=f"worker_{worker_id}")
     except ImportError:
         pass
+
+    configure_protocol_v3_audit(
+        source=f"worker_{worker_id}",
+        run_label=f"iter_{iteration}",
+    )
 
     import gamestate
     if standard_core:
@@ -1382,6 +1391,9 @@ def worker_process(
         return
     
     finally:
+        flushed_audit_path = flush_protocol_v3_audit(force=True)
+        if flushed_audit_path is not None:
+            print(f"🧪 [Worker {worker_id}] V3 观测审计已保存: {flushed_audit_path}")
         # =========================================================================
         # [内存安全清理] 显式释放所有大型张量，防止 Windows 内存泄漏
         # =========================================================================

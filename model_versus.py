@@ -23,6 +23,10 @@ from feature_encoder import MAX_CARDS
 from checkpoint_utils import MODEL_PROTOCOL_VERSION
 import deck_utils
 from thought_logger import AIThoughtLogger, REPLAY_EVENT_MSGS
+from protocol_v3_audit import (
+    configure_protocol_v3_audit,
+    flush_protocol_v3_audit,
+)
 
 
 ARENA_LOOP_SOFT_BAN_THRESHOLD = 5
@@ -34,7 +38,7 @@ def select_arena_action_index(
     loop_bans,
     loop_counts=None,
 ):
-    """应用硬/软禁用；软禁用耗尽时改选访问次数最低的合法候选。"""
+    """应用硬/软禁用；软禁用耗尽时改选访问次数最低的合法候选"""
     if valid_logits.dim() != 1 or valid_logits.numel() == 0:
         raise RuntimeError("model produced no encodable actions")
 
@@ -42,7 +46,7 @@ def select_arena_action_index(
     if not finite_mask.any():
         raise RuntimeError("model produced no finite action logits")
 
-    # 网络内部使用极小值屏蔽 act_mask=False 的槽位；有效前缀不应全部落入该范围。
+    # 网络内部使用极小值屏蔽 act_mask=False 的槽位；有效前缀不应全部落入该范围
     available_mask = finite_mask & (valid_logits > -64000.0)
     if not available_mask.any():
         raise RuntimeError("model or encoder masked every valid action")
@@ -80,7 +84,7 @@ def select_arena_action_index(
 
 
 def describe_arena_loop_state(snapshot, msg_type, state_key, loop_tracker):
-    """生成防循环软禁用耗尽时的候选与重复次数摘要。"""
+    """生成防循环软禁用耗尽时的候选与重复次数摘要"""
     details = []
     for index, action in enumerate(snapshot.valid_actions):
         description = action.desc_str or f"Type={action.action_type}"
@@ -90,7 +94,7 @@ def describe_arena_loop_state(snapshot, msg_type, state_key, loop_tracker):
 
 
 def find_matching_action_index(snapshot, response, msg_type, msg_args, packer):
-    """按真实 Core 响应反查 RuleBot 选择的普通候选索引。"""
+    """按真实 Core 响应反查 RuleBot 选择的普通候选索引"""
     expected = bytes(response) if isinstance(response, (bytes, bytearray)) else response
     for index, action in enumerate(snapshot.valid_actions):
         try:
@@ -131,6 +135,10 @@ class ModelArena:
         p1_name = os.path.basename(model_p1_path) if model_p1_path else "RuleBot"
         self.p0_name = p0_name
         self.p1_name = p1_name
+        configure_protocol_v3_audit(
+            source="arena",
+            run_label=f"{os.path.splitext(p0_name)[0]}_vs_{os.path.splitext(p1_name)[0]}",
+        )
         self.logger = AIThoughtLogger(player_name=p0_name, opponent_name=p1_name)
         
         # P0
@@ -588,3 +596,6 @@ class ModelArena:
         print("📊 胜负原因统计:")
         for k, v in reasons.items():
             if v > 0: print(f"   - {k}: {v}")
+        audit_path = flush_protocol_v3_audit(force=True)
+        if audit_path is not None:
+            print(f"🧪 V3 观测审计已保存: {audit_path}")

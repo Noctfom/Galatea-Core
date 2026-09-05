@@ -4,6 +4,37 @@
 
 ---
 
+## [v3.6.2] - 2026-09-04
+
+### 🔗 Exact Lua Runtime-Effect to Code-Semantic Binding
+
+- **Removed the invalid low-bit assumption**: The low four bits of Core `desc` retain a Stringid index; they are no longer interpreted as `Effect.CreateEffect(c)` creation order. The framework therefore no longer sets the wrong `used_effect_mask` bit or focuses a chain on an unrelated semantic slot
+- **Generated mappings from Lua object identity**: Semantic parsing follows each top-level Lua Effect object to a static `SetDescription(aux.Stringid(...))` and writes the complete runtime `desc` onto the same code-semantic slot. Printed card-description text is neither read nor parsed
+- **Safe fallback for ambiguity**: Dynamic expressions, passive effects without descriptions, and a `desc` shared by multiple Effect objects are never guessed. Actions, chains, and history retain whole-card semantics, and no false used-effect bit is set
+- **Exact effect semantics for action candidates**: Legal actions add a compact `act_effect_slot` input. With both an entity pointer and an exact binding, the policy head directly indexes that slot's existing Lua code vector. Flattened indexing creates only candidate-scale selected vectors, never a candidate-by-eight-slot expansion, and adds no network parameters
+- **Unified runtime path**: GameState, action candidates, the 12-entry chain, eight-entry activation history, and entity used-effect bits share one mapping. Chain/history attention narrows to one slot only when binding is exact; unknown bindings preserve the former whole-card mask
+- **Semantic assets and audit upgraded**: Startup validates runtime-binding uniqueness, type, and range. WebUI replaces “current V3 assumed slot” with the actual Lua-bound slot and a `binding_missing` safe-fallback status; the audit report schema advances to 2
+- **Current assets migrated**: All 27,647 code-semantic slots and vector-index rows remain unchanged. The KB gains 13,831 exact runtime bindings across 8,951 cards. Ninety-four identifiers shared by multiple Lua objects were detected and intentionally omitted
+- **Adjacent issue fixed**: Semantic-cache construction now honors each explicit KB `slot` instead of relying on JSON list order. Model Protocol remains V3 and checkpoint/deployment container formats remain 2, but ONNX artifacts should be re-exported for this input signature
+- **Safe CUDA compile fallback**: Training now checks that CUDA Inductor's Triton backend is usable before wrapping the model. A portable environment without Triton no longer fails lazily on its first forward pass; it reports the condition and uses the result-equivalent eager path
+- **Full regression**: 149 automated tests pass with one environment-dependent skip, covering exact/cross-card/ambiguous binding, invalid-asset rejection, PyTorch forward, ONNX export, and ONNX Runtime inference. One real-Core model-vs-RuleBot smoke duel also passed
+
+---
+
+## [v3.6.1] - 2026-09-04
+
+### 🧪 Model Protocol V3 Stabilization
+
+- **Strict semantic-bundle cross-validation**: Encoder startup, code-semantic generation, deployment-package import/export, and one-click preflight now cross-check every modeled KB effect slot against matrix rows and index keys. Missing, stale, duplicate, or partial assets no longer silently fall back to zero vectors
+- **Automatic V3 observation audit**: Training workers, Arena, and RuleBot self-check aggregate Core message counts, chain depth, handler/trigger controller and location boundaries, runtime description slots, and semantic-slot coverage per process/iteration. Reports are atomically written under `system_logs/protocol_v3_audit/`
+- **Initial effect-slot mapping audit**: Runtime collection records only in-memory facts and performs no Lua I/O. Offline inspection of `SetDescription(aux.Stringid(...))` exposed that Stringid low bits are not Lua creation slots, directly motivating the object-level binding implemented in 3.6.2
+- **WebUI visualization**: Semantic Knowledge Engine now contains a V3 Observation Audit tab with on-demand full-bundle validation, source filtering, and card name/runtime description/KB slot/explicit Lua slot/count tables
+- **Stable protocol**: Network inputs, parameters, actions, rewards, PPO, Worker memory, and ZMQ flows are unchanged. `MODEL_PROTOCOL_VERSION` remains 3; checkpoint-container and deployment-package formats both remain 2
+- **Tightened deployment boundaries**: `.gkg` import/export now treats the knowledge base, code vectors, and vector index as one indivisible runtime semantic bundle, preventing a partial overwrite from breaking the next startup
+- **Full regression**: 143 automated tests completed with one environment-dependent skip, plus one real-Core RuleBot self-check duel. All 27,647 KB effect slots, 27,647 code-vector rows, and 27,647 index keys in the current assets match exactly
+
+---
+
 ## [v3.6.0] - 2026-09-03
 
 ### 🧠 Ordered Context and Model Protocol V3

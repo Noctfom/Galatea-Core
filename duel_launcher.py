@@ -8,11 +8,16 @@ from rich.table import Table
 from galatea_env import GalateaEnv
 import deck_utils
 import run_self_play # 引入刚才改好的 worker
+from protocol_v3_audit import (
+    configure_protocol_v3_audit,
+    flush_protocol_v3_audit,
+)
 
 class DuelManager:
     def __init__(self, core_dir, deck_dir, standard_core=False):
         self.deck_dir = deck_dir
         self.standard_core = standard_core
+        configure_protocol_v3_audit("rule_selfcheck", run_label="rule_vs_rule")
 
         import gamestate
         if standard_core:
@@ -69,6 +74,9 @@ class DuelManager:
 
         # 4. 打印报表
         self._print_report(stats, time.time() - start_t)
+        audit_path = flush_protocol_v3_audit(force=True)
+        if audit_path is not None:
+            print(f"🧪 V3 观测审计已保存: {audit_path}")
 
     def _print_report(self, stats, duration):
         console = Console()

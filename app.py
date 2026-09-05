@@ -40,6 +40,11 @@ from managed_processes import (
     purge_managed_processes,
 )
 from training_validation import resolve_training_target, validate_model_prefix
+from semantic_assets import validate_semantic_bundle
+from protocol_v3_audit import (
+    enrich_effect_slot_observation,
+    load_protocol_v3_audit_reports,
+)
 from replay_utils import (
     format_action_semantics,
     get_replay_frame_state,
@@ -77,7 +82,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.6.0"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.6.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1145,10 +1150,11 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
     st.markdown(_("将 Lua 脚本降维提纯，生成供神经网络食用的高维特征字典。", 
                   "Compress Lua scripts into high-dimensional semantic features for neural networks."))
     
-    tab_exec, tab_hash, tab_card = st.tabs([
-        _("⚙️ 执行中枢", "⚙️ Execution Hub"), 
+    tab_exec, tab_hash, tab_card, tab_audit = st.tabs([
+        _("⚙️ 执行中枢", "⚙️ Execution Hub"),
         _("🧬 特殊效果图鉴", "🧬 Custom Hash Explorer"),
-        _("🔍 单卡语义解剖", "🔍 Card Semantic Viewer")
+        _("🔍 单卡语义解剖", "🔍 Card Semantic Viewer"),
+        _("🧪 V3 观测审计", "🧪 V3 Observation Audit"),
     ])
     
     # --- 1. 执行中枢 ---
@@ -1261,6 +1267,149 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                     st.warning(_("知识库中未找到该卡片的独立效果，这可能是一张白板怪兽，或脚本极其特殊。", "Card not found in Knowledge Base. It might be a Normal Monster or has no extractable effects."))
         else:
             st.info(_("请先在 [执行中枢] 提取语义数据。", "Please run the parser in Execution Hub first."))
+
+    # --- 4. Model Protocol V3 运行观测与效果槽映射审计 ---
+    with tab_audit:
+        st.markdown("### " + _("Model Protocol V3 观测审计", "Model Protocol V3 Observation Audit"))
+        st.info(_(
+            "训练 Worker、竞技场和 RuleBot 自检会自动采集；每个进程/训练轮次生成独立 JSON，保存在 `system_logs/protocol_v3_audit/`。审计只读取公开报文，不改变模型输入、动作或奖励。",
+            "Training workers, Arena, and RuleBot self-check collect automatically. Each process/iteration writes an independent JSON under `system_logs/protocol_v3_audit/`. Auditing observes public packets only and never changes model inputs, actions, or rewards.",
+        ))
+
+        validation_col, refresh_col = st.columns(2)
+        with validation_col:
+            if st.button(_("校验完整语义资产", "Validate Semantic Bundle"), key="validate_v3_semantics", **REPLAY_BUTTON_WIDTH):
+                try:
+                    validated = validate_semantic_bundle(PROJECT_ROOT)
+                    st.success(_(
+                        f"语义资产一致：{validated['effect_slot_count']} 个效果槽、{validated['runtime_effect_binding_count']} 个运行时 Lua 绑定，向量维度 {validated['shape']}。",
+                        f"Semantic bundle is coherent: {validated['effect_slot_count']} effect slots, {validated['runtime_effect_binding_count']} runtime Lua bindings, matrix shape {validated['shape']}.",
+                    ))
+                except (OSError, ValueError) as error:
+                    st.error(_(f"语义资产校验失败：{error}", f"Semantic validation failed: {error}"))
+        with refresh_col:
+            st.button(_("刷新审计报告", "Refresh Audit Reports"), key="refresh_v3_audit", **REPLAY_BUTTON_WIDTH)
+
+        audit_reports = load_protocol_v3_audit_reports(
+            os.path.join(PROJECT_ROOT, "system_logs", "protocol_v3_audit")
+        )
+        if not audit_reports:
+            st.warning(_(
+                "尚无动态审计报告。运行一次训练、模型竞技场或 `python main.py play` 后再刷新此页。",
+                "No dynamic audit report exists yet. Run training, Arena, or `python main.py play`, then refresh this tab.",
+            ))
+        else:
+            available_sources = sorted({report.get("source", "unknown") for report in audit_reports})
+            selected_sources = st.multiselect(
+                _("运行来源", "Run Sources"),
+                available_sources,
+                default=available_sources,
+                key="v3_audit_sources",
+            )
+            visible_reports = [
+                report for report in audit_reports
+                if report.get("source", "unknown") in selected_sources
+            ]
+
+            total_messages = 0
+            total_chain_events = 0
+            structural_issues = 0
+            effect_rows = []
+            status_totals = {}
+            structural_issue_keys = {
+                "chain_depth_overflow",
+                "invalid_chain_index",
+                "invalid_handler_controller",
+                "invalid_trigger_controller",
+                "invalid_handler_location",
+                "invalid_trigger_location",
+                "invalid_handler_sequence",
+                "invalid_trigger_sequence",
+            }
+            for report in visible_reports:
+                counters = report.get("counters", {})
+                total_messages += int(counters.get("messages_total", 0))
+                total_chain_events += int(counters.get("chain_events", 0))
+                structural_issues += sum(
+                    int(counters.get(key, 0)) for key in structural_issue_keys
+                )
+                for raw_observation in report.get("effect_observations", []):
+                    observation = enrich_effect_slot_observation(raw_observation)
+                    count = int(observation.get("count", 0))
+                    status = str(observation.get("status", "unverified"))
+                    status_totals[status] = status_totals.get(status, 0) + count
+                    card_code = int(observation.get("card_code", 0))
+                    description_index = int(observation.get("description_index", -1))
+                    runtime_desc = int(observation.get("runtime_desc", 0))
+                    effect_rows.append({
+                        _("状态", "Status"): status,
+                        _("卡片", "Card"): card_db_ui.get_card_name(card_code),
+                        _("卡号", "Card Code"): card_code,
+                        _("Stringid 索引(0基)", "Stringid Index (0-based)"): description_index,
+                        _("Lua 绑定语义槽(1基)", "Lua-bound Semantic Slot (1-based)"): (
+                            str(int(observation["resolved_effect_slot"]) + 1)
+                            if observation.get("resolved_effect_slot") is not None
+                            else "-"
+                        ),
+                        _("原始 desc", "Raw desc"): runtime_desc,
+                        _("语义槽", "Semantic Slots"): ", ".join(
+                            str(int(slot) + 1) for slot in observation.get("semantic_slots", [])
+                        ) or "-",
+                        _("Lua 显式槽", "Explicit Lua Slots"): ", ".join(
+                            str(int(slot) + 1) for slot in observation.get("explicit_lua_slots", [])
+                        ) or "-",
+                        _("出现次数", "Count"): count,
+                        _("来源", "Source"): report.get("source", "unknown"),
+                        _("批次", "Run"): report.get("run_label", "run"),
+                        _("更新时间", "Updated"): report.get("updated_at", ""),
+                    })
+
+            mismatch_count = int(status_totals.get("mismatch", 0))
+            missing_count = sum(
+                int(status_totals.get(status, 0))
+                for status in (
+                    "missing_card_semantics",
+                    "binding_missing",
+                    "outside_model_slots",
+                    "outside_semantic_slots",
+                    "explicit_slot_missing_semantics",
+                    "invalid_observation",
+                )
+            )
+            metric_columns = st.columns(5)
+            metric_columns[0].metric(_("报告", "Reports"), len(visible_reports))
+            metric_columns[1].metric(_("Core 消息", "Core Messages"), total_messages)
+            metric_columns[2].metric(_("连锁发动", "Chain Events"), total_chain_events)
+            metric_columns[3].metric(_("显式错位", "Explicit Mismatches"), mismatch_count)
+            metric_columns[4].metric(_("结构/语义异常", "Structural/Semantic Issues"), structural_issues + missing_count)
+
+            if effect_rows:
+                status_priority = {
+                    "mismatch": 0,
+                    "missing_card_semantics": 1,
+                    "binding_missing": 2,
+                    "outside_model_slots": 3,
+                    "outside_semantic_slots": 4,
+                    "explicit_slot_missing_semantics": 5,
+                    "invalid_observation": 6,
+                    "unverified": 7,
+                    "exact": 8,
+                }
+                status_column = _("状态", "Status")
+                count_column = _("出现次数", "Count")
+                effect_rows.sort(
+                    key=lambda row: (
+                        status_priority.get(row[status_column], 99),
+                        -int(row[count_column]),
+                    )
+                )
+                st.caption(_(
+                    "`exact` 表示完整运行时 desc 已通过 Lua Effect 对象绑定到代码语义槽；`binding_missing` 表示脚本使用动态或未支持的写法，系统会安全回退到整卡语义，不会猜测。Stringid 仅作调试展示，不再当作效果槽序号。",
+                    "`exact` means the complete runtime desc was bound to a code-semantic slot through its Lua Effect object. `binding_missing` means the script uses a dynamic or unsupported form, so the system safely falls back to whole-card semantics instead of guessing. Stringid is diagnostic only and is no longer treated as a slot ordinal.",
+                ))
+                st.dataframe(pd.DataFrame(effect_rows), hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+            else:
+                st.info(_("所选报告中尚无连锁效果记录。", "The selected reports contain no chain-effect observations."))
 
 # ==========================================
 # 🗃️ 模块五：资产与卡组管理
@@ -3161,8 +3310,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 sel_models = []
                 preview_records = []
                 st.warning(_(
-                    "暂无可验证的模型池；仍可只打包知识库。",
-                    "No verified model pool is available; a knowledge-only package is still allowed.",
+                    "暂无可验证的模型池；仍可打包完整运行时语义或兜底池。",
+                    "No verified model pool is available; a complete runtime semantic bundle or staples can still be packaged.",
                 ))
 
             selection_warning = get_model_iteration_mismatch(preview_records)
@@ -3188,11 +3337,18 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
 
             with st.form("pack_form"):
                 st.markdown("##### 🗂️ 附加数据组件")
-                c1, c2, c3, c4 = st.columns(4)
-                with c1: inc_kb = st.checkbox("包含 结构语义", value=True, help="knowledge_base.json + hash_mapping_report.json")
-                with c2: inc_code_semantics = st.checkbox("包含 代码语义", value=True, help="code_embeddings.npy + code_embeddings_idx.json")
-                with c3: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
-                with c4: st.checkbox("强制安全清单", value=True, disabled=True, help="manifest.json")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    inc_semantic_bundle = st.checkbox(
+                        "包含 完整运行时语义",
+                        value=True,
+                        help=(
+                            "knowledge_base.json + code_embeddings.npy + "
+                            "code_embeddings_idx.json；Hash 接续索引存在时一并携带"
+                        ),
+                    )
+                with c2: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
+                with c3: st.checkbox("强制安全清单", value=True, disabled=True, help="manifest.json")
                 
                 st.markdown("##### 🏷️ 包体信息")
                 pkg_name = st.text_input(_("自定义包名 (留空默认自动生成)", "Package Name"), placeholder="e.g. Galatea_V3_Full")
@@ -3204,18 +3360,19 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                     disabled=bool(selection_warning or prefix_warning),
                 ):
                     missing = []
-                    if inc_kb and not os.path.exists("knowledge_base.json"): missing.append("knowledge_base.json")
-                    if inc_code_semantics:
-                        for semantic_filename in ("code_embeddings.npy", "code_embeddings_idx.json"):
+                    if inc_semantic_bundle:
+                        for semantic_filename in (
+                            "knowledge_base.json",
+                            "code_embeddings.npy",
+                            "code_embeddings_idx.json",
+                        ):
                             if not os.path.exists(semantic_filename):
                                 missing.append(semantic_filename)
                     if inc_staples and not os.path.exists("meta_staples.json"): missing.append("meta_staples.json")
 
                     if missing:
                         st.error(_(f"缺少勾选的组件: {', '.join(missing)}。请先生成或取消勾选！", f"Missing files: {', '.join(missing)}."))
-                    elif inc_code_semantics and not inc_kb:
-                        st.error(_("代码语义必须和对应知识库一起打包。", "Code semantics must be packaged with their knowledge base."))
-                    elif not sel_models and not (inc_kb or inc_code_semantics or inc_staples):
+                    elif not sel_models and not (inc_semantic_bundle or inc_staples):
                         st.error("包体不能为空，请至少选择一个模型或组件！")
                     else:
                         try:
@@ -3224,11 +3381,10 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                 validate_package_name(final_name)
                                 target_zip = os.path.join(deploy_dir, f"{final_name}.gkg")
                                 extra_files = {}
-                                if inc_kb:
+                                if inc_semantic_bundle:
                                     extra_files["knowledge_base.json"] = "knowledge_base.json"
                                     if os.path.exists("hash_mapping_report.json"):
                                         extra_files["hash_mapping_report.json"] = "hash_mapping_report.json"
-                                if inc_code_semantics:
                                     extra_files["code_embeddings.npy"] = "code_embeddings.npy"
                                     extra_files["code_embeddings_idx.json"] = "code_embeddings_idx.json"
                                 if inc_staples: extra_files["meta_staples.json"] = "meta_staples.json"
@@ -3381,18 +3537,15 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
 
                             root_file_groups = [
                                 (
-                                    "结构化语义（知识库 + Hash 接续索引）",
+                                    "完整运行时语义（知识库 + 代码向量 + 索引 + 可选 Hash 接续索引）",
                                     [
                                         filename
-                                        for filename in ("knowledge_base.json", "hash_mapping_report.json")
-                                        if filename in staged_files
-                                    ],
-                                ),
-                                (
-                                    "代码语义向量（向量 + 索引）",
-                                    [
-                                        filename
-                                        for filename in ("code_embeddings.npy", "code_embeddings_idx.json")
+                                        for filename in (
+                                            "knowledge_base.json",
+                                            "code_embeddings.npy",
+                                            "code_embeddings_idx.json",
+                                            "hash_mapping_report.json",
+                                        )
                                         if filename in staged_files
                                     ],
                                 ),
@@ -3417,12 +3570,20 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                 if not selected_stage_models and not selected_root_files:
                                     st.warning("未勾选任何文件！")
                                 elif (
-                                    "code_embeddings.npy" in selected_root_files
-                                    and "knowledge_base.json" not in selected_root_files
+                                    bool({
+                                        "knowledge_base.json",
+                                        "code_embeddings.npy",
+                                        "code_embeddings_idx.json",
+                                    }.intersection(selected_root_files))
+                                    and not {
+                                        "knowledge_base.json",
+                                        "code_embeddings.npy",
+                                        "code_embeddings_idx.json",
+                                    }.issubset(selected_root_files)
                                 ):
                                     st.warning(_(
-                                        "导入代码语义时必须同时导入同包知识库，避免向量索引错配。",
-                                        "Import the matching knowledge base together with code semantics to avoid index mismatches.",
+                                        "运行时语义必须将知识库、代码向量和索引作为同一组导入。",
+                                        "Import the knowledge base, code vectors and index as one runtime semantic bundle.",
                                     ))
                                 else:
                                     try:

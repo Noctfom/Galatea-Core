@@ -24,7 +24,7 @@ from semantic_assets import (
     HASH_MAPPING_FILENAME,
     KNOWLEDGE_BASE_FILENAME,
     SEMANTIC_ASSET_FILENAMES,
-    validate_code_semantic_assets,
+    validate_semantic_bundle,
 )
 
 
@@ -1056,21 +1056,25 @@ def create_deployment_package(
     included_code_semantics = CODE_SEMANTIC_FILE_SET.intersection(extras)
     if included_code_semantics and included_code_semantics != CODE_SEMANTIC_FILE_SET:
         raise ValueError("code semantic vectors and their index must be packaged together")
-    if included_code_semantics:
-        if KNOWLEDGE_BASE_FILENAME not in extras:
-            raise ValueError("code semantic vectors require knowledge_base.json")
-        semantic_root = extras[CODE_EMBEDDINGS_FILENAME].parent
-        validated_semantics = validate_code_semantic_assets(
-            semantic_root,
-            required=True,
+    includes_knowledge_base = KNOWLEDGE_BASE_FILENAME in extras
+    includes_complete_code_semantics = included_code_semantics == CODE_SEMANTIC_FILE_SET
+    if includes_knowledge_base is not includes_complete_code_semantics:
+        raise ValueError(
+            "knowledge_base.json, code_embeddings.npy and "
+            "code_embeddings_idx.json must be packaged as one complete runtime semantic bundle"
         )
+    if included_code_semantics:
+        semantic_root = extras[CODE_EMBEDDINGS_FILENAME].parent
+        validated_semantics = validate_semantic_bundle(semantic_root)
         if (
             validated_semantics["embedding_path"]
             != extras[CODE_EMBEDDINGS_FILENAME]
             or validated_semantics["index_path"]
             != extras[CODE_EMBEDDINGS_INDEX_FILENAME]
+            or validated_semantics["knowledge_base_path"]
+            != extras[KNOWLEDGE_BASE_FILENAME]
         ):
-            raise ValueError("code semantic assets must come from one coherent directory")
+            raise ValueError("semantic assets must come from one coherent directory")
     if HASH_MAPPING_FILENAME in extras and KNOWLEDGE_BASE_FILENAME not in extras:
         raise ValueError("hash mapping requires knowledge_base.json")
 
@@ -1081,10 +1085,10 @@ def create_deployment_package(
         "models_included": selected_models,
         "model_artifacts": records,
         "model_files_included": model_files,
-        "includes_kb": KNOWLEDGE_BASE_FILENAME in extras,
+        "includes_kb": includes_knowledge_base,
         "includes_staples": "meta_staples.json" in extras,
         "includes_hash_mapping": HASH_MAPPING_FILENAME in extras,
-        "includes_code_semantics": included_code_semantics == CODE_SEMANTIC_FILE_SET,
+        "includes_code_semantics": includes_complete_code_semantics,
     }
 
     temporary = tempfile.NamedTemporaryFile(
@@ -1201,10 +1205,15 @@ def validate_deployment_package(stage_dir):
         raise ValueError("deployment package contains an incomplete code semantic pair")
     if includes_code_semantics is not (actual_code_semantics == CODE_SEMANTIC_FILE_SET):
         raise ValueError("manifest includes_code_semantics does not match package contents")
+    has_knowledge_base = KNOWLEDGE_BASE_FILENAME in actual_names
+    has_complete_code_semantics = actual_code_semantics == CODE_SEMANTIC_FILE_SET
+    if has_knowledge_base is not has_complete_code_semantics:
+        raise ValueError(
+            "deployment package must contain knowledge_base.json, code_embeddings.npy and "
+            "code_embeddings_idx.json as one complete runtime semantic bundle"
+        )
     if actual_code_semantics:
-        if KNOWLEDGE_BASE_FILENAME not in actual_names:
-            raise ValueError("code semantic vectors require knowledge_base.json")
-        validate_code_semantic_assets(stage_root, required=True)
+        validate_semantic_bundle(stage_root)
         expected_names.update(CODE_SEMANTIC_FILE_SET)
     if HASH_MAPPING_FILENAME in actual_names and KNOWLEDGE_BASE_FILENAME not in actual_names:
         raise ValueError("hash mapping requires knowledge_base.json")

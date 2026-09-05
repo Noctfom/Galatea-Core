@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.6.0**.
+> This document applies to **Galatea-Core v3.6.2**.
 
 ---
 
@@ -81,6 +81,8 @@ Go to **🧠 Semantic Knowledge Engine**:
 > 📖 See [Special Handling - Semantic KB](special_handling.md#语义化模块semantic-kb) for Hash clustering details.
 
 Wait for parsing to complete (first time may take several minutes). Structured knowledge, the Hash continuation index, and code-semantic vectors are stored together in the project root.
+
+After training or Arena starts, open **Semantic Knowledge Engine → V3 Observation Audit** to inspect automatic reports. Before the first real training run, use **Validate Semantic Bundle**; raw reports are also available under `system_logs/protocol_v3_audit/`.
 
 ---
 

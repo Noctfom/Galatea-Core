@@ -388,7 +388,21 @@ class GalateaNet(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=1.0)
                 nn.init.constant_(m.bias, 0.0)
 
-    def process_semantics(self, sem_cat, sem_req, sem_sc, sem_num, sem_ref, sem_race, sem_attr, sem_code_idx, sem_mask, feat_vecs=None):
+    def process_semantics(
+        self,
+        sem_cat,
+        sem_req,
+        sem_sc,
+        sem_num,
+        sem_ref,
+        sem_race,
+        sem_attr,
+        sem_code_idx,
+        sem_mask,
+        feat_vecs=None,
+        return_slots=False,
+    ):
+        """聚合 Lua 代码语义；按需同时返回保留槽身份的效果向量"""
         cat_v = self.sem_cat_embed(sem_cat.long()).sum(dim=-2)
         
         # 残差融合代码语义
@@ -450,8 +464,10 @@ class GalateaNet(nn.Module):
             key_padding_mask=key_padding_mask
         )
         
-        card_sem_v = attn_out.view(B, N, D)
-        return self.final_slot_norm(card_sem_v)
+        card_sem_v = self.final_slot_norm(attn_out.view(B, N, D))
+        if return_slots:
+            return card_sem_v, slot_v
+        return card_sem_v
 
     def forward(self, batch_dict):
         # --- 全局状态调制器 ---
@@ -467,14 +483,16 @@ class GalateaNet(nn.Module):
 
         # 接入语义大脑！
         if 'sem_category' in batch_dict:
-            x_sem = self.process_semantics(
-                batch_dict['sem_category'], batch_dict['sem_req'], 
+            x_sem, x_sem_slots = self.process_semantics(
+                batch_dict['sem_category'], batch_dict['sem_req'],
                 batch_dict['sem_setcode'], batch_dict['sem_number'],
                 batch_dict['sem_ref'], batch_dict['sem_race'], batch_dict['sem_attr'],
-                batch_dict['sem_code_idx'], batch_dict['sem_mask'], x_feat  #传入新增的 3 个变量
+                batch_dict['sem_code_idx'], batch_dict['sem_mask'], x_feat,
+                return_slots=True,
             )
         else:
             x_sem = 0.0
+            x_sem_slots = None
         # 全息物理与语义的大一统！
         x = x_code + x_overlay + x_feat + x_race + x_attr + x_setcode + x_sem
         seq_len = x.shape[1]
@@ -602,6 +620,46 @@ class GalateaNet(nn.Module):
         act_attr_vecs = self.attr_embed(batch_dict['act_attr'])
         act_code_vecs = self.card_embed(batch_dict['act_code'])
 
+        # 通过实体指针和精确 Lua 槽位取出本次动作对应的代码语义；未知绑定保持零向量
+        action_effect_vecs = torch.zeros_like(act_code_vecs)
+        if x_sem_slots is not None:
+            effect_slot_ids = batch_dict['act_effect_slot'].long()
+            source_entity_ids = act_card_idx[..., 0].long()
+            safe_source_entity_ids = source_entity_ids.clamp(
+                0, x_sem_slots.shape[1] - 1
+            )
+            source_card_ids = torch.gather(
+                batch_dict['card_idx'].long(),
+                1,
+                safe_source_entity_ids,
+            )
+            known_effects = (
+                (effect_slot_ids > 0)
+                & (effect_slot_ids <= x_sem_slots.shape[2])
+                & (source_entity_ids >= 0)
+                & (source_entity_ids < x_sem_slots.shape[1])
+                & (source_card_ids == batch_dict['act_code'].long())
+            )
+            flat_slots = x_sem_slots.reshape(
+                B,
+                x_sem_slots.shape[1] * x_sem_slots.shape[2],
+                D,
+            )
+            safe_slot_ids = (effect_slot_ids - 1).clamp(
+                0, x_sem_slots.shape[2] - 1
+            )
+            flat_effect_ids = (
+                safe_source_entity_ids * x_sem_slots.shape[2]
+                + safe_slot_ids
+            )
+            action_effect_vecs = torch.gather(
+                flat_slots,
+                1,
+                flat_effect_ids[..., None].expand(-1, -1, D),
+            )
+            action_effect_vecs = self.final_slot_norm(action_effect_vecs)
+            action_effect_vecs = action_effect_vecs * known_effects.unsqueeze(-1)
+
         place_vecs_raw = self.place_embed(batch_dict['act_place']) # [B, 120, 5, 512]
         place_vecs = place_vecs_raw.sum(dim=2)                     # [B, 120, 512]
 
@@ -648,6 +706,7 @@ class GalateaNet(nn.Module):
             + act_race_vecs
             + act_attr_vecs
             + act_code_vecs
+            + action_effect_vecs
             + place_vecs
             + operation_vecs
             + response_vecs

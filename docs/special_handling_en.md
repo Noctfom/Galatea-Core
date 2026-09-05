@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.6.0**.
+> This document applies to **Galatea-Core v3.6.2**.
 
 ---
 
@@ -77,6 +77,12 @@ In **🧠 Semantic Knowledge Engine**:
 3. Click **Start Extracting Card Semantics** and wait for completion
 
 Hash-cluster labels are derived deterministically from normalized code through MD5. v3.6.0 fixes a different source of nondeterminism: semantic fields were deduplicated through unordered sets before fixed-slot truncation. GitHub sync now also inherits the Hash map and code-semantic vectors and automatically appends locally missing slots. If the remote Hash map is absent, continuation records are reconstructed from existing `CUSTOM_HASH_*` tags in the KB.
+
+### V3 Observation and Effect-Slot Audit
+
+Since 3.6.1, training workers, Arena, and RuleBot self-check collect audits without a switch. Runtime collection only aggregates Core messages and public chain fields into per-process reports under `system_logs/protocol_v3_audit/`; it never reads Lua and does not participate in action selection or reward calculation.
+
+Version 3.6.2 no longer treats the low four bits of `desc`, or the Stringid index, as Lua effect-creation order. Semantic generation follows a statically recognizable `SetDescription(aux.Stringid(...))` on the same `Effect.CreateEffect(c)` object and stores the complete `desc` on the corresponding code-semantic slot. Dynamic expressions, ambiguous bindings, and passive effects without descriptions are never guessed; runtime falls back to whole-card semantics and does not set a false “used this turn” bit. WebUI reports unresolved observations as `binding_missing` so static-parser coverage can be expanded safely.
 
 ---
 
