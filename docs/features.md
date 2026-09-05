@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.6.2**。
+> 文档适用于 **Galatea-Core v3.6.3**。
 
 ---
 
@@ -62,12 +62,19 @@
 
 | 指标 | 含义 | 理想趋势 |
 |------|------|----------|
-| `Train/Total_Loss` | 总损失 | 逐渐下降 |
-| `Train/Policy_Loss` | 策略损失 | 逐渐下降 |
-| `Train/Value_Loss` | 价值损失 | 逐渐下降 |
-| `Train/Entropy` | 探索熵值 | 缓慢下降 |
-| `Rollout/Average_Reward` | 平均奖励 | 逐渐上升 |
-| `League_Overall/WinRate_Total` | 总胜率 | 逐渐上升 |
+| `Train/Total_Loss` | PPO 策略、价值与熵项的组合量 | 不要求单调下降，主要排查非有限值与持续突变 |
+| `Train/Policy_Loss` | 截断后的策略目标 | 可围绕 0 波动，不单独作为棋力指标 |
+| `Train/Value_Loss` | 价值预测与回报的误差 | 长期趋势收窄，短期允许明显波动 |
+| `Train/Entropy` | 策略的探索不确定性 | 可缓慢下降，避免过早趋近 0 |
+| `Train/Approx_KL` | 新旧策略的近似 KL 偏移 | 保持较小，避免持续尖峰 |
+| `Train/Clip_Fraction` | 被 PPO 截断的样本比例 | 保持中低水平，不长期接近 0 或 1 |
+| `Train/Explained_Variance` | 价值网络对回报波动的解释程度 | 由 0 向 1 提升，长期为负值需检查 |
+| `Train/Gradient_Norm` | 裁剪前的总梯度范数 | 有限且无持续异常尖峰 |
+| `Rollout/Average_Reward` | 采样局平均奖励 | 优先比较同对手分组的平滑趋势 |
+| `League_Overall/WinRate_Total` | 联盟混合对手总胜率 | 结合 Rule/Self/Hist 分项观察，避免被采样比例误导 |
+| `Performance/Rollout_Steps_Per_Second` | 每秒采集的有效样本 | 稳定或提升 |
+| `Performance/Collection_Seconds` | 本轮数据采集耗时 | 相同规模和对手结构下稳定 |
+| `Performance/PPO_Update_Seconds` | 本轮 PPO 更新耗时 | 相同样本数下稳定 |
 
 #### 使用方法
 
@@ -268,7 +275,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 
 #### 🧪 V3 观测审计
 
-- 训练 Worker、竞技场和 RuleBot 自检自动生成独立审计报告
+- 训练和竞技场仅在开启 `--protocol-audit` 时生成独立报告；RuleBot 自检默认开启
 - 报告目录为 `system_logs/protocol_v3_audit/`
 - 可主动检查知识库效果槽、代码向量行与索引是否完全一致
 - 可按运行来源筛选连锁结构异常与效果槽映射结果
@@ -287,6 +294,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 | 标签页 | 目录 | 文件类型 |
 |--------|------|----------|
 | 系统日志 | `./system_logs/` | `.log` |
+| V3 审计报告 | `./system_logs/protocol_v3_audit/` | `.json` |
 | 读心记录 | `./ai_thoughts/` | `.json` |
 | 模型仓库 | `./models/` | `.pth`、`.onnx`、`.onnx.data`、`.artifacts.json` |
 | 对局数据 | `./web_data/` | `.csv` |
@@ -298,6 +306,10 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 - 导出（下载）文件
 - 批量删除
 - 一键清空（需二次确认）
+
+V3 审计报告可在独立标签页中预览、下载、批量删除或二次确认后清空；清理不
+会影响模型、检查点或语义资产。若对应审计任务仍在运行，其下一次周期刷新
+可能重新生成刚被删除的报告。
 
 模型仓库会以内置 `model_id` 为模型池、以内置轮次为制品组进行展示。上传 ONNX
 时必须同时提供主图和其引用的 `.onnx.data`；删除轮次会同步删除该轮次的 PTH、
@@ -417,6 +429,7 @@ python main.py train [选项]
 | `--use_onnx` | 保存点同步导出 ONNX，并加速历史对手推理 | - |
 | `--no_compile` | 禁用编译 | - |
 | `--standard_core` | 关闭幽灵字节解析（自编译内核用） | - |
+| `--protocol-audit` | 生成 V3 协议与效果槽诊断报告 | 关闭 |
 | `--gamma` | 折扣因子 | 0.998 |
 | `--lr` | 学习率 | 1e-4 |
 | `--entropy` | 熵正则系数 | 0.03 |
@@ -584,6 +597,7 @@ python deploy_tool.py
 | `device` | 训练主设备 | `auto` 优先 CUDA；`cpu` 仅用 CPU；Worker 始终使用 CPU |
 | `use_onnx` | 历史对手 ONNX 推理 | 保存点同步导出完整 ONNX 制品；运行失败时自动回退历史 PTH |
 | `no_compile` | 禁用编译 | Windows 或老旧环境建议启用 |
+| `protocol_audit` | V3 观测审计 | 诊断时手动开启；正式长训默认关闭 |
 
 #### RL 灵魂超参数（深层调优）
 

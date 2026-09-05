@@ -82,7 +82,7 @@ st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wid
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.6.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.6.3"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -807,8 +807,16 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         c_onnx = st.checkbox(_("同时导出 ONNX 静态模型 (--use_onnx)", "Export ONNX Model (--use_onnx)"), value=True, 
                              help=_("开启后会在保存 Checkpoint 时同步导出优化后的 .onnx 文件，大幅加速老模型对打和自决斗时的 CPU 推理速度。", 
                                    "Export .onnx graphs synchronously to accelerate CPU inference during arena duels."))
-        c_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False, 
+        c_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False,
                                  help=_("如果使用自编译的无幽灵字节内核(Standard Core)，请勾选此项以防止解析错位。", "Check this if using a custom core without ghost bytes at 16/31 messages."))
+        c_protocol_audit = st.checkbox(
+            _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
+            value=False,
+            help=_(
+                "仅用于协议排查：按 Worker 统计 Core 消息和效果槽映射。默认关闭，不影响模型输入或训练结果。",
+                "Diagnostic only: records Core messages and effect-slot mappings per worker. Disabled by default and never changes model inputs or training results.",
+            ),
+        )
         
         if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
             if is_running:
@@ -880,6 +888,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
                 if c_std_core: cmd.append("--standard_core")
+                if c_protocol_audit: cmd.append("--protocol-audit")
                 p = launch_managed_task(cmd)
                 st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
                 time.sleep(0.5)
@@ -905,6 +914,14 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 d_freq = st.number_input("🧠 " + _("读心频率 (导出 JSON)", "Thought Log Freq"), value=5, 
                                          help=_("每隔 N 局保存一次极其详尽的 AI 脑电波日志（存放于 ./ai_thoughts/），用于后续读心回放复盘。设为 0 关闭。", "Save AI probability dist every N games for replay."))
             d_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False)
+            d_protocol_audit = st.checkbox(
+                _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
+                value=False,
+                help=_(
+                    "为本次竞技场生成独立的 V3 协议诊断报告。",
+                    "Generate an independent V3 protocol diagnostic report for this Arena run.",
+                ),
+            )
             
             if st.form_submit_button("⚔️ " + _("在后台启动竞技场", "Start Arena Process"), use_container_width=True):
                 if is_running:
@@ -914,6 +931,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         cmd = [sys.executable, "main.py", "duel", "--p0", d_p0, "--num", str(d_num), "--thought_freq", str(d_freq)]
                         if d_p1 != "None": cmd.extend(["--p1", d_p1])
                         if d_std_core: cmd.append("--standard_core")
+                        if d_protocol_audit: cmd.append("--protocol-audit")
                         p = launch_managed_task(cmd)
                         st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
                         
@@ -1272,8 +1290,8 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
     with tab_audit:
         st.markdown("### " + _("Model Protocol V3 观测审计", "Model Protocol V3 Observation Audit"))
         st.info(_(
-            "训练 Worker、竞技场和 RuleBot 自检会自动采集；每个进程/训练轮次生成独立 JSON，保存在 `system_logs/protocol_v3_audit/`。审计只读取公开报文，不改变模型输入、动作或奖励。",
-            "Training workers, Arena, and RuleBot self-check collect automatically. Each process/iteration writes an independent JSON under `system_logs/protocol_v3_audit/`. Auditing observes public packets only and never changes model inputs, actions, or rewards.",
+            "训练和竞技场仅在勾选 `--protocol-audit` 时采集；RuleBot 自检仍默认开启。每个进程/训练轮次生成独立 JSON，保存在 `system_logs/protocol_v3_audit/`。审计只读取公开报文，不改变模型输入、动作或奖励。",
+            "Training and Arena collect only when `--protocol-audit` is enabled; RuleBot self-check remains enabled by default. Each process/iteration writes an independent JSON under `system_logs/protocol_v3_audit/`. Auditing observes public packets only and never changes model inputs, actions, or rewards.",
         ))
 
         validation_col, refresh_col = st.columns(2)
@@ -2079,12 +2097,13 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
     st.markdown(_("管理系统运行期间产生的所有日志、模型文件与 AI 心声记录。", 
                   "Manage all logs, models, and AI thoughts generated during system operation."))
     
-    tab_logs, tab_thoughts, tab_models, tab_data, tab_tb = st.tabs([ # <--- 增加了 tab_tb
+    tab_logs, tab_audit_logs, tab_thoughts, tab_models, tab_data, tab_tb = st.tabs([
         _("📜 系统日志", "📜 System Logs"),
+        _("🛡️ V3 审计报告", "🛡️ V3 Audit Reports"),
         _("🧠 读心记录", "🧠 Thought Replays"),
         _("🤖 模型仓库", "🤖 Model Storage"),
         _("📊 对局大盘数据", "📊 Match Data"),
-        _("📉 TensorBoard 数据", "📉 TensorBoard Runs") # <--- 增加这行
+        _("📉 TensorBoard 数据", "📉 TensorBoard Runs"),
     ])
     
     # 🌟 定义一个通用的文件管理器模板函数，直接消灭重复代码
@@ -2161,6 +2180,18 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
     # 渲染标签页的内容
     with tab_logs:
         build_file_manager("./system_logs", ".log", _("系统运行日志", "System Logs"), allow_view=True, allow_upload=False)
+    with tab_audit_logs:
+        st.caption(_(
+            "管理训练、竞技场和 RuleBot 自检产生的 Model Protocol V3 诊断 JSON；正在采集的报告删除后可能在下次周期刷新时重新生成。",
+            "Manage Model Protocol V3 diagnostic JSON reports produced by training, Arena, and RuleBot self-check. A report from an active run may be recreated at its next periodic flush.",
+        ))
+        build_file_manager(
+            "./system_logs/protocol_v3_audit",
+            ".json",
+            _("V3 观测审计报告", "V3 Observation Audit Reports"),
+            allow_view=True,
+            allow_upload=False,
+        )
     with tab_thoughts:
         build_file_manager("./ai_thoughts", ".json", _("AI 读心记录", "AI Thought Records"), allow_view=True, allow_upload=False)
     with tab_models:

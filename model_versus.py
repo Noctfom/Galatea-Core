@@ -109,7 +109,7 @@ def find_matching_action_index(snapshot, response, msg_type, msg_args, packer):
 
 class ModelArena:
     # 增加 config 参数
-    def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None, standard_core=False):
+    def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None, standard_core=False, protocol_audit=False):
         self.deck_dir = deck_dir
         self.standard_core = standard_core
 
@@ -135,10 +135,11 @@ class ModelArena:
         p1_name = os.path.basename(model_p1_path) if model_p1_path else "RuleBot"
         self.p0_name = p0_name
         self.p1_name = p1_name
-        configure_protocol_v3_audit(
-            source="arena",
-            run_label=f"{os.path.splitext(p0_name)[0]}_vs_{os.path.splitext(p1_name)[0]}",
-        )
+        if protocol_audit:
+            configure_protocol_v3_audit(
+                source="arena",
+                run_label=f"{os.path.splitext(p0_name)[0]}_vs_{os.path.splitext(p1_name)[0]}",
+            )
         self.logger = AIThoughtLogger(player_name=p0_name, opponent_name=p1_name)
         
         # P0

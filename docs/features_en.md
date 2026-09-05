@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.6.2**.
+> This document applies to **Galatea-Core v3.6.3**.
 
 ---
 
@@ -63,12 +63,19 @@
 
 | Metric | Meaning | Ideal Trend |
 |--------|---------|-------------|
-| `Train/Total_Loss` | Total loss | Decreasing |
-| `Train/Policy_Loss` | Policy loss | Decreasing |
-| `Train/Value_Loss` | Value loss | Decreasing |
-| `Train/Entropy` | Exploration entropy | Slowly decreasing |
-| `Rollout/Average_Reward` | Average reward | Increasing |
-| `League_Overall/WinRate_Total` | Total win rate | Increasing |
+| `Train/Total_Loss` | Combined PPO policy, value, and entropy objective | Need not decrease monotonically; watch for non-finite values and persistent discontinuities |
+| `Train/Policy_Loss` | Clipped policy objective | May oscillate around zero and is not a standalone playing-strength metric |
+| `Train/Value_Loss` | Error between value estimates and returns | Narrowing over the long term, with substantial short-term noise allowed |
+| `Train/Entropy` | Policy exploration uncertainty | May decrease slowly, but should not collapse toward zero too early |
+| `Train/Approx_KL` | Approximate old/new policy divergence | Small and stable; avoid persistent spikes |
+| `Train/Clip_Fraction` | Fraction of samples clipped by PPO | Moderate; avoid staying near 0 or 1 |
+| `Train/Explained_Variance` | How much return variance the value network explains | Rise from 0 toward 1; persistent negatives need investigation |
+| `Train/Gradient_Norm` | Total gradient norm before clipping | Finite and without sustained abnormal spikes |
+| `Rollout/Average_Reward` | Mean reward of sampled games | Prefer smoothed trends within the same opponent category |
+| `League_Overall/WinRate_Total` | Win rate over the mixed league pool | Read alongside Rule/Self/Hist splits to avoid opponent-mixture bias |
+| `Performance/Rollout_Steps_Per_Second` | Valid rollout samples collected per second | Stable or increasing |
+| `Performance/Collection_Seconds` | Collection duration for the iteration | Stable at comparable batch and opponent composition |
+| `Performance/PPO_Update_Seconds` | PPO update duration for the iteration | Stable at comparable sample counts |
 
 #### Usage
 
@@ -269,7 +276,7 @@ Enter card code to view AI-perspective semantic features.
 
 #### 🧪 V3 Observation Audit
 
-- Training workers, Arena, and RuleBot self-check generate independent audit reports automatically
+- Training and Arena generate independent reports only with `--protocol-audit`; RuleBot self-check remains enabled by default
 - Reports are stored under `system_logs/protocol_v3_audit/`
 - Full-bundle validation cross-checks KB effect slots, code-vector rows, and index keys
 - Reports can be filtered by source to inspect chain-structure anomalies and effect-slot mappings
@@ -288,6 +295,7 @@ Enter card code to view AI-perspective semantic features.
 | Tab | Directory | File Type |
 |-----|-----------|-----------|
 | System Logs | `./system_logs/` | `.log` |
+| V3 Audit Reports | `./system_logs/protocol_v3_audit/` | `.json` |
 | Thought Records | `./ai_thoughts/` | `.json` |
 | Model Storage | `./models/` | `.pth`, `.onnx`, `.onnx.data`, `.artifacts.json` |
 | Match Data | `./web_data/` | `.csv` |
@@ -299,6 +307,11 @@ Enter card code to view AI-perspective semantic features.
 - Export (download) files
 - Batch delete
 - One-click purge (requires confirmation)
+
+V3 audit reports have a dedicated tab for preview, download, batch deletion, and
+confirmed purge. Removing these diagnostics does not affect models, checkpoints,
+or semantic assets. If the corresponding audited task is still active, its next
+periodic flush may recreate a deleted report.
 
 Model storage is grouped by embedded `model_id`, then by embedded iteration. ONNX
 uploads must include both the graph and every referenced `.onnx.data` file. Deleting
@@ -418,6 +431,7 @@ python main.py train [options]
 | `--use_onnx` | Export ONNX at checkpoints and accelerate historical opponents | - |
 | `--no_compile` | Disable compilation | - |
 | `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
+| `--protocol-audit` | Generate V3 protocol and effect-slot diagnostics | Off |
 | `--gamma` | Discount factor | 0.998 |
 | `--lr` | Learning rate | 1e-4 |
 | `--entropy` | Entropy regularization coefficient | 0.03 |
@@ -588,6 +602,7 @@ Extract `.gkg` packages and import into current system:
 | `device` | Main training device | `auto` prefers CUDA; `cpu` is CPU-only; workers always use CPU |
 | `use_onnx` | Historical-opponent ONNX inference | Exports complete ONNX artifacts synchronously at checkpoints and falls back to historical PTH on failure |
 | `no_compile` | Disable compilation | Recommended for Windows or legacy environments |
+| `protocol_audit` | V3 observation audit | Enable manually for diagnosis; leave off for long training |
 
 #### RL Soul Hyperparameters (Deep Tuning)
 

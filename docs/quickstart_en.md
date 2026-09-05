@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.6.2**.
+> This document applies to **Galatea-Core v3.6.3**.
 
 ---
 
@@ -82,7 +82,7 @@ Go to **🧠 Semantic Knowledge Engine**:
 
 Wait for parsing to complete (first time may take several minutes). Structured knowledge, the Hash continuation index, and code-semantic vectors are stored together in the project root.
 
-After training or Arena starts, open **Semantic Knowledge Engine → V3 Observation Audit** to inspect automatic reports. Before the first real training run, use **Validate Semantic Bundle**; raw reports are also available under `system_logs/protocol_v3_audit/`.
+Training and Arena create reports only when **V3 Observation Audit (`--protocol-audit`)** is enabled; RuleBot self-check keeps it enabled by default. Inspect reports under **Semantic Knowledge Engine → V3 Observation Audit** or as raw JSON under `system_logs/protocol_v3_audit/`. Before the first real training run, use **Validate Semantic Bundle**.
 
 ---
 
@@ -236,10 +236,15 @@ Go to **📉 Training Manifold**, click **🚀 Start TensorBoard** to view:
 
 | Key Metric | Ideal Trend |
 |------------|-------------|
-| `Train/Total_Loss` | Decreasing |
+| `Train/Total_Loss` | Need not decrease monotonically; watch for non-finite values and persistent discontinuities |
 | `Train/Entropy` | Slowly decreasing |
-| `Rollout/Average_Reward` | Increasing |
-| `League_Overall/WinRate_Total` | Increasing |
+| `Train/Approx_KL` | Small, with no persistent spikes |
+| `Train/Clip_Fraction` | Moderate, not persistently near 0 or 1 |
+| `Train/Explained_Variance` | Rising from 0 toward 1 |
+| `Train/Gradient_Norm` | Finite, with no persistent spikes |
+| `Rollout/Average_Reward` | Compare smoothed trends within the same opponent category |
+| `League_Overall/WinRate_Total` | Interpret together with Rule/Self/Hist splits |
+| `Performance/Rollout_Steps_Per_Second` | Stable or increasing |
 
 ### Meta Dashboard
 

@@ -180,6 +180,7 @@ def run_training_command(args, parser):
             standard_core=args.standard_core,
             model_prefix=args.model_prefix,
             preloaded_resume_checkpoint=resume_checkpoint,
+            protocol_audit=args.protocol_audit,
         )
         try:
             training_lock.set_run_id(trainer.run_id)
@@ -247,6 +248,11 @@ def main():
 
     train_parser.add_argument('--use_onnx', action='store_true', help='在保存点同步导出 ONNX，并加速历史对手本地推理')
     train_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
+    train_parser.add_argument(
+        '--protocol-audit',
+        action='store_true',
+        help='采集 Model Protocol V3 诊断报告（默认关闭）',
+    )
 
     # RL 灵魂超参数
     train_parser.add_argument('--gamma', type=float, default=0.998, help='目光长远度 (推荐0.998)')
@@ -277,6 +283,11 @@ def main():
     duel_parser.add_argument("--n_heads", type=int, default=4, help=argparse.SUPPRESS)
     duel_parser.add_argument("--n_layers", type=int, default=2, help=argparse.SUPPRESS)
     duel_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
+    duel_parser.add_argument(
+        '--protocol-audit',
+        action='store_true',
+        help='采集 Model Protocol V3 诊断报告（默认关闭）',
+    )
     # --- 4. 语义化提取模式 (Parse) ---
     parse_parser = subparsers.add_parser('parse', help='提取并更新卡片Lua脚本语义知识库')
     parse_parser.add_argument('--script_dir', type=str, default='./script', help='Lua脚本所在目录')
@@ -348,7 +359,8 @@ def main():
             device=args.device,
             deck_dir=args.deck_dir,
             config=config,
-            standard_core=args.standard_core
+            standard_core=args.standard_core,
+            protocol_audit=args.protocol_audit,
         )
         arena.run_tournament(n_games=args.num)
         

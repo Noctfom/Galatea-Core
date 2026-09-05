@@ -301,6 +301,7 @@ def worker_process(
     shared_logits=None,
     standard_core=False,
     shared_response_ids=None,
+    protocol_audit=False,
 ):
     """在固定 CPU Worker 中运行对局采集并请求中央模型推理"""
 
@@ -311,10 +312,11 @@ def worker_process(
     except ImportError:
         pass
 
-    configure_protocol_v3_audit(
-        source=f"worker_{worker_id}",
-        run_label=f"iter_{iteration}",
-    )
+    if protocol_audit:
+        configure_protocol_v3_audit(
+            source=f"worker_{worker_id}",
+            run_label=f"iter_{iteration}",
+        )
 
     import gamestate
     if standard_core:

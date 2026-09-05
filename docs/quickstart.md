@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置，预计耗时 **5-10 分钟**。
 
-> 文档适用于 **Galatea-Core v3.6.2**。
+> 文档适用于 **Galatea-Core v3.6.3**。
 
 ---
 
@@ -72,7 +72,7 @@ Linux 用户请参考 [README.md](../README.md#linux-用户) 中的自动化安�
 
 等待解析完成（首次可能需要几分钟），结构化知识、Hash 接续索引和代码语义向量会作为一组保存在项目根目录。
 
-开始训练或竞技场后，可在 **语义知识库引擎 → V3 观测审计** 查看自动报告。首次正式训练前建议点击 **校验完整语义资产**；动态报告也可直接在 `system_logs/protocol_v3_audit/` 中查看。
+训练或竞技场需勾选 **V3 观测审计 (`--protocol-audit`)** 才会生成报告，RuleBot 自检默认开启。可在 **语义知识库引擎 → V3 观测审计** 查看，原始 JSON 位于 `system_logs/protocol_v3_audit/`。首次正式训练前建议点击 **校验完整语义资产**。
 
 ---
 
@@ -225,10 +225,15 @@ Galatea-Core 的训练参数分为三个层级，理解这个分类有助于你�
 
 | 关键指标 | 理想趋势 |
 |----------|----------|
-| `Train/Total_Loss` | 逐渐下降 |
+| `Train/Total_Loss` | 不要求单调下降，主要排查非有限值和持续突变 |
 | `Train/Entropy` | 缓慢下降 |
-| `Rollout/Average_Reward` | 逐渐上升 |
-| `League_Overall/WinRate_Total` | 逐渐上升 |
+| `Train/Approx_KL` | 保持较小，不应持续尖峰 |
+| `Train/Clip_Fraction` | 保持中低水平，不应长期接近 0 或 1 |
+| `Train/Explained_Variance` | 逐渐由 0 向 1 提升 |
+| `Train/Gradient_Norm` | 有限且无持续尖峰 |
+| `Rollout/Average_Reward` | 比较同对手分组的平滑趋势 |
+| `League_Overall/WinRate_Total` | 结合 Rule/Self/Hist 分项解读 |
+| `Performance/Rollout_Steps_Per_Second` | 稳定或提升 |
 
 ### 卡组生态大盘
 

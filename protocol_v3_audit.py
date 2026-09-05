@@ -164,6 +164,19 @@ class ProtocolV3AuditRecorder:
         location = int(location)
         return location in (1, 2, 4, 8, 16, 32, 64, 128)
 
+    @staticmethod
+    def _sequence_is_valid(location, sequence):
+        """按 Core 区域结构校验序号，可变长区域保留完整 uint8 范围"""
+        location = int(location)
+        sequence = int(sequence)
+        if not 0 <= sequence <= 0xFF:
+            return False
+        if location == 0x04:  # 怪兽区：5 主怪兽区 + 2 额外怪兽区
+            return sequence <= 6
+        if location == 0x08:  # 魔陷区：包含场地与钟摆序号
+            return sequence <= 7
+        return True
+
     def record_message(self, msg_type):
         """累计一条 Core 消息，并低频触发报告落盘"""
         with self.lock:
@@ -224,11 +237,14 @@ class ProtocolV3AuditRecorder:
                     self.counters[f"unknown_{label}_location"] += 1
                 elif not self._location_is_valid(location):
                     self.counters[f"invalid_{label}_location"] += 1
-            for label, sequence in (
-                ("handler", handler_sequence),
-                ("trigger", trigger_sequence),
+            for label, location, sequence in (
+                ("handler", handler_location, handler_sequence),
+                ("trigger", trigger_location, trigger_sequence),
             ):
-                if not 0 <= int(sequence) <= 31:
+                if (
+                    self._location_is_valid(location)
+                    and not self._sequence_is_valid(location, sequence)
+                ):
                     self.counters[f"invalid_{label}_sequence"] += 1
 
             self.mapping_counts[status] += 1

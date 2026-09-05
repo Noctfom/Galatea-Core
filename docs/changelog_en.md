@@ -4,6 +4,21 @@
 
 ---
 
+## [v3.6.3] - 2026-09-05
+
+### 🛡️ V3 Audit Finalization and PPO Observability
+
+- **Explicit diagnostic audit switch**: Training and Arena no longer collect per-process V3 reports by default. CLI now exposes `--protocol-audit`, with matching Training and Arena toggles in WebUI. RuleBot self-check remains enabled by default for dedicated protocol stress testing
+- **Audit logs in Storage & Logs**: A dedicated V3 Audit Reports tab now supports JSON preview, download, batch deletion, and confirmed purge
+- **Location-aware sequence validation**: Auditing no longer treats legal sequence values above 31 in Deck, Hand, Graveyard, Banished, and Extra Deck as structural errors. Monster and Spell/Trap zones retain strict fixed-slot validation
+- **Arrow table display fix**: The WebUI Lua-bound semantic-slot column now uses one display type, so integer bindings and the unresolved placeholder no longer trigger mixed-type PyArrow serialization errors
+- **PPO health diagnostics**: TensorBoard now records `Approx_KL`, `Clip_Fraction`, `Explained_Variance`, and pre-clipping `Gradient_Norm`. They are derived from existing tensors only at the existing once-per-20-mini-batch logging interval and never participate in loss or backpropagation
+- **Throughput timing diagnostics**: Each iteration records collection seconds, PPO update seconds, and valid rollout samples per second under the TensorBoard `Performance/` group
+- **Stable protocols and checkpoints**: Network inputs, rewards, actions, PPO loss, and parameter updates are unchanged. Model Protocol remains 3 and Checkpoint Format remains 2, so existing V3 checkpoints resume directly
+- **Stable-release regression**: 151 automated tests pass; one long-running real-Core test remains skipped unless explicitly enabled
+
+---
+
 ## [v3.6.2] - 2026-09-04
 
 ### 🔗 Exact Lua Runtime-Effect to Code-Semantic Binding

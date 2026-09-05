@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 中为解决框架固有局限性而特殊构建的模块，这些模块是框架的核心竞争力之一。
 
-> 文档适用于 **Galatea-Core v3.6.2**。
+> 文档适用于 **Galatea-Core v3.6.3**。
 
 ---
 
@@ -80,7 +80,7 @@ Hash 聚类标签由规范化代码的 MD5 决定，本身是确定性的。v3.6
 
 ### V3 观测与效果槽审计
 
-3.6.1 起，训练 Worker、竞技场和 RuleBot 自检无需开关即可采集审计。运行时只累计 Core 消息与连锁公开字段，按进程写入 `system_logs/protocol_v3_audit/`；它不读取 Lua，也不参与动作选择或奖励计算。
+3.6.1 引入 V3 观测审计；3.6.3 起，训练和竞技场默认关闭，需显式开启 `--protocol-audit`，RuleBot 自检仍默认采集。运行时只累计 Core 消息与连锁公开字段，按进程写入 `system_logs/protocol_v3_audit/`；它不读取 Lua，也不参与动作选择或奖励计算。
 
 3.6.2 不再把 `desc` 低四位或 Stringid 索引当作 Lua 效果创建顺序。语义生成器直接追踪同一个 `Effect.CreateEffect(c)` 对象上的静态 `SetDescription(aux.Stringid(...))`，并把完整 `desc` 写入对应代码语义槽。动态表达式、歧义绑定或无描述的被动效果不会被猜测；运行时保留整卡语义回退，也不会错误写入“本回合已发动”位。WebUI 会把无法绑定的观测标为 `binding_missing`，供后续扩展静态解析覆盖率。
 

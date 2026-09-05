@@ -250,7 +250,7 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -258,6 +258,7 @@ class PPOTrainer:
         self.num_workers = num_workers
         self.requested_training_device = training_device
         self.use_onnx = use_onnx
+        self.protocol_audit = bool(protocol_audit)
         self.server_stop_event = threading.Event()
         self.infer_thread = None
         self._closed = False
@@ -818,6 +819,7 @@ class PPOTrainer:
                 self.shared_logits,
                 self.standard_core,
                 self.shared_response_ids,
+                self.protocol_audit,
             ))
             p.daemon = True
             p.start()
@@ -1300,17 +1302,66 @@ class PPOTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
                     continue
 
-                if self.train_step % 20 == 0:
-                    self.writer.add_scalar('Train/Total_Loss', loss.item(), self.train_step)
-                    self.writer.add_scalar('Train/Policy_Loss', policy_loss.item(), self.train_step) # 策略偏移
-                    self.writer.add_scalar('Train/Value_Loss', value_loss.item(), self.train_step)   # 价值预测准确度
-                    self.writer.add_scalar('Train/Entropy', entropy.mean().item(), self.train_step)  # 探索欲 (如果急剧降到0，说明AI变傻钻牛角尖了)
+                should_log_diagnostics = self.train_step % 20 == 0
+                if should_log_diagnostics:
+                    # 诊断量只在原有日志频率上计算，不参与损失和反向传播
+                    with torch.no_grad():
+                        log_ratio = new_log_probs - gpu_old_log_probs
+                        approx_kl = ((ratio - 1.0) - log_ratio).mean()
+                        clip_fraction = (
+                            (torch.abs(ratio - 1.0) > self.clip_eps)
+                            .float()
+                            .mean()
+                        )
+                        return_variance = torch.var(gpu_returns, unbiased=False)
+                        if return_variance > 1e-8:
+                            explained_variance = 1.0 - (
+                                torch.var(gpu_returns - values, unbiased=False)
+                                / return_variance
+                            )
+                        else:
+                            explained_variance = torch.zeros_like(return_variance)
                 self.train_step += 1
 
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(self.agent.net.parameters(), 0.5)
+                gradient_norm = nn.utils.clip_grad_norm_(self.agent.net.parameters(), 0.5)
+
+                if should_log_diagnostics:
+                    diagnostic_values = torch.stack((
+                        loss.detach().float(),
+                        policy_loss.detach().float(),
+                        value_loss.detach().float(),
+                        entropy.mean().detach().float(),
+                        approx_kl.detach().float(),
+                        clip_fraction.detach().float(),
+                        explained_variance.detach().float(),
+                        torch.as_tensor(
+                            gradient_norm,
+                            device=loss.device,
+                        ).detach().float(),
+                    )).cpu().tolist()
+                    diagnostic_names = (
+                        'Total_Loss',
+                        'Policy_Loss',
+                        'Value_Loss',
+                        'Entropy',
+                        'Approx_KL',
+                        'Clip_Fraction',
+                        'Explained_Variance',
+                        'Gradient_Norm',
+                    )
+                    log_step = self.train_step - 1
+                    for metric_name, metric_value in zip(
+                        diagnostic_names,
+                        diagnostic_values,
+                    ):
+                        self.writer.add_scalar(
+                            f'Train/{metric_name}',
+                            metric_value,
+                            log_step,
+                        )
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
 
@@ -1334,13 +1385,32 @@ class PPOTrainer:
         while self.iteration < target_iter:
             self.iteration += 1
             iter_start = time.time()
-            
+
             # 1. 采集 (现在返回的是总步数)
+            collection_start = time.time()
             total_steps = self.collect_rollouts()
-            
+            collection_seconds = time.time() - collection_start
+            self.writer.add_scalar(
+                'Performance/Collection_Seconds',
+                collection_seconds,
+                self.iteration,
+            )
+            if total_steps:
+                self.writer.add_scalar(
+                    'Performance/Rollout_Steps_Per_Second',
+                    total_steps / max(collection_seconds, 1e-6),
+                    self.iteration,
+                )
+
             # 2. 优化 (只有当样本足够时才更新)
             if total_steps is not None and total_steps >= self.mini_batch_size:
+                policy_update_start = time.time()
                 self.update_policy(total_steps)
+                self.writer.add_scalar(
+                    'Performance/PPO_Update_Seconds',
+                    time.time() - policy_update_start,
+                    self.iteration,
+                )
                 # 下一轮会从索引 0 覆盖有效前缀，保留固定池可避免 Windows 反复提交/释放大块内存。
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.device.type == 'cuda':
