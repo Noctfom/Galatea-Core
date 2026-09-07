@@ -278,6 +278,38 @@ def main():
     duel_parser.add_argument('--device', type=str, default='cpu', help='推理设备')
     duel_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
     duel_parser.add_argument('--thought_freq', type=int, default=0, help='每隔几局保存一次AI心声 (0为不保存)')
+    duel_parser.add_argument(
+        '--arena-mode',
+        choices=('normal', 'benchmark'),
+        default='normal',
+        help='normal=普通随机竞技；benchmark=固定赛程并交替先后手',
+    )
+    duel_parser.add_argument(
+        '--p0-deck-source', '--p0_deck_source',
+        default='weighted',
+        help='P0 卡组来源：weighted、physical:<池>、virtual:<池> 或 deck:<池>/<卡组>',
+    )
+    duel_parser.add_argument(
+        '--p1-deck-source', '--p1_deck_source',
+        default='same_range',
+        help='P1 卡组来源：same_range、same_deck，或与 P0 相同的四类独立来源',
+    )
+    duel_parser.add_argument(
+        '--benchmark-seed',
+        type=int,
+        default=20260906,
+        help='新建竞技场基准计划时使用的 uint32 随机种子',
+    )
+    duel_parser.add_argument(
+        '--benchmark-name',
+        default='baseline',
+        help='新建竞技场基准计划的名称',
+    )
+    duel_parser.add_argument(
+        '--benchmark-plan',
+        default=None,
+        help='复用既有竞技场基准计划 JSON；计划中的局数优先于 --num',
+    )
     # 兼容既有命令行但不再参与竞技场构网；模型架构始终读取检查点内置配置。
     duel_parser.add_argument("--d_model", type=int, default=256, help=argparse.SUPPRESS)
     duel_parser.add_argument("--n_heads", type=int, default=4, help=argparse.SUPPRESS)
@@ -361,6 +393,12 @@ def main():
             config=config,
             standard_core=args.standard_core,
             protocol_audit=args.protocol_audit,
+            p0_deck_source=args.p0_deck_source,
+            p1_deck_source=args.p1_deck_source,
+            arena_mode=args.arena_mode,
+            benchmark_seed=args.benchmark_seed,
+            benchmark_name=args.benchmark_name,
+            benchmark_plan=args.benchmark_plan,
         )
         arena.run_tournament(n_games=args.num)
         

@@ -5,7 +5,6 @@
 ## Remaining Main-Framework Cognition
 
 - [x] Bind complete runtime `desc` values to code-semantic slots through Lua Effect object identity; never infer slots from description low bits, and safely fall back for dynamic or ambiguous scripts
-- [ ] Expand recent activation history from “the last eight activated card IDs” into structured events, then evaluate whether summons, attacks, moves, and selection results belong in the same stream
 - [ ] Research structured auxiliary heads for tactical goals, card roles, line completion, resource deltas, and next-state prediction. Every output needs a verifiable label or self-supervised target; attention weights alone are not explanations
 - [ ] Display calibrated auxiliary predictions and counterfactual evaluations in Holographic Replay while clearly separating prediction, observed event, and explanatory inference
 

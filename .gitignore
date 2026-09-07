@@ -13,6 +13,7 @@ runs/
 __pycache__/
 .vscode/
 ai_thoughts/
+arena_benchmarks/
 replays/
 replay_data/
 system_logs/

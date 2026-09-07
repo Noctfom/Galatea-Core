@@ -3,6 +3,7 @@
 # ==================================================================================
 
 import os
+import random
 import numpy as np
 import torch
 import struct
@@ -26,6 +27,12 @@ from thought_logger import AIThoughtLogger, REPLAY_EVENT_MSGS
 from protocol_v3_audit import (
     configure_protocol_v3_audit,
     flush_protocol_v3_audit,
+)
+from arena_benchmark import (
+    build_benchmark_plan,
+    load_benchmark_plan,
+    save_benchmark_plan,
+    save_benchmark_result,
 )
 
 
@@ -109,9 +116,44 @@ def find_matching_action_index(snapshot, response, msg_type, msg_args, packer):
 
 class ModelArena:
     # 增加 config 参数
-    def __init__(self, model_p0_path, model_p1_path=None, device='cpu', deck_dir="./decks", config=None, standard_core=False, protocol_audit=False):
+    def __init__(
+        self,
+        model_p0_path,
+        model_p1_path=None,
+        device='cpu',
+        deck_dir="./decks",
+        config=None,
+        standard_core=False,
+        protocol_audit=False,
+        p0_deck_source=deck_utils.ARENA_SOURCE_WEIGHTED,
+        p1_deck_source=deck_utils.ARENA_SOURCE_SAME_RANGE,
+        arena_mode="normal",
+        benchmark_seed=20260906,
+        benchmark_name="baseline",
+        benchmark_plan=None,
+        benchmark_root="./arena_benchmarks",
+    ):
+        """初始化普通竞技场或固定赛程基准模式"""
         self.deck_dir = deck_dir
         self.standard_core = standard_core
+        self.model_p0_path = model_p0_path
+        self.model_p1_path = model_p1_path
+        self.p0_deck_source = deck_utils.parse_arena_deck_source(
+            p0_deck_source,
+        )
+        self.p1_deck_source = deck_utils.parse_arena_deck_source(
+            p1_deck_source,
+            allow_follow=True,
+        )
+        if arena_mode not in {"normal", "benchmark"}:
+            raise ValueError("arena_mode must be 'normal' or 'benchmark'")
+        self.arena_mode = arena_mode
+        self.benchmark_seed = int(benchmark_seed)
+        self.benchmark_name = str(benchmark_name or "baseline")
+        self.benchmark_plan = benchmark_plan
+        self.benchmark_root = benchmark_root
+        self.last_duel_metadata = {}
+        self.deck_catalog = deck_utils.discover_arena_deck_catalog(deck_dir)
 
         import gamestate
         if standard_core:
@@ -187,7 +229,23 @@ class ModelArena:
                 f"act_card_idx outside [0, {MAX_CARDS}]: min={minimum}, max={maximum}"
             )
 
-    def run_duel(self, game_idx=1):
+    @staticmethod
+    def _describe_deck_pick(pick):
+        """生成终端与基准结果共用的卡组来源摘要"""
+        return {
+            "range_kind": pick.range_kind,
+            "range_name": pick.range_name,
+            "pool_name": pick.pool_name,
+            "deck_name": pick.deck_name,
+        }
+
+    def run_duel(
+        self,
+        game_idx=1,
+        deck_pair=None,
+        duel_seed=None,
+        swap_model_seats=False,
+    ):
         """
         返回: (winner_index, reason_code, model_fallback_count)
         reason_code:
@@ -197,30 +255,71 @@ class ModelArena:
            -3: 初始化失败
            -4: 模型决策链失败
         """
-        try:
-            res = deck_utils.get_random_deck_pair(ydk_dir=self.deck_dir)
-            if res is None:
-                return -1, -3, 0
-            env_name, d1_name, d1, d2_name, d2 = res
+        self.last_duel_metadata = {
+            "game_index": int(game_idx),
+            "duel_seed": duel_seed,
+            "swap_model_seats": bool(swap_model_seats),
+            "steps": 0,
+        }
 
-            raw_data = self.env.reset(d1, d2)
+        def finish_result(winner, reason, fallback_count, steps=0, engine_winner=-1):
+            """统一写回逐局元数据，同时保持原有三元返回契约"""
+            self.last_duel_metadata.update({
+                "winner": int(winner),
+                "engine_winner": int(engine_winner),
+                "reason": int(reason),
+                "fallback_count": int(fallback_count),
+                "steps": int(steps),
+            })
+            return int(winner), int(reason), int(fallback_count)
+
+        try:
+            logical_pair = deck_pair or deck_utils.select_arena_deck_pair(
+                ydk_dir=self.deck_dir,
+                p0_source=self.p0_deck_source,
+                p1_source=self.p1_deck_source,
+                catalog=self.deck_catalog,
+            )
+            self.last_duel_metadata["p0_deck"] = self._describe_deck_pick(
+                logical_pair.p0
+            )
+            self.last_duel_metadata["p1_deck"] = self._describe_deck_pick(
+                logical_pair.p1
+            )
+
+            if swap_model_seats:
+                physical_picks = (logical_pair.p1, logical_pair.p0)
+                physical_bots = (self.p1_bot, self.p0_bot)
+                physical_names = (self.p1_name, self.p0_name)
+            else:
+                physical_picks = (logical_pair.p0, logical_pair.p1)
+                physical_bots = (self.p0_bot, self.p1_bot)
+                physical_names = (self.p0_name, self.p1_name)
+
+            d1_pick, d2_pick = physical_picks
+            d1, d2 = d1_pick.deck, d2_pick.deck
+            if duel_seed is not None:
+                random.seed(int(duel_seed))
+            raw_data = self.env.reset(d1, d2, seed=duel_seed)
             if not raw_data:
-                return -1, -3, 0
+                return finish_result(-1, -3, 0)
 
             brain = DuelState(d1.main, d1.extra, d2.main, d2.extra)
+            self.logger.player_name = physical_names[0]
+            self.logger.opponent_name = physical_names[1]
             self.logger.set_decklists(
                 d1.main,
                 d1.extra,
                 d2.main,
                 d2.extra,
-                p0_name=d1_name,
-                p1_name=d2_name,
+                p0_name=d1_pick.deck_name,
+                p1_name=d2_pick.deck_name,
             )
             msg_queue = MessageParser.parse(raw_data)
         except Exception as error:
             print(f"\n❌ [Arena] 对局初始化失败: {error}")
             traceback.print_exc()
-            return -1, -3, 0
+            return finish_result(-1, -3, 0)
         
         consecutive_retries = 0
         current_step_ignore_list = []
@@ -244,7 +343,9 @@ class ModelArena:
         INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
         DECISION_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143}
         AI_MANAGED_MSGS = MODEL_ACTION_MSGS
-        macro_rng = np.random.default_rng(game_idx)
+        macro_rng = np.random.default_rng(
+            int(duel_seed) if duel_seed is not None else game_idx
+        )
 
         steps = 0
         # 增加步数上限到 5000，防止慢速卡组被误判
@@ -314,7 +415,17 @@ class ModelArena:
                     # 将 reason_str 透传给记录器
                     saved_path = self.logger.save(winner, game_idx, reason_str)
                     print(f"\n🧠 [AI 读心] 第 {game_idx} 局的心声已保存至 {saved_path}")
-                return winner, reason, ai_fallback_count
+                logical_winner = (
+                    1 - winner if swap_model_seats and winner in (0, 1)
+                    else winner
+                )
+                return finish_result(
+                    logical_winner,
+                    reason,
+                    ai_fallback_count,
+                    steps=steps,
+                    engine_winner=winner,
+                )
 
             # --- Retry 处理 ---
             if msg_type == 1:
@@ -338,7 +449,12 @@ class ModelArena:
                 
                 current_limit = 100 if (last_interaction_msg and last_interaction_msg[0] == 142) else 20
                 if consecutive_retries > current_limit:
-                    return -1, -1, ai_fallback_count
+                    return finish_result(
+                        -1,
+                        -1,
+                        ai_fallback_count,
+                        steps=steps,
+                    )
                 
                 # 时空回溯
                 if last_interaction_msg is not None:
@@ -350,8 +466,7 @@ class ModelArena:
             # --- 决策 ---
             if msg_type in DECISION_MSGS:
                 player_to_act = msg[1] if len(msg) > 1 else 0
-                is_p0_turn = player_to_act == 0
-                active_bot = self.p0_bot if is_p0_turn else self.p1_bot
+                active_bot = physical_bots[player_to_act]
                 model_should_act = active_bot is not None and msg_type in AI_MANAGED_MSGS
 
                 if model_should_act:
@@ -458,7 +573,7 @@ class ModelArena:
                                 chosen_index=sel_idx,
                                 player_id=player_to_act,
                                 msg_type=msg_type,
-                                agent_name=self.p0_name if is_p0_turn else self.p1_name,
+                                agent_name=physical_names[player_to_act],
                             )
 
                         chosen = snap.valid_actions[sel_idx]
@@ -478,7 +593,12 @@ class ModelArena:
                         traceback.print_exc()
                         if self.logger.is_active:
                             self.logger.save(-1, game_idx, f"模型决策链失败: {e}")
-                        return -1, -4, ai_fallback_count
+                        return finish_result(
+                            -1,
+                            -4,
+                            ai_fallback_count,
+                            steps=steps,
+                        )
                 else:
                     clean_ignore = []
                     for value in current_step_ignore_list:
@@ -514,7 +634,7 @@ class ModelArena:
                             msg_type=msg_type,
                             response=resp,
                             player_id=player_to_act,
-                            agent_name="RuleBot",
+                            agent_name=physical_names[player_to_act],
                             chosen_index=rule_chosen_index,
                         )
 
@@ -526,9 +646,84 @@ class ModelArena:
         if self.logger.is_active:
             self.logger.save(-1, game_idx, "超时强制截断/死锁熔断")
         
-        return -1, -2, ai_fallback_count # 超时
+        return finish_result(
+            -1,
+            -2,
+            ai_fallback_count,
+            steps=steps,
+        ) # 超时
+
+    @staticmethod
+    def _resolve_reason(reason):
+        """把引擎与竞技场异常代码转换为稳定的统计标签"""
+        reason_map = {
+            0: ("Surrender", "Surrender", False),
+            1: ("LP -> 0", "LP_0", False),
+            2: ("Deck -> 0", "Deck_0", False),
+            3: ("Time Limit", "TimeLimit", False),
+            -1: ("❌ AI Deadlock", "Deadlock", True),
+            -2: ("⌛ Steps Limit", "StepsOut", True),
+            -3: ("⚠️ Init Fail", "InitFail", True),
+            -4: ("❌ Model Decision Error", "ModelError", True),
+        }
+        if reason in reason_map:
+            return reason_map[reason]
+        label = f"Special({reason})"
+        return label, label, False
+
+    def _prepare_benchmark(self, n_games):
+        """创建或加载固定竞技场赛程，并返回计划、卡组与文件位置"""
+        if self.benchmark_plan:
+            plan, pairs = load_benchmark_plan(
+                self.benchmark_plan,
+                self.deck_dir,
+                catalog=self.deck_catalog,
+            )
+            plan_path = os.path.realpath(self.benchmark_plan)
+            return plan, pairs, plan_path
+
+        plan, pairs = build_benchmark_plan(
+            deck_dir=self.deck_dir,
+            p0_source=self.p0_deck_source,
+            p1_source=self.p1_deck_source,
+            n_games=n_games,
+            seed=self.benchmark_seed,
+            name=self.benchmark_name,
+            catalog=self.deck_catalog,
+        )
+        plan_path = save_benchmark_plan(plan, root=self.benchmark_root)
+        return plan, pairs, plan_path
 
     def run_tournament(self, n_games=10):
+        """运行普通随机竞技，或执行可复现且交替先后手的固定基准"""
+        n_games = int(n_games)
+        if (
+            not (self.arena_mode == "benchmark" and self.benchmark_plan)
+            and not 1 <= n_games <= 100000
+        ):
+            raise ValueError("竞技场对局数必须位于 1～100000")
+
+        benchmark_plan = None
+        benchmark_pairs = None
+        benchmark_plan_path = None
+        benchmark_games = []
+        if self.arena_mode == "benchmark":
+            benchmark_plan, benchmark_pairs, benchmark_plan_path = (
+                self._prepare_benchmark(n_games)
+            )
+            n_games = len(benchmark_pairs)
+            print(
+                f"🧪 基准计划: {benchmark_plan_path} | "
+                f"种子: {benchmark_plan.get('selection_seed')} | "
+                f"交替 P0/P1 物理座位"
+            )
+        else:
+            print(
+                "🎴 普通选池: "
+                f"P0={deck_utils.format_arena_deck_source(self.p0_deck_source)} | "
+                f"P1={deck_utils.format_arena_deck_source(self.p1_deck_source)}"
+            )
+
         print(f"🚀 开始 {n_games} 场对决...")
         p0_wins = 0
         p1_wins = 0
@@ -549,13 +744,22 @@ class ModelArena:
             'ModelError': 0,
         }
         
-        # 修复了致命的语法错误：只需要 range(n_games) 即可
         for i in range(n_games):
             # [新增] 如果开启了记录，并且到达了指定的间隔局数，唤醒 Logger
             if self.thought_freq > 0 and (i + 1) % self.thought_freq == 0:
                 self.logger.start_recording()
 
-            w, r, fallback_cnt = self.run_duel(game_idx=i+1)
+            if benchmark_plan is not None:
+                schedule = benchmark_plan["games"][i]
+                w, r, fallback_cnt = self.run_duel(
+                    game_idx=i + 1,
+                    deck_pair=benchmark_pairs[i],
+                    duel_seed=schedule["duel_seed"],
+                    swap_model_seats=schedule["swap_model_seats"],
+                )
+            else:
+                schedule = None
+                w, r, fallback_cnt = self.run_duel(game_idx=i + 1)
 
             # 初始化阶段若未产生任何帧，也必须关闭本局录像状态，避免串入下一局。
             if self.logger.is_active:
@@ -563,25 +767,27 @@ class ModelArena:
 
             total_ai_fallbacks += fallback_cnt
             
-            reason_str = "Unknown"
-            is_abnormal = False
-            
-            # 解析原因代码 (根据 YGOPro 核心定义)
-            if r == 0: reason_str = "Surrender"; reasons['Surrender'] += 1
-            elif r == 1: reason_str = "LP -> 0"; reasons['LP_0'] += 1
-            elif r == 2: reason_str = "Deck -> 0"; reasons['Deck_0'] += 1
-            elif r == 3: reason_str = "Time Limit"; reasons['TimeLimit'] += 1
-            elif r == -1: reason_str = "❌ AI Deadlock"; is_abnormal = True; reasons['Deadlock'] += 1
-            elif r == -2: reason_str = "⌛ Steps Limit"; is_abnormal = True; reasons['StepsOut'] += 1
-            elif r == -3: reason_str = "⚠️ Init Fail"; is_abnormal = True; reasons['InitFail'] += 1
-            elif r == -4: reason_str = "❌ Model Decision Error"; is_abnormal = True; reasons['ModelError'] += 1
-            else: # 👇 [新增] 把未知的数字打印出来！
-                reason_str = f"Special({r})"
-                reasons[reason_str] = reasons.get(reason_str, 0) + 1
+            reason_str, reason_key, is_abnormal = self._resolve_reason(r)
+            reasons[reason_key] = reasons.get(reason_key, 0) + 1
             
             if w == 0: p0_wins += 1
             elif w == 1: p1_wins += 1
             else: draws += 1
+
+            if schedule is not None:
+                game_result = dict(schedule)
+                game_result.update({
+                    "winner": int(w),
+                    "engine_winner": int(
+                        self.last_duel_metadata.get("engine_winner", -1)
+                    ),
+                    "reason": int(r),
+                    "reason_label": reason_key,
+                    "abnormal": bool(is_abnormal),
+                    "fallback_count": int(fallback_cnt),
+                    "steps": int(self.last_duel_metadata.get("steps", 0)),
+                })
+                benchmark_games.append(game_result)
             
             # 删除了冗余的双重打印逻辑，只保留带 Fallback 信息的最完美输出格式
             score_str = f"Score: {p0_wins}-{p1_wins}"
@@ -597,6 +803,33 @@ class ModelArena:
         print("📊 胜负原因统计:")
         for k, v in reasons.items():
             if v > 0: print(f"   - {k}: {v}")
+        if total_ai_fallbacks:
+            print(f"⚠️ 模型决策回退总数: {total_ai_fallbacks}")
+
+        benchmark_result_path = None
+        if benchmark_plan is not None:
+            benchmark_result_path = save_benchmark_result(
+                plan=benchmark_plan,
+                plan_path=benchmark_plan_path,
+                p0_model_path=self.model_p0_path,
+                p1_model_path=self.model_p1_path,
+                games=benchmark_games,
+                root=self.benchmark_root,
+            )
+            print(f"📈 竞技场基准结果已保存: {benchmark_result_path}")
         audit_path = flush_protocol_v3_audit(force=True)
         if audit_path is not None:
             print(f"🧪 V3 观测审计已保存: {audit_path}")
+        return {
+            "p0_wins": p0_wins,
+            "p1_wins": p1_wins,
+            "draws_or_aborts": draws,
+            "reasons": reasons,
+            "model_fallbacks": total_ai_fallbacks,
+            "benchmark_plan": (
+                str(benchmark_plan_path) if benchmark_plan_path else None
+            ),
+            "benchmark_result": (
+                str(benchmark_result_path) if benchmark_result_path else None
+            ),
+        }

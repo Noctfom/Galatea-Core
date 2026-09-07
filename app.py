@@ -18,6 +18,8 @@ import tempfile
 import inspect
 import html
 from collections import deque
+import deck_utils
+from arena_benchmark import load_benchmark_results
 from card_reader import CardReader
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
@@ -79,10 +81,96 @@ REPLAY_DATAFRAME_WIDTH = get_stretch_width_args(st.dataframe)
 
 st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wide")
 
+
+@st.cache_data(ttl=10, show_spinner=False)
+def load_arena_deck_catalog(deck_root):
+    """短时缓存竞技场卡组目录，避免一次页面刷新重复扫描磁盘"""
+    return deck_utils.discover_arena_deck_catalog(deck_root)
+
+
+def render_arena_deck_source(prefix, catalog, allow_follow=False):
+    """渲染一侧竞技场选池控件并返回稳定的 CLI 来源字符串"""
+    choices = []
+    if allow_follow:
+        choices.extend([
+            (
+                _("与 P0 自动相同区间", "Follow P0 range"),
+                deck_utils.ARENA_SOURCE_SAME_RANGE,
+            ),
+            (
+                _("与 P0 自动相同卡组", "Use exact P0 deck"),
+                deck_utils.ARENA_SOURCE_SAME_DECK,
+            ),
+        ])
+    choices.extend([
+        (
+            _("当前权重随机区间", "Weighted current ranges"),
+            deck_utils.ARENA_SOURCE_WEIGHTED,
+        ),
+        (
+            _("单一物理卡组池", "Single physical pool"),
+            deck_utils.ARENA_SOURCE_PHYSICAL,
+        ),
+        (
+            _("单一虚拟池", "Single virtual pool"),
+            deck_utils.ARENA_SOURCE_VIRTUAL,
+        ),
+        (
+            _("单个卡组", "Single deck"),
+            deck_utils.ARENA_SOURCE_DECK,
+        ),
+    ])
+    label_to_kind = dict(choices)
+    selected_label = st.selectbox(
+        _(
+            f"{prefix} 卡组选择方式",
+            f"{prefix} deck selection",
+        ),
+        list(label_to_kind),
+        key=f"arena_{prefix.lower()}_source_kind",
+    )
+    kind = label_to_kind[selected_label]
+    if kind in {
+        deck_utils.ARENA_SOURCE_WEIGHTED,
+        deck_utils.ARENA_SOURCE_SAME_RANGE,
+        deck_utils.ARENA_SOURCE_SAME_DECK,
+    }:
+        return kind
+
+    physical_pools = catalog.get("physical_pools", {})
+    if kind == deck_utils.ARENA_SOURCE_PHYSICAL:
+        pool_name = st.selectbox(
+            _("选择物理卡组池", "Physical pool"),
+            list(physical_pools),
+            key=f"arena_{prefix.lower()}_physical_pool",
+        )
+        return f"physical:{pool_name}" if pool_name else None
+
+    if kind == deck_utils.ARENA_SOURCE_VIRTUAL:
+        virtual_name = st.selectbox(
+            _("选择虚拟池", "Virtual pool"),
+            list(catalog.get("virtual_pools", {})),
+            key=f"arena_{prefix.lower()}_virtual_pool",
+        )
+        return f"virtual:{virtual_name}" if virtual_name else None
+
+    pool_name = st.selectbox(
+        _("单卡组所属物理池", "Deck's physical pool"),
+        list(physical_pools),
+        key=f"arena_{prefix.lower()}_deck_pool",
+    )
+    deck_names = physical_pools.get(pool_name, []) if pool_name else []
+    deck_name = st.selectbox(
+        _("选择单个卡组", "Exact deck"),
+        deck_names,
+        key=f"arena_{prefix.lower()}_deck_name",
+    )
+    return f"deck:{pool_name}/{deck_name}" if deck_name else None
+
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.6.3"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.6.4"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -904,15 +992,108 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             d_p0 = st.selectbox(_("出战模型 (P0)", "Select P0 Model"), models, index=1 if len(models)>1 else 0)
         with c_p1:
             d_p1 = st.selectbox(_("守擂模型/规则 (P1)", "Select P1 Model/RuleBot"), models, index=0, help=_("如果选 None，对手就是内置的规则脚本 (RuleBot)。", "Opponent. None means RuleBot."))
-            
+
+        d_arena_mode = st.radio(
+            _("竞技方式", "Arena mode"),
+            ["normal", "benchmark"],
+            format_func=lambda value: _(
+                "普通竞技（每局随机抽取）" if value == "normal" else "竞技场基准（固定赛程并交替座位）",
+                "Normal arena (random per game)" if value == "normal" else "Arena benchmark (fixed schedule, alternating seats)",
+            ),
+            horizontal=True,
+            key="arena_mode",
+        )
+
+        benchmark_plan_mode = "new"
+        selected_benchmark_plan = None
+        benchmark_plans = []
+        if d_arena_mode == "benchmark":
+            benchmark_plans = sorted(
+                (
+                    path
+                    for path in glob.glob("./arena_benchmarks/plans/*.json")
+                    if os.path.isfile(path) and not os.path.islink(path)
+                ),
+                key=os.path.getmtime,
+                reverse=True,
+            )
+            benchmark_plan_mode = st.radio(
+                _("基准赛程", "Benchmark schedule"),
+                ["new", "reuse"],
+                format_func=lambda value: _(
+                    "按当前设置新建固定赛程" if value == "new" else "复用已有固定赛程",
+                    "Create from current settings" if value == "new" else "Reuse an existing schedule",
+                ),
+                horizontal=True,
+                key="arena_benchmark_plan_mode",
+            )
+            if benchmark_plan_mode == "reuse":
+                selected_benchmark_plan = st.selectbox(
+                    _("选择既有基准计划", "Existing benchmark plan"),
+                    benchmark_plans,
+                    format_func=lambda path: os.path.basename(path),
+                    key="arena_benchmark_plan",
+                )
+                st.caption(_(
+                    "复用计划时，局数、双方卡组、决斗种子和换边顺序均以计划文件为准。",
+                    "When reusing a plan, game count, both decks, duel seeds, and seat order come from that plan.",
+                ))
+
+        d_p0_source = None
+        d_p1_source = None
+        arena_sources_available = True
+        if d_arena_mode == "normal" or benchmark_plan_mode == "new":
+            arena_catalog = load_arena_deck_catalog("./decks")
+            if not arena_catalog.get("physical_pools"):
+                arena_sources_available = False
+                st.error(_(
+                    "./decks 中没有可用的普通 .ydk 卡组。",
+                    "No usable regular .ydk deck was found under ./decks.",
+                ))
+            deck_col0, deck_col1 = st.columns(2)
+            with deck_col0:
+                d_p0_source = render_arena_deck_source(
+                    "P0",
+                    arena_catalog,
+                    allow_follow=False,
+                )
+            with deck_col1:
+                d_p1_source = render_arena_deck_source(
+                    "P1",
+                    arena_catalog,
+                    allow_follow=True,
+                )
+            st.caption(_(
+                "“相同区间”跟随 P0 本局最终抽中的物理池或虚拟池并独立抽卡组；“相同卡组”复制 P0 本局的确切卡组。",
+                "Same range follows P0's resolved physical or virtual pool and draws independently; same deck copies P0's exact deck.",
+            ))
+
         with st.form("duel_form"):
             c1, c2 = st.columns(2)
             with c1:
-                d_num = st.number_input(_("对战局数", "Number of Games"), value=100, step=10, 
+                d_num = st.number_input(_("对战局数", "Number of Games"), min_value=1, max_value=10000 if d_arena_mode == "benchmark" else 100000, value=100, step=10,
                                         help=_("让双方在竞技场打多少局。打完会在终端打印胜负原因统计。", "Total games to play."))
             with c2:
-                d_freq = st.number_input("🧠 " + _("读心频率 (导出 JSON)", "Thought Log Freq"), value=5, 
+                d_freq = st.number_input("🧠 " + _("读心频率 (导出 JSON)", "Thought Log Freq"), min_value=0, value=5,
                                          help=_("每隔 N 局保存一次极其详尽的 AI 脑电波日志（存放于 ./ai_thoughts/），用于后续读心回放复盘。设为 0 关闭。", "Save AI probability dist every N games for replay."))
+            d_benchmark_seed = 20260906
+            d_benchmark_name = "baseline"
+            if d_arena_mode == "benchmark" and benchmark_plan_mode == "new":
+                b1, b2 = st.columns(2)
+                with b1:
+                    d_benchmark_seed = st.number_input(
+                        _("基准随机种子", "Benchmark seed"),
+                        min_value=0,
+                        max_value=0xFFFFFFFF,
+                        value=20260906,
+                        step=1,
+                    )
+                with b2:
+                    d_benchmark_name = st.text_input(
+                        _("基准名称", "Benchmark name"),
+                        value="baseline",
+                        max_chars=64,
+                    )
             d_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False)
             d_protocol_audit = st.checkbox(
                 _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
@@ -926,19 +1107,77 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             if st.form_submit_button("⚔️ " + _("在后台启动竞技场", "Start Arena Process"), use_container_width=True):
                 if is_running:
                     st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
+                elif d_arena_mode == "benchmark" and benchmark_plan_mode == "reuse" and not selected_benchmark_plan:
+                    st.error(_("没有可复用的基准计划。", "No benchmark plan is available for reuse."))
+                elif benchmark_plan_mode == "new" and (
+                    not arena_sources_available
+                    or not d_p0_source
+                    or not d_p1_source
+                ):
+                    st.error(_("所选卡组来源没有可用候选。", "The selected deck source has no usable candidate."))
                 elif d_p0 != "None":
-                    if d_p0 != "None":
-                        cmd = [sys.executable, "main.py", "duel", "--p0", d_p0, "--num", str(d_num), "--thought_freq", str(d_freq)]
-                        if d_p1 != "None": cmd.extend(["--p1", d_p1])
-                        if d_std_core: cmd.append("--standard_core")
-                        if d_protocol_audit: cmd.append("--protocol-audit")
-                        p = launch_managed_task(cmd)
-                        st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
-                        
-                        time.sleep(0.5)
-                        st.rerun()
+                    cmd = [
+                        sys.executable, "main.py", "duel",
+                        "--p0", d_p0,
+                        "--num", str(d_num),
+                        "--thought_freq", str(d_freq),
+                        "--arena-mode", d_arena_mode,
+                    ]
+                    if d_p1 != "None":
+                        cmd.extend(["--p1", d_p1])
+                    if selected_benchmark_plan:
+                        cmd.extend(["--benchmark-plan", selected_benchmark_plan])
                     else:
-                        st.error(_("请至少为 P0 选择一个有效的出战模型！", "Please select a valid P0 model!"))
+                        cmd.extend([
+                            "--p0-deck-source", d_p0_source,
+                            "--p1-deck-source", d_p1_source,
+                        ])
+                    if d_arena_mode == "benchmark" and benchmark_plan_mode == "new":
+                        cmd.extend([
+                            "--benchmark-seed", str(d_benchmark_seed),
+                            "--benchmark-name", d_benchmark_name,
+                        ])
+                    if d_std_core: cmd.append("--standard_core")
+                    if d_protocol_audit: cmd.append("--protocol-audit")
+                    p = launch_managed_task(cmd)
+                    st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
+
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error(_("请至少为 P0 选择一个有效的出战模型！", "Please select a valid P0 model!"))
+
+        benchmark_results = load_benchmark_results(limit=100)
+        if benchmark_results:
+            st.markdown("#### 📈 " + _("竞技场基准结果", "Arena benchmark results"))
+            st.caption(_(
+                "只有使用同一个计划文件的结果才适合直接横向比较；模型哈希用于确认比较对象未被同名文件替换。",
+                "Only results sharing the same plan file are directly comparable; model hashes identify replaced files with the same name.",
+            ))
+            benchmark_rows = []
+            for result in benchmark_results:
+                summary = result.get("summary", {})
+                models_meta = result.get("models", {})
+                interval = summary.get("p0_win_rate_95ci", [0.0, 0.0])
+                benchmark_rows.append({
+                    _("时间", "Time"): result.get("created_at", ""),
+                    _("基准", "Benchmark"): result.get("benchmark_name", ""),
+                    _("计划", "Plan"): result.get("plan_file", ""),
+                    "P0": models_meta.get("p0", {}).get("name", ""),
+                    "P0 SHA": str(models_meta.get("p0", {}).get("sha256", "rule"))[:12],
+                    "P1": models_meta.get("p1", {}).get("name", ""),
+                    "P1 SHA": str(models_meta.get("p1", {}).get("sha256", "rule"))[:12],
+                    _("比分", "Score"): f"{summary.get('p0_wins', 0)}-{summary.get('p1_wins', 0)}",
+                    _("P0 胜率", "P0 win rate"): f"{summary.get('p0_win_rate', 0.0):.1%}",
+                    "95% CI": f"{interval[0]:.1%}～{interval[1]:.1%}",
+                    _("异常局", "Aborts"): summary.get("abnormal_games", 0),
+                    _("平均决策步", "Avg. steps"): round(summary.get("average_decision_steps", 0.0), 1),
+                })
+            st.dataframe(
+                benchmark_rows,
+                hide_index=True,
+                **REPLAY_DATAFRAME_WIDTH,
+            )
 
     # --- 🛠️ 规则自检测试舱 ---
     with tab_selfcheck:
@@ -2743,9 +2982,11 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             fixed_cell(5, 1, "Extra", state.get("p0_extra_len", len(state.get('p0_extra', []))), 0x40, 0)
             fixed_cell(1, 7, "Extra", state.get("p1_extra_len", len(state.get('p1_extra', []))), 0x40, 1)
             
-            # 🌟 强制检查 seq==5 才算场地区
-            fixed_cell(4, 1, "Field", "", 0x08, 0, expected_seq=5)
-            fixed_cell(2, 7, "Field", "", 0x08, 1, expected_seq=5)
+            # 常驻场地魔法已由 SZONE seq=5 填入，只有空槽才绘制区域标签。
+            if (4, 1) not in occupied_cells:
+                fixed_cell(4, 1, "Field", "", 0x08, 0, expected_seq=5)
+            if (2, 7) not in occupied_cells:
+                fixed_cell(2, 7, "Field", "", 0x08, 1, expected_seq=5)
 
             # 离场移动后源卡已经不在快照中，使用事件幽灵卡保留移动起点。
             for event_card in [actor_data] + frame_visuals["targets"]:

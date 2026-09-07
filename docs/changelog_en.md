@@ -4,6 +4,22 @@
 
 ---
 
+## [v3.6.4] - 2026-09-07
+
+### 🏟️ Arena Deck Selection and Reproducible Benchmarks
+
+- **Kept normal Arena and added two-sided deck selection**: P0 can use the current globally weighted ranges, one physical pool, one virtual pool, or one exact deck. P1 can use the same four independent modes, follow P0's resolved range per game, or use P0's exact deck
+- **Preserved the default behavior**: Normal Arena still defaults to P0 selecting a physical/virtual range under current global weights and P1 drawing independently from that range. Existing `duel` commands need no changes. Training continues to use its original `get_random_deck_pair()`, weight cache, and sampling order, isolated from the Arena selector
+- **Added fixed-schedule benchmark mode**: Before play, a benchmark freezes both decks, deck SHA-256 values, duel seeds, and seat swaps for every game. Odd/even games alternate the physical P0/P1 seats, while winners are mapped back to logical model identities, reducing deck-sampling and first-player bias in comparisons
+- **Reusable plans with drift rejection**: New plans are stored under `arena_benchmarks/plans/` and may be reused for later models. Loading resolves ordinary deck files again and checks their content hashes; a modified, removed, or replaced deck causes an explicit refusal instead of an incomparable run
+- **Structured benchmark results**: Files under `arena_benchmarks/results/` contain model names and SHA-256 identities, per-game winners/reasons/aborts/decision steps, overall P0 win rate with a 95% Wilson interval, seat splits, and fallback totals. WebUI compares recent results and warns that only runs sharing a plan are directly comparable
+- **Fixed Field Spell display in holographic replay**: A resident Spell/Trap-zone card at sequence 5 is no longer overwritten by the fixed “Field” placeholder. Empty Field Zones retain the original label, and existing replay files need no regeneration
+- **Input and artifact boundaries**: Plan/result JSON rejects symlinks and non-JSON files, is capped at 16 MiB and 10,000 games, and Arena cataloging accepts ordinary `.ydk` files only. Runtime benchmark files are excluded from Git and portable release archives
+- **Protocol and training unchanged**: This release only changes Arena controls, deck selection, and post-game statistics. Network, observations, actions, rewards, PPO, training sampling, and ONNX are untouched. Model Protocol remains 3 and Checkpoint Format remains 2
+- **Stable-release regression**: 155 automated tests pass, with one real-Core long-game test skipped unless explicitly enabled. Both Normal and Benchmark WebUI forms pass Streamlit runtime checks
+
+---
+
 ## [v3.6.3] - 2026-09-05
 
 ### 🛡️ V3 Audit Finalization and PPO Observability

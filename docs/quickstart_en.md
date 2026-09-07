@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.6.3**.
+> This document applies to **Galatea-Core v3.6.4**.
 
 ---
 
@@ -258,10 +258,11 @@ After training, go to **⚔️ Launch & Monitor Hub → 🏟️ Start Arena (Due
 
 1. **P0 Model**: Select your trained `.pth` model
 2. **P1 Model**: Select "None" to fight RuleBot
-3. Set game count and thought log frequency
-4. Click **⚔️ Start Arena Process**
+3. Select both deck sources. The default “P0 weighted current ranges + P1 follow P0 range” preserves previous behavior. You may instead pin a physical pool, virtual pool, exact deck, or mirror P0's exact deck
+4. Select a mode: Normal Arena is for quick random play; Arena Benchmark freezes decks/seeds and alternates seats for model comparisons
+5. Set game count and thought-log frequency, then click **⚔️ Start Arena Process**
 
-Results viewable in **📈 Meta Dashboard**. AI decision process replayable in **👁️ Holographic Replay**.
+Normal results are viewable in **📈 Meta Dashboard**, and AI decisions in **👁️ Holographic Replay**. Benchmark results appear below the Arena form. Compare model versions by selecting “Reuse an existing schedule” so both runs share the same plan file.
 
 ![Holographic Replay](图片/全息回放.png)
 

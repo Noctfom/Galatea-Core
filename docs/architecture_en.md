@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.6.3**.
+> This document applies to **Galatea-Core v3.6.4**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -81,6 +81,8 @@ Galatea-Core adopts a modular design consisting of the following core subsystems
 | `gamestate.py` | Environment | Game state parsing (core!) |
 | `trainer.py` | Application | PPO trainer |
 | `worker.py` | Application | Multi-process data collection |
+| `model_versus.py` | Application | Normal Arena, logical/physical seat mapping, and Arena decisions |
+| `arena_benchmark.py` | Application | Fixed schedules, deck/model hashes, and benchmark statistics; never participates in training or network forward passes |
 
 ---
 

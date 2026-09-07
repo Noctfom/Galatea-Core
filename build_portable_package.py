@@ -17,6 +17,7 @@ EXCLUDED_TOP_LEVEL_DIRECTORIES = {
     ".vscode",
     "__pycache__",
     "ai_thoughts",
+    "arena_benchmarks",
     "deploy_packages",
     "MDPro3-master-Tools-YGO Classes-ocgcore",
     "models",
