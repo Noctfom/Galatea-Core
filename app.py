@@ -170,7 +170,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.6.4"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.6.5"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1068,6 +1068,41 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 "Same range follows P0's resolved physical or virtual pool and draws independently; same deck copies P0's exact deck.",
             ))
 
+        d_policy_mode = st.radio(
+            _("模型决策策略", "Model decision policy"),
+            ["greedy", "training", "deployment"],
+            format_func=lambda value: {
+                "greedy": _("贪心决策（Argmax）", "Greedy (Argmax)"),
+                "training": _("训练同分布（T=1.0）", "Training distribution (T=1.0)"),
+                "deployment": _("部署温度采样", "Deployment temperature sampling"),
+            }[value],
+            horizontal=True,
+            key="arena_policy_mode",
+            help=_(
+                "只改变竞技场从合法 Logit 中选择动作的方式，不改变模型、观测、动作包装或训练。",
+                "Only changes how Arena selects from legal logits; models, observations, action packing, and training remain unchanged.",
+            ),
+        )
+        d_policy_temperature = 0.8
+        if d_policy_mode == "deployment":
+            d_policy_temperature = st.number_input(
+                _("部署采样温度", "Deployment temperature"),
+                min_value=0.05,
+                max_value=5.0,
+                value=0.8,
+                step=0.05,
+                format="%.2f",
+                help=_(
+                    "越低越接近贪心，越高越愿意尝试低置信度合法动作；推荐先从 0.8 开始。",
+                    "Lower values approach greedy play; higher values explore lower-confidence legal actions. Start with 0.8.",
+                ),
+            )
+        elif d_policy_mode == "training":
+            st.caption(_(
+                "按训练时的 Categorical(Logits) 分布采样，温度固定为 1.0，适合观察真实训练策略。",
+                "Samples from the same Categorical(logits) distribution used in training at fixed temperature 1.0.",
+            ))
+
         with st.form("duel_form"):
             c1, c2 = st.columns(2)
             with c1:
@@ -1122,7 +1157,10 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         "--num", str(d_num),
                         "--thought_freq", str(d_freq),
                         "--arena-mode", d_arena_mode,
+                        "--policy-mode", d_policy_mode,
                     ]
+                    if d_policy_mode == "deployment":
+                        cmd.extend(["--temperature", str(d_policy_temperature)])
                     if d_p1 != "None":
                         cmd.extend(["--p1", d_p1])
                     if selected_benchmark_plan:
@@ -1151,13 +1189,22 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         if benchmark_results:
             st.markdown("#### 📈 " + _("竞技场基准结果", "Arena benchmark results"))
             st.caption(_(
-                "只有使用同一个计划文件的结果才适合直接横向比较；模型哈希用于确认比较对象未被同名文件替换。",
-                "Only results sharing the same plan file are directly comparable; model hashes identify replaced files with the same name.",
+                "只有使用同一个计划文件、相同策略和相同温度的结果才适合直接横向比较；模型哈希用于确认比较对象未被同名文件替换。",
+                "Only results sharing the same plan, policy, and temperature are directly comparable; model hashes identify replaced files with the same name.",
             ))
             benchmark_rows = []
             for result in benchmark_results:
                 summary = result.get("summary", {})
                 models_meta = result.get("models", {})
+                inference_meta = result.get("inference", {})
+                policy_mode = inference_meta.get("policy_mode", "greedy")
+                policy_temperature = inference_meta.get("temperature")
+                if policy_mode == "training":
+                    policy_label = "Training T=1.0"
+                elif policy_mode == "deployment":
+                    policy_label = f"Deployment T={policy_temperature:g}"
+                else:
+                    policy_label = "Greedy"
                 interval = summary.get("p0_win_rate_95ci", [0.0, 0.0])
                 benchmark_rows.append({
                     _("时间", "Time"): result.get("created_at", ""),
@@ -1167,6 +1214,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     "P0 SHA": str(models_meta.get("p0", {}).get("sha256", "rule"))[:12],
                     "P1": models_meta.get("p1", {}).get("name", ""),
                     "P1 SHA": str(models_meta.get("p1", {}).get("sha256", "rule"))[:12],
+                    _("策略", "Policy"): policy_label,
                     _("比分", "Score"): f"{summary.get('p0_wins', 0)}-{summary.get('p1_wins', 0)}",
                     _("P0 胜率", "P0 win rate"): f"{summary.get('p0_win_rate', 0.0):.1%}",
                     "95% CI": f"{interval[0]:.1%}～{interval[1]:.1%}",

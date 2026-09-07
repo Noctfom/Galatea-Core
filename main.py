@@ -279,6 +279,18 @@ def main():
     duel_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
     duel_parser.add_argument('--thought_freq', type=int, default=0, help='每隔几局保存一次AI心声 (0为不保存)')
     duel_parser.add_argument(
+        '--policy-mode', '--policy_mode',
+        choices=('greedy', 'training', 'deployment'),
+        default='greedy',
+        help='竞技场动作策略：greedy=贪心；training=训练同分布；deployment=可调温度采样',
+    )
+    duel_parser.add_argument(
+        '--temperature',
+        type=float,
+        default=0.8,
+        help='deployment 模式采样温度，范围 0.05～5.0；training 固定为 1.0',
+    )
+    duel_parser.add_argument(
         '--arena-mode',
         choices=('normal', 'benchmark'),
         default='normal',
@@ -399,6 +411,8 @@ def main():
             benchmark_seed=args.benchmark_seed,
             benchmark_name=args.benchmark_name,
             benchmark_plan=args.benchmark_plan,
+            policy_mode=args.policy_mode,
+            temperature=args.temperature,
         )
         arena.run_tournament(n_games=args.num)
         

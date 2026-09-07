@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.6.4**.
+> This document applies to **Galatea-Core v3.6.5**.
 
 ---
 
@@ -146,10 +146,11 @@ Test trained models in battle.
 - Arena Mode: Normal samples immediately per game; Benchmark creates a reusable fixed schedule and alternates physical seats
 - P0 Deck: Current weighted ranges, one physical pool, one virtual pool, or one exact deck
 - P1 Deck: The same four independent modes, plus Follow P0 Range and Use Exact P0 Deck
+- Decision Policy: Greedy Argmax, training-distribution sampling at T=1.0, or adjustable deployment-temperature sampling
 - Game Count: Total test games
 - Thought Frequency: Save AI decision record every N games
 
-Normal Arena preserves the existing default: P0 samples a range under current global weights and P1 independently samples inside P0's resolved range. Benchmark mode saves plans and results; use the same plan for a direct cross-model comparison.
+Normal Arena preserves the existing default: P0 samples a range under current global weights and P1 independently samples inside P0's resolved range. Benchmark mode saves plans and results; use the same plan, policy, and temperature for a direct cross-model comparison.
 
 ##### 🛠️ Rules Self-Check (Stress Test)
 
@@ -490,6 +491,8 @@ python main.py duel [options]
 | `--device` | Inference device | cpu |
 | `--deck_dir` | Deck directory | `./decks` |
 | `--thought_freq` | Thought log save frequency | 0 |
+| `--policy-mode` | `greedy` / `training` distribution / `deployment` sampling | greedy |
+| `--temperature` | Deployment sampling temperature from 0.05 to 5.0 | 0.8 |
 | `--arena-mode` | `normal` random Arena / `benchmark` fixed schedule | normal |
 | `--p0-deck-source` | P0 deck source | weighted |
 | `--p1-deck-source` | P1 deck source | same_range |
@@ -505,13 +508,19 @@ choices are soft bans that cannot exhaust the candidate pool by themselves. If a
 pushes every candidate past the threshold, Arena explores the least-visited legal choice in that
 state instead of permanently disabling protection or reporting finite scores as numerical failures.
 
+`greedy` selects the highest filtered logit for deterministic stress checks. `training` samples from
+the same `Categorical(logits)` distribution used during training at fixed T=1.0. `deployment` uses
+an adjustable temperature: lower values approach greedy behavior while higher values explore more.
+All modes share the same encoder, masks, macro pool, and response packer and never modify the model.
+
 Deck-source syntax is `weighted`, `physical:<pool>`, `virtual:<pool>`, or
 `deck:<physical-pool>/<deck-name>`. P1 also accepts `same_range` and `same_deck`.
 `same_range` follows P0's resolved physical/virtual range and draws independently;
 `same_deck` copies the exact deck.
 
 Benchmark mode saves the per-game decks and hashes, duel seeds, and alternating-seat plan before
-play. Results include model hashes, per-game outcomes, abort rate, seat splits, and a 95% Wilson
+play. Results include model hashes, per-game outcomes, abort rate, seat splits, inference policy and
+temperature, and a 95% Wilson
 interval for P0 win rate. Plans are under `arena_benchmarks/plans/` and results under
 `arena_benchmarks/results/`; changed deck contents invalidate an old plan. The seed fixes the
 schedule and framework RNG sources, but different hardware or inference backends may still have
@@ -528,6 +537,12 @@ python main.py duel --p0 ./models/model_a.pth --p1 ./models/model_b.pth --num 10
 
 # Save thought records
 python main.py duel --p0 ./models/galatea_iter_100.pth --thought_freq 5 --num 100
+
+# Evaluate the same stochastic policy used during training
+python main.py duel --p0 ./models/galatea_iter_100.pth --policy-mode training --num 100
+
+# Deployment sampling at temperature 0.8
+python main.py duel --p0 ./models/galatea_iter_100.pth --policy-mode deployment --temperature 0.8 --num 100
 
 # Draw from one physical pool and mirror P0's exact deck
 python main.py duel --p0 ./models/model_a.pth --p1 ./models/model_b.pth --p0-deck-source physical:ranked --p1-deck-source same_deck --num 100

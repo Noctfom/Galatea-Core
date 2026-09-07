@@ -7,7 +7,7 @@
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.6.4](https://img.shields.io/badge/Release-v3.6.4-brightgreen.svg)](docs/changelog_en.md)
+[![Release: v3.6.5](https://img.shields.io/badge/Release-v3.6.5-brightgreen.svg)](docs/changelog_en.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -148,6 +148,9 @@ python main.py train --dir ./models --additional-iterations 1000 --model-prefix 
 
 # Arena
 python main.py duel --p0 ./models/galatea_iter_100.pth --num 100
+
+# Evaluate the training distribution (or use deployment --temperature 0.8)
+python main.py duel --p0 ./models/galatea_iter_100.pth --policy-mode training --num 100
 
 # Fixed-schedule benchmark (create once, then rerun with --benchmark-plan)
 python main.py duel --p0 ./models/galatea_iter_100.pth --arena-mode benchmark --benchmark-name rule_baseline --benchmark-seed 20260906 --num 100

@@ -20,6 +20,35 @@ MAX_RESULT_SCAN_BYTES = 64 * 1024 * 1024
 DEFAULT_BENCHMARK_ROOT = Path("arena_benchmarks")
 
 
+def normalize_benchmark_inference(inference=None):
+    """校验并规范化写入基准结果的竞技场推理策略"""
+    if inference is None:
+        return {"policy_mode": "greedy", "temperature": None}
+    if not isinstance(inference, dict):
+        raise ValueError("竞技场基准推理策略必须是对象")
+    policy_mode = inference.get("policy_mode")
+    temperature = inference.get("temperature")
+    if policy_mode == "greedy" and temperature is None:
+        return {"policy_mode": policy_mode, "temperature": None}
+    if (
+        policy_mode == "training"
+        and isinstance(temperature, (int, float))
+        and not isinstance(temperature, bool)
+        and math.isfinite(temperature)
+        and float(temperature) == 1.0
+    ):
+        return {"policy_mode": policy_mode, "temperature": 1.0}
+    if (
+        policy_mode == "deployment"
+        and isinstance(temperature, (int, float))
+        and not isinstance(temperature, bool)
+        and math.isfinite(temperature)
+        and 0.05 <= float(temperature) <= 5.0
+    ):
+        return {"policy_mode": policy_mode, "temperature": float(temperature)}
+    raise ValueError("竞技场基准推理策略或温度无效")
+
+
 def _safe_benchmark_label(value):
     """把基准名称限制为适合文件名的短标签"""
     text = str(value or "baseline").strip()
@@ -336,8 +365,9 @@ def save_benchmark_result(
     p1_model_path,
     games,
     root=DEFAULT_BENCHMARK_ROOT,
+    inference=None,
 ):
-    """保存带模型哈希、计划引用、逐局数据和统计摘要的结果"""
+    """保存带模型、推理策略、赛程引用和统计摘要的基准结果"""
     p0_model = describe_benchmark_model(p0_model_path, "P0_AI")
     if (
         p0_model_path
@@ -357,6 +387,7 @@ def save_benchmark_result(
             "p0": p0_model,
             "p1": p1_model,
         },
+        "inference": normalize_benchmark_inference(inference),
         "summary": summarize_benchmark_games(games),
         "games": games,
     }
@@ -403,6 +434,13 @@ def load_benchmark_results(root=DEFAULT_BENCHMARK_ROOT, limit=100):
                 continue
             summary = payload.get("summary")
             models = payload.get("models")
+            if "inference" not in payload:
+                # 3.6.4 结果没有策略字段，按当时唯一存在的贪心模式解释
+                payload["inference"] = normalize_benchmark_inference()
+            else:
+                payload["inference"] = normalize_benchmark_inference(
+                    payload["inference"]
+                )
             interval = (
                 summary.get("p0_win_rate_95ci")
                 if isinstance(summary, dict)

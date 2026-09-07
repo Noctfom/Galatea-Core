@@ -4,6 +4,21 @@
 
 ---
 
+## [v3.6.5] - 2026-09-07
+
+### 🎛️ Arena Inference Policies and Replay Fix
+
+- **Training-distribution mode**: Arena can sample from the same `Categorical(logits)` distribution used during training at a fixed temperature of 1.0, exposing the model's actual training-time policy without changing training code or model parameters
+- **Deployment temperature sampling**: Temperature is adjustable from 0.05 to 5.0. Lower values approach greedy behavior while higher values explore lower-confidence legal actions; 0.8 is the recommended starting point. Existing `greedy` Argmax remains the default, preserving old command behavior
+- **Shared legal-action safeguards**: All three policies retain the existing action mask, Retry hard bans, repetition soft bans, macro-action wrapper pool, and candidate-exhaustion protection. Only the final selection among filtered legal logits changes
+- **Reproducible sampled benchmarks**: Under a fixed schedule, sampling uses an independent PyTorch generator initialized from each duel seed. Benchmark results now store policy and temperature metadata. Older 3.6.4 results are interpreted as greedy; direct comparisons should share the same plan, policy, and temperature
+- **Synchronized CLI and WebUI**: `duel` adds `--policy-mode greedy|training|deployment` and `--temperature`; WebUI exposes all three policies, deployment temperature, and a policy column in benchmark results
+- **Fixed Field Spell display in holographic replay**: A resident Spell/Trap-zone card at sequence 5 is no longer overwritten by the fixed “Field” placeholder. Empty Field Zones retain the original label, and existing replay files need no regeneration
+- **Training and protocols unchanged**: Network, observations, action protocol, rewards, PPO, Workers, central inference, ONNX, and checkpoints are untouched. Model Protocol remains 3 and Checkpoint Format remains 2
+- **Stable-release regression**: 159 automated tests pass, with one real-Core long-game test skipped unless explicitly enabled. CPU/CUDA sampling, CLI arguments, and Streamlit WebUI runtime checks pass
+
+---
+
 ## [v3.6.4] - 2026-09-07
 
 ### 🏟️ Arena Deck Selection and Reproducible Benchmarks
@@ -13,7 +28,6 @@
 - **Added fixed-schedule benchmark mode**: Before play, a benchmark freezes both decks, deck SHA-256 values, duel seeds, and seat swaps for every game. Odd/even games alternate the physical P0/P1 seats, while winners are mapped back to logical model identities, reducing deck-sampling and first-player bias in comparisons
 - **Reusable plans with drift rejection**: New plans are stored under `arena_benchmarks/plans/` and may be reused for later models. Loading resolves ordinary deck files again and checks their content hashes; a modified, removed, or replaced deck causes an explicit refusal instead of an incomparable run
 - **Structured benchmark results**: Files under `arena_benchmarks/results/` contain model names and SHA-256 identities, per-game winners/reasons/aborts/decision steps, overall P0 win rate with a 95% Wilson interval, seat splits, and fallback totals. WebUI compares recent results and warns that only runs sharing a plan are directly comparable
-- **Fixed Field Spell display in holographic replay**: A resident Spell/Trap-zone card at sequence 5 is no longer overwritten by the fixed “Field” placeholder. Empty Field Zones retain the original label, and existing replay files need no regeneration
 - **Input and artifact boundaries**: Plan/result JSON rejects symlinks and non-JSON files, is capped at 16 MiB and 10,000 games, and Arena cataloging accepts ordinary `.ydk` files only. Runtime benchmark files are excluded from Git and portable release archives
 - **Protocol and training unchanged**: This release only changes Arena controls, deck selection, and post-game statistics. Network, observations, actions, rewards, PPO, training sampling, and ONNX are untouched. Model Protocol remains 3 and Checkpoint Format remains 2
 - **Stable-release regression**: 155 automated tests pass, with one real-Core long-game test skipped unless explicitly enabled. Both Normal and Benchmark WebUI forms pass Streamlit runtime checks

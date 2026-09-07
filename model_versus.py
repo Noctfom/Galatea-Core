@@ -37,6 +37,47 @@ from arena_benchmark import (
 
 
 ARENA_LOOP_SOFT_BAN_THRESHOLD = 5
+ARENA_POLICY_GREEDY = "greedy"
+ARENA_POLICY_TRAINING = "training"
+ARENA_POLICY_DEPLOYMENT = "deployment"
+ARENA_POLICY_MODES = {
+    ARENA_POLICY_GREEDY,
+    ARENA_POLICY_TRAINING,
+    ARENA_POLICY_DEPLOYMENT,
+}
+MIN_ARENA_TEMPERATURE = 0.05
+MAX_ARENA_TEMPERATURE = 5.0
+
+
+def resolve_arena_policy(policy_mode, temperature=0.8):
+    """校验竞技场策略，并解析实际参与采样的温度"""
+    normalized_mode = str(policy_mode or ARENA_POLICY_GREEDY).strip().lower()
+    if normalized_mode not in ARENA_POLICY_MODES:
+        raise ValueError(
+            "policy_mode must be 'greedy', 'training' or 'deployment'"
+        )
+    if normalized_mode == ARENA_POLICY_GREEDY:
+        return normalized_mode, None
+    if normalized_mode == ARENA_POLICY_TRAINING:
+        return normalized_mode, 1.0
+
+    if isinstance(temperature, bool):
+        raise ValueError("arena temperature must be a finite number")
+    try:
+        normalized_temperature = float(temperature)
+    except (TypeError, ValueError) as error:
+        raise ValueError("arena temperature must be a finite number") from error
+    if (
+        not np.isfinite(normalized_temperature)
+        or not MIN_ARENA_TEMPERATURE
+        <= normalized_temperature
+        <= MAX_ARENA_TEMPERATURE
+    ):
+        raise ValueError(
+            f"arena temperature must be within "
+            f"{MIN_ARENA_TEMPERATURE}～{MAX_ARENA_TEMPERATURE}"
+        )
+    return normalized_mode, normalized_temperature
 
 
 def select_arena_action_index(
@@ -44,8 +85,11 @@ def select_arena_action_index(
     retry_bans,
     loop_bans,
     loop_counts=None,
+    policy_mode=ARENA_POLICY_GREEDY,
+    temperature=0.8,
+    generator=None,
 ):
-    """应用硬/软禁用；软禁用耗尽时改选访问次数最低的合法候选"""
+    """过滤硬/软禁用后，按指定竞技场策略选择一个合法动作"""
     if valid_logits.dim() != 1 or valid_logits.numel() == 0:
         raise RuntimeError("model produced no encodable actions")
 
@@ -87,7 +131,27 @@ def select_arena_action_index(
 
     masked_logits = valid_logits.clone()
     masked_logits[~loop_filtered_mask] = -torch.inf
-    return int(torch.argmax(masked_logits).item()), ignored_exhaustive_loop_bans
+    resolved_mode, resolved_temperature = resolve_arena_policy(
+        policy_mode,
+        temperature,
+    )
+    if resolved_mode == ARENA_POLICY_GREEDY:
+        selected_index = int(torch.argmax(masked_logits).item())
+    else:
+        probabilities = torch.softmax(
+            masked_logits.float() / resolved_temperature,
+            dim=0,
+        )
+        if not torch.isfinite(probabilities).all() or probabilities.sum() <= 0:
+            raise RuntimeError("model produced an invalid sampling distribution")
+        selected_index = int(
+            torch.multinomial(
+                probabilities,
+                num_samples=1,
+                generator=generator,
+            ).item()
+        )
+    return selected_index, ignored_exhaustive_loop_bans
 
 
 def describe_arena_loop_state(snapshot, msg_type, state_key, loop_tracker):
@@ -132,6 +196,8 @@ class ModelArena:
         benchmark_name="baseline",
         benchmark_plan=None,
         benchmark_root="./arena_benchmarks",
+        policy_mode=ARENA_POLICY_GREEDY,
+        temperature=0.8,
     ):
         """初始化普通竞技场或固定赛程基准模式"""
         self.deck_dir = deck_dir
@@ -152,6 +218,10 @@ class ModelArena:
         self.benchmark_name = str(benchmark_name or "baseline")
         self.benchmark_plan = benchmark_plan
         self.benchmark_root = benchmark_root
+        self.policy_mode, self.policy_temperature = resolve_arena_policy(
+            policy_mode,
+            temperature,
+        )
         self.last_duel_metadata = {}
         self.deck_catalog = deck_utils.discover_arena_deck_catalog(deck_dir)
 
@@ -209,6 +279,24 @@ class ModelArena:
             print(f"🤖 [Opponent] 使用 RuleBot (内置规则脚本)")
 
         self.env = GalateaEnv()
+
+    def _inference_metadata(self):
+        """生成终端、基准结果与 WebUI 共用的竞技场策略元数据"""
+        policy_mode = getattr(self, "policy_mode", ARENA_POLICY_GREEDY)
+        policy_temperature = getattr(self, "policy_temperature", None)
+        return {
+            "policy_mode": policy_mode,
+            "temperature": policy_temperature,
+        }
+
+    def _inference_description(self):
+        """生成便于人工核对的竞技场策略说明"""
+        metadata = self._inference_metadata()
+        if metadata["policy_mode"] == ARENA_POLICY_TRAINING:
+            return "训练同分布采样 (T=1.0)"
+        if metadata["policy_mode"] == ARENA_POLICY_DEPLOYMENT:
+            return f"部署温度采样 (T={metadata['temperature']:g})"
+        return "贪心决策 (Argmax)"
 
     @staticmethod
     def _require_model_loaded(bot, path, player_label):
@@ -346,6 +434,17 @@ class ModelArena:
         macro_rng = np.random.default_rng(
             int(duel_seed) if duel_seed is not None else game_idx
         )
+        # 采样策略使用独立生成器；固定赛程下同一决斗种子可复现动作采样流
+        policy_generator = None
+        if self.policy_mode != ARENA_POLICY_GREEDY:
+            policy_seed = (
+                int(duel_seed)
+                if duel_seed is not None
+                else random.randrange(0, 2**63 - 1)
+            )
+            policy_generator = torch.Generator(device=self.device)
+            policy_generator.manual_seed(policy_seed)
+            self.last_duel_metadata["policy_seed"] = policy_seed
 
         steps = 0
         # 增加步数上限到 5000，防止慢速卡组被误判
@@ -541,6 +640,13 @@ class ModelArena:
                                     )
                                     for index in range(valid_count)
                                 },
+                                policy_mode=self.policy_mode,
+                                temperature=(
+                                    self.policy_temperature
+                                    if self.policy_temperature is not None
+                                    else 0.8
+                                ),
+                                generator=policy_generator,
                             )
                             if ignored_loop_bans:
                                 loop_bans_for_state.pop(current_state_key, None)
@@ -724,6 +830,8 @@ class ModelArena:
                 f"P1={deck_utils.format_arena_deck_source(self.p1_deck_source)}"
             )
 
+        print(f"🎛️ 决策策略: {self._inference_description()}")
+
         print(f"🚀 开始 {n_games} 场对决...")
         p0_wins = 0
         p1_wins = 0
@@ -815,6 +923,7 @@ class ModelArena:
                 p1_model_path=self.model_p1_path,
                 games=benchmark_games,
                 root=self.benchmark_root,
+                inference=self._inference_metadata(),
             )
             print(f"📈 竞技场基准结果已保存: {benchmark_result_path}")
         audit_path = flush_protocol_v3_audit(force=True)

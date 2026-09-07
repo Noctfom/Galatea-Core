@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.6.4**。
+> 文档适用于 **Galatea-Core v3.6.5**。
 
 ---
 
@@ -145,10 +145,11 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 - 竞技方式：普通竞技每局即时随机；竞技场基准先生成可复用的固定赛程并交替双方物理座位
 - P0 卡组：当前权重随机区间、单一物理池、单一虚拟池或单个卡组
 - P1 卡组：可在 P0 的四种模式外选择“与 P0 自动相同区间”或“与 P0 自动相同卡组”
+- 决策策略：贪心 Argmax、与训练一致的 T=1.0 分布采样，或可调温度的部署采样
 - 对战局数：测试的总局数
 - 读心频率：每隔 N 局保存一次 AI 决策记录
 
-普通竞技默认保持既有行为：P0 按当前全局权重抽取区间，P1 在 P0 抽中的区间独立抽卡组。基准模式会保存计划与结果；复用同一计划才能对不同模型作直接横向比较。
+普通竞技默认保持既有行为：P0 按当前全局权重抽取区间，P1 在 P0 抽中的区间独立抽卡组。基准模式会保存计划与结果；复用同一计划、策略和温度才能对不同模型作直接横向比较。
 
 ##### 🛠️ 规则自检压测 (Self-Check)
 
@@ -487,6 +488,8 @@ python main.py duel [选项]
 | `--device` | 推理设备 | cpu |
 | `--deck_dir` | 卡组目录 | `./decks` |
 | `--thought_freq` | 心声保存频率 | 0 |
+| `--policy-mode` | `greedy` 贪心 / `training` 训练同分布 / `deployment` 部署采样 | greedy |
+| `--temperature` | `deployment` 模式温度，范围 0.05～5.0 | 0.8 |
 | `--arena-mode` | `normal` 普通竞技 / `benchmark` 固定赛程基准 | normal |
 | `--p0-deck-source` | P0 卡组来源 | weighted |
 | `--p1-deck-source` | P1 卡组来源 | same_range |
@@ -500,12 +503,16 @@ python main.py duel [选项]
 属于不会独自耗尽候选池的软禁用。若异常循环使全部候选都达到阈值，竞技场会在该状态选择
 访问次数最低的合法候选继续探索，不会永久关闭防循环，也不会把有限模型分数误报为数值错误。
 
+`greedy` 使用过滤后最高 Logit，适合确定性压力检查；`training` 使用训练阶段相同的
+`Categorical(logits)` 且固定 T=1.0，适合观察真实训练策略；`deployment` 使用可调温度，
+低温更接近贪心，高温增加探索。三者共用同一编码、遮罩、宏动作池和响应打包器，不修改模型。
+
 卡组来源格式为 `weighted`、`physical:<物理池>`、`virtual:<虚拟池>` 或
 `deck:<物理池>/<卡组名>`；P1 还支持 `same_range` 和 `same_deck`。`same_range`
 跟随 P0 本局最终抽中的物理/虚拟区间后独立抽卡组，`same_deck` 则复制确切卡组。
 
 基准模式预先保存每局卡组及哈希、决斗种子和交替座位计划。结果包含模型哈希、逐局结果、
-异常率、先后手分项及 P0 胜率 95% Wilson 区间。计划位于 `arena_benchmarks/plans/`，结果位于
+异常率、先后手分项、推理策略/温度及 P0 胜率 95% Wilson 区间。计划位于 `arena_benchmarks/plans/`，结果位于
 `arena_benchmarks/results/`；卡组内容变化后旧计划会拒绝执行。固定种子固定的是赛程与框架随机源，
 不同硬件或推理后端仍可能存在底层数值非确定性。
 
@@ -520,6 +527,12 @@ python main.py duel --p0 ./models/model_a.pth --p1 ./models/model_b.pth --num 10
 
 # 保存心声记录
 python main.py duel --p0 ./models/galatea_iter_100.pth --thought_freq 5 --num 100
+
+# 使用训练同分布评估模型
+python main.py duel --p0 ./models/galatea_iter_100.pth --policy-mode training --num 100
+
+# 使用温度 0.8 的部署采样
+python main.py duel --p0 ./models/galatea_iter_100.pth --policy-mode deployment --temperature 0.8 --num 100
 
 # 从单一物理池随机对战同一副卡组
 python main.py duel --p0 ./models/model_a.pth --p1 ./models/model_b.pth --p0-deck-source physical:ranked --p1-deck-source same_deck --num 100
