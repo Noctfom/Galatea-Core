@@ -41,6 +41,15 @@ Maintainers can double-click `构建一键包.bat` in the project root to create
 After validation, it writes `Galatea_Core_Vx.x.x.zip` without including local models,
 logs, or training data.
 
+If a large CUDA runtime makes the ZIP reach GitHub Release's 2 GiB per-file limit, the
+builder automatically creates approximately 1900 MiB `.partNNN` volumes, a SHA256
+manifest, and a Windows merge script. Upload all parts, the manifest, and
+`Merge_Galatea_Core_Vx.x.x.bat`; after downloading them into one folder, users run the
+script to reconstruct and verify the ZIP. `--allow-cpu-only` only relaxes CUDA validation
+and does not uninstall or trim existing CUDA files. Use
+`build_portable_package.py --split-existing <ZIP>` to split an existing oversized archive
+without recompressing it.
+
 ### Linux Users
 
 Use the repository setup script to create the environment and launch the desired mode:

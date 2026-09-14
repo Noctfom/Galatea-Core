@@ -36,6 +36,9 @@ tmp_rollout_*.pt.tmp
 # python 打包环境
 python_env/
 Galatea_Core_V*.zip
+Galatea_Core_V*.zip.part*
+Galatea_Core_V*.zip.sha256.txt
+Merge_Galatea_Core_V*.bat
 
 # --- 允许提交引擎核心 ---
 !ocgcore.dll

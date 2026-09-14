@@ -14,8 +14,10 @@
 - **可复现采样基准**：固定赛程下，温度采样使用由每局决斗种子初始化的独立 PyTorch 随机源；基准结果新增策略与温度元数据。3.6.4 的旧结果自动按贪心模式解释，同计划、同策略、同温度的结果才建议直接比较
 - **CLI 与 WebUI 同步**：`duel` 新增 `--policy-mode greedy|training|deployment` 和 `--temperature`；WebUI 提供三种策略选择、部署温度输入和基准结果策略列
 - **修复全息回放场地魔法显示**：魔陷区序号 5 的常驻场地卡不再被固定“Field”区域标签覆盖；空场地区仍保留原有占位标签，既有录像无需重新生成
+- **GitHub Release 大包发布**：一键包构建器会实际压缩 DLL/PYD/SO 运行库；最终 ZIP 达到 GitHub 的 2 GiB 单文件上限时，自动生成约 1900 MiB 的无损分卷、SHA256 清单及 Windows 合并校验脚本。已有 ZIP 可用 `--split-existing` 直接分卷
+- **澄清 CPU 预检参数**：`--allow-cpu-only` 明确只跳过 CUDA 发布探针，不再暗示会从现有便携环境中裁剪 CUDA 运行库；发布分卷与合并只改变文件传输形态，不改变 Python、PyTorch、训练或模型内容
 - **训练与协议保持不变**：不修改网络、观测、动作协议、奖励、PPO、Worker、中央推理、ONNX 或检查点；Model Protocol 保持 3，Checkpoint Format 保持 2
-- **稳定版回归**：159 项自动化测试通过，1 项需显式启用真实 Core 的长局测试按预期跳过；CPU/CUDA 采样路径、CLI 参数及 Streamlit WebUI 运行态检查通过
+- **稳定版回归**：161 项自动化测试通过，1 项需显式启用真实 Core 的长局测试按预期跳过；CPU/CUDA 采样路径、CLI 参数、Streamlit WebUI 运行态、一键包压缩与分卷无损重组检查通过
 
 ---
 

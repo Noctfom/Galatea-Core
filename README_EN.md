@@ -66,6 +66,15 @@ engine, and CUDA probes. A successful build writes `Galatea_Core_Vx.x.x.zip` to 
 project root. The archive includes portable Python, the card database, Lua scripts, and
 decks while excluding local models, logs, replays, caches, and Git development data.
 
+If the ZIP reaches GitHub Release's 2 GiB per-file limit, the builder automatically emits
+approximately 1900 MiB `.part001`, `.part002`, and subsequent volumes, a SHA256 manifest,
+and `Merge_Galatea_Core_Vx.x.x.bat`. Upload every part, the manifest, and the merge script
+instead of the oversized original ZIP. Users download them into one folder and run the
+merge script to reconstruct and verify the original archive. `--allow-cpu-only` only skips
+the CUDA release probe; it does not remove CUDA libraries already present in `python_env`
+or reduce their size. An existing ZIP can be split with
+`python_env\python.exe build_portable_package.py --split-existing <ZIP-path>`.
+
 #### Manual Install (Developers)
 
 ```bash

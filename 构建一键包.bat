@@ -17,5 +17,5 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [成功] 一键包已生成。
+echo [成功] 一键包已生成；若超过 GitHub 2 GiB 限制，Release 分卷也已自动生成。
 pause

@@ -2,7 +2,7 @@
 
 <img src="docs/图片/logo.png" alt="Galatea Logo" width="50%">
 
-# 🌟 Galatea-Core
+# Galatea-Core
 
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
@@ -63,6 +63,13 @@
 维护者双击 `构建一键包.bat` 即可执行依赖、运行资源、内核和 CUDA 探针，成功后
 在项目根目录生成 `Galatea_Core_Vx.x.x.zip`。压缩包包含便携 Python、卡片数据库、
 Lua 脚本和卡组，不包含本机模型、日志、回放、缓存及 Git 开发数据。
+
+若 ZIP 达到 GitHub Release 的 2 GiB 单文件上限，构建器会自动生成约 1900 MiB 的
+`.part001`、`.part002` 等分卷、SHA256 清单和 `Merge_Galatea_Core_Vx.x.x.bat`。
+发布时上传全部分卷、清单与合并脚本，不上传超限的原始 ZIP；用户下载到同一目录后
+双击合并脚本，即可得到并自动校验原始 ZIP。`--allow-cpu-only` 只跳过 CUDA 发布探针，
+不会删除当前 `python_env` 中的 CUDA 运行库，也不会因此缩小包体。已有 ZIP 可执行
+`python_env\python.exe build_portable_package.py --split-existing <ZIP路径>` 直接分卷。
 
 #### 手动安装（开发者）
 

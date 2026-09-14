@@ -14,8 +14,10 @@
 - **Reproducible sampled benchmarks**: Under a fixed schedule, sampling uses an independent PyTorch generator initialized from each duel seed. Benchmark results now store policy and temperature metadata. Older 3.6.4 results are interpreted as greedy; direct comparisons should share the same plan, policy, and temperature
 - **Synchronized CLI and WebUI**: `duel` adds `--policy-mode greedy|training|deployment` and `--temperature`; WebUI exposes all three policies, deployment temperature, and a policy column in benchmark results
 - **Fixed Field Spell display in holographic replay**: A resident Spell/Trap-zone card at sequence 5 is no longer overwritten by the fixed “Field” placeholder. Empty Field Zones retain the original label, and existing replay files need no regeneration
+- **Oversized GitHub Release bundles**: The portable builder now actually compresses DLL/PYD/SO runtime libraries. When the final ZIP reaches GitHub's 2 GiB per-file limit, it automatically emits approximately 1900 MiB lossless parts, a SHA256 manifest, and a Windows merge-and-verify script. Existing ZIP files can be split directly with `--split-existing`
+- **Clarified CPU validation option**: `--allow-cpu-only` is explicitly limited to skipping the CUDA release probe and no longer implies that CUDA libraries are removed from an existing portable environment. Splitting and merging change only the transfer representation, not Python, PyTorch, training behavior, or model contents
 - **Training and protocols unchanged**: Network, observations, action protocol, rewards, PPO, Workers, central inference, ONNX, and checkpoints are untouched. Model Protocol remains 3 and Checkpoint Format remains 2
-- **Stable-release regression**: 159 automated tests pass, with one real-Core long-game test skipped unless explicitly enabled. CPU/CUDA sampling, CLI arguments, and Streamlit WebUI runtime checks pass
+- **Stable-release regression**: 161 automated tests pass, with one real-Core long-game test skipped unless explicitly enabled. CPU/CUDA sampling, CLI arguments, Streamlit WebUI runtime checks, runtime-library compression, and lossless split reconstruction pass
 
 ---
 

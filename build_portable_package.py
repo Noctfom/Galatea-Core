@@ -2,6 +2,7 @@
 
 import argparse
 import fnmatch
+import hashlib
 import os
 import re
 import subprocess
@@ -12,6 +13,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ARCHIVE_ROOT_NAME = "Galatea_Core"
+GITHUB_RELEASE_ASSET_LIMIT_BYTES = 2 * 1024**3
+DEFAULT_RELEASE_PART_MIB = 1900
+COPY_BUFFER_BYTES = 8 * 1024**2
 EXCLUDED_TOP_LEVEL_DIRECTORIES = {
     ".git",
     ".vscode",
@@ -40,6 +44,9 @@ EXCLUDED_FILE_NAMES = {
 }
 EXCLUDED_FILE_PATTERNS = (
     "Galatea_Core_V*.zip",
+    "Galatea_Core_V*.zip.part*",
+    "Galatea_Core_V*.zip.sha256.txt",
+    "Merge_Galatea_Core_V*.bat",
     "crash_report*",
     "tmp_rollout_*.pt",
     "tmp_rollout_*.pt.tmp",
@@ -47,15 +54,11 @@ EXCLUDED_FILE_PATTERNS = (
     "*.pyc",
 )
 STORED_SUFFIXES = {
-    ".cdb",
     ".data",
-    ".dll",
     ".npy",
     ".onnx",
     ".pth",
     ".pt",
-    ".pyd",
-    ".so",
     ".zip",
 }
 
@@ -180,6 +183,158 @@ def create_portable_archive(output_path, files):
     return output_path
 
 
+def split_release_archive(archive_path, part_size_bytes=None):
+    """将超大 ZIP 无损切分为 GitHub Release 分卷并生成合并与校验文件"""
+    input_path = Path(archive_path)
+    if input_path.is_symlink():
+        raise ValueError(f"待分卷 ZIP 不允许使用符号链接: {input_path}")
+    archive_path = input_path.resolve()
+    if not archive_path.is_file():
+        raise FileNotFoundError(f"待分卷 ZIP 不存在或不是普通文件: {archive_path}")
+    if archive_path.suffix.casefold() != ".zip":
+        raise ValueError(f"只允许分卷 ZIP 文件: {archive_path.name}")
+    if not zipfile.is_zipfile(archive_path):
+        raise zipfile.BadZipFile(f"待分卷文件不是有效 ZIP: {archive_path.name}")
+
+    part_size_bytes = part_size_bytes or DEFAULT_RELEASE_PART_MIB * 1024**2
+    if part_size_bytes <= 0 or part_size_bytes >= GITHUB_RELEASE_ASSET_LIMIT_BYTES:
+        raise ValueError("Release 分卷大小必须大于 0 且严格小于 2 GiB")
+
+    archive_size = archive_path.stat().st_size
+    part_count = max(1, (archive_size + part_size_bytes - 1) // part_size_bytes)
+    number_width = max(3, len(str(part_count)))
+    part_paths = [
+        archive_path.with_name(
+            f"{archive_path.name}.part{part_number:0{number_width}d}"
+        )
+        for part_number in range(1, part_count + 1)
+    ]
+    manifest_path = archive_path.with_name(f"{archive_path.name}.sha256.txt")
+    merge_script_path = archive_path.with_name(f"Merge_{archive_path.stem}.bat")
+    output_paths = [*part_paths, manifest_path, merge_script_path]
+    existing_outputs = [path for path in output_paths if path.exists()]
+    if existing_outputs:
+        names = ", ".join(path.name for path in existing_outputs)
+        raise FileExistsError(f"分卷输出已存在，请先确认后删除: {names}")
+
+    temporary_outputs = []
+    part_records = []
+    archive_digest = hashlib.sha256()
+    try:
+        with archive_path.open("rb") as source:
+            for part_path in part_paths:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{part_path.name}.",
+                    suffix=".tmp",
+                    dir=archive_path.parent,
+                    delete=False,
+                ) as temporary_file:
+                    temporary_path = Path(temporary_file.name)
+                    temporary_outputs.append((temporary_path, part_path))
+                    part_digest = hashlib.sha256()
+                    remaining = part_size_bytes
+                    written_bytes = 0
+                    while remaining > 0:
+                        chunk = source.read(min(COPY_BUFFER_BYTES, remaining))
+                        if not chunk:
+                            break
+                        temporary_file.write(chunk)
+                        part_digest.update(chunk)
+                        archive_digest.update(chunk)
+                        written_bytes += len(chunk)
+                        remaining -= len(chunk)
+                part_records.append(
+                    (part_path, written_bytes, part_digest.hexdigest())
+                )
+
+        expected_archive_hash = archive_digest.hexdigest()
+        if sum(record[1] for record in part_records) != archive_size:
+            raise OSError("分卷读取长度与原始 ZIP 不一致")
+
+        manifest_lines = [
+            "# Galatea-Core GitHub Release split archive checksums",
+            f"# Original-Size: {archive_size}",
+            f"{expected_archive_hash} *{archive_path.name}",
+        ]
+        manifest_lines.extend(
+            f"{part_hash} *{part_path.name}"
+            for part_path, _, part_hash in part_records
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{manifest_path.name}.",
+            suffix=".tmp",
+            dir=archive_path.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_manifest = Path(temporary_file.name)
+            temporary_outputs.append((temporary_manifest, manifest_path))
+            temporary_file.write("\n".join(manifest_lines) + "\n")
+
+        copy_expression = "+".join(f'"{path.name}"' for path in part_paths)
+        merge_script = (
+            "@echo off\n"
+            ":: This file reconstructs and verifies the Galatea-Core release ZIP.\n"
+            "setlocal\n"
+            "cd /d \"%~dp0\"\n"
+            f"set \"ARCHIVE={archive_path.name}\"\n"
+            f"set \"EXPECTED_SHA256={expected_archive_hash}\"\n"
+            "if exist \"%ARCHIVE%\" (\n"
+            "  echo [ERROR] The target ZIP already exists: %ARCHIVE%\n"
+            "  echo Remove or move it only after confirming which copy to keep.\n"
+            "  pause\n"
+            "  exit /b 1\n"
+            ")\n"
+            f"copy /b {copy_expression} \"%ARCHIVE%\" >nul\n"
+            "if errorlevel 1 (\n"
+            "  echo [ERROR] Failed to merge parts. Download every part into this folder.\n"
+            "  pause\n"
+            "  exit /b 1\n"
+            ")\n"
+            "for /f %%H in ('powershell -NoProfile -Command \"(Get-FileHash -LiteralPath '%ARCHIVE%' -Algorithm SHA256).Hash.ToLowerInvariant()\"') do set \"ACTUAL_SHA256=%%H\"\n"
+            "if /I not \"%ACTUAL_SHA256%\"==\"%EXPECTED_SHA256%\" (\n"
+            "  echo [ERROR] SHA256 mismatch. A release part may be missing or damaged.\n"
+            "  pause\n"
+            "  exit /b 1\n"
+            ")\n"
+            "echo [OK] Release ZIP reconstructed and verified: %ARCHIVE%\n"
+            "pause\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="ascii",
+            newline="",
+            prefix=f".{merge_script_path.name}.",
+            suffix=".tmp",
+            dir=archive_path.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_script = Path(temporary_file.name)
+            temporary_outputs.append((temporary_script, merge_script_path))
+            temporary_file.write(merge_script)
+
+        for temporary_path, final_path in temporary_outputs:
+            os.replace(temporary_path, final_path)
+        temporary_outputs.clear()
+    finally:
+        for temporary_path, _ in temporary_outputs:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+    print(
+        f"[Release 分卷] {archive_path.name} 已切分为 {len(part_paths)} 个文件，"
+        f"单卷上限 {part_size_bytes / 1024**2:.0f} MiB"
+    )
+    print(
+        f"[Release 分卷] GitHub 上传全部 .part 文件、{manifest_path.name} 与 "
+        f"{merge_script_path.name}；不要上传超过 2 GiB 的原始 ZIP。"
+    )
+    return part_paths, manifest_path, merge_script_path
+
+
 def main(argv=None):
     """解析打包参数，完成发布预检并生成版本化 ZIP"""
     parser = argparse.ArgumentParser(description="构建 Galatea-Core Windows 一键包")
@@ -192,7 +347,18 @@ def main(argv=None):
     parser.add_argument(
         "--allow-cpu-only",
         action="store_true",
-        help="允许便携环境不含 CUDA，仅用于明确发布 CPU 一键包",
+        help="仅跳过 CUDA 发布预检；不会删除当前环境中的 CUDA 文件或缩小包体",
+    )
+    parser.add_argument(
+        "--release-part-mib",
+        type=int,
+        default=DEFAULT_RELEASE_PART_MIB,
+        help="超出 GitHub 限制时的分卷大小（MiB），默认 1900；设为 0 禁用分卷",
+    )
+    parser.add_argument(
+        "--split-existing",
+        type=Path,
+        help="只分卷一个已经生成的 ZIP，不重复执行环境预检和完整打包",
     )
     parser.add_argument(
         "--validate-only",
@@ -201,7 +367,23 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    if args.release_part_mib < 0 or args.release_part_mib >= 2048:
+        parser.error("--release-part-mib 必须为 0 到 2047 之间的整数")
+    part_size_bytes = args.release_part_mib * 1024**2
+    if args.split_existing is not None:
+        if args.validate_only or args.allow_cpu_only:
+            parser.error("--split-existing 不能与 --validate-only/--allow-cpu-only 同时使用")
+        if not part_size_bytes:
+            parser.error("--split-existing 需要启用非零 Release 分卷大小")
+        split_release_archive(args.split_existing, part_size_bytes)
+        return 0
+
     version = read_release_version()
+    if args.allow_cpu_only:
+        print(
+            "[一键包] 注意：--allow-cpu-only 只跳过 CUDA 探针，"
+            "不会从现有 python_env 裁剪 CUDA 运行库。"
+        )
     validate_portable_environment(require_cuda=not args.allow_cpu_only)
     files = list(iter_package_files())
     if not files:
@@ -217,7 +399,17 @@ def main(argv=None):
         return 0
 
     output_path = args.output_dir / f"Galatea_Core_V{version}.zip"
-    create_portable_archive(output_path, files)
+    archive_path = create_portable_archive(output_path, files)
+    if (
+        part_size_bytes
+        and archive_path.stat().st_size >= GITHUB_RELEASE_ASSET_LIMIT_BYTES
+    ):
+        split_release_archive(archive_path, part_size_bytes)
+    elif archive_path.stat().st_size >= GITHUB_RELEASE_ASSET_LIMIT_BYTES:
+        print(
+            "[一键包] 警告：ZIP 已达到 GitHub Release 2 GiB 单文件上限，"
+            "但分卷已禁用。"
+        )
     return 0
 
 

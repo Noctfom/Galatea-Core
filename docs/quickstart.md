@@ -39,6 +39,12 @@
 
 维护者需要制作发布包时，可双击项目根目录的 `构建一键包.bat`。脚本通过发布预检后
 会生成 `Galatea_Core_Vx.x.x.zip`，不会把本机模型、日志和训练数据带入压缩包。
+大型 CUDA 环境若使 ZIP 达到 GitHub Release 的 2 GiB 单文件上限，脚本会自动生成
+约 1900 MiB 的 `.partNNN` 分卷、SHA256 清单和 Windows 合并脚本。发布者应上传全部
+分卷、清单及合并脚本；用户下载到同一目录后双击 `Merge_Galatea_Core_Vx.x.x.bat`
+即可无损还原并校验 ZIP。`--allow-cpu-only` 仅放宽 CUDA 环境检查，不负责卸载或裁剪
+现有 CUDA 文件。已有超限 ZIP 可通过 `build_portable_package.py --split-existing <ZIP>`
+直接生成 Release 分卷，无需重新压缩。
 
 ### Linux 用户
 
