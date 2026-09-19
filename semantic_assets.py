@@ -25,19 +25,115 @@ SEMANTIC_ASSET_FILENAMES = (
     HASH_MAPPING_FILENAME,
     *CODE_SEMANTIC_FILENAMES,
 )
+DEFAULT_SEMANTIC_REPOSITORY_URL = "https://github.com/Noctfom/Galatea-Core.git"
 MAX_CODE_EMBEDDINGS_BYTES = 2 * 1024 * 1024 * 1024
 MAX_CODE_EMBEDDING_INDEX_BYTES = 256 * 1024 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 512 * 1024 * 1024
 
 
 def semantic_sibling_url(base_url, filename):
-    """把知识库 URL 的文件名替换为同目录下的其他语义资产名"""
-    parts = urllib.parse.urlsplit(base_url)
-    parent = parts.path.rsplit("/", 1)[0]
-    path = f"{parent}/{filename}" if parent else f"/{filename}"
+    """把仓库或旧式 Raw 地址解析为指定语义资产的下载地址"""
+    source = str(base_url or "").strip()
+    parts = urllib.parse.urlsplit(source)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ValueError("semantic repository URL must use HTTP or HTTPS")
+    if parts.username or parts.password:
+        raise ValueError("semantic repository URL must not contain credentials")
+
+    path_parts = [part for part in parts.path.split("/") if part]
+    if parts.netloc.lower() == "github.com" and len(path_parts) >= 2:
+        owner = path_parts[0]
+        repository = path_parts[1]
+        if repository.endswith(".git"):
+            repository = repository[:-4]
+        branch = "main"
+        subdirectory = []
+        if len(path_parts) >= 4 and path_parts[2] in {"tree", "blob"}:
+            branch = path_parts[3]
+            subdirectory = path_parts[4:]
+            if path_parts[2] == "blob" and subdirectory:
+                subdirectory = subdirectory[:-1]
+        asset_path = "/".join([owner, repository, branch, *subdirectory, filename])
+        return f"https://raw.githubusercontent.com/{asset_path}"
+
+    known_filenames = set(SEMANTIC_ASSET_FILENAMES)
+    if path_parts and path_parts[-1] in known_filenames:
+        path_parts = path_parts[:-1]
+    path = "/" + "/".join([*path_parts, filename])
     return urllib.parse.urlunsplit(
         (parts.scheme, parts.netloc, path, parts.query, parts.fragment)
     )
+
+
+def clear_local_semantic_assets(
+    target_directory,
+    *,
+    knowledge_base_filename=KNOWLEDGE_BASE_FILENAME,
+):
+    """物理删除本地语义资产，供明确选择的全量重建流程使用"""
+    root = Path(target_directory).resolve()
+    filenames = {
+        knowledge_base_filename,
+        HASH_MAPPING_FILENAME,
+        *CODE_SEMANTIC_FILENAMES,
+    }
+    removed = []
+    for filename in filenames:
+        path = root / filename
+        if path.is_symlink():
+            raise ValueError(f"semantic asset must not be a symbolic link: {path}")
+        if path.is_file():
+            path.unlink()
+            removed.append(path.name)
+    return removed
+
+
+def _rebuild_hash_mapping(knowledge_base):
+    """从结构化语义中的自定义标签重建可接续的 Hash 映射"""
+    mapping = {}
+    for card_id, card_data in knowledge_base.items():
+        if not isinstance(card_data, dict):
+            continue
+        for fallback_slot, effect in enumerate(card_data.get("effects", []), start=1):
+            if not isinstance(effect, dict):
+                continue
+            slot = int(effect.get("slot", fallback_slot) or fallback_slot)
+            card_label = f"{card_id}_E{slot}"
+            for category in effect.get("categories", []):
+                category = str(category)
+                if not category.startswith("CUSTOM_HASH_"):
+                    continue
+                record = mapping.setdefault(
+                    category,
+                    {"cards": [], "sample_code": ""},
+                )
+                if card_label not in record["cards"]:
+                    record["cards"].append(card_label)
+    return mapping
+
+
+def _write_json_atomically(payload, destination):
+    """把 JSON 资产写入同目录临时文件后原子替换"""
+    destination = Path(destination).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{destination.name}.",
+            suffix=".sync.tmp",
+            dir=destination.parent,
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temporary_path, destination)
+        temporary_path = None
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def _load_json_object(path, *, max_bytes, label):
@@ -301,4 +397,46 @@ def download_remote_semantic_bundle(remote_kb_url, target_directory):
         "hash_mapping": hash_mapping,
         "installed_code_semantics": downloaded_vectors == vector_names,
         "errors": errors,
+    }
+
+
+def synchronize_remote_semantic_bundle(
+    remote_source,
+    target_directory,
+    *,
+    knowledge_base_filename=KNOWLEDGE_BASE_FILENAME,
+):
+    """仅同步远程语义资产，不扫描本地 Lua，也不生成新向量"""
+    target_root = Path(target_directory).resolve()
+    target_root.mkdir(parents=True, exist_ok=True)
+    remote_kb_url = semantic_sibling_url(
+        remote_source,
+        KNOWLEDGE_BASE_FILENAME,
+    )
+    bundle = download_remote_semantic_bundle(remote_kb_url, target_root)
+    hash_mapping = bundle["hash_mapping"]
+    rebuilt_hash_mapping = hash_mapping is None
+    if rebuilt_hash_mapping:
+        hash_mapping = _rebuild_hash_mapping(bundle["knowledge_base"])
+
+    _write_json_atomically(
+        bundle["knowledge_base"],
+        target_root / knowledge_base_filename,
+    )
+    _write_json_atomically(
+        hash_mapping,
+        target_root / HASH_MAPPING_FILENAME,
+    )
+
+    if not bundle["installed_code_semantics"]:
+        # 远程结构语义变化后不能继续沿用旧向量，避免静默错位。
+        for filename in CODE_SEMANTIC_FILENAMES:
+            path = target_root / filename
+            if path.is_file() and not path.is_symlink():
+                path.unlink()
+
+    return {
+        **bundle,
+        "remote_knowledge_base_url": remote_kb_url,
+        "rebuilt_hash_mapping": rebuilt_hash_mapping,
     }

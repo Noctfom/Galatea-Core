@@ -31,6 +31,9 @@ from data_types import (
     ACTION_SIGNATURE_BYTES,
     ACTION_TARGET_SLOTS,
     CHAIN_CONTEXT_DIM,
+    CARD_NUMERIC_FEATURE_DIM,
+    GLOBAL_FEATURE_DIM,
+    PLAYER_CONTEXT_SLOTS,
 )
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
@@ -42,6 +45,7 @@ from checkpoint_utils import (
     restore_model_state_strict,
     validate_training_checkpoint,
 )
+from protocol_schema import apply_current_protocol_metadata, get_current_protocol_metadata
 from inference_protocol import (
     InferenceProtocolError,
     decode_inference_request,
@@ -267,14 +271,7 @@ class PPOTrainer:
         if net_config is None:
             net_config = {'d_model': 256, 'n_heads': 4, 'n_layers': 2, 'vocab_size': 20000}
         net_config = dict(net_config)
-        configured_protocol = net_config.get(
-            'model_protocol_version', MODEL_PROTOCOL_VERSION
-        )
-        if configured_protocol != MODEL_PROTOCOL_VERSION:
-            raise ValueError(
-                "net_config model_protocol_version does not match the current model protocol"
-            )
-        net_config['model_protocol_version'] = MODEL_PROTOCOL_VERSION
+        net_config = apply_current_protocol_metadata(net_config)
 
         self.net_config = net_config
         self.worker_timeout = worker_timeout
@@ -298,7 +295,10 @@ class PPOTrainer:
                 if preloaded_resume_checkpoint is not None
                 else load_training_checkpoint(resume_path, map_location="cpu")
             )
-            self.net_config = resume_checkpoint['net_config']
+            # 词表合法追加后，恢复训练立即升级运行时身份；下一检查点应覆盖新卡映射
+            self.net_config = apply_current_protocol_metadata(
+                resume_checkpoint['net_config']
+            )
             self.model_id = resume_checkpoint['model_id']
             self.model_prefix = resume_checkpoint['model_prefix']
             self.resume_source_record = {
@@ -489,13 +489,17 @@ class PPOTrainer:
         
         # 严密对齐特工的观测维度 specs
         input_specs = {
-            'global': ((15,), torch.float32),
+            'global': ((GLOBAL_FEATURE_DIM,), torch.float32),
+            'phase': ((1,), torch.long),
+            'player_context': ((PLAYER_CONTEXT_SLOTS,), torch.long),
             'card_idx': ((120,), torch.long),
             'card_overlay_idx': ((120,), torch.long),
             'card_race': ((120,), torch.long),
             'card_attr': ((120,), torch.long),
             'card_setcodes': ((120, 4), torch.long),
-            'card_feats': ((120, 66), torch.float32),
+            'card_feats': ((120, CARD_NUMERIC_FEATURE_DIM), torch.float32),
+            'card_zone': ((120,), torch.long),
+            'card_position': ((120,), torch.long),
             'padding_mask': ((120,), torch.bool),
             
             # ---前场/后场/手牌 语义大脑皮层槽位 ---
@@ -530,6 +534,8 @@ class PPOTrainer:
             'c_card_idx': ((12,), torch.long),
             'c_desc': ((12,), torch.long),
             'c_context': ((12, CHAIN_CONTEXT_DIM), torch.float16),
+            'c_zone': ((12, 2), torch.long),
+            'c_position': ((12,), torch.long),
 
             # --- 瞬间时点连锁堆栈 语义槽位 ---
             'c_sem_category': ((12, 8, 8), torch.int16),
@@ -571,6 +577,7 @@ class PPOTrainer:
             'act_controller': ((120,), torch.uint8),
             'act_location': ((120,), torch.uint8),
             'act_sequence': ((120,), torch.uint8),
+            'act_position': ((120,), torch.uint8),
         }
         self.input_specs = input_specs
 
@@ -1436,7 +1443,7 @@ class PPOTrainer:
                 # 补全生命周期字段，确保 TensorBoard 曲线 100% 无缝对接
                 checkpoint = {
                     'checkpoint_format_version': CHECKPOINT_FORMAT_VERSION,
-                    'model_protocol_version': MODEL_PROTOCOL_VERSION,
+                    **get_current_protocol_metadata(),
                     'model_id': self.model_id,
                     'model_prefix': self.model_prefix,
                     'run_id': self.run_id,

@@ -1,25 +1,29 @@
 # ==================================================================================
-#  Galatea Feature Encoder (特征编码器 V3.0 - Semantic Active)
+#  Galatea Feature Encoder（V4 精确卡片身份已启用）
 # ==================================================================================
 
 import torch
 import numpy as np
+from card_vocab import get_default_card_vocabulary
 from data_types import (
     ACTION_CONTEXT_DIM,
     ACTION_RESPONSE_BUCKETS,
     ACTION_SIGNATURE_BYTES,
     ACTION_TARGET_SLOTS,
     CHAIN_CONTEXT_DIM,
+    CARD_NUMERIC_FEATURE_DIM,
+    GLOBAL_FEATURE_DIM,
+    PHASE_CATEGORY_COUNT,
+    PLAYER_CONTEXT_SLOTS,
+    POSITION_CATEGORY_COUNT,
+    ZONE_CATEGORY_COUNT,
     GameSnapshot,
 )
 from game_constants import LocationInfo, Zone
 from semantic_kb import SemanticKnowledgeBase  # 导入语义库
 
 # --- 配置参数 ---
-MAX_CARDS = 120          
-VOCAB_SIZE = 20000       
-UNK_CODE_IDX = 1         
-PAD_CODE_IDX = 0         
+MAX_CARDS = 120
 MAX_ACTIONS = 120
 HIDDEN_OPPONENT_ZONES = {
     Zone.HAND,
@@ -33,22 +37,33 @@ HIDDEN_OPPONENT_ZONES = {
 _GLOBAL_SEM_KB = None
 
 class GalateaEncoder:
-    def __init__(self, vocab_size=VOCAB_SIZE):
-        self.vocab_size = vocab_size
-        self.reserved_ids = 10 
-        self.global_dim = 15
+    def __init__(self, vocab_size=None, card_vocabulary=None):
+        self.card_vocabulary = card_vocabulary or get_default_card_vocabulary()
+        if vocab_size is not None and vocab_size != self.card_vocabulary.capacity:
+            raise ValueError(
+                "encoder vocab_size must equal the exact card vocabulary capacity"
+            )
+        self.vocab_size = self.card_vocabulary.capacity
+        self.global_dim = GLOBAL_FEATURE_DIM
         self.card_feat_dim = 7
         
         # 单例模式：防止每开一局卡顿，所有环境共享一个缓存！
         global _GLOBAL_SEM_KB
         if _GLOBAL_SEM_KB is None:
-            _GLOBAL_SEM_KB = SemanticKnowledgeBase('knowledge_base.json')
+            _GLOBAL_SEM_KB = SemanticKnowledgeBase(
+                'knowledge_base.json',
+                card_vocabulary=self.card_vocabulary,
+            )
+        elif (
+            _GLOBAL_SEM_KB.card_vocabulary.vocabulary_hash
+            != self.card_vocabulary.vocabulary_hash
+        ):
+            raise ValueError("semantic cache and encoder card vocabularies do not match")
         self.sem_kb = _GLOBAL_SEM_KB
 
-    def _hash_code(self, code):
-        if code == 0:
-            return UNK_CODE_IDX
-        return (code % (self.vocab_size - self.reserved_ids)) + self.reserved_ids
+    def _encode_card_code(self, code):
+        """把真实卡片代码映射为无碰撞的固定词表索引"""
+        return self.card_vocabulary.encode(code)
 
     @staticmethod
     def _hash_action_response(value):
@@ -124,22 +139,23 @@ class GalateaEncoder:
         """把引擎原始位置转成行动方视角的控制者、区域与序号"""
         raw_location = getattr(action, 'target_location_raw', -1)
         if raw_location is None or raw_location < 0:
-            return 0, 0, 0
-        controller, location, sequence, _ = LocationInfo.decode(raw_location)
+            return 0, 0, 0, 0
+        controller, location, sequence, position = LocationInfo.decode(raw_location)
         relative_controller = 1 if controller == player_id else 2
-        location_index = location.bit_length() if location > 0 else 0
-        return relative_controller, min(location_index, 8), min(int(sequence), 31) + 1
+        return (
+            relative_controller,
+            GalateaEncoder._encode_zone_category(location),
+            min(int(sequence), 31) + 1,
+            GalateaEncoder._encode_position_category(position),
+        )
 
     @staticmethod
     def _encode_chain_context(item, player_id):
         """把连锁位置与已确认的 Lua 效果槽压缩为行动方视角特征"""
         trigger_controller = int(item.get('c', -1))
-        trigger_location = int(item.get('l', 0))
         trigger_sequence = int(item.get('s', 0))
         handler_controller = int(item.get('hc', trigger_controller))
-        handler_location = int(item.get('hl', trigger_location))
         handler_sequence = int(item.get('hs', trigger_sequence))
-        handler_position = int(item.get('hp', 0))
         effect_slot = int(item.get('effect_slot', -1))
         chain_index = int(item.get('ct', 0))
 
@@ -151,19 +167,43 @@ class GalateaEncoder:
 
         return [
             relative_controller(handler_controller),
-            handler_location / 100.0,
             min(max(handler_sequence, 0), 31) / 10.0,
-            handler_position / 10.0,
             relative_controller(trigger_controller),
-            trigger_location / 100.0,
             min(max(trigger_sequence, 0), 31) / 10.0,
             min(max(chain_index, 0), 12) / 12.0,
             (effect_slot + 1) / 8.0 if 0 <= effect_slot < 8 else 0.0,
         ]
 
     @staticmethod
+    def _encode_phase_category(phase_id):
+        """把 Core 阶段常量映射为紧凑且稳定的离散类别"""
+        phase_ids = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200)
+        try:
+            return phase_ids.index(int(phase_id)) + 1
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _encode_zone_category(location):
+        """把单一区域位映射为未知、卡组、手牌等九类离散编号"""
+        zone_ids = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80)
+        try:
+            return zone_ids.index(int(location)) + 1
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _encode_position_category(position):
+        """保留 Core 四位表示掩码，并把越界值归入未知类别"""
+        try:
+            category = int(position)
+        except (TypeError, ValueError):
+            return 0
+        return category if 0 <= category < POSITION_CATEGORY_COUNT else 0
+
+    @staticmethod
     def _encode_global_vector(g, player_id):
-        """Encode fixed P0/P1 state fields from the acting player's view."""
+        """把绝对全局状态转换为当前决策玩家的相对连续特征"""
         if player_id not in (0, 1):
             raise ValueError(f"player_id must be 0 or 1, got {player_id}")
 
@@ -179,14 +219,50 @@ class GalateaEncoder:
         if player_id == 1:
             resource_pairs = [(op, me, scale) for me, op, scale in resource_pairs]
 
+        turn_player = getattr(g, 'turn_player', -1)
+        if turn_player not in (0, 1):
+            turn_player = g.to_play
+        starting_player = getattr(g, 'starting_player', -1)
+        turn_counts = [
+            getattr(g, 'p0_turn_count', 0),
+            getattr(g, 'p1_turn_count', 0),
+        ]
+        if player_id == 1:
+            turn_counts.reverse()
+
         global_vec = [
             min(g.turn_count / 20.0, 5.0),
-            g.phase_id / 10.0,
-            1.0 if g.to_play == player_id else 0.0,
+            1.0 if turn_player == player_id else 0.0,
+            1.0 if starting_player == player_id else 0.0,
+            min(turn_counts[0] / 10.0, 5.0),
+            min(turn_counts[1] / 10.0, 5.0),
         ]
         for me, opponent, scale in resource_pairs:
             global_vec.extend([me / scale, opponent / scale])
         return global_vec
+
+    @staticmethod
+    def _encode_player_context(g, player_id):
+        """将决策者、回合玩家和先手玩家编码为未知/己方/对方三类角色"""
+        if player_id not in (0, 1):
+            raise ValueError(f"player_id must be 0 or 1, got {player_id}")
+
+        def relative_role(absolute_player):
+            if absolute_player not in (0, 1):
+                return 0
+            return 1 if absolute_player == player_id else 2
+
+        decision_player = getattr(g, 'decision_player', -1)
+        if decision_player not in (0, 1):
+            decision_player = g.to_play
+        roles = [
+            relative_role(decision_player),
+            relative_role(getattr(g, 'turn_player', -1)),
+            relative_role(getattr(g, 'starting_player', -1)),
+        ]
+        if len(roles) != PLAYER_CONTEXT_SLOTS:
+            raise RuntimeError("player context slot count does not match the protocol")
+        return roles
 
     @staticmethod
     def _is_entity_visible_to_player(entity, player_id):
@@ -259,7 +335,7 @@ class GalateaEncoder:
         act_races, act_attrs, act_codes, act_places = [], [], [], []
         act_operations, act_responses, act_signatures = [], [], []
         act_contexts, act_target_codes, act_target_values = [], [], []
-        act_controllers, act_locations, act_sequences = [], [], []
+        act_controllers, act_locations, act_sequences, act_positions = [], [], [], []
 
         for act in valid_actions[:MAX_ACTIONS]:
             if getattr(act, 'macro_targets', None):
@@ -283,7 +359,7 @@ class GalateaEncoder:
             act_places.append(places)
 
             raw_codes = list(getattr(act, 'macro_target_codes', None) or ())[:max_materials]
-            target_codes = [self._hash_code(code) if code else 0 for code in raw_codes]
+            target_codes = [self._encode_card_code(code) if code else 0 for code in raw_codes]
             target_codes.extend([0] * (max_materials - len(target_codes)))
             act_target_codes.append(target_codes)
 
@@ -310,10 +386,14 @@ class GalateaEncoder:
                 float(bool(getattr(act, 'cancelable', False))),
                 self._scale_action_context(getattr(act, 'context_value', 0)),
             ])
-            controller, location, sequence = self._encode_target_location(act, player_id)
+            controller, location, sequence, position = self._encode_target_location(
+                act,
+                player_id,
+            )
             act_controllers.append(controller)
             act_locations.append(location)
             act_sequences.append(sequence)
+            act_positions.append(position)
 
             race_value, attr_value, code_value = 0, 0, 0
             if act.action_type == 140 and act.desc_id > 0:
@@ -321,9 +401,9 @@ class GalateaEncoder:
             elif act.action_type == 141 and act.desc_id > 0:
                 attr_value = (act.desc_id.bit_length() - 1) % 10
             elif act.action_type == 142:
-                code_value = self._hash_code(act.desc_id)
+                code_value = self._encode_card_code(act.desc_id)
             elif getattr(act, 'code', 0):
-                code_value = self._hash_code(act.code)
+                code_value = self._encode_card_code(act.code)
             act_races.append(race_value)
             act_attrs.append(attr_value)
             act_codes.append(code_value)
@@ -348,6 +428,7 @@ class GalateaEncoder:
             act_controllers.extend([0] * pad_len)
             act_locations.extend([0] * pad_len)
             act_sequences.extend([0] * pad_len)
+            act_positions.extend([0] * pad_len)
 
         return {
             'act_card_idx': torch.tensor(act_card_idxs, dtype=torch.long).unsqueeze(0),
@@ -368,19 +449,35 @@ class GalateaEncoder:
             'act_controller': torch.tensor(act_controllers, dtype=torch.uint8).unsqueeze(0),
             'act_location': torch.tensor(act_locations, dtype=torch.uint8).unsqueeze(0),
             'act_sequence': torch.tensor(act_sequences, dtype=torch.uint8).unsqueeze(0),
+            'act_position': torch.tensor(act_positions, dtype=torch.uint8).unsqueeze(0),
         }
 
     def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:
         g = snapshot.global_data
         global_vec = self._encode_global_vector(g, player_id)
+        player_context = self._encode_player_context(g, player_id)
+        phase_category = self._encode_phase_category(g.phase_id)
         
         # 核心优化：直接预分配全量固定形状的 NumPy 数组，天然自带 Padding
-        card_indices = np.full(MAX_CARDS, PAD_CODE_IDX, dtype=np.int64)
-        card_overlay_indices = np.full(MAX_CARDS, PAD_CODE_IDX, dtype=np.int64)
+        card_indices = np.full(
+            MAX_CARDS,
+            self.card_vocabulary.padding_id,
+            dtype=np.int64,
+        )
+        card_overlay_indices = np.full(
+            MAX_CARDS,
+            self.card_vocabulary.padding_id,
+            dtype=np.int64,
+        )
         card_races = np.zeros(MAX_CARDS, dtype=np.int64)
         card_attrs = np.zeros(MAX_CARDS, dtype=np.int64)
         card_setcodes = np.zeros((MAX_CARDS, 4), dtype=np.int64)
-        card_feats = np.zeros((MAX_CARDS, 66), dtype=np.float32)
+        card_feats = np.zeros(
+            (MAX_CARDS, CARD_NUMERIC_FEATURE_DIM),
+            dtype=np.float32,
+        )
+        card_zones = np.zeros(MAX_CARDS, dtype=np.int64)
+        card_positions = np.zeros(MAX_CARDS, dtype=np.int64)
         masks = np.zeros(MAX_CARDS, dtype=np.bool_)
 
         # 语义大矩阵全量预分配，消灭碎片
@@ -412,6 +509,8 @@ class GalateaEncoder:
                 op_known.pop(0)
 
         for i, e in enumerate(snapshot.entities[:MAX_CARDS]):
+            card_zones[i] = self._encode_zone_category(e.location)
+            card_positions[i] = self._encode_position_category(e.position)
             is_visible = self._is_entity_visible_to_player(e, player_id)
             is_tracked_by_memory = False
             visible_code = e.code
@@ -423,7 +522,7 @@ class GalateaEncoder:
                     is_tracked_by_memory = True
 
             if is_visible:
-                card_indices[i] = self._hash_code(visible_code)
+                card_indices[i] = self._encode_card_code(visible_code)
                 pos_x, pos_y = self._get_coords(player_id, e.owner, e.location, e.sequence)
 
                 mask = getattr(e, 'used_effect_mask', 0)  # 使用 getattr 安全获取实体属性
@@ -438,9 +537,9 @@ class GalateaEncoder:
                 used_eff_7 = 1.0 if (mask & (1 << 7)) else 0.0
 
                 feat_numeric = [
-                    1.0 if e.owner == player_id else -1.0, e.location / 100.0, e.sequence / 10.0,
+                    1.0 if e.owner == player_id else -1.0, e.sequence / 10.0,
                     e.current_atk / 4000.0, e.current_def / 4000.0, e.base_atk / 4000.0, e.base_def / 4000.0,
-                    pos_x, pos_y, e.level / 12.0, e.lscale / 13.0, e.rscale / 13.0, e.position / 10.0,
+                    pos_x, pos_y, e.level / 12.0, e.lscale / 13.0, e.rscale / 13.0,
                     1.0 if e.is_public else (0.5 if is_tracked_by_memory else 0.0),
                     min(e.overlay_count / 5.0, 1.0), min(e.counter_count / 10.0, 1.0), 1.0 if e.is_equipped else 0.0,
                     used_eff_0, used_eff_1, used_eff_2, used_eff_3, used_eff_4, used_eff_5, used_eff_6, used_eff_7
@@ -454,20 +553,25 @@ class GalateaEncoder:
                 raw_sc = e.setcodes if isinstance(e.setcodes, (list, tuple)) else [e.setcodes]
                 card_setcodes[i] = [(s % 4096) for s in (list(raw_sc) + [0]*4)[:4]]
                 masks[i] = True
-                card_overlay_indices[i] = self._hash_code(getattr(e, 'top_overlay_code', 0))
+                overlay_code = getattr(e, 'top_overlay_code', 0)
+                card_overlay_indices[i] = (
+                    self._encode_card_code(overlay_code)
+                    if overlay_code
+                    else self.card_vocabulary.padding_id
+                )
 
                 # 写入预分配矩阵对应切片
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(visible_code)
             else:
                 if e.location == Zone.HAND:
-                    card_indices[i] = 2 
+                    card_indices[i] = self.card_vocabulary.hidden_hand_id
                 elif e.location == Zone.SZONE:
-                    card_indices[i] = 3
+                    card_indices[i] = self.card_vocabulary.hidden_szone_id
                 else:
-                    card_indices[i] = UNK_CODE_IDX
-                card_overlay_indices[i] = PAD_CODE_IDX
+                    card_indices[i] = self.card_vocabulary.unknown_id
+                card_overlay_indices[i] = self.card_vocabulary.padding_id
                 masks[i] = True
-                card_feats[i, :5] = [-1.0, e.location / 100.0, e.sequence / 10.0, -1.0, -1.0]
+                card_feats[i, :4] = [-1.0, e.sequence / 10.0, -1.0, -1.0]
                 cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(0)
 
             sem_cats[i] = cat_out; sem_reqs[i] = req_out; sem_scs[i] = set_out
@@ -481,7 +585,11 @@ class GalateaEncoder:
         MAX_DECK_CARDS = 75
         my_deck = (snapshot.p0_deck_codes + snapshot.p0_extra_codes) if player_id == 0 else (snapshot.p1_deck_codes + snapshot.p1_extra_codes)
 
-        deck_idx = np.full(MAX_DECK_CARDS, PAD_CODE_IDX, dtype=np.int64)
+        deck_idx = np.full(
+            MAX_DECK_CARDS,
+            self.card_vocabulary.padding_id,
+            dtype=np.int64,
+        )
         deck_race = np.zeros(MAX_DECK_CARDS, dtype=np.int64)
         deck_attr = np.zeros(MAX_DECK_CARDS, dtype=np.int64)
         deck_setcodes = np.zeros((MAX_DECK_CARDS, 4), dtype=np.int64)
@@ -509,7 +617,7 @@ class GalateaEncoder:
             except Exception:
                 pass
                 
-            deck_idx[i] = self._hash_code(code)
+            deck_idx[i] = self._encode_card_code(code)
             deck_masks[i] = True
             
             dc_out, dr_out, ds_out, dn_out, dref_out, drace_out, dattr_out, dcode_out = self.sem_kb.get_card_semantics(code)
@@ -535,6 +643,8 @@ class GalateaEncoder:
         c_card_idx = np.zeros(MAX_CHAIN, dtype=np.int64)
         c_desc = np.zeros(MAX_CHAIN, dtype=np.int64)
         c_context = np.zeros((MAX_CHAIN, CHAIN_CONTEXT_DIM), dtype=np.float16)
+        c_zones = np.zeros((MAX_CHAIN, 2), dtype=np.int64)
+        c_positions = np.zeros(MAX_CHAIN, dtype=np.int64)
         c_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
         if hasattr(snapshot, 'chain_stack'):
             for i, item in enumerate(snapshot.chain_stack[:MAX_CHAIN]):
@@ -547,9 +657,14 @@ class GalateaEncoder:
                     base_mask,
                     item.get('effect_slot', -1),
                 )
-                c_card_idx[i] = self._hash_code(item['code'])
+                c_card_idx[i] = self._encode_card_code(item['code'])
                 c_desc[i] = int(item.get('desc', 0)) % 1024
                 c_context[i] = self._encode_chain_context(item, player_id)
+                c_zones[i] = [
+                    self._encode_zone_category(item.get('hl', 0)),
+                    self._encode_zone_category(item.get('l', 0)),
+                ]
+                c_positions[i] = self._encode_position_category(item.get('hp', 0))
                 c_masks[i] = True
 
         # ==========================================
@@ -624,6 +739,14 @@ class GalateaEncoder:
         
         base_dict = {
             'global': torch.tensor(global_vec, dtype=torch.float32).unsqueeze(0),
+            'phase': torch.tensor(
+                [phase_category],
+                dtype=torch.long,
+            ).unsqueeze(0),
+            'player_context': torch.tensor(
+                player_context,
+                dtype=torch.long,
+            ).unsqueeze(0),
             
             'card_idx': torch.from_numpy(card_indices).unsqueeze(0),
             'card_overlay_idx': torch.from_numpy(card_overlay_indices).unsqueeze(0),
@@ -631,6 +754,8 @@ class GalateaEncoder:
             'card_attr': torch.from_numpy(card_attrs).unsqueeze(0), 
             'card_setcodes': torch.from_numpy(card_setcodes).unsqueeze(0), 
             'card_feats': torch.from_numpy(card_feats).unsqueeze(0),
+            'card_zone': torch.from_numpy(card_zones).unsqueeze(0),
+            'card_position': torch.from_numpy(card_positions).unsqueeze(0),
             'padding_mask': torch.from_numpy(masks).unsqueeze(0),
             
             'sem_category': torch.from_numpy(sem_cats).unsqueeze(0),
@@ -663,6 +788,8 @@ class GalateaEncoder:
             'c_card_idx': torch.from_numpy(c_card_idx).unsqueeze(0),
             'c_desc': torch.from_numpy(c_desc).unsqueeze(0),
             'c_context': torch.from_numpy(c_context).unsqueeze(0),
+            'c_zone': torch.from_numpy(c_zones).unsqueeze(0),
+            'c_position': torch.from_numpy(c_positions).unsqueeze(0),
             'c_sem_category': torch.from_numpy(c_sem_cats).unsqueeze(0),
             'c_sem_req': torch.from_numpy(c_sem_reqs).unsqueeze(0),
             'c_sem_setcode': torch.from_numpy(c_sem_scs).unsqueeze(0),

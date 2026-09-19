@@ -8,8 +8,12 @@ import time
 import math
 from dataclasses import dataclass
 from card_reader import card_db
+from card_vocab import get_default_card_vocabulary
 
 _last_io_check = {'global': 0, 'virtual': 0}
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CDB_PATH = os.path.join(PROJECT_ROOT, "cards.cdb")
+DEFAULT_CARD_VOCAB_PATH = os.path.join(PROJECT_ROOT, "card_vocab.json")
 
 class Deck:
     def __init__(self, name="Unknown"):
@@ -17,6 +21,11 @@ class Deck:
         self.main = []
         self.extra = [] 
         self.side = []
+        self.invalid_codes = []
+
+
+class DeckCompatibilityError(ValueError):
+    """表示卡组包含当前 CDB/权威词表尚未支持的卡"""
 
 
 ARENA_SOURCE_WEIGHTED = "weighted"
@@ -223,6 +232,11 @@ def _load_arena_deck_pick(catalog, pool_name, deck_name, range_kind, range_name)
     deck = load_deck(pool_dir, deck_name)
     if deck is None:
         raise ValueError(f"竞技场卡组加载失败: {pool_name}/{deck_name}")
+    if not is_deck_compatible(deck):
+        raise DeckCompatibilityError(
+            f"竞技场卡组含未支持卡密: {pool_name}/{deck_name} -> "
+            f"{deck.invalid_codes[:8]}"
+        )
     return ArenaDeckPick(
         range_kind=range_kind,
         range_name=range_name,
@@ -248,14 +262,21 @@ def _pick_from_physical(catalog, pool_name, rng, range_kind, range_name):
     names = catalog["physical_pools"].get(pool_name)
     if not names:
         raise ValueError(f"竞技场物理池不存在或为空: {pool_name}")
-    deck_name = rng.choice(names)
-    return _load_arena_deck_pick(
-        catalog,
-        pool_name,
-        deck_name,
-        range_kind,
-        range_name,
-    )
+    remaining = list(names)
+    while remaining:
+        deck_name = rng.choice(remaining)
+        remaining.remove(deck_name)
+        try:
+            return _load_arena_deck_pick(
+                catalog,
+                pool_name,
+                deck_name,
+                range_kind,
+                range_name,
+            )
+        except DeckCompatibilityError:
+            continue
+    raise DeckCompatibilityError(f"竞技场物理池没有可用卡组: {pool_name}")
 
 
 def _pick_from_virtual(catalog, virtual_name, rng):
@@ -367,7 +388,7 @@ def select_arena_deck_pair(
     )
     return ArenaDeckPair(p0=p0_pick, p1=p1_pick)
 
-def load_deck(base_dir, deck_name):
+def load_deck(base_dir, deck_name, *, card_database=None, vocabulary=None):
     """根据名字加载卡组"""
     filepath = os.path.join(base_dir, f"{deck_name}.ydk")
     d = Deck(name=deck_name)
@@ -375,6 +396,11 @@ def load_deck(base_dir, deck_name):
     
     if not os.path.exists(filepath):
         return None
+
+    active_card_database = card_database or card_db
+    active_vocabulary = vocabulary or get_default_card_vocabulary(
+        DEFAULT_CARD_VOCAB_PATH
+    )
 
     # 使用 errors='ignore' 防止因为奇怪字符导致崩溃
     with open(filepath, 'r', encoding='utf-8-sig', errors='ignore') as f:
@@ -398,13 +424,88 @@ def load_deck(base_dir, deck_name):
                 
             try:
                 raw_code = int(line)
-                code = card_db.get_base_code(raw_code)
+                code = active_card_database.get_base_code(raw_code)
+                if (
+                    not active_card_database.has_card(raw_code)
+                    or not active_vocabulary.contains(code)
+                ):
+                    d.invalid_codes.append(raw_code)
                 if current_section == 'main': d.main.append(code)
                 elif current_section == 'extra': d.extra.append(code)
             except Exception:
                 print(f"[Deck] ⚠️ 解析 {deck_name}.ydk 时遇到非整数行: {line}")
             
+    d.invalid_codes = sorted(set(d.invalid_codes))
     return d
+
+
+def is_deck_compatible(deck):
+    """判断卡组的主卡组和额外卡组是否都能被当前协议识别"""
+    return isinstance(deck, Deck) and not deck.invalid_codes
+
+
+def _load_random_compatible_deck(base_dir, names, rng=random):
+    """在同一范围内重抽卡组，自动跳过尚含新卡的文件"""
+    remaining = list(names)
+    while remaining:
+        name = rng.choice(remaining)
+        remaining.remove(name)
+        deck = load_deck(base_dir, name)
+        if is_deck_compatible(deck):
+            return name, deck
+    return None
+
+
+def audit_deck_directory(
+    ydk_dir="./decks",
+    *,
+    cdb_path=DEFAULT_CDB_PATH,
+    vocabulary_path=DEFAULT_CARD_VOCAB_PATH,
+):
+    """扫描全部物理卡组，为 WebUI 返回新卡兼容性报告"""
+    from card_reader import CardReader
+
+    root = os.path.realpath(ydk_dir)
+    records = []
+    if not os.path.isdir(root):
+        return records
+    audit_database = CardReader(db_path=os.path.abspath(cdb_path))
+    audit_vocabulary = get_default_card_vocabulary(vocabulary_path)
+    try:
+        for current_dir, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not os.path.islink(os.path.join(current_dir, name))
+            ]
+            pool_name = os.path.relpath(current_dir, root).replace("\\", "/")
+            for filename in sorted(filenames, key=str.casefold):
+                if not filename.endswith(".ydk"):
+                    continue
+                path = os.path.join(current_dir, filename)
+                if os.path.islink(path) or not os.path.isfile(path):
+                    continue
+                deck_name = filename[:-4]
+                deck = load_deck(
+                    current_dir,
+                    deck_name,
+                    card_database=audit_database,
+                    vocabulary=audit_vocabulary,
+                )
+                records.append(
+                    {
+                        "pool": "." if pool_name == "." else pool_name,
+                        "deck": deck_name,
+                        "main_count": len(deck.main),
+                        "extra_count": len(deck.extra),
+                        "valid": is_deck_compatible(deck),
+                        "unsupported_codes": list(deck.invalid_codes),
+                    }
+                )
+    finally:
+        if audit_database.conn is not None:
+            audit_database.conn.close()
+    return records
 
 # --- 双通道零 IO 缓存系统 ---
 _cache_dict = {'global': {}, 'virtual': {}}
@@ -436,8 +537,13 @@ def get_random_deck_pair(ydk_dir='./decks'):
         names = list_decks(ydk_dir)
         if len(names) < 2:
             return None
-        n1, n2 = random.choice(names), random.choice(names)
-        return "Root_Mix", n1, load_deck(ydk_dir, n1), n2, load_deck(ydk_dir, n2)
+        first = _load_random_compatible_deck(ydk_dir, names)
+        second = _load_random_compatible_deck(ydk_dir, names)
+        if first is None or second is None:
+            return None
+        n1, d1 = first
+        n2, d2 = second
+        return "Root_Mix", n1, d1, n2, d2
 
     # 1. 分别加载全局权重与虚拟池配方
     global_file = os.path.join(ydk_dir, 'global_weights.json')
@@ -471,8 +577,13 @@ def get_random_deck_pair(ydk_dir='./decks'):
         if not names1 or not names2:
             return None
 
-        n1, n2 = random.choice(names1), random.choice(names2)
-        return chosen_env, n1, load_deck(c_env1, n1), n2, load_deck(c_env2, n2)
+        first = _load_random_compatible_deck(c_env1, names1)
+        second = _load_random_compatible_deck(c_env2, names2)
+        if first is None or second is None:
+            return None
+        n1, d1 = first
+        n2, d2 = second
+        return chosen_env, n1, d1, n2, d2
 
     # --- 路径 B：抽中了物理池 (内战) ---
     else:
@@ -480,5 +591,10 @@ def get_random_deck_pair(ydk_dir='./decks'):
         names = list_decks(chosen_dir)
         if len(names) < 1:
             return None
-        n1, n2 = random.choice(names), random.choice(names)
-        return chosen_env, n1, load_deck(chosen_dir, n1), n2, load_deck(chosen_dir, n2)
+        first = _load_random_compatible_deck(chosen_dir, names)
+        second = _load_random_compatible_deck(chosen_dir, names)
+        if first is None or second is None:
+            return None
+        n1, d1 = first
+        n2, d2 = second
+        return chosen_env, n1, d1, n2, d2

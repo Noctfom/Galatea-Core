@@ -11,8 +11,10 @@ from trainer import PPOTrainer, resolve_training_device
 from model_versus import ModelArena
 from system_logger import setup_global_logger
 from checkpoint_utils import load_training_checkpoint
+from semantic_assets import DEFAULT_SEMANTIC_REPOSITORY_URL
 from training_lock import TrainerAlreadyRunningError, TrainerProcessLock
 from training_validation import resolve_training_target
+from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL
 
 # [必须] Windows多进程入口保护
 import torch.multiprocessing as mp
@@ -56,10 +58,10 @@ except RuntimeError:
 #      - 4-6层适合主流竞技卡组。
 #      - 层数太深会导致训练极慢，且容易难以收敛(梯度消失)。
 #
-# 4. vocab_size (默认 20000) -> [识字量/卡池大小]
-#    - 含义: Embedding 层的词表大小。
-#    - 类比: AI 认识多少张不同的游戏王卡。
-#    - 调整建议: 只要比实际出现的卡片ID总数大即可。游戏王目前约1.2万张卡，设2万足够。
+# 4. vocab_size (固定 20000) -> [精确卡片词表容量]
+#    - 含义: V4 使用 card_vocab.json 将真实卡密唯一映射到 Embedding 行。
+#    - 当前容量 20000 包含协议保留项与未来追加空间，不再使用取模 Hash。
+#    - 此值属于模型协议，训练时不可手动修改。
 #
 # 5. batch_size (默认 4096) -> [采集批量/经验池大小]
 #    - 含义: 一次采集的总步数。
@@ -111,8 +113,9 @@ except RuntimeError:
 #  更新示例命令:
 #  python main.py update --core --data
 #
-#  语义化提取示例命令:
-#  python main.py parse
+#  语义资产同步 / 本地接续示例命令:
+#  python main.py parse --sync
+#  python main.py parse --local-update
 
 # ==============================================================================
 
@@ -194,7 +197,14 @@ def run_training_command(args, parser):
 def main():
     # 修改：根据输入命令动态切换日志前缀
     cmd_name = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith('-') else "Main"
-    prefix_mapping = {'train': 'Trainer', 'duel': 'Arena', 'play': 'SelfCheck', 'parse': 'Parser', 'update': 'Updater'}
+    prefix_mapping = {
+        'train': 'Trainer',
+        'duel': 'Arena',
+        'play': 'SelfCheck',
+        'parse': 'Parser',
+        'update': 'Updater',
+        'vocab': 'Vocabulary',
+    }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
     
     setup_global_logger(prefix=log_prefix)
@@ -338,18 +348,36 @@ def main():
     parse_parser.add_argument('--output', type=str, default='knowledge_base.json', help='输出的知识库文件路径')
     parse_parser.add_argument('--clear', action='store_true', help='清空本地知识库、Hash 映射和代码语义向量后重新解析')
     
-    parse_parser.add_argument('--sync', action='store_true', help='从主仓库拉取完整语义资产组作为基座')
-    parse_parser.add_argument('--remote_url', type=str, 
-                              default='https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json', 
-                              help='指定其他的 Github Raw URL')
-    parse_parser.add_argument('--embed', action='store_true', help='为新增效果槽接续生成代码语义向量，必要时全量重建')
+    parse_parser.add_argument('--sync', action='store_true', help='仅从远程仓库同步完整语义资产组，不解析本地 Lua')
+    parse_parser.add_argument('--remote_url', type=str,
+                              default=DEFAULT_SEMANTIC_REPOSITORY_URL,
+                              help='语义资产仓库 URL，也兼容旧式 knowledge_base.json Raw URL')
+    parse_parser.add_argument('--local-update', action='store_true', help='解析本地 Lua 并自动接续结构语义与代码向量')
+    parse_parser.add_argument('--embed', action='store_true', help=argparse.SUPPRESS)
 
     # --- 5. 更新同步模式 (Update) ---
     update_parser = subparsers.add_parser('update', help='更新本地代码、卡片数据库(CDB)与脚本库')
     update_parser.add_argument('--core', action='store_true', help='仅更新 Galatea 核心代码 (从你的Github拉取)')
     update_parser.add_argument('--data', action='store_true', help='仅更新 cards.cdb 与 script 脚本库 (从萌卡与官方拉取)')
     update_parser.add_argument('--repo', type=str, default='default', help='指定脚本的来源仓库地址 (默认官方)')
+    update_parser.add_argument(
+        '--cdb-url',
+        type=str,
+        default=MOCKA_CDB_URL,
+        help='指定 cards.cdb 文件源 URL',
+    )
+    update_parser.add_argument(
+        '--card-vocab-url',
+        type=str,
+        default=CARD_VOCAB_URL,
+        help='指定词表仓库或 card_vocab.json 文件源 URL',
+    )
     update_parser.add_argument('--force', action='store_true', help='覆盖更新：清空本地旧脚本，完全以远程为准')
+
+    # --- 6. 本地精确卡片词表更新模式 (Vocabulary) ---
+    vocab_parser = subparsers.add_parser('vocab', help='从本地 CDB 只追加更新精确卡片词表')
+    vocab_parser.add_argument('--cdb', type=str, default='cards.cdb', help='本地 cards.cdb 或自制卡数据库路径')
+    vocab_parser.add_argument('--output', type=str, default='card_vocab.json', help='目标词表路径')
 
     args = parser.parse_args()
 
@@ -417,15 +445,43 @@ def main():
         arena.run_tournament(n_games=args.num)
         
     elif args.command == 'parse':
-        print("🧠 启动语义知识库构建模块...")
-        from lua_parser import YGOProLuaParser
-        parser = YGOProLuaParser(script_dir=args.script_dir)
-        
-        # 逻辑判定：如果开启了 --sync，就使用默认的 remote_url，否则传入 None
-        actual_remote_url = args.remote_url if args.sync else None
-        
-        parser.run_batch(output_file=args.output, clear_existing=args.clear, remote_url=actual_remote_url)
-        if args.embed or args.sync:
+        print("🧠 启动语义资产管理模块...")
+        from semantic_assets import (
+            clear_local_semantic_assets,
+            synchronize_remote_semantic_bundle,
+        )
+
+        output_path = os.path.abspath(args.output)
+        output_directory = os.path.dirname(output_path)
+        local_update = bool(args.local_update or args.embed)
+        if args.clear:
+            removed = clear_local_semantic_assets(
+                output_directory,
+                knowledge_base_filename=os.path.basename(output_path),
+            )
+            print(f"🧨 已物理清除 {len(removed)} 个本地语义资产。")
+
+        if args.sync:
+            print(f"🌐 正在仅同步远程语义资产: {args.remote_url}")
+            sync_result = synchronize_remote_semantic_bundle(
+                args.remote_url,
+                output_directory,
+                knowledge_base_filename=os.path.basename(output_path),
+            )
+            if sync_result["installed_code_semantics"]:
+                print("✅ 远程结构语义、Hash 映射及代码向量已同步完成。")
+            else:
+                print("⚠️ 远程代码向量不完整，已仅安装结构语义；可启用 --local-update 重建向量。")
+
+        if local_update:
+            print("🔍 启动本地 Lua 语义接续更新...")
+            from lua_parser import YGOProLuaParser
+            semantic_parser = YGOProLuaParser(script_dir=args.script_dir)
+            semantic_parser.run_batch(
+                output_file=args.output,
+                clear_existing=False,
+                remote_url=None,
+            )
             print("🧬 启动代码语义向量接续检查...")
             from code_embedder import CodeSemanticEmbedder
             embedder = CodeSemanticEmbedder()
@@ -436,8 +492,10 @@ def main():
             embedder.generate_embeddings(
                 kb_file=args.output,
                 output_file=embedding_path,
-                incremental=not args.clear,
+                incremental=True,
             )
+        elif not args.sync and not args.clear:
+            print("⚠️ 未选择任何操作；请使用 --sync 和/或 --local-update。")
         
     elif args.command == 'update':
         print("🌐 启动自动同步更新模块...")
@@ -452,7 +510,26 @@ def main():
                 update_tools.update_core_code()
                 
             if args.data:
-                update_tools.update_data_and_scripts(repo_type=args.repo, force=args.force)
+                update_tools.update_data_and_scripts(
+                    repo_type=args.repo,
+                    force=args.force,
+                    cdb_url=args.cdb_url,
+                    card_vocab_url=args.card_vocab_url,
+                )
+
+    elif args.command == 'vocab':
+        print("⚠️ 本地词表追加会形成模型协议身份；请备份并向所有训练/部署机器分发同一 card_vocab.json。")
+        from card_vocab import load_card_vocabulary, update_card_vocabulary
+
+        previous_count = 0
+        if os.path.isfile(args.output):
+            previous_count = load_card_vocabulary(args.output).card_count
+        vocabulary = update_card_vocabulary(args.cdb, args.output)
+        print(
+            f"✅ 精确卡片词表已更新：新增 {vocabulary.card_count - previous_count} 张，"
+            f"当前 {vocabulary.card_count}/{vocabulary.capacity}，"
+            f"SHA-256 {vocabulary.vocabulary_hash}"
+        )
 
     else:
         parser.print_help()

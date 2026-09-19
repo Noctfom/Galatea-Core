@@ -9,8 +9,16 @@ ACTION_OPERATION_COUNT = 32
 ACTION_RESPONSE_BUCKETS = 512
 ACTION_SIGNATURE_BYTES = 4
 ACTION_CONTEXT_DIM = 6
-# 连锁条目保留处理卡位置、触发位置、链序和效果槽等 9 项结构化信息
-CHAIN_CONTEXT_DIM = 9
+# 连锁连续特征只保留角色、序号、链序与效果槽；区域和表示改走离散输入
+CHAIN_CONTEXT_DIM = 6
+# V4 全局连续特征与玩家角色槽位采用固定维度，供编码器、网络和共享内存共同引用
+GLOBAL_FEATURE_DIM = 17
+PLAYER_CONTEXT_SLOTS = 3
+PLAYER_ROLE_COUNT = 3
+CARD_NUMERIC_FEATURE_DIM = 64
+PHASE_CATEGORY_COUNT = 11
+ZONE_CATEGORY_COUNT = 9
+POSITION_CATEGORY_COUNT = 16
 
 
 class ActionOperation(IntEnum):
@@ -49,7 +57,7 @@ class GlobalFeature:
     """全局环境特征：描述整局游戏的宏观状态"""
     turn_count: int       # 当前回合数
     phase_id: int         # 当前阶段ID
-    to_play: int          # 当前行动玩家 (0或1)
+    to_play: int          # 兼容字段：最近交互玩家；V4 决策使用下方显式身份
     
     # 核心资源（固定座位顺序：历史命名 my=P0，op=P1；编码器再转换为行动方视角）
     my_lp: int
@@ -66,6 +74,13 @@ class GlobalFeature:
     op_removed_len: int   # 对方除外数
     my_extra_len: int     # 我方额外卡组数
     op_extra_len: int     # 对方额外卡组数
+
+    # V4 显式拆分决策权、回合归属、先手身份与双方已开始的回合数
+    decision_player: int = -1
+    turn_player: int = -1
+    starting_player: int = -1
+    p0_turn_count: int = 0
+    p1_turn_count: int = 0
 
 @dataclass
 class CardEntity:

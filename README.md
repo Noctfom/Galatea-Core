@@ -7,7 +7,7 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.6.5](https://img.shields.io/badge/Release-v3.6.5-brightgreen.svg)](docs/changelog.md)
+[![Release: v3.7.0](https://img.shields.io/badge/Release-v3.7.0-brightgreen.svg)](docs/changelog.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -24,6 +24,7 @@
 - 📦 **一键包支持** - 内置 Python 环境，双击即可启动
 - 🔥 **高效训练** - 固定中央批量推理 + CPU/CUDA 双模式 + 联盟训练机制
 - 🔐 **模型身份管理** - 动态文件前缀、自动 UUID、内置轮次与完整 ONNX 制品组
+- 🆔 **V4 身份与全局状态** - 权威只追加卡片词表、玩家角色解耦及阶段/区域/表示离散编码
 - 🧩 **动作协议 V2** - 顺序多选、宏动作组合、响应语义与约束特征统一进入策略网络
 - 👁️ **决策可视化** - 全息回放系统，深入理解 AI 思考过程
 
@@ -141,6 +142,7 @@ streamlit run app.py
 | [🔧 架构设计](docs/architecture.md) | 技术原理和核心算法 |
 | [🧬 特殊处理逻辑](docs/special_handling.md) | 框架独特特性的实现细节 |
 | [🗺️ 后续路线](docs/roadmap.md) | 主框架认知与组卡模块 TODO |
+| [🧭 V4 实施规格](docs/protocol_v4_implementation.md) | V4 开发边界、阶段与验收门槛 |
 | [📝 更新日志](docs/changelog.md) | 版本更新历史 |
 
 ---
@@ -163,8 +165,12 @@ python main.py duel --p0 ./models/galatea_iter_100.pth --arena-mode benchmark --
 # 更新资源
 python main.py update --data
 
-# 语义解析
-python main.py parse --script_dir ./script
+# 从含自制卡的本地 CDB 只追加词表
+python main.py vocab --cdb ./cards.cdb
+
+# 仅同步语义资产 / 本地接续语义
+python main.py parse --sync
+python main.py parse --local-update --script_dir ./script
 ```
 
 ---

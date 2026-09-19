@@ -264,6 +264,11 @@ class ModelArena:
             'n_layers': self.p0_bot.net.n_layers,
             'vocab_size': self.p0_bot.net.vocab_size,
             'model_protocol_version': MODEL_PROTOCOL_VERSION,
+            'protocol_schema_revision': self.p0_bot.net.protocol_schema_revision,
+            'protocol_schema_hash': self.p0_bot.net.protocol_schema_hash,
+            'card_vocab_hash': self.p0_bot.net.card_vocab_hash,
+            'card_vocab_size': self.p0_bot.net.card_vocab_size,
+            'card_vocab_card_count': self.p0_bot.net.card_vocab_card_count,
         }
         print(f"⚙️ [Arena] P0 模型架构（检查点）: {self.net_config}")
         print(f"🤖 [AiBot] 成功加载模型权重: {model_p0_path}")

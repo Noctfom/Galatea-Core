@@ -4,6 +4,8 @@ import zipfile
 import shutil
 import tempfile
 
+from card_vocab import synchronize_authoritative_card_vocabulary
+
 from model_artifacts import (
     create_deployment_package,
     discover_model_repository,
@@ -104,6 +106,9 @@ def pack_model():
 
     try:
         extra_files = {}
+        if not os.path.exists("card_vocab.json"):
+            raise FileNotFoundError("缺少 V4 必选精确卡片词表 card_vocab.json")
+        extra_files["card_vocab.json"] = "card_vocab.json"
         if os.path.exists("knowledge_base.json"):
             extra_files["knowledge_base.json"] = "knowledge_base.json"
             if os.path.exists("hash_mapping_report.json"):
@@ -184,6 +189,15 @@ def unpack_model():
             with zipfile.ZipFile(pkg_path, 'r') as gkg_zip:
                 safe_extract_zip(gkg_zip, stage_dir)
             validated = validate_deployment_package(stage_dir)
+            vocabulary_result = synchronize_authoritative_card_vocabulary(
+                os.path.join(stage_dir, "card_vocab.json"),
+                "card_vocab.json",
+            )
+            print(
+                "  -> 同步精确卡片词表: "
+                f"{vocabulary_result['status']} "
+                f"({vocabulary_result['vocabulary'].card_count} 张卡)"
+            )
             model_ids = sorted({record["model_id"] for record in validated["records"]})
             primary_models = validated["manifest"]["models_included"]
             if primary_models:

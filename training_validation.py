@@ -4,6 +4,7 @@ import math
 import re
 from numbers import Integral, Real
 
+from protocol_schema import apply_current_protocol_metadata
 
 MODEL_PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -42,6 +43,8 @@ def validate_training_config(
         if key not in net_config:
             raise ValueError(f"net_config is missing required key: {key}")
         _require_positive_integer(f"net_config.{key}", net_config[key])
+
+    apply_current_protocol_metadata(net_config)
 
     if net_config["d_model"] % net_config["n_heads"] != 0:
         raise ValueError("net_config.d_model must be divisible by net_config.n_heads")

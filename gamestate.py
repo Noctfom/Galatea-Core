@@ -381,7 +381,10 @@ class DuelState:
         """初始化单局状态；双状态镜像模式可关闭其中一份重复审计"""
         self.entities = {}
         self.current_valid_actions = []
-        self.turn_player = 0
+        self.turn_player = -1
+        self.starting_player = -1
+        self.player_turn_counts = [0, 0]
+        self.decision_player = -1
         
         # 初始化双边记牌器
         self.p0_deck = list(p0_main) if p0_main else []
@@ -409,6 +412,10 @@ class DuelState:
         self.my_lp = 8000
         self.op_lp = 8000
         self.active_player = 0
+        self.turn_player = -1
+        self.starting_player = -1
+        self.player_turn_counts = [0, 0]
+        self.decision_player = -1
         self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
         
         # 当前挂起的合法动作列表
@@ -629,8 +636,15 @@ class DuelState:
                 if tc in [0,1] and ts in self.field_map[tc].get(tl, {}):
                     self.field_map[tc][tl][ts]['is_equipped'] = True
             
-            elif msg_type == 40: 
+            elif msg_type == 40:
+                turn_player = struct.unpack('<B', stream.read(1))[0]
+                if turn_player not in (0, 1):
+                    raise ValueError(f"MSG_NEW_TURN player must be 0 or 1, got {turn_player}")
                 self.turn += 1
+                self.turn_player = turn_player
+                if self.starting_player == -1:
+                    self.starting_player = turn_player
+                self.player_turn_counts[turn_player] += 1
                 # [新增] 换回合时，清空全场的一回合一次记忆
                 for p in [0, 1]:
                     for loc in self.field_map[p]:
@@ -643,12 +657,18 @@ class DuelState:
             # 如果是交互消息，解析出 valid_actions
             if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
                 self.active_player = struct.unpack('<B', msg_payload[0:1])[0]
+                if self.active_player not in (0, 1):
+                    raise ValueError(
+                        f"interaction player must be 0 or 1, got {self.active_player}"
+                    )
+                self.decision_player = self.active_player
                 self._parse_valid_actions(msg_type, stream)
                 self._bind_action_effect_slots()
             # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
             # 否则重演时无法用上一次的选项去验证人类的修正点击
-            elif msg_type != 1: 
+            elif msg_type != 1:
                 self.current_valid_actions = []
+                self.decision_player = -1
 
         except Exception as e:
             print(f"⚠️ [GameState] update消息解析失败: {e}")
@@ -1409,7 +1429,12 @@ class DuelState:
             my_removed_len=count_zone(0, Zone.REMOVED), op_removed_len=count_zone(1, Zone.REMOVED),
             
             # --- 修复：额外卡组同理 ---
-            my_extra_len=len(self.p0_extra), op_extra_len=len(self.p1_extra)
+            my_extra_len=len(self.p0_extra), op_extra_len=len(self.p1_extra),
+            decision_player=self.decision_player,
+            turn_player=self.turn_player,
+            starting_player=self.starting_player,
+            p0_turn_count=self.player_turn_counts[0],
+            p1_turn_count=self.player_turn_counts[1],
         )
 
         entities = []

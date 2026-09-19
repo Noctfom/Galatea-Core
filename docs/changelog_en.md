@@ -4,6 +4,28 @@
 
 ---
 
+## [v3.7.0] - 2026-09-15
+
+### 🆔 V4 Phase 1: Identity and Global State (All Three Batches)
+
+- **Removed real-card identity collisions**: Added append-only `card_vocab.json` and replaced modulo hashing with one unique token per card. It currently covers all 14,981 entries in `cards.cdb`; real-card tokens begin at 10 and the fixed capacity remains 20,000
+- **Unified every card-identity channel**: Scene cards, overlays, initial decks, chains, candidates/announcements, macro targets, and Lua-semantic references all use the same exact mapping. Missing cards explicitly map to `UNK` instead of silently colliding with known cards
+- **Cross-machine append-only vocabulary**: Repository `card_vocab.json` is the default numbering authority. Ordinary WebUI/CLI data updates synchronize it and may target a custom vocabulary repository/file source. Custom-card users can append from a local CDB through a dedicated Resource Sync page or `main.py vocab`, with explicit fork and distribution warnings; resident processes invalidate their vocabulary cache when the file changes. Older V4 artifacts remain valid when their mapping is an exact prefix, while reordering or forks are rejected
+- **Soft isolation and deck preflight**: A CDB that contains cards newer than the authoritative vocabulary no longer blocks the runtime. Affected decks remain on disk but leave training/Arena random pools, and WebUI preflight reports their unsupported codes
+- **Fixed false failures in a resident WebUI preflight**: Every deck scan reopens the current project-root `cards.cdb` and authoritative vocabulary. If the CDB is downloaded or atomically replaced after WebUI startup, an empty/stale SQLite connection can no longer mark every deck incompatible. Successful resource updates also clear stale scan results from the page
+- **Bounded online deck-pool updates**: YGOProDeck tasks now default to a 100-deck per-pool cap. Each manual or automatic update removes only that online pool's oldest excess `.ydk` files. The WebUI subscription list exposes and edits Latest/Random mode, batch size, pool cap, and current count; legacy tasks migrate to the 100-deck default
+- **Configurable resource sources**: Resource Sync advanced options now expose the CDB file source and vocabulary repository/file source while retaining the MyCard Chinese CDB and Galatea raw vocabulary defaults. CLI accepts the same settings and rejects local-file schemes or embedded credentials
+- **Separated semantic sync and extraction**: The remote base now defaults to the Galatea repository URL. `--sync` only downloads remote semantic assets, while `--local-update` scans local Lua and automatically continues both structured semantics and code vectors. Clear + local update without sync rebuilds from scratch; every other local-update combination continues from existing or freshly synchronized assets
+- **Separated player state**: `decision_player`, `turn_player`, `starting_player`, and P0/P1 turn counts are maintained independently from Core messages. Responses during the opponent's turn are no longer mislabeled as one's own turn; the network receives relative player-role classes, `is_my_turn`, and `went_first`
+- **Categorical phase and location state**: Phase, card zone, battle position, chain handler/trigger zones, and action target positions now use bounded embeddings. The old `/10` and `/100` pseudo-continuous encodings are removed, and phase categories condition both the global token and FiLM
+- **Closed V4 artifact identity**: Vocabulary SHA-256, count, capacity, schema revision, and `protocol_schema_hash` are embedded throughout PTH, `net_config`, ONNX, artifact manifests, and `.gkg`. Structural hashes stay stable across valid appends while each model retains its exact training-prefix identity
+- **Deployment and environment integration**: `card_vocab.json` is mandatory in portable environments and `.gkg`. Import validates models against the packaged vocabulary before append-only synchronization, allowing packages with newer cards to move safely onto older installations
+- **Version boundary**: Framework version is 3.7.0, `MODEL_PROTOCOL_VERSION` is 4, and Checkpoint Format, artifact-manifest format, and deployment-package format are all 3. Per the scratch-trained V4 boundary, V3 models are not migrated
+- **Implementation status**: All three Phase 1 review batches are complete. V4 schema revision is 3; Phase 2 proceeds to action semantics and public relations
+- **Regression**: The default suite passes 184 tests with one real-Core case skipped as expected; that case completes a real duel when enabled separately. Coverage includes append/fork validation, configurable resource sources, separated remote/local semantic flows, soft deck isolation, refreshed preflight assets, online-pool caps, player perspectives, categorical bounds, checkpoint/ONNX/package round trips, and ONNXRuntime execution
+
+---
+
 ## [v3.6.5] - 2026-09-07
 
 ### 🎛️ Arena Inference Policies and Replay Fix

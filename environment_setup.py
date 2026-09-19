@@ -28,6 +28,7 @@ IMPORT_NAME_OVERRIDES = {
 MANUALLY_MANAGED_PACKAGES = {"torch"}
 REQUIRED_RUNTIME_FILES = (
     "cards.cdb",
+    "card_vocab.json",
     "knowledge_base.json",
     "hash_mapping_report.json",
     "code_embeddings.npy",
@@ -162,6 +163,12 @@ def find_runtime_asset_issues(project_root=None, require_portable_python=False):
         path = project_root / relative_name
         if not path.is_dir() or not any(item.is_file() for item in path.rglob("*")):
             issues.append(f"缺少或为空的运行目录: {relative_name}")
+
+    try:
+        from card_vocab import load_card_vocabulary
+        load_card_vocabulary(project_root / "card_vocab.json")
+    except (OSError, ValueError) as exc:
+        issues.append(f"精确卡片词表无效: {exc}")
 
     try:
         from semantic_assets import validate_semantic_bundle

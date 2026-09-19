@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.6.5**.
+> This document applies to **Galatea-Core v3.7.0**.
 
 ---
 
@@ -131,6 +131,7 @@ Configure and launch AI training tasks.
 - **Standard Core**: Enable for custom OCGCore builds without ghost bytes
 
 **Model Action Protocol**:
+- v3.7.0 completes Model Protocol V4 Phase 1: append-only `card_vocab.json` removes real-card collisions and supports exact-prefix compatibility; decision/turn/starting players are separate, while phase, zone, and position use categorical embeddings
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
@@ -193,7 +194,7 @@ Manage `.ydk` deck files in `decks/` directory.
 
 #### 🌐 Online Dynamic Environment Builder
 
-Auto-fetch decks from online libraries like YGOProDeck with scheduled auto-updates.
+Auto-fetch decks from online libraries like YGOProDeck with scheduled auto-updates. Each online pool independently selects Latest or Random mode, batch size, and a capacity cap (100 decks by default); only that pool's oldest excess deck files are removed.
 
 ![Online Fetch](图片/在线爬取卡组.png)
 
@@ -244,7 +245,8 @@ Create cross-pool mixing recipes, allowing decks from different physical pools t
 #### Sync Targets
 
 - **Update Core Code**: Pull latest framework code from GitHub
-- **Update CDB & Scripts**: Sync `cards.cdb` and `script/` from MyCard/official repos
+- **Update CDB, Exact Vocabulary & Scripts**: Sync `cards.cdb` and `script/` from MyCard/official repos plus the cross-machine authoritative `card_vocab.json` from Galatea
+- **Deck Compatibility Preflight**: Report `.ydk` files containing cards absent from CDB or not yet numbered by the authoritative vocabulary; files remain on disk but temporarily leave training/Arena random pools
 
 #### Advanced Options
 
@@ -265,8 +267,8 @@ Scan all Lua scripts in `script/` directory to extract semantic information.
 
 **Options**:
 - **Physical Clear**: Delete the local KB, Hash map, and code-semantic vectors before a full rebuild
-- **Github Sync**: Pull structured knowledge, the Hash map, code-semantic vectors, and their index from the same remote directory, then append locally missing slots automatically
-- **Code Semantic Extraction**: Append only new effect slots when the local `.npy` pair is coherent; rebuild fully if its index or dimension is incompatible
+- **Remote Sync**: Only pull structured knowledge, the Hash map, code-semantic vectors, and their index; do not scan local Lua
+- **Local Extraction/Continuation**: Scan local scripts, append only new effect slots when the `.npy` pair is coherent, and rebuild fully if its index or dimension is incompatible
 
 #### 🧬 Custom Hash Explorer
 
@@ -574,7 +576,11 @@ python main.py update [options]
 | `--core` | Update core code |
 | `--data` | Update card DB and scripts |
 | `--repo` | Specify script repo source |
+| `--cdb-url` | Specify the CDB file-source URL |
+| `--card-vocab-url` | Specify a vocabulary repository or file URL |
 | `--force` | Force overwrite local changes |
+
+For local/custom cards, run `python main.py vocab --cdb <path> [--output card_vocab.json]` to append vocabulary IDs. Distribute the output file to every machine that uses the model.
 
 ### Semantic Parse Command
 
@@ -586,10 +592,10 @@ python main.py parse [options]
 |--------|-------------|---------|
 | `--script_dir` | Lua script directory | `./script` |
 | `--output` | Output file path | `knowledge_base.json` |
-| `--clear` | Clear local KB | - |
-| `--sync` | Pull the complete remote semantic baseline and append missing vectors | - |
-| `--remote_url` | Remote `knowledge_base.json`; sibling semantic URLs are derived automatically | Main repository Raw URL |
-| `--embed` | Encode only new effect slots, rebuilding fully when necessary | - |
+| `--clear` | Physically clear local semantic assets before selected operations | - |
+| `--sync` | Only pull the complete remote semantic baseline; do not scan local Lua | - |
+| `--remote_url` | Semantic repository URL; legacy raw `knowledge_base.json` links remain accepted | Galatea repository URL |
+| `--local-update` | Parse local Lua and automatically continue structured semantics and code vectors | - |
 
 ---
 
@@ -609,6 +615,7 @@ python deploy_tool.py
 
 Package trained models into `.gkg` deployment packages containing:
 - Model files from one `model_id` pool (`.pth`/`.onnx`/`.onnx.data`)
+- Required V4 exact card vocabulary (`card_vocab.json`)
 - Knowledge base (`knowledge_base.json`)
 - Hash continuation index (`hash_mapping_report.json`)
 - Code-semantic matrix and index (`code_embeddings.npy`, `code_embeddings_idx.json`)
@@ -633,7 +640,7 @@ Extract `.gkg` packages and import into current system:
 | `d_model` | Feature dimension | Higher = smarter, but computation increases exponentially. Must be divisible by `n_heads` |
 | `n_heads` | Attention heads | Typically 4 or 8. More heads = stronger complex relationship handling |
 | `n_layers` | Transformer layers | 2 for quick experiments, 4-6 for competitive decks |
-| `vocab_size` | Card vocabulary size | Just needs to exceed total card ID count |
+| `vocab_size` | V4 exact-card vocabulary capacity | Fixed at 20000 by the model protocol; do not override manually |
 
 ### Training Parameters
 

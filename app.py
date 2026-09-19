@@ -42,7 +42,11 @@ from managed_processes import (
     purge_managed_processes,
 )
 from training_validation import resolve_training_target, validate_model_prefix
-from semantic_assets import validate_semantic_bundle
+from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL
+from semantic_assets import (
+    DEFAULT_SEMANTIC_REPOSITORY_URL,
+    validate_semantic_bundle,
+)
 from protocol_v3_audit import (
     enrich_effect_slot_observation,
     load_protocol_v3_audit_reports,
@@ -170,7 +174,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.6.5"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.7.0"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -235,6 +239,28 @@ def validate_local_asset_name(filename, *, required_suffix=None):
     if required_suffix and not filename.casefold().endswith(required_suffix.casefold()):
         raise ValueError(f"文件名必须以 {required_suffix} 结尾")
     return filename
+
+
+def resolve_online_pool_path(task_name):
+    """将在线订阅任务解析到卡组根目录内，拒绝越界和符号链接。"""
+    if not isinstance(task_name, str) or not task_name.strip():
+        raise ValueError("在线卡池任务名不能为空")
+    deck_root = os.path.realpath(os.path.join(PROJECT_ROOT, "decks"))
+    target_path = os.path.abspath(os.path.join(deck_root, task_name))
+    if (
+        os.path.commonpath([deck_root, target_path]) != deck_root
+        or target_path == deck_root
+    ):
+        raise ValueError("在线卡池任务越过 decks 根目录")
+    relative_parts = os.path.relpath(target_path, deck_root).split(os.sep)
+    current_path = deck_root
+    for part in relative_parts:
+        if part in {"", ".", ".."}:
+            raise ValueError("在线卡池任务包含非法路径段")
+        current_path = os.path.join(current_path, part)
+        if os.path.islink(current_path):
+            raise ValueError("在线卡池任务不能通过符号链接")
+    return target_path
 
 # ==========================================
 # 🛠️ 进程管理辅助函数与状态初始化
@@ -1377,8 +1403,9 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
 
     st.write("")
     
-    tab_sync, tab_changelog = st.tabs([
-        _("🔄 同步控制台", "🔄 Sync Dashboard"), 
+    tab_sync, tab_vocab, tab_changelog = st.tabs([
+        _("🔄 同步控制台", "🔄 Sync Dashboard"),
+        _("🆔 本地/自制卡词表", "🆔 Local/Custom Card Vocabulary"),
         _("📜 更新日志", "📜 Changelog")
     ])
     
@@ -1390,11 +1417,21 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
             st.subheader(_("选择同步目标", "Select Sync Targets"))
             c_core = st.checkbox(_("🔄 更新 Galatea 核心代码 (Git Pull)", "Sync Core Code (Git Pull)"), value=has_critical_update, 
                                  help=_("从 GitHub 拉取最新的框架 Python 代码。", "Pull the latest framework Python code from GitHub."))
-            c_data = st.checkbox(_("🃏 更新 CDB卡库与官方 Lua 脚本", "Sync CDB & Scripts"), value=True, 
-                                 help=_("从萌卡拉取最新的 cards.cdb，并从官方仓库同步 script 文件夹。", "Fetch the latest cards.cdb from MyCard and sync the script folder from the official repo."))
+            c_data = st.checkbox(_("🃏 更新 CDB、精确词表与官方 Lua 脚本", "Sync CDB, Exact Vocabulary & Scripts"), value=True,
+                                 help=_("从萌卡拉取 cards.cdb，从 Galatea 仓库同步跨机器唯一的 card_vocab.json，并同步官方脚本。", "Fetch cards.cdb from MyCard, the cross-machine authoritative card_vocab.json from Galatea, and Lua scripts from the official repository."))
             
             st.subheader(_("高级选项", "Advanced Options"))
             t_repo = st.text_input(_("脚本仓库源 (留空为官方)", "Script Repo Source"), value="default")
+            t_cdb_url = st.text_input(
+                _("CDB 文件源 URL", "CDB File Source URL"),
+                value=MOCKA_CDB_URL,
+                help=_("默认使用萌卡中文 cards.cdb；可改为自建的 HTTP/HTTPS 文件源。", "Defaults to the MyCard Chinese cards.cdb; may be replaced with a custom HTTP/HTTPS file source."),
+            )
+            t_vocab_url = st.text_input(
+                _("词表仓库/文件源 URL", "Vocabulary Repository/File URL"),
+                value=CARD_VOCAB_URL,
+                help=_("既可填写 card_vocab.json 直链，也可填写包含该文件的 GitHub 仓库地址。", "Accepts either a direct card_vocab.json URL or a GitHub repository containing it."),
+            )
             c_force = st.checkbox(_("⚠️ 覆盖模式 (强制覆盖本地修改)", "Force Overwrite"), value=False)
             
             if st.form_submit_button("🚀 " + _("立即开始同步", "Start Synchronization"), type="primary", use_container_width=True):
@@ -1405,6 +1442,9 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
                     if c_core: cmd.append("--core")
                     if c_data: cmd.append("--data")
                     if t_repo != "default": cmd.extend(["--repo", t_repo])
+                    if c_data:
+                        cmd.extend(["--cdb-url", t_cdb_url])
+                        cmd.extend(["--card-vocab-url", t_vocab_url])
                     if c_force: cmd.append("--force")
                     
                     with st.spinner(_("⏳ 正在全力同步中，这可能需要几分钟时间，请勿刷新页面...", "⏳ Syncing... Please wait.")):
@@ -1414,6 +1454,7 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
                             result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8', env=custom_env)
                             
                             if result.returncode == 0:
+                                st.session_state.pop("deck_compatibility_audit", None)
                                 st.success(_("✅ 同步完成！建议重启整个系统以加载最新代码。", "✅ Synchronization Complete! Restart recommended."))
                             else:
                                 st.error(_("⚠️ 同步遇到问题，请查看下方日志：", "⚠️ Sync encountered issues:"))
@@ -1425,6 +1466,91 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
                             
                         except Exception as e:
                             st.error(f"执行失败: {e}")
+
+    with tab_vocab:
+        st.markdown("### " + _("本地精确词表追加", "Append Local Exact Vocabulary"))
+        st.error(_(
+            "⚠️ 自制卡会永久占用新的词表编号。不同机器若以不同顺序追加会形成不可自动合并的词表分叉；更新后必须备份并向训练、竞技场与部署端分发同一份 card_vocab.json。已有较短 V4 前缀模型仍可加载，但不能与分叉词表混用。",
+            "⚠️ Custom cards permanently consume new vocabulary IDs. Appending in a different order on another machine creates a vocabulary fork that cannot be merged automatically. Back up and distribute the same card_vocab.json to training, Arena, and deployment systems. Existing shorter-prefix V4 models remain loadable, but forked vocabularies must never be mixed.",
+        ))
+        with st.form("local_card_vocab_form"):
+            local_cdb_path = st.text_input(
+                _("本地 CDB 路径", "Local CDB Path"),
+                value=os.path.join(PROJECT_ROOT, "cards.cdb"),
+                help=_("可指向含自制卡的 SQLite cards.cdb；只读取 datas.id，不会修改数据库。", "May point to a SQLite cards.cdb containing custom cards; only datas.id is read and the database is never modified."),
+            )
+            local_vocab_path = os.path.join(PROJECT_ROOT, "card_vocab.json")
+            st.caption(_("目标词表固定为项目协议资产：", "Target is fixed to the project protocol asset:"))
+            st.code(local_vocab_path, language=None)
+            confirm_local_vocab = st.checkbox(_(
+                "我已理解词表只追加和跨机器一致性要求",
+                "I understand the append-only and cross-machine identity requirements",
+            ))
+            run_local_vocab = st.form_submit_button(
+                "🆔 " + _("检查并追加新卡", "Check and Append New Cards"),
+                type="primary",
+                use_container_width=True,
+                disabled=not confirm_local_vocab,
+            )
+
+        try:
+            from card_vocab import (
+                find_card_vocabulary_cdb_gaps,
+                load_card_vocabulary,
+            )
+            current_vocabulary = load_card_vocabulary(local_vocab_path)
+            missing_codes = find_card_vocabulary_cdb_gaps(
+                current_vocabulary,
+                local_cdb_path,
+            )
+            metric_vocab, metric_missing = st.columns(2)
+            metric_vocab.metric(
+                _("当前词表卡数", "Current Vocabulary Cards"),
+                f"{current_vocabulary.card_count}/{current_vocabulary.capacity}",
+            )
+            metric_missing.metric(
+                _("CDB 待追加卡数", "CDB Cards to Append"),
+                len(missing_codes),
+            )
+            if missing_codes:
+                st.caption(_(
+                    "待追加示例：" + ", ".join(str(code) for code in missing_codes[:12]),
+                    "Pending sample: " + ", ".join(str(code) for code in missing_codes[:12]),
+                ))
+        except Exception as error:
+            st.warning(_(
+                f"当前路径预检失败：{error}",
+                f"Path preflight failed: {error}",
+            ))
+
+        if run_local_vocab:
+            cmd = [
+                sys.executable,
+                "main.py",
+                "vocab",
+                "--cdb",
+                local_cdb_path,
+                "--output",
+                local_vocab_path,
+            ]
+            with st.spinner(_("正在校验并只追加新卡编号...", "Validating and appending new card IDs...")):
+                custom_env = os.environ.copy()
+                custom_env["PYTHONIOENCODING"] = "utf-8"
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    encoding="utf-8",
+                    env=custom_env,
+                )
+            output = result.stdout + "\n" + result.stderr
+            if result.returncode == 0:
+                st.session_state.pop("deck_compatibility_audit", None)
+                st.success(_("✅ 本地词表更新完成。", "✅ Local vocabulary update completed."))
+            else:
+                st.error(_("❌ 本地词表更新失败，原文件保持不变。", "❌ Local vocabulary update failed; the original file is unchanged."))
+            st.code(output.strip(), language="bash")
 
     with tab_changelog:
         st.markdown("### " + _("📝 版本更新日志", "📝 Release Notes"))
@@ -1470,42 +1596,48 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                       "Scan all Lua scripts to extract semantic requirements and categories."))
             p_clear = st.checkbox(_("🧨 物理清空本地旧数据 (--clear)", "Clear Local KB"), value=False,
                                   help=_("彻底删除本地知识库、映射表和代码语义向量，重新全量解析。", "Delete the local KB, mapping, and code-semantic vectors before a full rebuild."))
-            p_sync = st.checkbox(_("🌐 从 Github 拉取基础卡库同步 (--sync)", "Sync Base KB from Github"), value=False,
-                                 help=_("同步主仓库的知识库、Hash 映射、代码语义向量和索引，解析新增卡片后自动接续代码向量。", "Sync the remote KB, Hash map, code-semantic matrix, and index, then automatically append vectors for newly parsed cards."))
-            p_url = st.text_input(_("远程基座 URL (可选)", "Remote Base URL (Optional)"), value="https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/knowledge_base.json")
-            
-            # 👇 [新增] 代码语义化特征提取开关
-            p_embed = st.checkbox(_("🧬 提取代码语义特征 (--embed)", "Extract Code Semantic Features"), value=False,
-                                  help=_("用于不启用同步的本地更新；同步模式已自动接续。仅提取新增 Lua 效果槽，资产不一致时才全量重建。",
-                                         "For local updates without sync; sync mode already continues automatically. Only new Lua effect slots are encoded unless assets are incompatible."))
+            p_sync = st.checkbox(_("🌐 仅同步远程语义资产 (--sync)", "Sync Remote Semantic Assets Only"), value=False,
+                                 help=_("只下载知识库、Hash 映射、代码语义向量和索引；不会扫描本地 Lua，也不会生成向量。", "Only downloads the KB, Hash map, code-semantic matrix, and index; it does not scan local Lua or generate vectors."))
+            p_local_update = st.checkbox(_("🧬 本地提取/接续语义 (--local-update)", "Extract/Continue Local Semantics"), value=False,
+                                         help=_("扫描本地 Lua，自动接续结构语义并为新增效果槽生成代码向量；资产不一致时安全全量重建。", "Scans local Lua, continues structured semantics, and embeds new effect slots; incompatible assets are safely rebuilt."))
+            p_url = st.text_input(
+                _("远程基座仓库 URL", "Remote Base Repository URL"),
+                value=DEFAULT_SEMANTIC_REPOSITORY_URL,
+                help=_("默认填写仓库地址；仍兼容旧式 knowledge_base.json Raw 直链。", "Repository URLs are preferred; legacy raw knowledge_base.json links remain supported."),
+            )
+            st.caption(_(
+                "执行规则：同步只负责下载；本地更新始终自动接续。勾选物理清空且不勾选同步时，本地更新会从零构建；其他本地更新组合均从现有或刚同步的资产接续。",
+                "Rules: sync only downloads; local update always continues automatically. Clear + local update without sync rebuilds from scratch; every other local-update combination continues from existing or freshly synchronized assets.",
+            ))
             
             if st.form_submit_button("🧠 " + _("开始提取卡片语义", "Start Semantic Parsing"), use_container_width=True):
-                cmd = [sys.executable, "main.py", "parse"]
-                if p_clear: cmd.append("--clear")
-                if p_sync: 
-                    cmd.append("--sync")
-                    if p_url: cmd.extend(["--remote_url", p_url])
-                
-                # 👇 [新增] 捕捉勾选状态并传递给 main.py
-                if p_embed: cmd.append("--embed")
-                
-                with st.spinner(_("⏳ 正在暴力解析全卡池 Lua 脚本中，请耐心等待...", "⏳ Parsing all Lua scripts... Please wait.")):
-                    try:
-                        custom_env = os.environ.copy()
-                        custom_env["PYTHONIOENCODING"] = "utf-8"
-                        result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8', env=custom_env)
-                        
-                        import re
-                        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-                        clean_log = ansi_escape.sub('', result.stdout + "\n" + result.stderr)
-                        
-                        if result.returncode == 0:
-                            st.success(_("✅ 解析完成！", "✅ Parsing Complete!"))
-                        else:
-                            st.error(_("⚠️ 解析遭遇异常：", "⚠️ Parsing encountered issues:"))
-                        st.code(clean_log, language="bash")
-                    except Exception as e:
-                        st.error(f"执行失败: {e}")
+                if not p_sync and not p_local_update:
+                    st.warning(_("请至少选择远程同步或本地提取/接续。", "Select remote sync and/or local extraction/continuation."))
+                else:
+                    cmd = [sys.executable, "main.py", "parse"]
+                    if p_clear: cmd.append("--clear")
+                    if p_sync:
+                        cmd.append("--sync")
+                        if p_url: cmd.extend(["--remote_url", p_url])
+                    if p_local_update: cmd.append("--local-update")
+
+                    with st.spinner(_("⏳ 正在执行所选语义资产操作，请耐心等待...", "⏳ Running the selected semantic asset operations...")):
+                        try:
+                            custom_env = os.environ.copy()
+                            custom_env["PYTHONIOENCODING"] = "utf-8"
+                            result = subprocess.run(cmd, capture_output=True, text=True, check=False, encoding='utf-8', env=custom_env)
+
+                            import re
+                            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                            clean_log = ansi_escape.sub('', result.stdout + "\n" + result.stderr)
+
+                            if result.returncode == 0:
+                                st.success(_("✅ 语义资产操作完成！", "✅ Semantic asset operation complete!"))
+                            else:
+                                st.error(_("⚠️ 语义资产操作遇到异常：", "⚠️ Semantic asset operation encountered issues:"))
+                            st.code(clean_log, language="bash")
+                        except Exception as e:
+                            st.error(f"执行失败: {e}")
 
     # --- 2. 特殊效果图鉴 ---
     with tab_hash:
@@ -1789,9 +1921,56 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
 
     # --- 2. 资产与卡组管理：全息构筑与环境池中枢 ---
     with tab_decks:
-        import deck_utils 
+        import deck_utils
         deck_root = "./decks"
         os.makedirs(deck_root, exist_ok=True)
+
+        with st.expander(_("🧪 卡组兼容性预检", "🧪 Deck Compatibility Preflight")):
+            st.caption(_(
+                "检查主卡组/额外卡组是否同时存在于当前 cards.cdb 和 V4 权威词表。不兼容卡组不会被删除，只会暂时退出训练/随机竞技抽样",
+                "Checks whether every Main/Extra card exists in both cards.cdb and the V4 authoritative vocabulary. Incompatible decks are retained but temporarily excluded from training and random Arena sampling.",
+            ))
+            if st.button(_("扫描全部卡组", "Scan All Decks"), key="scan_deck_compatibility"):
+                with st.spinner(_("正在扫描卡组...", "Scanning decks...")):
+                    st.session_state["deck_compatibility_audit"] = (
+                        deck_utils.audit_deck_directory(
+                            deck_root,
+                            cdb_path=os.path.join(PROJECT_ROOT, "cards.cdb"),
+                            vocabulary_path=os.path.join(
+                                PROJECT_ROOT,
+                                "card_vocab.json",
+                            ),
+                        )
+                    )
+            deck_audit = st.session_state.get("deck_compatibility_audit")
+            if deck_audit is not None:
+                invalid_decks = [record for record in deck_audit if not record["valid"]]
+                st.metric(
+                    _("V4 可用卡组", "V4-compatible decks"),
+                    f"{len(deck_audit) - len(invalid_decks)} / {len(deck_audit)}",
+                )
+                if invalid_decks:
+                    display_records = []
+                    for record in invalid_decks:
+                        display_records.append(
+                            {
+                                _("物理池", "Pool"): record["pool"],
+                                _("卡组", "Deck"): record["deck"],
+                                _("主/额外", "Main/Extra"): (
+                                    f"{record['main_count']}/{record['extra_count']}"
+                                ),
+                                _("未支持卡密", "Unsupported codes"): ", ".join(
+                                    str(code) for code in record["unsupported_codes"]
+                                ),
+                            }
+                        )
+                    st.warning(_(
+                        f"发现 {len(invalid_decks)} 副暂不兼容卡组。",
+                        f"Found {len(invalid_decks)} temporarily incompatible decks.",
+                    ))
+                    st.dataframe(display_records, width="stretch", hide_index=True)
+                else:
+                    st.success(_("全部卡组均可用。", "All decks are compatible."))
 
         # 1. 环境池基础导航
         deck_root_real = os.path.realpath(deck_root)
@@ -2186,7 +2365,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         st.markdown("### 🌐 " + _("在线动态环境构建与同步", "Online Meta Builder"))
         
         import threading
-        tasks_file = "./decks/fetch_tasks.json"
+        tasks_file = os.path.join(PROJECT_ROOT, "decks", "fetch_tasks.json")
         daemon_status_file = "./decks/daemon_status.txt"
         
         # 🌟 UI 顶部：数据源声明与连通性测试
@@ -2239,10 +2418,11 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
 
         # 1. 抓取与添加新卡池
         with st.expander(_("➕ 初始化/拉取新卡池", "Fetch New Pool"), expanded=True):
-            f1, f2, f3 = st.columns([4, 3, 3])
+            f1, f2, f3, f4 = st.columns([4, 3, 2, 2])
             with f1: fetch_label = st.selectbox(_("选择目标卡组池标签 (API 映射)", "Select Target Pool Label"), list(api_tags.keys()), key="ftag")
             with f2: fetch_mode = st.radio(_("抓取深度模式", "Fetch Depth Mode"), [_("🆕 最新顺序", "🆕 Latest"), _("🌌 历史随机", "🌌 Random")], horizontal=True, key="fmode")
             with f3: fetch_limit = st.number_input(_("抓取数量", "Fetch Quantity"), min_value=5, max_value=200, value=30, step=10, key="flimit")
+            with f4: pool_limit = st.number_input(_("单池上限", "Pool Limit"), min_value=5, max_value=10000, value=100, step=10, key="fpool_limit")
             
             real_api_tag = api_tags[fetch_label]
             is_rand = "🌌" in fetch_mode
@@ -2256,7 +2436,13 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                     # 🌟 核心突破：强制将随机偏移量乘以 20，完美骗过 WordPress 的分页系统
                     offset = random.randint(1, 100) * 20 if is_rand else 0
                     
-                    succ, msg = fetcher.fetch_decks(limit=fetch_limit, target_dir=os.path.join("./decks", auto_folder_name), api_category=real_api_tag, offset=offset)
+                    succ, msg = fetcher.fetch_decks(
+                        limit=fetch_limit,
+                        target_dir=resolve_online_pool_path(auto_folder_name),
+                        api_category=real_api_tag,
+                        offset=offset,
+                        pool_limit=pool_limit,
+                    )
                     
                     if succ:
                         try:
@@ -2267,9 +2453,17 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                             tasks[auto_folder_name] = {
                                 "api_category": real_api_tag, "is_rand": is_rand,
                                 "base_limit": fetch_limit, "update_limit": fetch_limit, "auto_update": False,
+                                "pool_limit": pool_limit,
                                 "last_update": time.strftime("%m-%d %H:%M")
                             }
-                        else: tasks[auto_folder_name]["last_update"] = time.strftime("%m-%d %H:%M")
+                        else:
+                            tasks[auto_folder_name].update({
+                                "api_category": real_api_tag,
+                                "is_rand": is_rand,
+                                "update_limit": fetch_limit,
+                                "pool_limit": pool_limit,
+                                "last_update": time.strftime("%m-%d %H:%M"),
+                            })
                         
                         with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(tasks, f, indent=4)
                         st.success(f"{msg} (偏移深度: {offset})")
@@ -2322,10 +2516,16 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                                 try:
                                     fetcher = online_fetcher.YGOProDeckFetcher()
                                     offset = random.randint(1, 100) * 20 if cfg.get('is_rand') else 0
-                                    fetcher.fetch_decks(limit=cfg.get('update_limit', 10), target_dir=os.path.join("./decks", task_name), api_category=cfg.get('api_category'), offset=offset)
-                                    
-                                    tasks[task_name]['last_update'] = time.strftime("%m-%d %H:%M")
-                                    with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(tasks, f, indent=4)
+                                    success, _ = fetcher.fetch_decks(
+                                        limit=cfg.get('update_limit', 10),
+                                        target_dir=resolve_online_pool_path(task_name),
+                                        api_category=cfg.get('api_category'),
+                                        offset=offset,
+                                        pool_limit=cfg.get('pool_limit', 100),
+                                    )
+                                    if success:
+                                        tasks[task_name]['last_update'] = time.strftime("%m-%d %H:%M")
+                                        with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(tasks, f, indent=4)
                                 except: pass
                                 
                                 for _ in range(gap_sec):
@@ -2346,29 +2546,85 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             st.info("暂无抓取记录。请在上方执行首次抓取！")
         else:
             for t_name, t_cfg in current_tasks.items():
+                try:
+                    task_pool_path = resolve_online_pool_path(t_name)
+                except ValueError as error:
+                    st.error(f"已忽略非法在线卡池任务 {t_name!r}: {error}")
+                    continue
                 with st.container(border=True):
-                    col_name, col_lim, col_tog, col_man, col_del = st.columns([3, 2, 2, 2, 1])
+                    col_name, col_mode, col_tog = st.columns([4, 2, 2])
                     col_name.write(f"🏷️ **{t_name}**\n\n<small>{_('上次:', 'Last Updated')}: {t_cfg.get('last_update', 'N/A')}</small>", unsafe_allow_html=True)
-                    
-                    new_lim = col_lim.number_input(_("更新量", "Update Quantity"), min_value=5, max_value=t_cfg.get('base_limit', 50), value=t_cfg.get('update_limit', 10), step=5, key=f"ulim_{t_name}")
-                    st.write("")
+                    mode_options = [_("🆕 最新", "🆕 Latest"), _('🌌 随机', '🌌 Random')]
+                    new_mode = col_mode.selectbox(
+                        _('自动更新模式', 'Auto-Update Mode'),
+                        mode_options,
+                        index=1 if t_cfg.get('is_rand', False) else 0,
+                        key=f"umode_{t_name}",
+                    )
+                    new_is_rand = new_mode == mode_options[1]
                     new_tog = col_tog.toggle(_("🔄 允许自动", "🔄 Allow Auto-Update"), value=t_cfg.get('auto_update', False), key=f"utog_{t_name}")
-                    
-                    if new_lim != t_cfg.get('update_limit') or new_tog != t_cfg.get('auto_update'):
+
+                    col_lim, col_cap, col_count, col_man, col_del = st.columns([2, 2, 2, 2, 1])
+                    new_lim = col_lim.number_input(
+                        _('更新量', 'Update Quantity'),
+                        min_value=5,
+                        max_value=200,
+                        value=max(5, min(200, int(t_cfg.get('update_limit', 10)))),
+                        step=5,
+                        key=f"ulim_{t_name}",
+                    )
+                    configured_pool_limit = max(
+                        5,
+                        min(10000, int(t_cfg.get('pool_limit', 100))),
+                    )
+                    new_pool_limit = col_cap.number_input(
+                        _('单池上限', 'Pool Limit'),
+                        min_value=5,
+                        max_value=10000,
+                        value=configured_pool_limit,
+                        step=10,
+                        key=f"upool_{t_name}",
+                    )
+                    current_pool_size = 0
+                    if os.path.isdir(task_pool_path) and not os.path.islink(task_pool_path):
+                        current_pool_size = sum(
+                            1
+                            for name in os.listdir(task_pool_path)
+                            if name.lower().endswith('.ydk')
+                            and os.path.isfile(os.path.join(task_pool_path, name))
+                            and not os.path.islink(os.path.join(task_pool_path, name))
+                        )
+                    col_count.metric(_('当前池', 'Current Pool'), f"{current_pool_size}/{new_pool_limit}")
+
+                    if (
+                        new_lim != t_cfg.get('update_limit')
+                        or new_tog != t_cfg.get('auto_update')
+                        or new_is_rand != t_cfg.get('is_rand', False)
+                        or new_pool_limit != t_cfg.get('pool_limit', 100)
+                        or 'pool_limit' not in t_cfg
+                    ):
                         current_tasks[t_name]['update_limit'] = new_lim
                         current_tasks[t_name]['auto_update'] = new_tog
+                        current_tasks[t_name]['is_rand'] = new_is_rand
+                        current_tasks[t_name]['pool_limit'] = new_pool_limit
                         with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(current_tasks, f, indent=4)
                     
                     if col_man.button("⚡ " + _("立即覆盖更新", "Force Update"), key=f"uman_{t_name}"):
                         import online_fetcher, random
                         with st.spinner(f"正在更新 {t_name}..."):
                             fetcher = online_fetcher.YGOProDeckFetcher()
-                            offset = random.randint(1, 100) * 20 if t_cfg.get('is_rand') else 0
-                            succ, msg = fetcher.fetch_decks(limit=new_lim, target_dir=os.path.join("./decks", t_name), api_category=t_cfg.get('api_category'), offset=offset)
+                            offset = random.randint(1, 100) * 20 if new_is_rand else 0
+                            succ, msg = fetcher.fetch_decks(
+                                limit=new_lim,
+                                target_dir=task_pool_path,
+                                api_category=t_cfg.get('api_category'),
+                                offset=offset,
+                                pool_limit=new_pool_limit,
+                            )
                             if succ:
                                 current_tasks[t_name]['last_update'] = time.strftime("%m-%d %H:%M")
                                 with open(tasks_file, 'w', encoding='utf-8') as f: json.dump(current_tasks, f, indent=4)
-                                st.toast(f"✅ {t_name} 手动更新完毕！")
+                                st.toast(f"✅ {t_name} 手动更新完毕：{msg}")
                             else: st.error(msg)
                             
                     if col_del.button("🗑️ " + _("删除任务", "Delete Task"), key=f"udel_{t_name}"):
@@ -3657,6 +3913,10 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
 
             with st.form("pack_form"):
                 st.markdown("##### 🗂️ 附加数据组件")
+                st.caption(_(
+                    "V4 精确卡片词表 card_vocab.json 会作为必选协议资产自动打包。",
+                    "The V4 exact card vocabulary (card_vocab.json) is always packaged as a required protocol asset.",
+                ))
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     inc_semantic_bundle = st.checkbox(
@@ -3835,6 +4095,10 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                             st.write("**勾选需要部署进当前系统的文件：**")
                             selected_stage_models = []
                             selected_root_files = []
+                            st.caption(_(
+                                "精确卡片词表是 V4 必选协议资产，将按只追加兼容规则自动同步，不能取消",
+                                "The exact card vocabulary is a mandatory V4 protocol asset and will be synchronized with append-only compatibility checks.",
+                            ))
 
                             if models_in_stage:
                                 st.markdown("🤖 **模型制品组（依赖文件将自动补齐）**")
@@ -3907,6 +4171,11 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     ))
                                 else:
                                     try:
+                                        from card_vocab import synchronize_authoritative_card_vocabulary
+                                        vocabulary_result = synchronize_authoritative_card_vocabulary(
+                                            os.path.join(stage_path, "card_vocab.json"),
+                                            "card_vocab.json",
+                                        )
                                         if selected_stage_models:
                                             install_model_artifact_bundle(
                                                 stage_path,
@@ -3935,7 +4204,10 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                                 if os.path.exists(temporary):
                                                     os.remove(temporary)
                                         load_model_repository.clear()
-                                        st.success("✅ 导入成功！系统环境已更新。")
+                                        st.success(_(
+                                            f"✅ 导入成功！精确词表状态: {vocabulary_result['status']}，系统环境已更新。",
+                                            f"✅ Import complete. Exact-vocabulary status: {vocabulary_result['status']}.",
+                                        ))
                                     except Exception as e:
                                         st.error(f"导入中途失败: {str(e)}")
 

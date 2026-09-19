@@ -3,6 +3,58 @@ import os
 import requests
 import time
 import json
+from pathlib import Path
+
+
+DEFAULT_ONLINE_POOL_LIMIT = 100
+MAX_ONLINE_POOL_LIMIT = 10000
+
+
+def normalize_online_pool_limit(value=DEFAULT_ONLINE_POOL_LIMIT):
+    """将外部任务中的单池上限规范为安全正整数"""
+    if isinstance(value, bool):
+        raise ValueError("online deck pool limit must be an integer")
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("online deck pool limit must be an integer") from error
+    if normalized < 1 or normalized > MAX_ONLINE_POOL_LIMIT:
+        raise ValueError(
+            f"online deck pool limit must be between 1 and {MAX_ONLINE_POOL_LIMIT}"
+        )
+    return normalized
+
+
+def enforce_online_pool_limit(
+    target_dir,
+    pool_limit=DEFAULT_ONLINE_POOL_LIMIT,
+):
+    """仅删除在线卡池中最旧的超额 YDK，保留最近更新的文件"""
+    normalized_limit = normalize_online_pool_limit(pool_limit)
+    target = Path(target_dir)
+    if target.is_symlink():
+        raise ValueError("online deck pool directory must not be a symbolic link")
+    target.mkdir(parents=True, exist_ok=True)
+
+    deck_files = []
+    for entry in target.iterdir():
+        if entry.is_symlink() or entry.suffix.lower() != ".ydk" or not entry.is_file():
+            continue
+        try:
+            modified_ns = entry.stat().st_mtime_ns
+        except OSError:
+            continue
+        deck_files.append((modified_ns, entry.name.casefold(), entry))
+
+    deck_files.sort(reverse=True)
+    stale_files = deck_files[normalized_limit:]
+    for _, _, stale_path in stale_files:
+        stale_path.unlink()
+    return {
+        "limit": normalized_limit,
+        "removed": len(stale_files),
+        "remaining": len(deck_files) - len(stale_files),
+    }
 
 class BaseFetcher:
     def __init__(self):
@@ -37,7 +89,7 @@ class YGOProDeckFetcher(BaseFetcher):
         except requests.RequestException as e:
             return False, f"❌ 网络异常: {str(e)}"
 
-    def fetch_decks(self, limit=30, target_dir="./decks/ygoprodeck_meta", **kwargs):
+    def _fetch_decks_unbounded_legacy(self, limit=30, target_dir="./decks/ygoprodeck_meta", **kwargs):
         os.makedirs(target_dir, exist_ok=True)
         
         api_category = kwargs.get('api_category', 'All')
@@ -108,3 +160,34 @@ class YGOProDeckFetcher(BaseFetcher):
             return False, "❌ 未能抓取到任何卡组，可能是参数错误或该分类下没有数据。"
             
         return True, f"成功抓取并生成了 {success_count} 个卡组！"
+
+    def fetch_decks(self, limit=30, target_dir="./decks/ygoprodeck_meta", **kwargs):
+        """抓取在线卡组并在返回前将目标池收敛到配置上限"""
+        try:
+            fetch_limit = int(limit)
+            if isinstance(limit, bool) or fetch_limit < 1:
+                raise ValueError("fetch quantity must be a positive integer")
+            pool_limit = normalize_online_pool_limit(
+                kwargs.get("pool_limit", DEFAULT_ONLINE_POOL_LIMIT)
+            )
+            enforce_online_pool_limit(target_dir, pool_limit)
+        except (OSError, TypeError, ValueError) as error:
+            return False, f"❌ 在线卡池参数或目录无效: {error}"
+
+        success, message = self._fetch_decks_unbounded_legacy(
+            limit=fetch_limit,
+            target_dir=target_dir,
+            **kwargs,
+        )
+        try:
+            pool_status = enforce_online_pool_limit(target_dir, pool_limit)
+        except (OSError, ValueError) as error:
+            return False, f"❌ 卡池上限收敛失败: {error}"
+
+        removed_message = ""
+        if pool_status["removed"]:
+            removed_message = f"，已清理 {pool_status['removed']} 个最旧超额文件"
+        return success, (
+            f"{message}{removed_message} "
+            f"[当前卡池 {pool_status['remaining']}/{pool_limit}]"
+        )

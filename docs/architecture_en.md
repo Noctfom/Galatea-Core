@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.6.5**.
+> This document applies to **Galatea-Core v3.7.0**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -205,8 +205,9 @@ GalateaCore primarily drives exploration through **entropy regularization** and 
 
 | Feature Type | Dimensions | Description |
 |--------------|------------|-------------|
-| Global Features | 15 | Turn count, phase, LP, zone card counts |
-| Card Features | 66 | Numeric attributes + used-effect bits + type masks + link arrows |
+| Continuous Global Features | 17 | Turn count, relative initiative/turn identity, per-player turns, LP, and zone counts |
+| Categorical Global Features | 1 + 3 | Phase; relative decision/turn/starting-player roles |
+| Card Features | 64 + 2 categories | Numeric/effect/type/link features plus zone and position categories |
 | Semantic Features | 128×8 | Up to 8 effect slots per card |
 
 ### Card Feature Details
@@ -214,7 +215,6 @@ GalateaCore primarily drives exploration through **entropy regularization** and 
 ```python
 feat_numeric = [
     owner,              # Controller (1.0/-1.0)
-    location / 100.0,   # Location
     sequence / 10.0,    # Sequence
     current_atk / 4000, # Current ATK
     current_def / 4000, # Current DEF
@@ -224,13 +224,13 @@ feat_numeric = [
     level / 12.0,       # Level/Rank
     lscale / 13.0,      # Left Pendulum Scale
     rscale / 13.0,      # Right Pendulum Scale
-    position / 10.0,    # Battle position
     is_public,          # Whether face-up
     overlay_count / 5,  # Xyz material count
     counter_count / 10, # Counter count
     is_equipped,        # Whether equipped
     used_effect_mask[0:8], # Effect slots already activated this turn
 ]
+# + separate card_zone / card_position categorical embeddings
 # + 32-dim type mask (Monster/Spell/Trap/Effect/Fusion/Synchro/Xyz/Pendulum/Link...)
 # + 9-dim link arrows
 ```
@@ -256,6 +256,7 @@ act_dict = {
     'act_controller': [...], # Actor-relative controller
     'act_location': [...],   # Engine zone
     'act_sequence': [...],   # Sequence within the zone
+    'act_position': [...],   # Target position category
 }
 ```
 
@@ -282,6 +283,37 @@ Each card's eight effects also carry explicit slot embeddings. Bit N in `used_ef
 Action Protocol V2 does not treat `GameAction.index` as learned semantics. `index` and `decision_bytes` only translate the final choice back to Core; the policy sees operation, card code, location, constraints, and resulting selection set. Type 26 retains Core's native sequential Select/Unselect flow, producing a new snapshot and trajectory row at each step. Static combinatorial messages such as Types 15/20/22/23/25 first enumerate complete legal responses and then let the policy choose one.
 
 `MODEL_PROTOCOL_VERSION` is maintained independently from both the framework release and checkpoint-container version. It is embedded in PTH top-level metadata, `net_config`, model state, ONNX metadata, and artifact manifests. A mismatch means the input tensors or action-head weights are incompatible and is rejected.
+
+### Exact Card Identity (Model Protocol V4)
+
+Starting in 3.7.0, V4 no longer folds real card codes into shared embedding rows with
+`code % 19990`. Root-level `card_vocab.json` assigns every real code one unique,
+contiguous, append-only token. Token `0` is padding, `1` is unknown, `2/3` represent
+hidden opponent Hand/Spell-Trap occupancy, and real cards begin at `10`. The current
+`cards.cdb` registers 14,981 cards within the unchanged capacity of 20,000, so the
+embedding parameter count does not increase.
+
+Scene cards, top overlays, initial decks, chain cards, candidate/announcement cards,
+macro-action targets, and Lua-semantic references all share this vocabulary. The structural
+`protocol_schema_hash` remains stable across valid appends; PTH, `net_config`, ONNX,
+artifact manifests, and `.gkg` separately store the exact training-time vocabulary hash and
+count. A model loads only when its mapping is an exact prefix of the current lineage authority,
+which keeps older V4 models usable while rejecting reordered or independently forked mappings.
+Ordinary resource updates synchronize Galatea's authority by default and may target a custom
+source. Custom cards can be appended through WebUI or `python main.py vocab`, but every machine
+in one model lineage must receive the same file. A locally newer CDB only excludes affected decks.
+`protocol_schema.py` is the single owner of V4's `MODEL_PROTOCOL_VERSION=4`, while
+`checkpoint_utils.py` owns `CHECKPOINT_FORMAT_VERSION=3`. V3 checkpoints are
+intentionally not migrated.
+
+### V4 Player and Categorical Global State
+
+Core `MSG_NEW_TURN` independently maintains `turn_player`, the first `starting_player`, and
+per-player turn counts; interaction messages alone update `decision_player`. The encoder maps
+each role into unknown/self/opponent from the acting perspective, so a response during the
+opponent's turn is not mislabeled as one's own turn. Phase uses an 11-class embedding that
+conditions both the global token and FiLM. Card, chain, and action zones/positions use bounded
+categorical embeddings instead of treating bit masks divided by constants as distances.
 
 ---
 

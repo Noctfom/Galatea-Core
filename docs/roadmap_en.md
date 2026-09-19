@@ -2,6 +2,8 @@
 
 > This document records agreed directions only. Items below are not part of the current stable training protocol yet.
 
+See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
+
 ## Remaining Main-Framework Cognition
 
 - [x] Bind complete runtime `desc` values to code-semantic slots through Lua Effect object identity; never infer slots from description low bits, and safely fall back for dynamic or ambiguous scripts

@@ -7,6 +7,7 @@ import time
 import random
 from pathlib import Path
 
+from card_vocab import get_default_card_vocabulary
 from protocol_v3_audit import register_semantic_audit_catalog
 from semantic_assets import validate_semantic_bundle
 from effect_slot_binding import register_runtime_effect_bindings
@@ -16,11 +17,10 @@ RACE_MAP = {'RACE_WARRIOR': 0x1, 'RACE_SPELLCASTER': 0x2, 'RACE_FAIRY': 0x4, 'RA
 ATTR_MAP = {'ATTRIBUTE_EARTH': 0x01, 'ATTRIBUTE_WATER': 0x02, 'ATTRIBUTE_FIRE': 0x04, 'ATTRIBUTE_WIND': 0x08, 'ATTRIBUTE_LIGHT': 0x10, 'ATTRIBUTE_DARK': 0x20, 'ATTRIBUTE_DEVINE': 0x40}
 
 class SemanticKnowledgeBase:
-    def __init__(self, kb_path='knowledge_base.json', vocab_size=20000):
+    def __init__(self, kb_path='knowledge_base.json', card_vocabulary=None):
         """严格加载结构语义与代码向量，拒绝不完整或互相错位的资产"""
         self._cache = {}
-        self.vocab_size = vocab_size
-        self.reserved_ids = 10 
+        self.card_vocabulary = card_vocabulary or get_default_card_vocabulary()
         time.sleep(random.uniform(0.1, 1.5))
         kb_path_obj = Path(kb_path).resolve()
         try:
@@ -110,8 +110,8 @@ class SemanticKnowledgeBase:
             for cnum in reqs.get('custom_numbers', []):
                 try: 
                     val = float(cnum)
-                    if val > 10000 and r_idx < 4: 
-                        ref_out[i, r_idx] = (int(val) % (self.vocab_size - self.reserved_ids)) + self.reserved_ids
+                    if val > 10000 and r_idx < 4:
+                        ref_out[i, r_idx] = self.card_vocabulary.encode(int(val))
                         r_idx += 1
                     elif n_idx < 4:
                         num_out[i, n_idx] = val / 4000.0

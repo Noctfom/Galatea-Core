@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.6.5**。
+> 文档适用于 **Galatea-Core v3.7.0**。
 
 ---
 
@@ -130,6 +130,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 - **标准内核**：自编译 OCGCore 不含幽灵字节时启用
 
 **模型动作协议**：
+- v3.7.0 完成 Model Protocol V4 阶段 1：`card_vocab.json` 消除真实卡密碰撞；模型词表按权威映射的精确前缀兼容追加；决策者/回合者/先手分离，阶段、区域与表示使用离散类别 Embedding
 - v3.5.0 引入动作语义 V2；v3.6.0 使用 Model Protocol V3，为效果槽绑定身份，并为当前连锁和最近发动历史加入真正顺序敏感的上下文聚合。检查点、网络权重、ONNX 与制品清单会共同记录并校验该版本
 - v3.6.2 以 Lua `Effect.CreateEffect(c)` 对象为身份，把完整运行时 `desc` 绑定到已有代码语义槽；候选动作可直接取得对应效果向量，连锁、历史和本回合已用标记使用同一映射。Stringid 只用于生成 Core 标识，不再被解释成槽序号
 - 动作编码包含操作类型、真实响应、选择约束、目标卡密/位置/素材数值以及稳定语义签名；Type 26 由模型按 Core 原生 Select/Unselect 流程逐步决策
@@ -192,7 +193,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 
 #### 🌐 在线动态环境构建
 
-从 YGOProDeck 等在线卡组库自动抓取卡组，并设置自动更新。
+从 YGOProDeck 等在线卡组库自动抓取卡组，并设置自动更新。每个在线池可独立选择最新/随机模式、更新批量与容量上限（默认 100 副），超额时仅清理该池最旧的卡组文件。
 
 ![在线爬取卡组](图片/在线爬取卡组.png)
 
@@ -243,7 +244,8 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 #### 同步目标
 
 - **更新核心代码**：从 GitHub 拉取最新的框架代码
-- **更新 CDB 卡库与脚本**：从萌卡/官方仓库同步 `cards.cdb` 和 `script/`
+- **更新 CDB、精确词表与脚本**：从萌卡/官方仓库同步 `cards.cdb` 和 `script/`，并从 Galatea 仓库取得跨机器唯一的 `card_vocab.json`
+- **卡组兼容预检**：扫描含 CDB 未收录或权威词表尚未编号卡片的 `.ydk`；文件不会删除，但会暂时退出训练与竞技场随机池
 
 #### 高级选项
 
@@ -264,8 +266,8 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 
 **选项**：
 - **物理清空**：删除本地知识库、Hash 映射和代码语义向量，重新全量解析
-- **Github 同步**：从远程知识库同目录同步结构化知识、Hash 映射、代码语义向量和索引，并自动接续本地新增槽位
-- **代码语义提取**：供本地独立更新使用；资产一致时只向现有 `.npy` 追加新效果槽，索引或维度不一致时自动全量重建
+- **远程同步**：仅从仓库同步结构化知识、Hash 映射、代码语义向量和索引，不扫描本地 Lua
+- **本地提取/接续**：扫描本地脚本；资产一致时只向现有 `.npy` 追加新效果槽，索引或维度不一致时自动全量重建
 
 #### 🧬 特殊效果图鉴
 
@@ -564,7 +566,11 @@ python main.py update [选项]
 | `--core` | 更新核心代码 |
 | `--data` | 更新卡库和脚本 |
 | `--repo` | 指定脚本仓库源 |
+| `--cdb-url` | 指定 CDB 文件源 URL |
+| `--card-vocab-url` | 指定词表仓库或文件源 URL |
 | `--force` | 强制覆盖本地修改 |
+
+本地/自制卡使用 `python main.py vocab --cdb <路径> [--output card_vocab.json]` 只追加词表；输出文件必须同步到所有使用该模型的机器。
 
 ### 语义解析命令
 
@@ -576,10 +582,10 @@ python main.py parse [选项]
 |------|------|--------|
 | `--script_dir` | Lua 脚本目录 | `./script` |
 | `--output` | 输出文件路径 | `knowledge_base.json` |
-| `--clear` | 清空本地知识库 | - |
-| `--sync` | 从远程拉取完整语义基座并自动接续新增向量 | - |
-| `--remote_url` | 远程 `knowledge_base.json` 地址；其他语义文件从同目录派生 | 主仓库 Raw URL |
-| `--embed` | 仅为新增效果槽生成代码语义向量，必要时全量重建 | - |
+| `--clear` | 在所选操作前物理清空本地语义资产 | - |
+| `--sync` | 仅从远程拉取完整语义基座，不解析本地 Lua | - |
+| `--remote_url` | 语义仓库 URL；兼容旧式 `knowledge_base.json` Raw 直链 | Galatea 仓库 URL |
+| `--local-update` | 解析本地 Lua 并自动接续结构语义与代码向量 | - |
 
 ---
 
@@ -599,6 +605,7 @@ python deploy_tool.py
 
 将训练好的模型打包成 `.gkg` 部署包，包含：
 - 同一 `model_id` 池内的模型文件 (`.pth`/`.onnx`/`.onnx.data`)
+- V4 精确卡片词表 (`card_vocab.json`，必选)
 - 知识库 (`knowledge_base.json`)
 - Hash 接续索引 (`hash_mapping_report.json`)
 - 代码语义向量与索引 (`code_embeddings.npy`、`code_embeddings_idx.json`)
@@ -623,7 +630,7 @@ python deploy_tool.py
 | `d_model` | 特征维度 | 越高越聪明，但计算量成倍增加。必须能被 `n_heads` 整除 |
 | `n_heads` | 注意力头数 | 通常设为 4 或 8。头越多，处理复杂关系能力越强 |
 | `n_layers` | Transformer 层数 | 2 层适合快速实验，4-6 层适合竞技卡组 |
-| `vocab_size` | 卡片词表大小 | 只要比实际卡片 ID 总数大即可 |
+| `vocab_size` | V4 精确卡片词表容量 | 固定为 20000，属于模型协议，不可手动改写 |
 
 ### 训练参数
 

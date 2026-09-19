@@ -10,6 +10,11 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from card_vocab import (
+    CARD_VOCAB_FILENAME,
+    get_default_card_vocabulary,
+    load_card_vocabulary,
+)
 from checkpoint_utils import (
     CHECKPOINT_FORMAT_VERSION,
     MODEL_PROTOCOL_VERSION,
@@ -17,6 +22,7 @@ from checkpoint_utils import (
     validate_training_checkpoint_file,
     validate_model_id,
 )
+from protocol_schema import get_current_protocol_metadata, validate_protocol_metadata
 from training_validation import validate_model_prefix
 from semantic_assets import (
     CODE_EMBEDDINGS_FILENAME,
@@ -28,9 +34,9 @@ from semantic_assets import (
 )
 
 
-ARTIFACT_MANIFEST_FORMAT_VERSION = 2
+ARTIFACT_MANIFEST_FORMAT_VERSION = 3
 # 仅表示 .gkg 部署包协议，必须独立于 WebUI/框架版本维护
-DEPLOY_PACKAGE_FORMAT_VERSION = 2
+DEPLOY_PACKAGE_FORMAT_VERSION = 3
 MAX_ONNX_GRAPH_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_FILE_BYTES = 32 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
@@ -51,7 +57,11 @@ WINDOWS_RESERVED_FILENAMES = {
     *(f"LPT{index}" for index in range(1, 10)),
 }
 MODEL_ARTIFACT_SUFFIXES = (".artifacts.json", ".onnx.data", ".onnx", ".pth")
-DEPLOY_ROOT_FILES = {*SEMANTIC_ASSET_FILENAMES, "meta_staples.json"}
+DEPLOY_ROOT_FILES = {
+    *SEMANTIC_ASSET_FILENAMES,
+    CARD_VOCAB_FILENAME,
+    "meta_staples.json",
+}
 CODE_SEMANTIC_FILE_SET = {
     CODE_EMBEDDINGS_FILENAME,
     CODE_EMBEDDINGS_INDEX_FILENAME,
@@ -61,6 +71,11 @@ ONNX_IDENTITY_KEYS = {
     "model_prefix": "galatea.model_prefix",
     "iteration": "galatea.iteration",
     "model_protocol_version": "galatea.model_protocol_version",
+    "protocol_schema_revision": "galatea.protocol_schema_revision",
+    "protocol_schema_hash": "galatea.protocol_schema_hash",
+    "card_vocab_hash": "galatea.card_vocab_hash",
+    "card_vocab_size": "galatea.card_vocab_size",
+    "card_vocab_card_count": "galatea.card_vocab_card_count",
 }
 
 
@@ -194,6 +209,7 @@ def tag_onnx_model_identity(
     """把模型身份与模型协议版本写入 ONNX 主图并原子替换"""
     import onnx
 
+    protocol_metadata = get_current_protocol_metadata()
     validate_model_id(model_id)
     validate_model_prefix(model_prefix)
     model_artifact_stem(model_prefix, iteration)
@@ -213,6 +229,21 @@ def tag_onnx_model_identity(
             ONNX_IDENTITY_KEYS["iteration"]: str(iteration),
             ONNX_IDENTITY_KEYS["model_protocol_version"]: str(
                 model_protocol_version
+            ),
+            ONNX_IDENTITY_KEYS["protocol_schema_revision"]: str(
+                protocol_metadata["protocol_schema_revision"]
+            ),
+            ONNX_IDENTITY_KEYS["protocol_schema_hash"]: protocol_metadata[
+                "protocol_schema_hash"
+            ],
+            ONNX_IDENTITY_KEYS["card_vocab_hash"]: protocol_metadata[
+                "card_vocab_hash"
+            ],
+            ONNX_IDENTITY_KEYS["card_vocab_size"]: str(
+                protocol_metadata["card_vocab_size"]
+            ),
+            ONNX_IDENTITY_KEYS["card_vocab_card_count"]: str(
+                protocol_metadata["card_vocab_card_count"]
             ),
         }
     )
@@ -241,7 +272,7 @@ def _safe_external_data_path(model_dir, location):
     return resolved
 
 
-def _read_artifact_manifest(marker_path):
+def _read_artifact_manifest(marker_path, *, card_vocabulary=None):
     """读取并校验当前版本产物清单的基础结构"""
     marker_path = Path(marker_path)
     validate_safe_filename(marker_path.name, allowed_suffixes=(".artifacts.json",))
@@ -271,6 +302,11 @@ def _read_artifact_manifest(marker_path):
         or model_protocol_version != MODEL_PROTOCOL_VERSION
     ):
         raise ValueError(f"model protocol version mismatch: {marker_path.name}")
+    validate_protocol_metadata(
+        payload,
+        label=f"artifact manifest {marker_path.name}",
+        card_vocabulary=card_vocabulary,
+    )
     validate_model_id(payload.get("model_id"))
     validate_model_prefix(payload.get("model_prefix"))
     iteration = payload.get("iteration")
@@ -286,7 +322,13 @@ def _read_artifact_manifest(marker_path):
     return payload
 
 
-def _validate_onnx_artifact_manifest(graph_path, record, expected_model_id=None):
+def _validate_onnx_artifact_manifest(
+    graph_path,
+    record,
+    expected_model_id=None,
+    *,
+    card_vocabulary=None,
+):
     """确认 ONNX 与产物清单属于同一模型且依赖文件完整"""
     marker_path = graph_path.with_name(f"{graph_path.stem}.artifacts.json")
     if not marker_path.is_file():
@@ -296,7 +338,10 @@ def _validate_onnx_artifact_manifest(graph_path, record, expected_model_id=None)
             )
         return
 
-    payload = _read_artifact_manifest(marker_path)
+    payload = _read_artifact_manifest(
+        marker_path,
+        card_vocabulary=card_vocabulary,
+    )
     if expected_model_id is not None and payload["model_id"] != expected_model_id:
         raise PermissionError(
             f"ONNX model_id mismatch: expected {expected_model_id}, "
@@ -311,7 +356,17 @@ def _validate_onnx_artifact_manifest(graph_path, record, expected_model_id=None)
         )
     if onnx_record.get("files") != record["files"]:
         raise ValueError(f"ONNX artifact file list mismatch: {marker_path.name}")
-    for key in ("model_id", "model_prefix", "iteration", "model_protocol_version"):
+    for key in (
+        "model_id",
+        "model_prefix",
+        "iteration",
+        "model_protocol_version",
+        "protocol_schema_revision",
+        "protocol_schema_hash",
+        "card_vocab_hash",
+        "card_vocab_size",
+        "card_vocab_card_count",
+    ):
         if onnx_record.get(key) != payload.get(key):
             raise ValueError(
                 f"ONNX artifact {key} mismatch: {marker_path.name}"
@@ -332,6 +387,7 @@ def describe_onnx_artifact(
     model_prefix=None,
     iteration=None,
     model_protocol_version=None,
+    card_vocabulary=None,
 ):
     """读取 ONNX 主图引用并返回主图与全部外置权重的完整记录"""
     import onnx
@@ -354,6 +410,21 @@ def describe_onnx_artifact(
     embedded_model_protocol = properties.get(
         ONNX_IDENTITY_KEYS["model_protocol_version"]
     )
+    embedded_protocol_schema_revision = properties.get(
+        ONNX_IDENTITY_KEYS["protocol_schema_revision"]
+    )
+    embedded_protocol_schema_hash = properties.get(
+        ONNX_IDENTITY_KEYS["protocol_schema_hash"]
+    )
+    embedded_card_vocab_hash = properties.get(
+        ONNX_IDENTITY_KEYS["card_vocab_hash"]
+    )
+    embedded_card_vocab_size = properties.get(
+        ONNX_IDENTITY_KEYS["card_vocab_size"]
+    )
+    embedded_card_vocab_card_count = properties.get(
+        ONNX_IDENTITY_KEYS["card_vocab_card_count"]
+    )
     if embedded_iteration is not None:
         try:
             embedded_iteration = int(embedded_iteration)
@@ -366,12 +437,33 @@ def describe_onnx_artifact(
             raise ValueError(
                 "ONNX embedded model_protocol_version must be an integer"
             ) from error
+    for name, raw_value in (
+        ("protocol_schema_revision", embedded_protocol_schema_revision),
+        ("card_vocab_size", embedded_card_vocab_size),
+        ("card_vocab_card_count", embedded_card_vocab_card_count),
+    ):
+        if raw_value is not None:
+            try:
+                parsed_value = int(raw_value)
+            except ValueError as error:
+                raise ValueError(f"ONNX embedded {name} must be an integer") from error
+            if name == "protocol_schema_revision":
+                embedded_protocol_schema_revision = parsed_value
+            elif name == "card_vocab_size":
+                embedded_card_vocab_size = parsed_value
+            else:
+                embedded_card_vocab_card_count = parsed_value
 
     embedded_identity = (
         embedded_model_id,
         embedded_model_prefix,
         embedded_iteration,
         embedded_model_protocol,
+        embedded_protocol_schema_revision,
+        embedded_protocol_schema_hash,
+        embedded_card_vocab_hash,
+        embedded_card_vocab_size,
+        embedded_card_vocab_card_count,
     )
     if any(value is not None for value in embedded_identity):
         if any(value is None for value in embedded_identity):
@@ -382,6 +474,18 @@ def describe_onnx_artifact(
             raise ValueError(
                 "ONNX embedded model protocol does not match the current protocol"
             )
+        validate_protocol_metadata(
+            {
+                "model_protocol_version": embedded_model_protocol,
+                "protocol_schema_revision": embedded_protocol_schema_revision,
+                "protocol_schema_hash": embedded_protocol_schema_hash,
+                "card_vocab_hash": embedded_card_vocab_hash,
+                "card_vocab_size": embedded_card_vocab_size,
+                "card_vocab_card_count": embedded_card_vocab_card_count,
+            },
+            label="ONNX metadata",
+            card_vocabulary=card_vocabulary,
+        )
     if expected_model_id is not None and embedded_model_id != expected_model_id:
         raise PermissionError(
             f"ONNX embedded model_id mismatch: expected {expected_model_id}, "
@@ -428,6 +532,11 @@ def describe_onnx_artifact(
         "model_prefix": embedded_model_prefix,
         "iteration": embedded_iteration,
         "model_protocol_version": embedded_model_protocol,
+        "protocol_schema_revision": embedded_protocol_schema_revision,
+        "protocol_schema_hash": embedded_protocol_schema_hash,
+        "card_vocab_hash": embedded_card_vocab_hash,
+        "card_vocab_size": embedded_card_vocab_size,
+        "card_vocab_card_count": embedded_card_vocab_card_count,
         "primary": graph_path.name,
         "files": files,
         "external_data": files[1:],
@@ -438,6 +547,7 @@ def describe_onnx_artifact(
             graph_path,
             record,
             expected_model_id=expected_model_id,
+            card_vocabulary=card_vocabulary,
         )
     return record
 
@@ -484,6 +594,15 @@ def discover_checkpoint_artifacts(
                     "model_protocol_version": payload.get(
                         "model_protocol_version"
                     ),
+                    "protocol_schema_revision": payload.get(
+                        "protocol_schema_revision"
+                    ),
+                    "protocol_schema_hash": payload.get("protocol_schema_hash"),
+                    "card_vocab_hash": payload.get("card_vocab_hash"),
+                    "card_vocab_size": payload.get("card_vocab_size"),
+                    "card_vocab_card_count": payload.get(
+                        "card_vocab_card_count"
+                    ),
                     "checkpoint_path": str(checkpoint_path),
                     "manifest_path": str(marker_path),
                 }
@@ -521,6 +640,15 @@ def discover_checkpoint_artifacts(
                         ],
                         "model_protocol_version": metadata[
                             "model_protocol_version"
+                        ],
+                        "protocol_schema_revision": metadata[
+                            "protocol_schema_revision"
+                        ],
+                        "protocol_schema_hash": metadata["protocol_schema_hash"],
+                        "card_vocab_hash": metadata["card_vocab_hash"],
+                        "card_vocab_size": metadata["card_vocab_size"],
+                        "card_vocab_card_count": metadata[
+                            "card_vocab_card_count"
                         ],
                         "checkpoint_path": str(checkpoint_path.resolve()),
                         "manifest_path": None,
@@ -609,7 +737,12 @@ def assert_model_artifact_target_identity(model_dir, record):
             )
 
 
-def collect_model_artifact_files(model_dir, selected_models):
+def collect_model_artifact_files(
+    model_dir,
+    selected_models,
+    *,
+    card_vocabulary=None,
+):
     """展开用户选择，自动补齐 ONNX 外置权重和同轮次产物清单"""
     model_root = Path(model_dir).resolve()
     collected = []
@@ -629,7 +762,11 @@ def collect_model_artifact_files(model_dir, selected_models):
             raise FileNotFoundError(f"selected model does not exist: {primary_path}")
 
         if name.casefold().endswith(".onnx"):
-            record = describe_onnx_artifact(primary_path, require_complete=True)
+            record = describe_onnx_artifact(
+                primary_path,
+                require_complete=True,
+                card_vocabulary=card_vocabulary,
+            )
             for relative_name in record["files"]:
                 append_once(relative_name)
         else:
@@ -643,7 +780,12 @@ def collect_model_artifact_files(model_dir, selected_models):
     return collected
 
 
-def build_package_model_records(model_dir, selected_models):
+def build_package_model_records(
+    model_dir,
+    selected_models,
+    *,
+    card_vocabulary=None,
+):
     """为部署包清单生成带轮次和依赖文件的模型记录"""
     model_root = Path(model_dir).resolve()
     records = []
@@ -655,20 +797,35 @@ def build_package_model_records(model_dir, selected_models):
         if primary_path.is_symlink() or not primary_path.is_file():
             raise FileNotFoundError(f"selected model does not exist: {primary_path}")
         if name.casefold().endswith(".onnx"):
-            records.append(describe_onnx_artifact(primary_path, require_complete=True))
+            records.append(
+                describe_onnx_artifact(
+                    primary_path,
+                    require_complete=True,
+                    card_vocabulary=card_vocabulary,
+                )
+            )
         else:
             checkpoint = validate_training_checkpoint_file(
                 primary_path,
                 map_location="cpu",
+                card_vocabulary=card_vocabulary,
             )
             marker_path = checkpoint_artifact_manifest_path(primary_path)
             if marker_path.is_file():
-                payload = _read_artifact_manifest(marker_path)
+                payload = _read_artifact_manifest(
+                    marker_path,
+                    card_vocabulary=card_vocabulary,
+                )
                 for key in (
                     "model_id",
                     "model_prefix",
                     "iteration",
                     "model_protocol_version",
+                    "protocol_schema_revision",
+                    "protocol_schema_hash",
+                    "card_vocab_hash",
+                    "card_vocab_size",
+                    "card_vocab_card_count",
                 ):
                     if payload[key] != checkpoint[key]:
                         raise ValueError(
@@ -691,6 +848,15 @@ def build_package_model_records(model_dir, selected_models):
                     "iteration": checkpoint["iteration"],
                     "model_protocol_version": checkpoint[
                         "model_protocol_version"
+                    ],
+                    "protocol_schema_revision": checkpoint[
+                        "protocol_schema_revision"
+                    ],
+                    "protocol_schema_hash": checkpoint["protocol_schema_hash"],
+                    "card_vocab_hash": checkpoint["card_vocab_hash"],
+                    "card_vocab_size": checkpoint["card_vocab_size"],
+                    "card_vocab_card_count": checkpoint[
+                        "card_vocab_card_count"
                     ],
                     "primary": name,
                     "files": [name],
@@ -720,7 +886,12 @@ def get_model_iteration_mismatch(records):
     return None
 
 
-def validate_package_model_records(records, *, expected_model_id=None):
+def validate_package_model_records(
+    records,
+    *,
+    expected_model_id=None,
+    card_vocabulary=None,
+):
     """校验部署包只能包含同一 UUID 的模型，且双格式轮次必须成对一致"""
     if not isinstance(records, list):
         raise ValueError("model artifact records must be a list")
@@ -743,6 +914,12 @@ def validate_package_model_records(records, *, expected_model_id=None):
         raise ValueError("one model_id pool cannot contain different model prefixes")
     if model_protocol_versions != {MODEL_PROTOCOL_VERSION}:
         raise ValueError("deployment package model protocol version is incompatible")
+    for record in records:
+        validate_protocol_metadata(
+            record,
+            label="deployment model record",
+            card_vocabulary=card_vocabulary,
+        )
     if expected_model_id is not None and model_ids and model_ids != {expected_model_id}:
         raise PermissionError("selected models do not belong to the requested model_id pool")
     artifact_keys = [
@@ -786,6 +963,11 @@ def discover_model_repository(model_dir):
                         "model_prefix",
                         "iteration",
                         "model_protocol_version",
+                        "protocol_schema_revision",
+                        "protocol_schema_hash",
+                        "card_vocab_hash",
+                        "card_vocab_size",
+                        "card_vocab_card_count",
                     ):
                         if payload[key] != checkpoint[key]:
                             raise ValueError(
@@ -806,6 +988,17 @@ def discover_model_repository(model_dir):
                         "model_protocol_version": checkpoint[
                             "model_protocol_version"
                         ],
+                        "protocol_schema_revision": checkpoint[
+                            "protocol_schema_revision"
+                        ],
+                        "protocol_schema_hash": checkpoint[
+                            "protocol_schema_hash"
+                        ],
+                        "card_vocab_hash": checkpoint["card_vocab_hash"],
+                        "card_vocab_size": checkpoint["card_vocab_size"],
+                        "card_vocab_card_count": checkpoint[
+                            "card_vocab_card_count"
+                        ],
                         "primary": primary_path.name,
                         "files": [primary_path.name, marker_path.name],
                         "identity_source": "checkpoint",
@@ -819,6 +1012,17 @@ def discover_model_repository(model_dir):
                         "iteration": checkpoint["iteration"],
                         "model_protocol_version": checkpoint[
                             "model_protocol_version"
+                        ],
+                        "protocol_schema_revision": checkpoint[
+                            "protocol_schema_revision"
+                        ],
+                        "protocol_schema_hash": checkpoint[
+                            "protocol_schema_hash"
+                        ],
+                        "card_vocab_hash": checkpoint["card_vocab_hash"],
+                        "card_vocab_size": checkpoint["card_vocab_size"],
+                        "card_vocab_card_count": checkpoint[
+                            "card_vocab_card_count"
                         ],
                         "primary": primary_path.name,
                         "files": [primary_path.name],
@@ -961,6 +1165,7 @@ def write_checkpoint_artifact_manifest(
     onnx_error=None,
 ):
     """在保存检查点时写入同轮次产物清单，并标记 ONNX 是否完整"""
+    protocol_metadata = get_current_protocol_metadata()
     validate_model_id(model_id)
     validate_model_prefix(model_prefix)
     if checkpoint_format_version != CHECKPOINT_FORMAT_VERSION:
@@ -982,13 +1187,13 @@ def write_checkpoint_artifact_manifest(
                 "model_id": model_id,
                 "model_prefix": model_prefix,
                 "iteration": int(iteration),
-                "model_protocol_version": int(model_protocol_version),
+                **protocol_metadata,
             }
         )
     payload = {
         "artifact_manifest_version": ARTIFACT_MANIFEST_FORMAT_VERSION,
         "checkpoint_format_version": int(checkpoint_format_version),
-        "model_protocol_version": int(model_protocol_version),
+        **protocol_metadata,
         "model_id": model_id,
         "model_prefix": model_prefix,
         "iteration": int(iteration),
@@ -1031,12 +1236,32 @@ def create_deployment_package(
         raise FileExistsError(f"deployment package already exists: {target.name}")
 
     selected_models = list(dict.fromkeys(selected_models))
-    records = build_package_model_records(model_dir, selected_models)
-    validate_package_model_records(records)
-    model_files = collect_model_artifact_files(model_dir, selected_models)
+    requested_extras = dict(extra_files or {})
+    requested_extras.setdefault(
+        CARD_VOCAB_FILENAME,
+        str(Path(CARD_VOCAB_FILENAME).resolve()),
+    )
+    raw_vocabulary_source = Path(requested_extras[CARD_VOCAB_FILENAME])
+    if raw_vocabulary_source.is_symlink():
+        raise ValueError("deployment card vocabulary must not be a symlink")
+    packaged_vocabulary = load_card_vocabulary(raw_vocabulary_source.resolve())
+    records = build_package_model_records(
+        model_dir,
+        selected_models,
+        card_vocabulary=packaged_vocabulary,
+    )
+    validate_package_model_records(
+        records,
+        card_vocabulary=packaged_vocabulary,
+    )
+    model_files = collect_model_artifact_files(
+        model_dir,
+        selected_models,
+        card_vocabulary=packaged_vocabulary,
+    )
     model_total_size = validate_model_artifact_file_set(model_dir, model_files)
     extras = {}
-    for archive_name, source_path in (extra_files or {}).items():
+    for archive_name, source_path in requested_extras.items():
         if archive_name not in DEPLOY_ROOT_FILES:
             raise ValueError(f"unsupported deployment root file: {archive_name!r}")
         raw_source = Path(source_path)
@@ -1078,8 +1303,18 @@ def create_deployment_package(
     if HASH_MAPPING_FILENAME in extras and KNOWLEDGE_BASE_FILENAME not in extras:
         raise ValueError("hash mapping requires knowledge_base.json")
 
+    protocol_metadata = get_current_protocol_metadata(packaged_vocabulary)
+    if records:
+        for record in records:
+            validate_protocol_metadata(
+                record,
+                label="deployment model record",
+                card_vocabulary=packaged_vocabulary,
+            )
+
     manifest = {
         "package_format_version": DEPLOY_PACKAGE_FORMAT_VERSION,
+        **protocol_metadata,
         "package_name": package_name,
         "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "models_included": selected_models,
@@ -1089,6 +1324,7 @@ def create_deployment_package(
         "includes_staples": "meta_staples.json" in extras,
         "includes_hash_mapping": HASH_MAPPING_FILENAME in extras,
         "includes_code_semantics": includes_complete_code_semantics,
+        "includes_card_vocab": True,
     }
 
     temporary = tempfile.NamedTemporaryFile(
@@ -1174,12 +1410,24 @@ def validate_deployment_package(stage_dir):
     if set(declared_models) != set(primary_models):
         raise ValueError("manifest primary model list does not match package contents")
 
-    actual_records = build_package_model_records(stage_root, declared_models)
-    validate_package_model_records(actual_records)
+    packaged_vocabulary = load_card_vocabulary(stage_root / CARD_VOCAB_FILENAME)
+    actual_records = build_package_model_records(
+        stage_root,
+        declared_models,
+        card_vocabulary=packaged_vocabulary,
+    )
+    validate_package_model_records(
+        actual_records,
+        card_vocabulary=packaged_vocabulary,
+    )
     declared_records = manifest.get("model_artifacts")
     if not isinstance(declared_records, list) or declared_records != actual_records:
         raise ValueError("manifest model identity records do not match embedded metadata")
-    actual_model_files = collect_model_artifact_files(stage_root, declared_models)
+    actual_model_files = collect_model_artifact_files(
+        stage_root,
+        declared_models,
+        card_vocabulary=packaged_vocabulary,
+    )
     declared_model_files = manifest.get("model_files_included")
     if (
         not isinstance(declared_model_files, list)
@@ -1193,6 +1441,7 @@ def validate_deployment_package(stage_dir):
         (KNOWLEDGE_BASE_FILENAME, "includes_kb"),
         ("meta_staples.json", "includes_staples"),
         (HASH_MAPPING_FILENAME, "includes_hash_mapping"),
+        (CARD_VOCAB_FILENAME, "includes_card_vocab"),
     ):
         included = filename in actual_names
         if manifest.get(flag) is not included:
@@ -1217,6 +1466,17 @@ def validate_deployment_package(stage_dir):
         expected_names.update(CODE_SEMANTIC_FILE_SET)
     if HASH_MAPPING_FILENAME in actual_names and KNOWLEDGE_BASE_FILENAME not in actual_names:
         raise ValueError("hash mapping requires knowledge_base.json")
+    validate_protocol_metadata(
+        manifest,
+        label="deployment package manifest",
+        card_vocabulary=packaged_vocabulary,
+    )
+    for record in actual_records:
+        validate_protocol_metadata(
+            record,
+            label="deployment model record",
+            card_vocabulary=packaged_vocabulary,
+        )
     if actual_names != expected_names:
         raise ValueError(
             f"deployment package contains undeclared files: {sorted(actual_names - expected_names)}"

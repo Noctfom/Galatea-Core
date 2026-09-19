@@ -9,19 +9,28 @@ from pathlib import Path
 
 import torch
 
+from protocol_schema import (
+    MODEL_PROTOCOL_VERSION,
+    apply_current_protocol_metadata,
+    get_current_protocol_metadata,
+    validate_protocol_metadata,
+)
 from training_validation import validate_model_prefix
 
 
 # 仅表示训练检查点数据协议，必须独立于 app.py 中的框架版本维护
-CHECKPOINT_FORMAT_VERSION = 2
-# 模型输入/网络结构协议独立维护；V3 含顺序上下文及 Lua 效果槽绑定
-MODEL_PROTOCOL_VERSION = 3
+CHECKPOINT_FORMAT_VERSION = 3
 DEFAULT_MODEL_PREFIX = "galatea"
 MAX_CHECKPOINT_FILE_BYTES = 32 * 1024 * 1024 * 1024
 
 REQUIRED_TRAINING_CHECKPOINT_KEYS = {
     "checkpoint_format_version",
     "model_protocol_version",
+    "protocol_schema_revision",
+    "protocol_schema_hash",
+    "card_vocab_hash",
+    "card_vocab_size",
+    "card_vocab_card_count",
     "model_id",
     "model_prefix",
     "run_id",
@@ -153,23 +162,18 @@ def inspect_training_checkpoint(path, map_location="cpu"):
     format_warning = get_checkpoint_format_warning(checkpoint)
     model_protocol_warning = get_model_protocol_warning(checkpoint)
     if format_warning is None and model_protocol_warning is None:
+        validate_protocol_metadata(checkpoint, label="checkpoint")
         validate_model_id(checkpoint.get("model_id"))
         validate_model_prefix(checkpoint.get("model_prefix"))
         net_config = checkpoint.get("net_config")
-        if (
-            not isinstance(net_config, dict)
-            or net_config.get("model_protocol_version") != MODEL_PROTOCOL_VERSION
-        ):
-            raise ValueError(
-                "checkpoint net_config model_protocol_version is invalid"
-            )
+        apply_current_protocol_metadata(net_config)
         if (
             isinstance(checkpoint.get("iteration"), bool)
             or not isinstance(checkpoint.get("iteration"), int)
             or checkpoint["iteration"] < 0
         ):
             raise ValueError("checkpoint iteration must be a non-negative integer")
-    return {
+    metadata = {
         "checkpoint_format_version": checkpoint.get("checkpoint_format_version"),
         "model_protocol_version": checkpoint.get("model_protocol_version"),
         "format_warning": format_warning,
@@ -180,10 +184,18 @@ def inspect_training_checkpoint(path, map_location="cpu"):
         "run_id": checkpoint.get("run_id"),
         "net_config": checkpoint.get("net_config", {}),
     }
+    for key in get_current_protocol_metadata():
+        metadata[key] = checkpoint.get(key)
+    return metadata
 
 
-def validate_training_checkpoint(checkpoint, *, source_path=None):
-    """校验已加载检查点的协议、UUID、结构和可选文件名一致性。"""
+def validate_training_checkpoint(
+    checkpoint,
+    *,
+    source_path=None,
+    card_vocabulary=None,
+):
+    """校验已加载检查点的协议、UUID、结构和可选文件名一致性"""
     if not isinstance(checkpoint, dict):
         raise TypeError("training checkpoint must be a dictionary")
 
@@ -196,6 +208,12 @@ def validate_training_checkpoint(checkpoint, *, source_path=None):
     if model_protocol_warning:
         warnings.warn(model_protocol_warning, RuntimeWarning, stacklevel=2)
         raise ValueError(model_protocol_warning)
+
+    validate_protocol_metadata(
+        checkpoint,
+        label="checkpoint",
+        card_vocabulary=card_vocabulary,
+    )
 
     missing = sorted(REQUIRED_TRAINING_CHECKPOINT_KEYS.difference(checkpoint))
     if missing:
@@ -215,13 +233,16 @@ def validate_training_checkpoint(checkpoint, *, source_path=None):
     validate_model_id(checkpoint["model_id"])
     validate_model_prefix(checkpoint["model_prefix"])
     net_config = checkpoint["net_config"]
-    if not isinstance(net_config, dict):
-        raise ValueError("checkpoint net_config must be a dictionary")
-    if net_config.get("model_protocol_version") != MODEL_PROTOCOL_VERSION:
-        raise ValueError(
-            "checkpoint net_config model_protocol_version does not match "
-            "the current model protocol"
-        )
+    validate_protocol_metadata(
+        net_config,
+        label="checkpoint net_config",
+        card_vocabulary=card_vocabulary,
+    )
+    for key in get_current_protocol_metadata(card_vocabulary):
+        if checkpoint.get(key) != net_config.get(key):
+            raise ValueError(
+                f"checkpoint top-level {key} does not match checkpoint net_config"
+            )
     if (
         isinstance(checkpoint["iteration"], bool)
         or not isinstance(checkpoint["iteration"], int)
@@ -249,14 +270,23 @@ def load_training_checkpoint(path, map_location="cpu"):
     return validate_training_checkpoint(checkpoint, source_path=path)
 
 
-def validate_training_checkpoint_file(path, map_location="cpu"):
+def validate_training_checkpoint_file(
+    path,
+    map_location="cpu",
+    *,
+    card_vocabulary=None,
+):
     """不分配真实张量存储地校验外部检查点的完整协议与模型身份"""
     checkpoint = safe_load_torch_checkpoint(
         path,
         map_location=map_location,
         materialize_tensors=False,
     )
-    return validate_training_checkpoint(checkpoint, source_path=path)
+    return validate_training_checkpoint(
+        checkpoint,
+        source_path=path,
+        card_vocabulary=card_vocabulary,
+    )
 
 
 def restore_model_state_strict(model, checkpoint):

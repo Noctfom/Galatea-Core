@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.6.5**.
+> This document applies to **Galatea-Core v3.7.0**.
 
 ---
 
@@ -73,7 +73,9 @@ Go to **🔄 Resource Sync Hub**:
 
 ![Resource Sync](图片/资源同步.png)
 
-Wait a few minutes. This pulls the latest `cards.cdb` and `script/` from official repos.
+Wait a few minutes. This updates `cards.cdb`, official `script/`, and the repository-authoritative `card_vocab.json`. Advanced options may point to a custom CDB file source, vocabulary repository/file source, and script repository. If the CDB contains cards not yet numbered by that vocabulary, the runtime remains usable while affected decks temporarily leave random pools; inspect them under Assets & Decks → Deck & Pool Manager → Deck Compatibility Preflight.
+
+Official environments should synchronize the repository vocabulary directly. For custom cards, use **Resource Sync Hub → Local/Custom Card Vocabulary** and acknowledge the warning before appending IDs from a local CDB. The CLI equivalent is `python main.py vocab --cdb <custom-cdb-path>`. Back up and distribute the resulting `card_vocab.json` to every training/deployment machine; forks created by different append orders cannot be merged automatically.
 
 ---
 
@@ -81,9 +83,10 @@ Wait a few minutes. This pulls the latest `cards.cdb` and `script/` from officia
 
 Go to **🧠 Semantic Knowledge Engine**:
 
-1. ⚠️ **Important**: Check **🌐 Sync Base KB from Github** to retrieve the KB, Hash map, and code-semantic vectors
-2. Sync mode automatically appends vectors for newer local scripts; enable **Extract Code Semantic Features** separately only for a local-only update
-3. Click **🧠 Start Extracting Card Semantics**
+1. Select **🌐 Sync Remote Semantic Assets Only** when only repository assets are needed; this downloads without scanning local Lua
+2. Select **🧬 Extract/Continue Local Semantics** to process the current `script/`; structured semantics and code vectors continue incrementally
+3. Combine **Clear Local KB** with local update only for an intentional from-scratch build; sync and local update may be selected together to sync first and then continue
+4. The remote base now defaults to the Galatea repository URL while legacy raw `knowledge_base.json` links remain accepted
 
 ![Semantic KB](图片/语义知识库.png)
 

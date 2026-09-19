@@ -15,8 +15,18 @@ from data_types import (
     ACTION_SIGNATURE_BYTES,
     ACTION_TARGET_SLOTS,
     CHAIN_CONTEXT_DIM,
+    CARD_NUMERIC_FEATURE_DIM,
+    GLOBAL_FEATURE_DIM,
+    PHASE_CATEGORY_COUNT,
+    PLAYER_CONTEXT_SLOTS,
+    PLAYER_ROLE_COUNT,
+    POSITION_CATEGORY_COUNT,
+    ZONE_CATEGORY_COUNT,
 )
-from checkpoint_utils import MODEL_PROTOCOL_VERSION
+from protocol_schema import (
+    MODEL_PROTOCOL_VERSION,
+    apply_current_protocol_metadata,
+)
 
 class RunningMeanStd(nn.Module):
     # 动态记录输入的均值和方差，用于 RND 归一化
@@ -220,14 +230,13 @@ class RNDModule(nn.Module): # 内在奖励模块：随机网络蒸馏 (RND),暂�
 class GalateaNet(nn.Module):
     def __init__(self, config):
         super().__init__()
-        configured_protocol = config.get(
-            'model_protocol_version', MODEL_PROTOCOL_VERSION
-        )
-        if configured_protocol != MODEL_PROTOCOL_VERSION:
-            raise ValueError(
-                "model_protocol_version does not match the current network protocol"
-            )
+        config = apply_current_protocol_metadata(config)
         self.model_protocol_version = MODEL_PROTOCOL_VERSION
+        self.protocol_schema_revision = config['protocol_schema_revision']
+        self.protocol_schema_hash = config['protocol_schema_hash']
+        self.card_vocab_hash = config['card_vocab_hash']
+        self.card_vocab_size = config['card_vocab_size']
+        self.card_vocab_card_count = config['card_vocab_card_count']
         self.register_buffer(
             '_model_protocol_version',
             torch.tensor(MODEL_PROTOCOL_VERSION, dtype=torch.int32),
@@ -236,7 +245,7 @@ class GalateaNet(nn.Module):
         self.d_model = config.get('d_model', 512)
         self.n_heads = config.get('n_heads', 8)
         self.n_layers = config.get('n_layers', 6)
-        self.vocab_size = config.get('vocab_size', 20000) 
+        self.vocab_size = config['vocab_size']
 
         try:
             code_emb_np = None
@@ -259,12 +268,34 @@ class GalateaNet(nn.Module):
         
         # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
-        self.feat_proj = nn.Linear(66, self.d_model)
+        self.feat_proj = nn.Linear(CARD_NUMERIC_FEATURE_DIM, self.d_model)
         self.race_embed = nn.Embedding(30, self.d_model, padding_idx=0)
         self.attr_embed = nn.Embedding(10, self.d_model, padding_idx=0)
         self.setcode_embed = nn.Embedding(4096, self.d_model, padding_idx=0) 
         
-        self.global_proj = nn.Linear(15, self.d_model)
+        self.global_proj = nn.Linear(GLOBAL_FEATURE_DIM, self.d_model)
+        self.player_role_embeds = nn.ModuleList(
+            [
+                nn.Embedding(PLAYER_ROLE_COUNT, self.d_model, padding_idx=0)
+                for _ in range(PLAYER_CONTEXT_SLOTS)
+            ]
+        )
+        self.phase_context_embed = nn.Embedding(
+            PHASE_CATEGORY_COUNT,
+            16,
+            padding_idx=0,
+        )
+        self.phase_token_proj = nn.Linear(16, self.d_model, bias=False)
+        self.zone_embed = nn.Embedding(
+            ZONE_CATEGORY_COUNT,
+            self.d_model,
+            padding_idx=0,
+        )
+        self.position_embed = nn.Embedding(
+            POSITION_CATEGORY_COUNT,
+            self.d_model,
+            padding_idx=0,
+        )
 
         # ==========================================================
         # 2. 语义解析皮层 (Semantic Knowledge Modules)
@@ -310,7 +341,10 @@ class GalateaNet(nn.Module):
 
         # --- 3. Transformer Encoder (逻辑推演引擎) ---
         # 1. 挂载全局环境信号发生器
-        self.film_gen = FiLMGenerator(condition_dim=15, d_model=self.d_model)
+        self.film_gen = FiLMGenerator(
+            condition_dim=GLOBAL_FEATURE_DIM + 16,
+            d_model=self.d_model,
+        )
         
         # 2. 实例化定制的堆叠主干 (利用 config 字典解包)
         self.transformer = GalateaTransformerStack(
@@ -337,7 +371,11 @@ class GalateaNet(nn.Module):
         )
         self.action_target_value_proj = nn.Linear(2, self.d_model, bias=False)
         self.action_controller_embed = nn.Embedding(3, self.d_model, padding_idx=0)
-        self.action_location_embed = nn.Embedding(9, self.d_model, padding_idx=0)
+        self.action_location_embed = nn.Embedding(
+            ZONE_CATEGORY_COUNT,
+            self.d_model,
+            padding_idx=0,
+        )
         self.action_sequence_embed = nn.Embedding(33, self.d_model, padding_idx=0)
         
         # 使用 SwiGLU 将 15 维的全局状态精准升维
@@ -471,7 +509,14 @@ class GalateaNet(nn.Module):
 
     def forward(self, batch_dict):
         # --- 全局状态调制器 ---
-        gamma, beta = self.film_gen(batch_dict['global'])
+        phase_context = self.phase_context_embed(
+            batch_dict['phase'][:, 0].long()
+        )
+        film_context = torch.cat(
+            [batch_dict['global'], phase_context],
+            dim=-1,
+        )
+        gamma, beta = self.film_gen(film_context)
 
         # 物理基础感知
         x_code = self.card_embed(batch_dict['card_idx'])
@@ -494,7 +539,12 @@ class GalateaNet(nn.Module):
             x_sem = 0.0
             x_sem_slots = None
         # 全息物理与语义的大一统！
-        x = x_code + x_overlay + x_feat + x_race + x_attr + x_setcode + x_sem
+        x_zone = self.zone_embed(batch_dict['card_zone'].long())
+        x_position = self.position_embed(batch_dict['card_position'].long())
+        x = (
+            x_code + x_overlay + x_feat + x_race + x_attr + x_setcode
+            + x_sem + x_zone + x_position
+        )
         seq_len = x.shape[1]
         x = x + self.pos_embed[:, :seq_len, :]
         
@@ -508,7 +558,16 @@ class GalateaNet(nn.Module):
             memory = self.transformer(x, src_mask, gamma, beta)
         
         # --- 全局局面掌控 ---
-        g_embed = self.global_proj(batch_dict['global']).unsqueeze(1) 
+        player_context = batch_dict['player_context'].long()
+        player_role_embed = sum(
+            embedding(player_context[:, slot])
+            for slot, embedding in enumerate(self.player_role_embeds)
+        )
+        g_embed = (
+            self.global_proj(batch_dict['global'])
+            + player_role_embed
+            + self.phase_token_proj(phase_context)
+        ).unsqueeze(1)
         masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -65000.0)
         pooled = torch.max(masked_memory, dim=1)[0].unsqueeze(1) 
         
@@ -550,6 +609,8 @@ class GalateaNet(nn.Module):
                 c_sem
                 + self.card_embed(batch_dict['c_card_idx'].long())
                 + self.desc_embed(batch_dict['c_desc'].long())
+                + self.zone_embed(batch_dict['c_zone'].long()).sum(dim=2)
+                + self.position_embed(batch_dict['c_position'].long())
                 + self.chain_metadata_proj(
                     batch_dict['c_context'].to(torch.float32)
                 )
@@ -682,6 +743,7 @@ class GalateaNet(nn.Module):
             self.action_controller_embed(batch_dict['act_controller'].long())
             + self.action_location_embed(batch_dict['act_location'].long())
             + self.action_sequence_embed(batch_dict['act_sequence'].long())
+            + self.position_embed(batch_dict['act_position'].long())
         )
 
         target_code_vecs = self.card_embed(batch_dict['act_target_code'].long())

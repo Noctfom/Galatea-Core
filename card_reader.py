@@ -12,8 +12,9 @@ class CardReader:
         self.db_path = db_path
         self.conn = None
         self.cursor = None
-        self.cache = {} 
+        self.cache = {}
         self.stats_cache = {}
+        self.exists_cache = {}
         
         if os.path.exists(db_path):
             try:
@@ -41,6 +42,24 @@ class CardReader:
             return code
         except Exception:
             return code
+
+    def has_card(self, code):
+        """检查当前 cards.cdb 是否能为卡密提供完整数据"""
+        try:
+            normalized = int(code)
+        except (TypeError, ValueError):
+            return False
+        if normalized in self.exists_cache:
+            return self.exists_cache[normalized]
+        if not self.cursor:
+            return False
+        try:
+            self.cursor.execute("SELECT 1 FROM datas WHERE id=?", (normalized,))
+            exists = self.cursor.fetchone() is not None
+        except Exception:
+            exists = False
+        self.exists_cache[normalized] = exists
+        return exists
 
     def get_card_name(self, code):
         # ... (保持不变) ...
@@ -120,5 +139,7 @@ class CardReader:
             print(f"⚠️ get_full_stats 解析异常: {e} (code={code})")
             return safe_fallback
 
-# 单例
-card_db = CardReader()
+# 单例始终绑定项目资产，避免从其他工作目录启动时误读 CDB。
+card_db = CardReader(
+    db_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "cards.cdb")
+)

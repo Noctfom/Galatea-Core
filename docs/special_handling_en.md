@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.6.5**.
+> This document applies to **Galatea-Core v3.7.0**.
 
 ---
 
@@ -72,11 +72,12 @@ This means: if two cards have structurally similar effect code (only differing i
 ### WebUI Operation
 
 In **🧠 Semantic Knowledge Engine**:
-1. Check **🌐 Sync Base KB from Github** to retrieve the complete four-file semantic baseline from the same directory
-2. Sync automatically checks and appends newly parsed effect slots; enable **Extract Code Semantic Features** separately only for local updates without sync
-3. Click **Start Extracting Card Semantics** and wait for completion
+1. **🌐 Sync Remote Semantic Assets Only** downloads the complete four-file baseline without parsing local Lua
+2. **🧬 Extract/Continue Local Semantics** scans local scripts and incrementally maintains both structured semantics and code vectors
+3. Select both to sync first and then continue; clear without sync makes local update rebuild from scratch
+4. Click **Start Extracting Card Semantics** and wait for the selected operations
 
-Hash-cluster labels are derived deterministically from normalized code through MD5. v3.6.0 fixes a different source of nondeterminism: semantic fields were deduplicated through unordered sets before fixed-slot truncation. GitHub sync now also inherits the Hash map and code-semantic vectors and automatically appends locally missing slots. If the remote Hash map is absent, continuation records are reconstructed from existing `CUSTOM_HASH_*` tags in the KB.
+Hash-cluster labels are derived deterministically from normalized code through MD5. v3.6.0 fixes a different source of nondeterminism: semantic fields were deduplicated through unordered sets before fixed-slot truncation. Since 3.7.0, remote sync and local extraction are explicit separate operations. If the remote Hash map is absent, continuation records are still reconstructed from existing `CUSTOM_HASH_*` tags in the KB.
 
 ### V3 Observation and Effect-Slot Audit
 
