@@ -34,6 +34,7 @@ class Position:
     FACEDOWN_ATTACK  = 0x2 # 极其罕见（如黑暗安眠曲）
     FACEUP_DEFENSE   = 0x4
     FACEDOWN_DEFENSE = 0x8
+    REVEAL           = 0x20 # Core 查询对仍保持里侧但公开可见卡片附加的标记
     
     # 辅助掩码 (方便位运算判断)
     FACEUP           = 0x5 # 0x1 | 0x4
@@ -53,6 +54,7 @@ class Position:
         if pos & Position.FACEDOWN: parts.append("里侧")
         if pos & Position.ATTACK: parts.append("攻击")
         if pos & Position.DEFENSE: parts.append("守备")
+        if pos & Position.REVEAL: parts.append("公开")
         return "".join(parts) if parts else f"Pos({pos})"
 
 class Phases:

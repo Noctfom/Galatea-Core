@@ -16,6 +16,9 @@ from data_types import (
     ACTION_TARGET_SLOTS,
     CHAIN_CONTEXT_DIM,
     CARD_NUMERIC_FEATURE_DIM,
+    CARD_RELATION_TYPE_COUNT,
+    CARD_STATUS_BITS,
+    FIELD_ZONE_BITS,
     GLOBAL_FEATURE_DIM,
     PHASE_CATEGORY_COUNT,
     PLAYER_CONTEXT_SLOTS,
@@ -297,6 +300,26 @@ class GalateaNet(nn.Module):
             self.d_model,
             padding_idx=0,
         )
+        # V4 公共卡片状态使用紧凑投影，避免为每类 bit 建立庞大词表
+        self.card_reason_proj = nn.Linear(32, self.d_model, bias=False)
+        self.card_status_proj = nn.Linear(
+            CARD_STATUS_BITS, self.d_model, bias=False
+        )
+        self.card_owner_role_embed = nn.Embedding(
+            PLAYER_ROLE_COUNT, self.d_model, padding_idx=0
+        )
+        self.card_relation_type_embed = nn.Embedding(
+            CARD_RELATION_TYPE_COUNT, self.d_model, padding_idx=0
+        )
+        self.card_counter_proj = nn.Linear(17, self.d_model, bias=False)
+        self.field_zone_mask_proj = nn.Linear(
+            FIELD_ZONE_BITS, self.d_model, bias=False
+        )
+        self.register_buffer(
+            '_bit_masks',
+            torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.long),
+            persistent=False,
+        )
 
         # ==========================================================
         # 2. 语义解析皮层 (Semantic Knowledge Modules)
@@ -523,6 +546,14 @@ class GalateaNet(nn.Module):
             return card_sem_v, slot_v
         return card_sem_v
 
+    def _unpack_bit_bytes(self, packed):
+        """把轨迹中的紧凑字节无损展开为供线性层使用的逐位特征"""
+        expanded = torch.bitwise_and(
+            packed.long().unsqueeze(-1),
+            self._bit_masks,
+        ).ne(0)
+        return expanded.flatten(start_dim=-2).to(torch.float32)
+
     def forward(self, batch_dict):
         # --- 全局状态调制器 ---
         phase_context = self.phase_context_embed(
@@ -536,11 +567,39 @@ class GalateaNet(nn.Module):
 
         # 物理基础感知
         x_code = self.card_embed(batch_dict['card_idx'])
+        x_alias = self.card_embed(batch_dict['card_alias_idx'].long())
         x_overlay = self.overlay_embed(batch_dict['card_overlay_idx'])
+        overlay_rest_idx = batch_dict['card_overlay_rest_idx'].long()
+        overlay_rest_mask = overlay_rest_idx.ne(0).unsqueeze(-1)
+        x_overlay_rest = self.overlay_embed(overlay_rest_idx)
+        x_overlay_rest = (x_overlay_rest * overlay_rest_mask).sum(dim=-2) / (
+            overlay_rest_mask.sum(dim=-2).clamp(min=1).to(x_overlay_rest.dtype)
+        )
         x_feat = self.feat_proj(batch_dict['card_feats'])
         x_race = self.race_embed(batch_dict['card_race'])
         x_attr = self.attr_embed(batch_dict['card_attr'])
         x_setcode = self.setcode_embed(batch_dict['card_setcodes']).sum(dim=-2)
+        x_reason = self.card_reason_proj(
+            self._unpack_bit_bytes(batch_dict['card_reason_bytes'])
+        )
+        x_status = self.card_status_proj(
+            batch_dict['card_status_bits'].to(torch.float32)
+        )
+        x_owner = self.card_owner_role_embed(
+            batch_dict['card_owner_role'].long()
+        )
+        counter_input = torch.cat(
+            [
+                self._unpack_bit_bytes(batch_dict['card_counter_type_bytes']),
+                batch_dict['card_counter_value'].to(torch.float32).unsqueeze(-1),
+            ],
+            dim=-1,
+        )
+        counter_mask = batch_dict['card_counter_type_bytes'].ne(0).any(dim=-1).unsqueeze(-1)
+        x_counter_slots = self.card_counter_proj(counter_input)
+        x_counter = (x_counter_slots * counter_mask).sum(dim=-2) / (
+            counter_mask.sum(dim=-2).clamp(min=1).to(x_counter_slots.dtype)
+        )
 
         # 接入语义大脑！
         if 'sem_category' in batch_dict:
@@ -557,10 +616,36 @@ class GalateaNet(nn.Module):
         # 全息物理与语义的大一统！
         x_zone = self.zone_embed(batch_dict['card_zone'].long())
         x_position = self.position_embed(batch_dict['card_position'].long())
-        x = (
-            x_code + x_overlay + x_feat + x_race + x_attr + x_setcode
-            + x_sem + x_zone + x_position
+        x_base = (
+            x_code + x_alias + x_overlay + x_overlay_rest + x_feat
+            + x_race + x_attr + x_setcode + x_reason + x_status
+            + x_owner + x_counter + x_sem + x_zone + x_position
         )
+        relation_idx = batch_dict['card_relation_idx'].long()
+        relation_type = batch_dict['card_relation_type'].long()
+        batch_size, card_count, relation_count = relation_idx.shape
+        relation_padding = torch.zeros(
+            batch_size, 1, self.d_model, device=x_base.device, dtype=x_base.dtype
+        )
+        relation_source = torch.cat([x_base, relation_padding], dim=1)
+        flat_relation_idx = relation_idx.clamp(0, card_count).reshape(
+            batch_size, card_count * relation_count
+        )
+        gathered_relations = torch.gather(
+            relation_source,
+            1,
+            flat_relation_idx.unsqueeze(-1).expand(-1, -1, self.d_model),
+        ).reshape(batch_size, card_count, relation_count, self.d_model)
+        relation_mask = (
+            relation_type.ne(0) & relation_idx.ge(0) & relation_idx.lt(card_count)
+        ).unsqueeze(-1)
+        relation_vectors = gathered_relations + self.card_relation_type_embed(
+            relation_type
+        )
+        x_relation = (relation_vectors * relation_mask).sum(dim=-2) / (
+            relation_mask.sum(dim=-2).clamp(min=1).to(relation_vectors.dtype)
+        )
+        x = x_base + x_relation
         seq_len = x.shape[1]
         x = x + self.pos_embed[:, :seq_len, :]
         
@@ -583,6 +668,9 @@ class GalateaNet(nn.Module):
             self.global_proj(batch_dict['global'])
             + player_role_embed
             + self.phase_token_proj(phase_context)
+            + self.field_zone_mask_proj(
+                self._unpack_bit_bytes(batch_dict['field_zone_mask'])
+            )
         ).unsqueeze(1)
         masked_memory = memory.masked_fill(src_mask.unsqueeze(-1), -65000.0)
         pooled = torch.max(masked_memory, dim=1)[0].unsqueeze(1) 

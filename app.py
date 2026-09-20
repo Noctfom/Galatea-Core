@@ -174,7 +174,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.8.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.8.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1751,6 +1751,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
             total_messages = 0
             total_chain_events = 0
             structural_issues = 0
+            known_gap_messages = {}
             effect_rows = []
             status_totals = {}
             structural_issue_keys = {
@@ -1770,6 +1771,14 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                 structural_issues += sum(
                     int(counters.get(key, 0)) for key in structural_issue_keys
                 )
+                for message_type, categories in report.get(
+                    "coverage_by_message", {}
+                ).items():
+                    gap_count = int(categories.get("known_observation_gap", 0))
+                    if gap_count:
+                        known_gap_messages[message_type] = (
+                            known_gap_messages.get(message_type, 0) + gap_count
+                        )
                 for raw_observation in report.get("effect_observations", []):
                     observation = enrich_effect_slot_observation(raw_observation)
                     count = int(observation.get("count", 0))
@@ -1813,12 +1822,34 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                     "invalid_observation",
                 )
             )
-            metric_columns = st.columns(5)
+            metric_columns = st.columns(6)
             metric_columns[0].metric(_("报告", "Reports"), len(visible_reports))
             metric_columns[1].metric(_("Core 消息", "Core Messages"), total_messages)
             metric_columns[2].metric(_("连锁发动", "Chain Events"), total_chain_events)
             metric_columns[3].metric(_("显式错位", "Explicit Mismatches"), mismatch_count)
             metric_columns[4].metric(_("结构/语义异常", "Structural/Semantic Issues"), structural_issues + missing_count)
+            metric_columns[5].metric(
+                _("待补消息", "Coverage Gaps"),
+                sum(known_gap_messages.values()),
+            )
+
+            if known_gap_messages:
+                st.warning(_(
+                    "下列公开 Core 消息目前只被记录、尚未进入持久模型观测；它们不会改变 Core 的规则执行，但出现时模型观测可能不完整，需要据此审查协议："
+                    + ", ".join(
+                        f"Type {message_type} × {count}"
+                        for message_type, count in sorted(
+                            known_gap_messages.items(), key=lambda item: int(item[0])
+                        )
+                    ),
+                    "These public Core messages are audited but do not yet enter persistent model observation. They do not alter Core rule execution, but may leave model observation incomplete and should trigger protocol review when observed: "
+                    + ", ".join(
+                        f"Type {message_type} × {count}"
+                        for message_type, count in sorted(
+                            known_gap_messages.items(), key=lambda item: int(item[0])
+                        )
+                    ),
+                ))
 
             if effect_rows:
                 status_priority = {

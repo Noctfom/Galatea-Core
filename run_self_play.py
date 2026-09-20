@@ -55,12 +55,11 @@ def print_snapshot_inspection(snapshot: GameSnapshot, player_id: int):
         if entity.type_mask & 0x2: props.append("魔")
         if entity.type_mask & 0x4: props.append("陷")
         
-        # [核心修正] 适配 V2.0 Schema
-        # 在 V2.0 中，Rank/Link/Level 都统一存储在 level 字段
+        # V4 把等级、阶级和连接值按 Core 查询结果独立展示。
         if entity.type_mask & 0x800000: # TYPE_XYZ
-            props.append(f"Rank{entity.level & 0xFFFF}")
+            props.append(f"Rank{entity.rank & 0xFFFF}")
         elif entity.type_mask & 0x4000000: # TYPE_LINK
-            props.append(f"Link{entity.level & 0xFFFF}")
+            props.append(f"Link{entity.link_rating & 0xFFFF}")
         elif (entity.type_mask & 0x1) and (entity.level > 0): # Monster with Level
             props.append(f"Lv{entity.level & 0xFFFF}")
         
@@ -157,7 +156,11 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
 
             # --- 状态重置 ---
             state_change_msgs = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
-            interaction_msgs = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143}
+            # 抛硬币/骰子与猜拳结果是通知，只有 Type 132 猜拳提示需回复。
+            interaction_msgs = {
+                10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 132, 140, 141, 142, 143,
+            }
             
             if msg_type in state_change_msgs:
                 consecutive_retries = 0
@@ -212,7 +215,7 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
 
             # ================= [NEW] 交互决策逻辑修正 =================
             # 包含所有需要 Bot 决策的消息 ID
-            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143]:
+            if msg_type in interaction_msgs:
                 last_interaction_msg = msg
                 try: active_player = msg_payload[0]
                 except: pass

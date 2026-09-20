@@ -15,12 +15,17 @@ from card_reader import card_db
 from data_types import (
     ActionOperation,
     CardEntity,
+    CardRelationType,
     GameAction,
     GameSnapshot,
     GlobalFeature,
     SummonMethod,
 )
-from protocol_v3_audit import record_protocol_chain, record_protocol_message
+from protocol_v3_audit import (
+    record_protocol_chain,
+    record_protocol_coverage,
+    record_protocol_message,
+)
 from effect_slot_binding import resolve_runtime_effect_slot
 
 _META_STAPLES = None
@@ -45,6 +50,41 @@ _IDLE_COMMAND_SUMMON_METHODS = (
     SummonMethod.NONE,
     SummonMethod.NONE,
 )
+_IDLE_COMMAND_LABELS = (
+    "Normal Summon",
+    "Special Summon",
+    "Change Position",
+    "Monster Set",
+    "Spell/Trap Set",
+    "Activate",
+)
+
+_DECISION_MESSAGES = {
+    10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    132, 140, 141, 142, 143,
+}
+_STATE_APPLIED_MESSAGES = {
+    30, 31, 40, 41, 42, 50, 53, 56, 70, 74, 90, 91, 92, 93, 94, 95,
+    96, 97, 100, 101, 102,
+}
+_QUERY_RECONCILED_MESSAGES = {
+    34, 36, 54, 55, 60, 61, 62, 63, 64, 65, 71, 72, 73, 75, 76,
+    81, 83, 110, 111, 112, 113, 114,
+}
+_KNOWN_OBSERVATION_GAPS = {35, 38, 120, 160, 161, 162, 165}
+
+
+def _protocol_coverage_category(msg_type):
+    """把 Core 消息归入决策、显式状态、查询校准或待补观测类别"""
+    if msg_type in _DECISION_MESSAGES:
+        return "decision_parsed"
+    if msg_type in _STATE_APPLIED_MESSAGES:
+        return "state_applied"
+    if msg_type in _QUERY_RECONCILED_MESSAGES:
+        return "query_reconciled"
+    if msg_type in _KNOWN_OBSERVATION_GAPS:
+        return "known_observation_gap"
+    return "informational_or_unclassified"
 
 class MessageParser:
     # 基于源码的精确长度定义 (Payload长度)
@@ -55,7 +95,7 @@ class MessageParser:
         # --- 交互类 ---
         10: -1, 11: -1, 12: 13, 13: 5, 14: -1, 15: -1, 16: -1, 
         18: 6,  # PLACE (1+1+4) [已验证]
-        19: 6, 20: -1, 22: -1, 23: -1, 
+        19: 6, 20: -1, 21: -1, 22: -1, 23: -1,
         24: 6,  # DISFIELD (同18) [已验证]
         25: -1, 26: -1, 
         
@@ -84,7 +124,8 @@ class MessageParser:
         81: -1, 83: -1, # BECOME_TARGET [已验证 变长]
         
         # --- 伤害/数值 ---
-        90: -1, 91: 5, 92: 5, 93: 8, 94: 5, 
+        90: -1, 91: 5, 92: 5, 93: 8, 94: 5,
+        95: 4, # UNEQUIP：只发送解除装备的卡片位置
         96: 8, 97: 8, # CARD_TARGET [已验证 4+4]
         100: 5, # PAY_LPCOST [已验证 1+4]
         101: 7, 102: 7, # COUNTER [已验证 2+1+1+1+2]
@@ -302,7 +343,7 @@ class MessageParser:
         # 1. 严格白名单 (移除 0)
         VALID_MSGS = {
             1, 2, 3, 4, 5, 
-            10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 
+            10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
             30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
             40, 41, 42,
             50, 53, 54, 55, 56, 
@@ -310,13 +351,13 @@ class MessageParser:
             70, 71, 72, 73, 74, 75, 76, 
             81, 83, 
             90,
-            91, 92, 93, 94, 96, 97, 
+            91, 92, 93, 94, 95, 96, 97,
             100, 101, 102, 
             110, 111, 112, 113, 114, 
             120,
             130, 131, 132, 133, 
             140, 141, 142, 143, 
-            160, 163, 164, 165, 170
+            160, 161, 162, 163, 164, 165, 170
         }
         
         # [探针] 记录最近 15 个成功解析的指令，看清乱码源头
@@ -417,6 +458,7 @@ class DuelState:
         self.my_lp = 8000
         self.op_lp = 8000
         self.active_player = 0
+        self.disabled_field_mask = 0
         self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
 
         self.chain_stack = []
@@ -435,6 +477,7 @@ class DuelState:
         self.starting_player = -1
         self.player_turn_counts = [0, 0]
         self.decision_player = -1
+        self.disabled_field_mask = 0
         self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
         
         # 当前挂起的合法动作列表
@@ -446,11 +489,22 @@ class DuelState:
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
 
+    def _get_field_entry(self, raw_location):
+        """按 Core 位置值查找当前镜像中的卡片条目"""
+        controller, location, sequence, _ = LocationInfo.decode(raw_location)
+        if controller not in (0, 1):
+            return None
+        return self.field_map[controller].get(location, {}).get(sequence)
+
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
         try:
             if self.audit_enabled:
                 record_protocol_message(msg_type)
+                record_protocol_coverage(
+                    msg_type,
+                    _protocol_coverage_category(msg_type),
+                )
             stream = io.BytesIO(msg_payload)
             
             # --- 状态维护 ---
@@ -475,7 +529,7 @@ class DuelState:
                 # ========================================================
                 is_public_move = False
                 if (old_l & 0x7F) == Zone.GRAVE: is_public_move = True
-                elif (old_l & 0x7F) in [Zone.MZONE, Zone.SZONE, Zone.REMOVED] and (old_pos & 0x1 or old_pos & 0x4): is_public_move = True
+                elif (old_l & 0x7F) in [Zone.MZONE, Zone.SZONE, Zone.REMOVED] and (old_pos & 0x1 or old_pos & 0x4 or old_pos & 0x20): is_public_move = True
                 elif pure_code in self.recently_confirmed:
                     is_public_move = True
                     self.recently_confirmed.remove(pure_code)
@@ -485,7 +539,7 @@ class DuelState:
                     self.known_hand_codes[new_c].append(pure_code)
 
                 # 出池：必须满足是从【手牌】离开，或者从【场上的暗牌/里侧表示】暴露真实身份离开
-                is_from_hidden = (old_l == Zone.HAND) or (old_l in [Zone.MZONE, Zone.SZONE] and not (old_pos & 0x1 or old_pos & 0x4))
+                is_from_hidden = (old_l == Zone.HAND) or (old_l in [Zone.MZONE, Zone.SZONE] and not (old_pos & 0x1 or old_pos & 0x4 or old_pos & 0x20))
                 
                 if pure_code != 0 and old_c in [0, 1] and is_from_hidden:
                     if pure_code in self.known_hand_codes[old_c]:
@@ -542,6 +596,9 @@ class DuelState:
                 if not (prev & 0x1 or prev & 0x4) and (new_pos & 0x1 or new_pos & 0x4):
                     if pure_code in self.known_hand_codes[c]:
                         self.known_hand_codes[c].remove(pure_code)
+
+            elif msg_type == 56: # FIELD_DISABLED
+                self.disabled_field_mask = struct.unpack('<I', stream.read(4))[0]
 
             elif msg_type == 70: # MSG_CHAINING (严格匹配 C++ 的 16 字节)
                 code = struct.unpack('<I', stream.read(4))[0]
@@ -648,12 +705,33 @@ class DuelState:
                     self.field_map[c][l][s]['counters'] = max(0, self.field_map[c][l][s].get('counters', 0) - count)
                     
             # [修正] 真正的装备雷达 MSG_EQUIP (93)
-            elif msg_type == 93: 
+            elif msg_type == 93:
                 equip_raw = struct.unpack('<I', stream.read(4))[0] # 装备卡的位置
                 tgt_raw = struct.unpack('<I', stream.read(4))[0]   # 被装备怪兽的位置
-                tc, tl, ts, _ = LocationInfo.decode(tgt_raw)
-                if tc in [0,1] and ts in self.field_map[tc].get(tl, {}):
-                    self.field_map[tc][tl][ts]['is_equipped'] = True
+                equip_info = self._get_field_entry(equip_raw)
+                target_info = self._get_field_entry(tgt_raw)
+                if equip_info is not None:
+                    equip_info['equip_target'] = tgt_raw
+                if target_info is not None:
+                    target_info['is_equipped'] = True
+
+            elif msg_type == 95: # UNEQUIP
+                equip_raw = struct.unpack('<I', stream.read(4))[0]
+                equip_info = self._get_field_entry(equip_raw)
+                if equip_info is not None:
+                    equip_info['equip_target'] = 0
+
+            elif msg_type in (96, 97): # CARD_TARGET / CANCEL_TARGET
+                source_raw = struct.unpack('<I', stream.read(4))[0]
+                target_raw = struct.unpack('<I', stream.read(4))[0]
+                source_info = self._get_field_entry(source_raw)
+                if source_info is not None:
+                    targets = list(source_info.get('target_locations', []))
+                    if msg_type == 96 and target_raw not in targets:
+                        targets.append(target_raw)
+                    elif msg_type == 97 and target_raw in targets:
+                        targets.remove(target_raw)
+                    source_info['target_locations'] = targets
             
             elif msg_type == 40:
                 turn_player = struct.unpack('<B', stream.read(1))[0]
@@ -755,6 +833,7 @@ class DuelState:
                                 index=i,
                                 target_entity_idx=loc_raw,
                                 desc_id=desc,
+                                desc_str=f"{_IDLE_COMMAND_LABELS[at]} {code}",
                                 code=code,
                                 operation_id=int(_IDLE_COMMAND_OPERATIONS[at]),
                                 summon_method_id=int(
@@ -1189,8 +1268,67 @@ class DuelState:
                             selection_max=count,
                             selection_count=1,
                         ))
+
+            # 9. MSG_SORT_CHAIN (21) / MSG_SORT_CARD (25)
+            elif msg_type in [21, 25]:
+                stream.read(1) # P
+                count = struct.unpack('<B', stream.read(1))[0]
+                for i in range(count):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    controller = struct.unpack('<B', stream.read(1))[0]
+                    location = struct.unpack('<B', stream.read(1))[0]
+                    sequence = struct.unpack('<B', stream.read(1))[0]
+                    loc_val = LocationInfo.encode(
+                        controller, location, sequence, 0
+                    )
+                    self.current_valid_actions.append(GameAction(
+                        action_type=msg_type,
+                        index=i,
+                        target_entity_idx=loc_val,
+                        desc_str=f"Sort Candidate {code}",
+                        code=code,
+                        operation_id=int(ActionOperation.MACRO_SORT),
+                        response_value=i,
+                        target_location_raw=loc_val,
+                        selection_min=count,
+                        selection_max=count,
+                        selection_count=1,
+                    ))
+
+            # 10. MSG_SELECT_COUNTER (22)
+            elif msg_type == 22:
+                stream.read(1) # P
+                counter_type = struct.unpack('<H', stream.read(2))[0]
+                quantity = struct.unpack('<H', stream.read(2))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
+                for i in range(count):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    controller = struct.unpack('<B', stream.read(1))[0]
+                    location = struct.unpack('<B', stream.read(1))[0]
+                    sequence = struct.unpack('<B', stream.read(1))[0]
+                    available = struct.unpack('<H', stream.read(2))[0]
+                    loc_val = LocationInfo.encode(
+                        controller, location, sequence, 0
+                    )
+                    self.current_valid_actions.append(GameAction(
+                        action_type=22,
+                        index=i,
+                        target_entity_idx=loc_val,
+                        desc_str=(
+                            f"Remove Counter {code} "
+                            f"(available={available})"
+                        ),
+                        code=code,
+                        operation_id=int(ActionOperation.REMOVE_COUNTER),
+                        response_value=i,
+                        target_location_raw=loc_val,
+                        selection_count=1,
+                        context_value=quantity,
+                        prompt_value=counter_type,
+                        macro_target_values=[available],
+                    ))
             
-            # 9. MSG_SELECT_UNSELECT (26)
+            # 11. MSG_SELECT_UNSELECT (26)
             elif msg_type == 26:
                 stream.read(1) # P
                 finishable = struct.unpack('<B', stream.read(1))[0]
@@ -1363,7 +1501,9 @@ class DuelState:
                             for seq, info in self.field_map[p].get(loc, {}).items():
                                 code = info.get('code', 0)
                                 pos = info.get('pos', 0)
-                                is_public = (pos & 0x1 or pos & 0x4)
+                                is_public = bool(
+                                    pos & 0x1 or pos & 0x4 or pos & 0x20
+                                )
                                 if p != self.active_player and not is_public and loc not in [Zone.GRAVE, Zone.REMOVED]:
                                     continue
                                 if code != 0: add_valid_code(code)
@@ -1560,6 +1700,7 @@ class DuelState:
             starting_player=self.starting_player,
             p0_turn_count=self.player_turn_counts[0],
             p1_turn_count=self.player_turn_counts[1],
+            disabled_field_mask=self.disabled_field_mask,
         )
 
         entities = []
@@ -1603,20 +1744,25 @@ class DuelState:
                     base_def = stats[9]
                     setcodes = stats[10] # 接收字段集合
 
-                    # 提取引擎给出的实时属性，如果没有拿到，才用数据库基础数值兜底
+                    # 查询存在时以 Core 动态值为准，0 级不会再被错误回填成阶级或连接值
+                    query_flags = int(info.get('query_flags', 0))
                     current_atk = info.get('current_atk', base_atk)
                     current_def = info.get('current_def', base_def)
+                    type_mask = info.get('current_type', stats[0]) if query_flags else stats[0]
+                    race = info.get('current_race', stats[1]) if query_flags else stats[1]
+                    attr = info.get('current_attr', stats[2]) if query_flags else stats[2]
+                    level = info.get('current_level', stats[3]) if query_flags else stats[3]
+                    rank = info.get('current_rank', stats[7]) if query_flags else stats[7]
+                    link_rating = info.get('link_rating', 0) if query_flags else 0
+                    lscale = info.get('lscale', stats[4]) if query_flags else stats[4]
+                    rscale = info.get('rscale', stats[5]) if query_flags else stats[5]
+                    link_marker = info.get('link_marker', stats[6]) if query_flags else stats[6]
+                    base_atk = info.get('base_atk', base_atk) if query_flags else base_atk
+                    base_def = info.get('base_def', base_def) if query_flags else base_def
 
-                    # [新增] 动态突变属性的接管！
-                    type_mask = info.get('current_type', stats[0])
-                    race = info.get('current_race', stats[1])
-                    attr = info.get('current_attr', stats[2])
-                    level = info.get('current_level', stats[3])
-                    if level == 0: 
-                        level = stats[3]  # 防止超量/Link被 C++ 的 0 星覆写，强制回退取数据库静态星数
-
-                    counters = info.get('counters', 0)
-                    overlays = info.get('overlays', [])
+                    counter_items = list(info.get('counter_items', []))
+                    counters = info.get('counter_count', info.get('counters', 0))
+                    overlays = list(info.get('overlay_codes', info.get('overlays', [])))
                     is_equipped = info.get('is_equipped', False)
 
                     top_overlay_code = overlays[0] if len(overlays) > 0 else 0
@@ -1628,14 +1774,62 @@ class DuelState:
                         base_atk=base_atk, base_def=base_def,
                         lscale=lscale, rscale=rscale, link_marker=link_marker, # 传入新参数
                         setcodes=setcodes, # 写入实体
-                        is_public=bool(pos & 0x1 or pos & 0x4),
+                        is_public=bool(pos & 0x1 or pos & 0x4 or pos & 0x20),
                         counter_count=counters,
                         overlay_count=len(overlays),
                         is_equipped=is_equipped,
-                        used_effect_mask=info.get('used_effect_mask', 0)
+                        used_effect_mask=info.get('used_effect_mask', 0),
+                        current_code=info.get('current_code', 0),
+                        original_owner=info.get('original_owner', -1),
+                        rank=rank,
+                        link_rating=link_rating,
+                        reason=info.get('reason', 0),
+                        status_mask=info.get('status_mask', 0),
+                        properly_summoned=bool(info.get('properly_summoned', False)),
+                        is_disabled=bool(info.get('is_disabled', False)),
+                        is_forbidden=bool(info.get('is_forbidden', False)),
+                        is_equip_source=bool(info.get('is_equip_source', False)),
+                        reason_card_location=info.get('reason_card', 0),
+                        equip_target_location=info.get('equip_target', 0),
+                        target_locations=list(info.get('target_locations', [])),
+                        overlay_codes=overlays,
+                        counter_items=counter_items,
                     ))
                     entities[-1].top_overlay_code = top_overlay_code
                     idx_counter += 1
+
+        def append_relation(entity, relation_type, raw_location):
+            """把公开 Core 位置关系映射为当前固定实体索引"""
+            if not raw_location:
+                return
+            controller, location, sequence, _ = LocationInfo.decode(raw_location)
+            target_index = loc_to_idx_map.get((controller, location, sequence))
+            if target_index is None:
+                return
+            pair = (int(relation_type), int(target_index))
+            existing = set(zip(entity.relation_types, entity.relation_indices))
+            if pair not in existing:
+                entity.relation_types.append(pair[0])
+                entity.relation_indices.append(pair[1])
+
+        # 查询先生成完整实体，再建立正向与装备反向关系，避免依赖遍历顺序
+        for source_index, entity in enumerate(entities):
+            append_relation(entity, CardRelationType.REASON_CARD, entity.reason_card_location)
+            append_relation(entity, CardRelationType.EQUIP_TARGET, entity.equip_target_location)
+            for raw_target in entity.target_locations:
+                append_relation(entity, CardRelationType.EFFECT_TARGET, raw_target)
+            if entity.equip_target_location:
+                controller, location, sequence, _ = LocationInfo.decode(
+                    entity.equip_target_location
+                )
+                target_index = loc_to_idx_map.get((controller, location, sequence))
+                if target_index is not None:
+                    target = entities[target_index]
+                    target.is_equipped = True
+                    inverse_pair = (int(CardRelationType.EQUIP_SOURCE), source_index)
+                    if inverse_pair not in set(zip(target.relation_types, target.relation_indices)):
+                        target.relation_types.append(inverse_pair[0])
+                        target.relation_indices.append(inverse_pair[1])
 
         # --- [核心步骤] 匹配 Action 指针 ---
         # 把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"
@@ -1692,24 +1886,31 @@ class DuelState:
         return snap
     
     def sync_active_field(self, env):
-        """Reconcile active zones with C++ without erasing event-only state.
-
-        Graveyard, banished and extra-deck state is maintained by MSG_MOVE and
-        must not be cleared here because ``query_card_state`` is only used for
-        the monster zone, spell/trap zone and hand.  Per-turn effect usage is
-        also event-derived, so it is retained when the queried slot still
-        contains the same public card.
-        """
+        """用公开 Core 查询校准场、手牌、墓地和除外区的动态状态"""
         zone_sizes = (
             (Zone.MZONE, 7, False),
             (Zone.SZONE, 8, False),
-            (Zone.HAND, 30, True),
+            (Zone.HAND, None, True),
+            (Zone.GRAVE, None, True),
+            (Zone.REMOVED, None, True),
         )
 
         for player in (0, 1):
-            for zone, capacity, is_contiguous in zone_sizes:
+            for zone, fixed_capacity, is_contiguous in zone_sizes:
                 previous_zone = self.field_map[player].get(zone, {})
                 reconciled_zone = {}
+                query_count = getattr(env, 'query_zone_count', None)
+                queried_count = (
+                    query_count(player, zone)
+                    if is_contiguous and callable(query_count)
+                    else None
+                )
+                capacity = fixed_capacity
+                if capacity is None:
+                    if queried_count is None and zone in (Zone.GRAVE, Zone.REMOVED):
+                        # 未提供公开计数接口时保留事件镜像，避免把可见历史区误清空
+                        continue
+                    capacity = queried_count if queried_count is not None else 120
 
                 for sequence in range(capacity):
                     queried = env.query_card_state(player, zone, sequence)

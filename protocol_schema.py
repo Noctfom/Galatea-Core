@@ -11,6 +11,14 @@ from card_vocab import (
 )
 from data_types import (
     ACTION_OPERATION_COUNT,
+    CARD_ADDITIONAL_OVERLAY_SLOTS,
+    CARD_COUNTER_SLOTS,
+    CARD_COUNTER_TYPE_BYTES,
+    CARD_RELATION_SLOTS,
+    CARD_REASON_BYTES,
+    CARD_STATUS_BITS,
+    FIELD_ZONE_BITS,
+    FIELD_ZONE_BYTES,
     GLOBAL_FEATURE_DIM,
     PHASE_CATEGORY_COUNT,
     POSITION_CATEGORY_COUNT,
@@ -22,7 +30,7 @@ from data_types import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 5
+PROTOCOL_SCHEMA_REVISION = 6
 
 
 def _schema_descriptor(card_vocabulary):
@@ -38,7 +46,9 @@ def _schema_descriptor(card_vocabulary):
             "reserved_tokens": CARD_VOCAB_RESERVED_TOKENS,
             "indexed_inputs": [
                 "card_idx",
+                "card_alias_idx",
                 "card_overlay_idx",
+                "card_overlay_rest_idx",
                 "deck_idx",
                 "c_card_idx",
                 "act_code",
@@ -83,6 +93,71 @@ def _schema_descriptor(card_vocabulary):
             "card_inputs": ["card_zone", "card_position"],
             "chain_inputs": ["c_zone", "c_position"],
             "action_inputs": ["act_location", "act_position"],
+        },
+        "public_card_state": {
+            "source": "public_legacy_ygopro_core_query_card",
+            "query_mode": "full_snapshot_without_cache",
+            "visibility": "masked_per_decision_player_after_query",
+            "dynamic_identity_input": "card_alias_idx",
+            "reason_bits_input": {
+                "name": "card_reason_bytes",
+                "shape": [120, CARD_REASON_BYTES],
+                "storage": "little_endian_packed_bits",
+                "expanded_bits": 32,
+            },
+            "status_bits_input": {
+                "name": "card_status_bits",
+                "shape": [120, CARD_STATUS_BITS],
+                "values": ["disabled", "proc_complete", "forbidden"],
+            },
+            "original_owner_input": "card_owner_role",
+            "relations": {
+                "index_input": "card_relation_idx",
+                "type_input": "card_relation_type",
+                "slots": CARD_RELATION_SLOTS,
+                "values": [
+                    "none",
+                    "equip_target",
+                    "effect_target",
+                    "reason_card",
+                    "equip_source",
+                ],
+            },
+            "overlay_inputs": {
+                "first": "card_overlay_idx",
+                "additional": "card_overlay_rest_idx",
+                "additional_slots": CARD_ADDITIONAL_OVERLAY_SLOTS,
+            },
+            "typed_counters": {
+                "type_bits_input": "card_counter_type_bytes",
+                "type_bytes": CARD_COUNTER_TYPE_BYTES,
+                "value_input": "card_counter_value",
+                "slots": CARD_COUNTER_SLOTS,
+            },
+            "disabled_field_input": {
+                "name": "field_zone_mask",
+                "shape": [FIELD_ZONE_BYTES],
+                "storage": "little_endian_packed_bits",
+                "expanded_bits": FIELD_ZONE_BITS,
+            },
+            "dynamic_numeric_fields": [
+                "level",
+                "rank",
+                "link_rating",
+                "left_scale",
+                "right_scale",
+                "link_marker",
+                "attack",
+                "defense",
+                "base_attack",
+                "base_defense",
+            ],
+            "summon_state_boundary": {
+                "available": "status_proc_complete_only",
+                "unavailable": ["summon_type", "summon_location", "summon_player"],
+                "policy": "do_not_infer_or_require_private_core_fork",
+                "upstream_action": "track_public_api_or_submit_upstream_pr",
+            },
         },
         "action_semantics": {
             "operation_input": {

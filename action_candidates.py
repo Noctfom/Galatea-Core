@@ -16,9 +16,9 @@ from selection_protocol import (
 )
 
 
-MACRO_ACTION_MSGS = frozenset({15, 18, 20, 22, 23, 24, 25, 140, 141})
+MACRO_ACTION_MSGS = frozenset({15, 18, 20, 21, 22, 23, 24, 25, 140, 141})
 MODEL_ACTION_MSGS = frozenset(
-    {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143}
+    {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 140, 141, 142, 143}
 )
 MIN_MACRO_OPTION_WEIGHT = 1e-4
 
@@ -61,7 +61,7 @@ def _read_macro_constraints(msg_type, msg_payload):
             prompt_flags=prompt["mode"],
             prompt_value=len(prompt["mandatory"]),
         )
-    elif msg_type in (25, 140, 141) and len(payload) >= 2:
+    elif msg_type in (21, 25, 140, 141) and len(payload) >= 2:
         constraints.update(selection_min=payload[1], selection_max=payload[1])
         if msg_type in (140, 141):
             constraints["context_value"] = payload[1]
@@ -292,7 +292,7 @@ def build_macro_action_pool(
         description = "Cancel" if response == CANCEL_RESPONSE else f"Macro Action {pool_index}"
         if response == CANCEL_RESPONSE:
             operation = ActionOperation.CANCEL
-        elif msg_type == 25:
+        elif msg_type in (21, 25):
             operation = ActionOperation.MACRO_SORT
         elif msg_type == 22:
             operation = ActionOperation.REMOVE_COUNTER

@@ -17,7 +17,8 @@ from effect_slot_binding import (
 )
 
 
-AUDIT_SCHEMA_VERSION = 2
+AUDIT_SCHEMA_VERSION = 3
+SUPPORTED_AUDIT_SCHEMA_VERSIONS = (2, AUDIT_SCHEMA_VERSION)
 MAX_EFFECT_OBSERVATIONS = 2048
 MAX_AUDIT_REPORT_BYTES = 16 * 1024 * 1024
 AUDIT_FLUSH_INTERVAL_SECONDS = 30.0
@@ -152,6 +153,8 @@ class ProtocolV3AuditRecorder:
         self.report_path = self.output_directory / filename
         self.counters = Counter()
         self.message_counts = Counter()
+        self.coverage_counts = Counter()
+        self.coverage_by_message = {}
         self.mapping_counts = Counter()
         self.effect_observations = {}
         self.last_flush_time = time.monotonic()
@@ -190,6 +193,16 @@ class ProtocolV3AuditRecorder:
             )
         if should_flush:
             self.flush()
+
+    def record_coverage(self, msg_type, category):
+        """记录一类 Core 消息当前由状态机、查询或审计缺口中的哪一层接管。"""
+        message_key = str(int(msg_type))
+        category = _safe_label(category, "unclassified")
+        with self.lock:
+            self.coverage_counts[category] += 1
+            per_message = self.coverage_by_message.setdefault(message_key, Counter())
+            per_message[category] += 1
+            self.dirty = True
 
     def record_chain(
         self,
@@ -285,6 +298,14 @@ class ProtocolV3AuditRecorder:
             "message_counts": dict(
                 sorted(self.message_counts.items(), key=lambda item: int(item[0]))
             ),
+            "coverage_counts": dict(sorted(self.coverage_counts.items())),
+            "coverage_by_message": {
+                message_key: dict(sorted(categories.items()))
+                for message_key, categories in sorted(
+                    self.coverage_by_message.items(),
+                    key=lambda item: int(item[0]),
+                )
+            },
             "mapping_counts": dict(sorted(self.mapping_counts.items())),
             "effect_observations": sorted(
                 self.effect_observations.values(),
@@ -359,6 +380,16 @@ def record_protocol_message(msg_type):
         return
 
 
+def record_protocol_coverage(msg_type, category):
+    """在审计已启用时记录消息覆盖类别，任何审计异常都不影响对局。"""
+    if _GLOBAL_RECORDER is None:
+        return
+    try:
+        _GLOBAL_RECORDER.record_coverage(msg_type, category)
+    except Exception:
+        return
+
+
 def record_protocol_chain(**details):
     """在审计已启用时记录一条连锁，审计异常不得影响正常对局"""
     if _GLOBAL_RECORDER is None:
@@ -398,7 +429,7 @@ def load_protocol_v3_audit_reports(directory=AUDIT_DIRECTORY, limit=200):
                 payload = json.load(stream)
             if not isinstance(payload, dict):
                 continue
-            if payload.get("audit_schema_version") != AUDIT_SCHEMA_VERSION:
+            if payload.get("audit_schema_version") not in SUPPORTED_AUDIT_SCHEMA_VERSIONS:
                 continue
             payload["_path"] = str(path)
             reports.append(payload)

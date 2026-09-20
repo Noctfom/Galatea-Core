@@ -4,6 +4,29 @@
 
 ---
 
+## [v3.8.2] - 2026-09-20
+
+### 🔗 V4 Phase 2 Batch 3: Public Card Relations and Core-State Closure
+
+- **Public Core only**: Added a dedicated legacy `query_card` parser for every standard public field and use `query_field_count` to reconcile Hand, Graveyard, and banished zones. Neither `ocgcore.dll/.so` nor a private Galatea Core fork is modified
+- **Fixed real query-buffer failures**: Legacy Core writes query results into a `ctypes.c_byte` buffer. Converting its signed Python list directly with `bytes()` failed whenever a byte was at least `0x80`. The implementation now copies the underlying memory as unsigned raw bytes, and the real-Core gate requires at least one successful query and zero query parse errors so message-mirror fallback cannot hide the defect
+- **Completed dynamic per-card state**: The model now receives dynamic identity, Level/Rank, current/base ATK/DEF, Pendulum Scales, Link Rating/markers, reason bits, original owner, and `STATUS_DISABLED / STATUS_PROC_COMPLETE / STATUS_FORBIDDEN`. A zero Level is no longer overwritten by a static Rank or Link value
+- **Completed public relations**: Equip source-target, effect target, reason card, and inverse equip edges map to entity indices. Xyz material identity expands from only the first material to at most 16, and counters expand from one total to eight typed amount slots
+- **Proper-summon awareness**: `STATUS_PROC_COMPLETE` follows visible field, Graveyard, and banished entities so revive-limit behavior is learnable. Exact summon method/source/player remains unknown because the public query API does not export it; card type, zone, and message order are never used as guesses
+- **Preserved the public-Core boundary**: Upstream v11.0 still exposes summon provenance to rule scripts internally but not through standard client query fields. It remains an upstream API/possible PR item. A future upgrade will adapt the complete public `OCG_DuelQuery` ABI instead of adding private binary fields
+- **Fixed false macro equivalence**: Physical copies are always preserved on the field, in the Graveyard, and in banishment. Hidden/reset-zone copies fold only when identity, prompt values, and known state match; the existing 5,000-combination cap and weighted reduction remain intact
+- **Completed public position/relation messages**: Added `FIELD_DISABLED`, `UNEQUIP`, and `CARD_TARGET/CANCEL_TARGET` mirrors, recognize Core's `POS_REVEAL` visibility bit, and admit message Types 95/161/162 through the parser whitelist
+- **Message-coverage audit**: Audit schema 3 classifies every seen message as `decision_parsed`, `state_applied`, `query_reconciled`, or `known_observation_gap`; WebUI surfaces rare gaps rather than leaving public information silently unused
+- **Closed residual action-message gaps**: Type 21 chain sorting now crosses parsing, RuleBot, macro pooling, Worker, Arena, and both model passes. Type 22 counter allocation exposes each card and available amount to Pass 1. Coin/dice and hand-result notifications are no longer mistaken for response-waiting decisions by Worker, Arena, or RuleBot self-check, preventing them from discarding later messages in the same batch
+- **Corrected self-check diagnostics**: Idle Type 0/2/4 and the other fixed families now have readable operation labels. Holographic inspection reads independent `rank` and `link_rating` fields instead of the obsolete V2 convention of displaying both through `level`
+- **Closed a memory-based hidden-state leak**: A previously revealed card may retain its identity and static card knowledge after entering an opponent-hidden zone, but no longer reuses Core-query dynamic ATK/DEF, type, relations, materials, counters, or status
+- **Known remaining boundary**: Exact summon provenance awaits an upstream public API. Types 35/38/120/160/161/162/165 (grave/deck swap, top-card/hint, and nonstandard-mode traffic) are retained as audit evidence instead of fabricated normal-BO1 observations
+- **Compact trajectory storage**: Reasons, counter types, and disabled zones are losslessly packed as little-endian bytes; bounded vocabulary indices use `int16` and relation indices use `uint8`. The baseline adds about 13.1 KiB per step, or roughly 420 MiB per 32,768 steps, avoiding a much larger eagerly expanded bit representation
+- **Schema boundary**: Framework version is 3.8.2; Model Protocol stays 4, Checkpoint Format stays 3, and V4 schema revision becomes 6. Revision-5 checkpoints are rejected before network construction because this batch adds inputs and parameters
+- **Regression**: The portable UTF-8 suite runs 200 tests: 199 pass and one real-Core gated case skips as expected. Enabling the gate separately completes a real-Core duel and verifies that successful `query_card` calls are nonzero while parse errors remain zero. Coverage includes complete public-query payloads, Type 21/22 action paths, truncation rejection, hidden-state masking, relation/status encoding, distinct same-name Graveyard copies, shared memory, PyTorch/ONNXRuntime parity, and actual Core responses
+
+---
+
 ## [v3.8.1] - 2026-09-20
 
 ### 🧩 V4 Phase 2 Batch 2: Selection State Machines and Response Closure
@@ -17,7 +40,7 @@
 - **Fixed response-buffer over-read**: Core's `set_responseb` copies the fixed `SIZE_RETURN_VALUE=512` bytes. The former 64-byte Python lifetime buffer caused truncation and an out-of-bounds read; responses are now held in a zero-padded 512-byte buffer and oversized payloads are rejected
 - **Unified RuleBot and model legality**: RuleBot no longer maintains approximate random Type 15/20/23 implementations. It reuses the same complete-combination generator and validator, failing the episode explicitly rather than fabricating a response Core may reject
 - **Schema boundary**: Framework version is 3.8.1; Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision becomes 5. This batch adds no parameters or tensors; the revision locks state-machine semantics so development checkpoints cannot cross the boundary silently
-- **Per-card Core-state audit**: `STATUS_PROC_COMPLETE` is the authoritative proper-summon bit used by revive-limit rules and persists through Graveyard/banishment. `summon_info`/`summon_player` preserve summon method, source, and player. Python does not consume these fields yet; exact summon data requires a capability-versioned query extension in the bundled Core and must never be guessed from card category or movement messages
+- **Per-card Core-state audit**: `STATUS_PROC_COMPLETE` is the authoritative proper-summon bit used by revive-limit rules and persists through Graveyard/banishment. Core internally retains summon method/source/player, but standard client queries do not export them. They must never be guessed from card category or movement messages and may be added only through a public upstream API
 - **Other public fields queued**: Dynamic alias, rank, base ATK/DEF, reason/reason card, equip target, target-card relations, all overlay materials, typed counters, original owner, disabled/forbidden/proper status, and dynamic scales/link values are now explicit later-batch items
 - **Regression**: The portable UTF-8 Python suite runs 194 tests: 193 pass and one real-Core gated test is skipped as expected. Coverage includes Type 20/23 Pass 1, exact dual-value and SumGreater checks, no fake cancellation, Type 26 response round trips and index bounds, exits beyond 120 candidates, and the 512-byte buffer
 

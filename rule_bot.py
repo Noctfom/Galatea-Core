@@ -27,6 +27,7 @@ MSG_SELECT_CHAIN = 16
 MSG_SELECT_PLACE = 18
 MSG_SELECT_POSITION = 19
 MSG_SELECT_TRIBUTE = 20
+MSG_SORT_CHAIN = 21
 MSG_SELECT_COUNTER = 22
 MSG_SELECT_SUM = 23
 MSG_SELECT_DISFIELD = 24
@@ -444,7 +445,7 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     decision = struct.pack('<i', 0)
 
         # ==================== 6. 排序与位置 (MSG_SORT_CARD) ====================
-        elif msg_type == MSG_SORT_CARD:
+        elif msg_type in (MSG_SORT_CHAIN, MSG_SORT_CARD):
             stream.read(1) # Player
             count = struct.unpack('<B', stream.read(1))[0]
             # 后面是 count * 7 字节的卡片信息，跳过
@@ -629,6 +630,38 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
     return decision
 
 
+def _macro_equivalence_key(card, brain, *prompt_values):
+    """仅合并公开状态与提示参数完全等价的隐藏区同名副本"""
+    controller, location, sequence, position = LocationInfo.decode(card['loc'])
+    # 场、墓地与除外区中的卡片个体可能保留不同关系或正规出场状态，禁止折叠
+    if location in (0x04, 0x08, 0x10, 0x20):
+        return ('INSTANCE', card.get('idx', card.get('index', sequence)))
+
+    state_signature = ()
+    if brain is not None and controller in (0, 1):
+        field_map = getattr(brain, 'field_map', {})
+        player_map = field_map.get(controller, {}) if hasattr(field_map, 'get') else {}
+        info = player_map.get(location, {}).get(sequence, {})
+        state_signature = (
+            int(info.get('current_code', 0) or 0),
+            int(info.get('reason', 0) or 0),
+            int(info.get('status_mask', 0) or 0),
+            int(info.get('equip_target', 0) or 0),
+            tuple(info.get('target_locations', ())),
+            tuple(info.get('overlay_codes', info.get('overlays', ()))),
+            tuple(info.get('counter_items', ())),
+            int(info.get('original_owner', -1)),
+        )
+    return (
+        'EQUIVALENT_HIDDEN',
+        int(card.get('code', 0)),
+        location,
+        position,
+        tuple(prompt_values),
+        state_signature,
+    )
+
+
 def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=None):
     """
     [AI 参谋部] 后台穷举合法素材组合，打包成“套餐”供 AI 挑选
@@ -683,18 +716,11 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
 
             groups = {}
             for card in cards:
-                _, location, _, position = LocationInfo.decode(card['loc'])
-                if location in (0x04, 0x08):
-                    key = ('FIELD', card['idx'])
-                else:
-                    # 隐藏区同名同参数卡只保留每种数量的一个等价代表，避免组合池膨胀
-                    key = (
-                        'NON_FIELD',
-                        card['code'],
-                        location,
-                        position,
-                        card['release_param'],
-                    )
+                key = _macro_equivalence_key(
+                    card,
+                    brain,
+                    card['release_param'],
+                )
                 groups.setdefault(key, []).append(card)
             group_lists = list(groups.values())
 
@@ -802,12 +828,7 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
             
             groups = {}
             for cd in candidates:
-                c, l, s, _ = LocationInfo.decode(cd['loc'])
-                if l == 0x04 or l == 0x08: 
-                    key = ('FIELD', cd['index']) 
-                else: 
-                    key = ('NON_FIELD', cd['code'], l) 
-                    
+                key = _macro_equivalence_key(cd, brain, cd['val'])
                 if key not in groups: groups[key] = []
                 groups[key].append(cd)
                 
@@ -969,7 +990,7 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 print(f"   -> 🃏 候选样本: {sample_names}...")
 
         # 4. 排序卡片
-        elif msg_type == 25: # MSG_SORT_CARD
+        elif msg_type in (21, 25): # MSG_SORT_CHAIN / MSG_SORT_CARD
             stream.read(1) # P
             count = struct.unpack('<B', stream.read(1))[0]
             cards = []
@@ -985,7 +1006,10 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 valid_solutions.append(sol)
                 if i >= limit - 1:
                     sample_names = [card_db.get_card_name(c['code']) for c in cards[:4]]
-                    print(f"📡 [RuleBot 截断雷达] Type 25 (排序) 选项组达到上限，触发安全阻断")
+                    print(
+                        f"📡 [RuleBot 截断雷达] Type {msg_type} "
+                        "(排序) 选项组达到上限，触发安全阻断"
+                    )
                     print(f"   -> 🎯 发动源头: {trigger_card}")
                     print(f"   -> 📊 需要排序的卡片总数: {count}")
                     print(f"   -> 🃏 涉案卡片: {sample_names}...")

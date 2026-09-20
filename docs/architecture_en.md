@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.8.1**.
+> This document applies to **Galatea-Core v3.8.2**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -207,7 +207,7 @@ GalateaCore primarily drives exploration through **entropy regularization** and 
 |--------------|------------|-------------|
 | Continuous Global Features | 17 | Turn count, relative initiative/turn identity, per-player turns, LP, and zone counts |
 | Categorical Global Features | 1 + 3 | Phase; relative decision/turn/starting-player roles |
-| Card Features | 64 + 2 categories | Numeric/effect/type/link features plus zone and position categories |
+| Card Features | 66 + 2 categories + compact public state | Numeric/effect/type/link features plus zone, position, relation, and status categories |
 | Semantic Features | 128×8 | Up to 8 effect slots per card |
 
 ### Card Feature Details
@@ -221,7 +221,7 @@ feat_numeric = [
     base_atk / 4000,    # Base ATK
     base_def / 4000,    # Base DEF
     pos_x, pos_y,       # Field coordinates
-    level / 12.0,       # Level/Rank
+    level / 12.0,       # Level
     lscale / 13.0,      # Left Pendulum Scale
     rscale / 13.0,      # Right Pendulum Scale
     is_public,          # Whether face-up
@@ -229,11 +229,19 @@ feat_numeric = [
     counter_count / 10, # Counter count
     is_equipped,        # Whether equipped
     used_effect_mask[0:8], # Effect slots already activated this turn
+    rank / 13.0,        # Rank
+    link_rating / 8.0,  # Link Rating
 ]
 # + separate card_zone / card_position categorical embeddings
 # + 32-dim type mask (Monster/Spell/Trap/Effect/Fusion/Synchro/Xyz/Pendulum/Link...)
 # + 9-dim link arrows
 ```
+
+Starting with 3.8.2, standard public `query_card/query_field_count` data also supplies dynamic identity, reason bits, original owner, `DISABLED/PROC_COMPLETE/FORBIDDEN`, equip/effect-target/reason-card relations, up to 16 overlay identities, eight typed-counter slots, and the 32-bit disabled-zone mask. Reason, counter types, and zone masks are stored losslessly as little-endian bytes in trajectories and expanded only during the network forward pass, avoiding redundant bit matrices in PPO rollout storage. Player-relative visibility masking is applied before these fields enter the network, so facedown opponent cards do not leak identity or state.
+
+Although CDB reuses one raw integer for Level, Rank, and Link Rating, Core queries expose independent `level/rank/link_rating` values. Xyz and Link monsters ordinarily have `level=0`; the model treats zero as “not applicable,” not missing, and never backfills Level from static Rank or Link Rating.
+
+Core internally retains exact summon method, source, and player, but the current public query API does not export them. Galatea maintains no private Core fork and does not infer them from card category or movement order. Only public `STATUS_PROC_COMPLETE` currently represents “properly summoned”; the remaining fields are an upstream API item.
 
 ### Action Encoding
 
@@ -281,7 +289,7 @@ Chain slots 1–12 retain Core insertion order. Each link also encodes card ID, 
 
 Each card's eight effects also carry explicit slot embeddings. Bit N in `used_effect_mask` can therefore learn a direct relationship with semantic effect N instead of collapsing the Slot Attention input into an unordered effect set.
 
-Action Protocol V2 does not treat `GameAction.index` as learned semantics. `index` and `decision_bytes` only translate the final choice back to Core; the policy sees operation, card code, location, constraints, and resulting selection set. Type 26 retains Core's native sequential Select/Unselect flow, producing a new snapshot and trajectory row at each step. Static combinatorial messages such as Types 15/20/22/23/25 first enumerate complete legal responses and then let the policy choose one.
+Action Protocol V2 does not treat `GameAction.index` as learned semantics. `index` and `decision_bytes` only translate the final choice back to Core; the policy sees operation, card code, location, constraints, and resulting selection set. Type 26 retains Core's native sequential Select/Unselect flow, producing a new snapshot and trajectory row at each step. Static combinatorial messages such as Types 15/20/21/22/23/25 first enumerate complete legal responses and then let the policy choose one. Type 21 simultaneous-trigger sorting shares the sort response with Type 25; Type 22 exposes candidate cards, counter type, requested total, and per-card availability to Pass 1.
 
 V4 schema revision 4 maps the six fixed `MSG_SELECT_IDLECMD` lists to normal summon, special summon, reposition, monster set, spell/trap set, and activate instead of labeling all six as activation. `act_operation` and `act_summon_method` are `[120] uint8` fields scoped to the current legal-action snapshot and consumed by the action signature, policy network, ONNX, and replay. Standard Core list ordinals prove only the broad normal/special family; they do not prove Ritual, Fusion, Synchro, Xyz, Pendulum, or Link. Special-summon candidates therefore use `SPECIAL_UNKNOWN` unless a future Core message or verified runtime context supplies direct evidence. Source zone and monster card category may be displayed separately but never become summon-method labels. The normal-summon list likewise does not prove a Tribute subtype; `TRIBUTE` remains reserved for direct evidence.
 
@@ -474,6 +482,10 @@ class MessageParser:
 ```
 
 ### State Synchronization
+
+Snapshots reconcile the field, Hand, Graveyard, and banished zones through the bundled Core's public legacy query API, while the message stream maintains turns, LP, chains, and disabled zones. Current upstream Core has moved to structured `OCG_DuelQuery`; a future upgrade must adapt the complete public ABI rather than append private fields to a local binary.
+
+`galatea_env.py` currently binds the legacy `create_duel/process/get_message/set_response*/query_card` exports, so a modern binary exposing `OCG_DuelProcess/OCG_DuelGetMessage/OCG_DuelSetResponse/OCG_DuelQuery` cannot be dropped in directly. Modern Core also introduces 64-bit races, TLV query fields, and messages such as Types 121/122/123/180/190. Migration requires a public dual-backend adapter plus Windows/Linux regression; use the bundled public legacy Core until that work is complete.
 
 ```python
 class DuelState:

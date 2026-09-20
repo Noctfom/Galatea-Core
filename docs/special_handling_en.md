@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.8.1**.
+> This document applies to **Galatea-Core v3.8.2**.
 
 ---
 
@@ -183,6 +183,8 @@ Type 20 follows Core's summed `release_param` rule instead of approximating trib
 
 Starting in 3.8.1, Types 20 and 23 expose each candidate's release/dual value to Pass 1 before constructing complete combinations. Type 23 has no Core cancel flag, so its pool no longer invents `-1`. Every Type 15/20/23 package is revalidated against the equivalent Core boundary before reaching the model, and a real cancel package is pinned when the pool is reduced to 120 actions.
 
+Starting in 3.8.2, same-code cards on the field, in the Graveyard, and in banishment are no longer folded by code because proper-summon status, reason, and public relations can differ. Hidden/reset-zone copies use one equivalent representative only when prompt values and known state match. Core candidate indices are unchanged; the existing 5,000-option bound and weighted reduction still control pool size.
+
 ### Type 26: Native Sequential Decisions
 
 Type 26 is not converted into static terminal packages. Arbitrary Lua `special_check` logic exists only inside Core, so one packet cannot reliably enumerate every terminal set; using RuleBot search would change the learning actor and may miss legal paths.
@@ -211,7 +213,7 @@ Training retains compact episode-wide visit counts derived from the complete sta
 | `MSG_SELECT_PLACE/DISFIELD` (18/24) | Position selection/lock | Wrap legal position combinations |
 | `MSG_SELECT_COUNTER` (22) | Counter selection | Wrap complete quantity allocations |
 | `MSG_SELECT_SUM` (23) | Synchro/Ritual value selection | Wrap combinations passing Core-equivalent sum rules |
-| `MSG_SORT_CARD` (25) | Sorting | Wrap legal orders |
+| `MSG_SORT_CHAIN/SORT_CARD` (21/25) | Simultaneous-chain/card sorting | Wrap legal orders |
 | `MSG_ANNOUNCE_RACE/ATTRIB` (140/141) | Multi-value announcement | Wrap complete bitmasks |
 | `MSG_SELECT_UNSELECT_CARD` (26) | Dynamic select/deselect | Model decides sequentially per Core message |
 

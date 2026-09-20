@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.8.1 (Phase 2 batch 2 complete) | 3.8.x–3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.8.2 (Phase 2 batch 3 complete) | 3.8.x–3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -59,13 +59,15 @@ Phase 2 batch 2 freezes the selection boundary: Type 26 is the only per-item Sel
 
 Public observations cover equip targets, overlays, target/material relations, control, disabled zones, and typed counters. Only facts deterministically available from Core are represented.
 
-The source audit also found missing per-card state. Standard `query_card` can already expose dynamic alias, rank, base ATK/DEF, reason/reason card, equip target, target-card relations, every overlay material, typed counters, original owner, dynamic scales/link values, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE`. Python currently consumes only a subset; later batches must add each visible field without replacing dynamic values with CDB defaults.
+Version 3.8.2 consumes dynamic identity, Level/Rank, current/base ATK/DEF, reason/reason card, equip and effect-target relations, every overlay identity, typed counters, original owner, dynamic scales/link values, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE` through the bundled Core's public legacy `query_card/query_field_count` API. Graveyard and banished zones are reconciled before each decision snapshot, and opponent-hidden Core dynamic state and relations are masked before encoding. The lightweight memory may retain a previously revealed identity and its static CDB/semantic facts, but cannot use that identity to read hidden dynamic ATK/DEF, type, counters, materials, or status. Reasons, counter types, and disabled zones use lossless packed bytes in trajectories and expand only during forward execution.
+
+Although CDB packs Level, Rank, and Link Rating into one raw `level` integer, Core exposes them as three independent runtime query fields. Normal/Fusion/Ritual/Synchro monsters ordinarily have only `level`; Xyz monsters ordinarily report `level=0, rank>0`; Link monsters ordinarily report `level=0, link_rating>0`. Zero means “not applicable,” not missing. Any effect-driven exception follows Core's query output and is never backfilled from card category.
 
 `STATUS_PROC_COMPLETE` is Core's authoritative “proper procedure completed” flag for revive-limit rules. It is set after a successful proper summon, persists in Graveyard and banishment, and is cleared by Core when the card returns to Hand/Main Deck/Extra Deck or its summon is negated. It must become persistent state on every currently visible monster entity rather than an event-derived guess.
 
-Core also retains `summon_info` and `summon_player` on each card, including normal/tribute/special main type, Fusion/Ritual/Synchro/Xyz/Pendulum/Link subtype, and summon-source zone. Standard query flags do not export them. They must never be inferred from card category, source zone, or message order. The implementation requires a versioned read-only query extension in the bundled Core plus synchronized Windows DLL, Linux SO, Python parsing, visibility masks, and real-Core tests. A binary without that capability must explicitly reject V4 entity-state use instead of silently emitting wrong labels.
+Core internally retains exact summon type, source, and player, and its public Lua API exposes these values to rules scripts. As of upstream v11.0, however, standard client query fields still do not export them. Galatea neither patches a local Core nor maintains a private binary, and it never infers these values from card category, source zone, or message order. The model currently receives only public `STATUS_PROC_COMPLETE`; exact summon provenance remains an upstream API/possible PR item. Current upstream uses structured `OCG_DuelQuery`, so a future upgrade must adapt its complete public ABI and TLV query format rather than replace one parser field.
 
-The current macro selector groups some same-code off-field candidates as equivalent to bound combinatorial growth. Same-name cards in the Graveyard or banishment can differ in `STATUS_PROC_COMPLETE`, reason, targeting, or equip relations. Once batch 3 exposes those per-card fields, the equivalence key must include all visible state; physical copies remain distinct whenever equivalence cannot be proven.
+The macro selector now preserves physical instances on the field, in the Graveyard, and in banishment. Hidden/reset-zone copies are folded only when card identity, prompt values, and known public state are identical. The 5,000-option cap and existing weighted reduction still bound combinatorial growth without changing legal responses.
 
 Static Lua semantics move to model-side lookup tables indexed by exact card identity and effect slot. Per-step trajectories carry identities, slots, and required dynamic overrides instead of duplicating large vectors.
 
@@ -123,11 +125,11 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 1: append-only exact vocabulary, V4 schema hash, and PTH/ONNX/artifact/package identity closure.
   - [x] Review batch 2: `decision_player`, `turn_player`, `starting_player`, and relative perspective.
   - [x] Review batch 3: categorical phase, zone, and position representations.
-- [ ] **Phase 2: actions/public relations**—operations, summon methods, selections, relations, audit.
+- [x] **Phase 2: actions/public relations**—operations, summon methods, selections, relations, audit.
   - [x] Review batch 1 (3.8.0 / schema revision 4): correct the six `MSG_SELECT_IDLECMD` operation families and add evidence-backed summon categories. When standard Core does not expose an exact method, encode unknown instead of guessing from card type.
     - Acceptance evidence: of 188 default tests, 187 pass and one gated real-Core case is skipped; the gated case passes when enabled separately, PyTorch/ONNX agree within `1e-3`, and empty semantic rows remain finite.
   - [x] Review batch 2 (3.8.1 / schema revision 5): retain Core-native iterative Type 26 and complete-combination Types 15/20/23; add Type 20/23 Pass-1 material semantics, Core-equivalent response validation, retained finish/cancel exits, and a 512-byte response buffer.
-  - [ ] Review batch 3: add public equip source-target, card-target, full overlay-material, typed-counter, original-owner, dynamic rank/scale/link, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE` per-card state; add a versioned Core query capability for `summon_info` / `summon_player`, correct Graveyard/banished same-code macro equivalence, and add message-coverage auditing.
+  - [x] Review batch 3 (3.8.2 / schema revision 6): use the public legacy Core query API for equip source-target, effect target, reason card, all overlay identities, typed counters, original owner, dynamic Level/Rank/Scale/Link values, disabled zones, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE`; preserve Graveyard/banished physical copies, classify audited messages as explicitly applied, query-reconciled, or known observation gaps, and connect Type 21 sorting plus Type 22 Pass-1 semantics. Exact summon provenance remains an explicit upstream item because public Core does not export it; this batch has no private-Core dependency.
 - [ ] **Phase 3: static semantic lookup**—deduplication, asset hashes, ONNX parity.
 - [ ] **Phase 4: deck protocol/encoder**—profile deduplication, labels, reusable encoder.
 - [ ] **Phase 5: layered FiLM/history**—separate modulation and 16 compact events.

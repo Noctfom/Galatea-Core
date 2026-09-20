@@ -7,6 +7,15 @@ from typing import List, Optional
 ACTION_TARGET_SLOTS = 5
 ACTION_OPERATION_COUNT = 32
 SUMMON_METHOD_COUNT = 11
+CARD_RELATION_SLOTS = 16
+CARD_RELATION_TYPE_COUNT = 5
+CARD_ADDITIONAL_OVERLAY_SLOTS = 15
+CARD_COUNTER_SLOTS = 8
+CARD_STATUS_BITS = 3
+FIELD_ZONE_BITS = 32
+CARD_REASON_BYTES = 4
+CARD_COUNTER_TYPE_BYTES = 2
+FIELD_ZONE_BYTES = 4
 ACTION_RESPONSE_BUCKETS = 512
 ACTION_SIGNATURE_BYTES = 4
 ACTION_CONTEXT_DIM = 6
@@ -16,10 +25,10 @@ CHAIN_CONTEXT_DIM = 6
 GLOBAL_FEATURE_DIM = 17
 PLAYER_CONTEXT_SLOTS = 3
 PLAYER_ROLE_COUNT = 3
-CARD_NUMERIC_FEATURE_DIM = 64
+CARD_NUMERIC_FEATURE_DIM = 66
 PHASE_CATEGORY_COUNT = 11
 ZONE_CATEGORY_COUNT = 9
-POSITION_CATEGORY_COUNT = 16
+POSITION_CATEGORY_COUNT = 64
 
 
 class ActionOperation(IntEnum):
@@ -71,6 +80,16 @@ class SummonMethod(IntEnum):
     LINK = 9
     OTHER_SPECIAL = 10
 
+
+class CardRelationType(IntEnum):
+    """表示公开卡片个体之间由 Core 直接给出的关系类型"""
+
+    NONE = 0
+    EQUIP_TARGET = 1
+    EFFECT_TARGET = 2
+    REASON_CARD = 3
+    EQUIP_SOURCE = 4
+
 # ==========================================
 #  Galatea AI 数据协议定义 (Schema V2.0)
 # ==========================================
@@ -104,6 +123,7 @@ class GlobalFeature:
     starting_player: int = -1
     p0_turn_count: int = 0
     p1_turn_count: int = 0
+    disabled_field_mask: int = 0
 
 @dataclass
 class CardEntity:
@@ -125,7 +145,7 @@ class CardEntity:
     type_mask: int        # 类型 (怪兽/魔法/陷阱...)
     race: int             # 种族
     attribute: int        # 属性
-    level: int            # 等级/阶级/连接值
+    level: int            # 等级；超量/连接怪兽通常为 0
     base_atk: int         # 原攻击力
     base_def: int         # 原防御力
     lscale: int = 0       # 灵摆左刻度
@@ -140,6 +160,25 @@ class CardEntity:
     overlay_count: int = 0       # 叠放的超量素材数量
     is_equipped: bool = False    # 是否有装备卡/取对象羁绊
     used_effect_mask: int = 0    # 已经发动过的效果 (Bitmask，区分同一张卡的不同效果)
+
+    # --- 4. V4 公开个体状态与关系（仅使用公开 Core 查询） ---
+    current_code: int = 0        # 动态卡名；0 表示与原卡密一致或不可见
+    original_owner: int = -1
+    rank: int = 0
+    link_rating: int = 0
+    reason: int = 0
+    status_mask: int = 0
+    properly_summoned: bool = False
+    is_disabled: bool = False
+    is_forbidden: bool = False
+    is_equip_source: bool = False
+    reason_card_location: int = 0
+    equip_target_location: int = 0
+    target_locations: list = field(default_factory=list)
+    overlay_codes: list = field(default_factory=list)
+    counter_items: list = field(default_factory=list)
+    relation_indices: list = field(default_factory=list)
+    relation_types: list = field(default_factory=list)
 
 @dataclass
 class GameAction:

@@ -431,10 +431,10 @@ class ModelArena:
         retry_bans_for_state = {}
         loop_bans_for_state = {}
         
-        # 替换为最全的常量集合
+        # 结果通知不进入决策链；Type 132 猜拳提示仍由 RuleBot 回复
         STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
-        INTERACTION_MSGS = {10, 11, 15, 16, 18, 19, 20, 22, 23, 24, 26, 130, 131, 132, 133}
-        DECISION_MSGS = {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 130, 131, 132, 133, 140, 141, 142, 143}
+        INTERACTION_MSGS = frozenset(MODEL_ACTION_MSGS) | {132}
+        DECISION_MSGS = frozenset(MODEL_ACTION_MSGS) | {132}
         AI_MANAGED_MSGS = MODEL_ACTION_MSGS
         macro_rng = np.random.default_rng(
             int(duel_seed) if duel_seed is not None else game_idx

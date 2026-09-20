@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.8.1**.
+> This document applies to **Galatea-Core v3.8.2**.
 
 ---
 
@@ -95,6 +95,8 @@ Go to **🧠 Semantic Knowledge Engine**:
 Wait for parsing to complete (first time may take several minutes). Structured knowledge, the Hash continuation index, and code-semantic vectors are stored together in the project root.
 
 Training and Arena create reports only when **V3 Observation Audit (`--protocol-audit`)** is enabled; RuleBot self-check keeps it enabled by default. Inspect reports under **Semantic Knowledge Engine → V3 Observation Audit** or as raw JSON under `system_logs/protocol_v3_audit/`. Before the first real training run, use **Validate Semantic Bundle**.
+
+Starting in 3.8.2, the audit page also reports `known_observation_gap`. Normal BO1 should usually keep it at zero. If Types 35/38/120/160/161/162/165 appear, retain the report for protocol review rather than patching a private local Core.
 
 ---
 

@@ -6,12 +6,11 @@ GalateaEnv 模块
 import ctypes
 import os
 import sqlite3
-import struct
 import time
 import random
-import io
 import sys
 
+from core_query import PUBLIC_CARD_QUERY_FLAGS, parse_legacy_card_query
 from selection_protocol import build_core_response_buffer
 
 # --- OCGCore 常量 ---
@@ -26,6 +25,17 @@ LOCATION_EXTRA = 0x40
 # 全局纯内存卡片数据库缓存
 _GLOBAL_CARD_CACHE = {}
 _GLOBAL_CACHE_INIT = False
+
+
+def _copy_ctypes_bytes(buffer, length):
+    """按原始无符号字节复制 ctypes 缓冲区，避免 c_byte 负值破坏 bytes 转换"""
+    size = ctypes.sizeof(buffer)
+    normalized_length = int(length)
+    if normalized_length < 0 or normalized_length > size:
+        raise ValueError(
+            f"ctypes buffer length {normalized_length} is outside 0..{size}"
+        )
+    return ctypes.string_at(ctypes.addressof(buffer), normalized_length)
 
 def _init_card_cache():
     global _GLOBAL_CACHE_INIT, _GLOBAL_CARD_CACHE
@@ -85,6 +95,8 @@ class GalateaEnv:
         self.lib = ctypes.cdll.LoadLibrary(self.dll_path)
         self.cdb = sqlite3.connect(self.cdb_path)
         self.pduel = None
+        self.query_card_success_count = 0
+        self.query_card_error_count = 0
         
         # [核心修复] 内存保活容器
         # 这一步至关重要：C++ 的 load_script 假设 buffer 一直有效
@@ -123,10 +135,14 @@ class GalateaEnv:
             self.lib.get_message.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_byte)]
             self.lib.get_message.restype = ctypes.c_uint32
 
-        # 注册 query_card 接口
-        if hasattr(self.lib, 'query_card'):
-            self.lib.query_card.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint32, ctypes.POINTER(ctypes.c_byte), ctypes.c_int32]
-            self.lib.query_card.restype = ctypes.c_int32
+        # V4 只使用公开 Core 查询接口，不依赖本地私有内核扩展
+        if not hasattr(self.lib, 'query_card'):
+            raise RuntimeError("当前公开 Core 未导出 query_card，无法构造 V4 完整观测")
+        self.lib.query_card.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint32, ctypes.POINTER(ctypes.c_byte), ctypes.c_int32]
+        self.lib.query_card.restype = ctypes.c_int32
+        if hasattr(self.lib, 'query_field_count'):
+            self.lib.query_field_count.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8]
+            self.lib.query_field_count.restype = ctypes.c_int32
             
         # 确认使用 set_responsei
         self.lib.set_responsei.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -217,74 +233,49 @@ class GalateaEnv:
             return 0
 
     def query_card_state(self, player_id, location, sequence):
-        """
-        向 C++ 内存精确打击，索要包含动态突变的完全体状态！
-        """
-        # Code(0x1) | Pos(0x2) | Type(0x8) | Level(0x10) | Attr(0x40) | Race(0x80)
-        # Atk(0x100) | Def(0x200) | Equip(0x4000) | Overlays(0x10000) | Counters(0x20000)
-        # 叠加结果为: 0x343DA
-        flags = 0x1 | 0x2 | 0x8 | 0x10 | 0x40 | 0x80 | 0x100 | 0x200 | 0x4000 | 0x10000 | 0x20000
-        length = self.lib.query_card(self.pduel, player_id, location, sequence, flags, self.query_buf, 0)
-        
-        if length <= 8: return None
-
-        stream = io.BytesIO(bytearray(self.query_buf)[:length])
-        try:
-            data_len = struct.unpack('<I', stream.read(4))[0]
-            actual_flag = struct.unpack('<I', stream.read(4))[0]
-            
-            # 初始化占位符
-            code = p = c = l = s = 0
-            ctype = level = attr = race = 0
-            atk = 0; defense = 0
-            is_equipped = False
-            overlays = []; counters = 0
-
-            # 必须严格按 C++ 写入掩码位由小到大读取
-            if actual_flag & 0x1: code = struct.unpack('<I', stream.read(4))[0]
-            if actual_flag & 0x2: 
-                pos_info = struct.unpack('<I', stream.read(4))[0]
-                c, l, s, p = pos_info & 0xFF, (pos_info >> 8) & 0xFF, (pos_info >> 16) & 0xFF, (pos_info >> 24) & 0xFF
-            
-            # [新增] 动态突变属性解析
-            if actual_flag & 0x8:  ctype = struct.unpack('<I', stream.read(4))[0]
-            if actual_flag & 0x10: level = struct.unpack('<I', stream.read(4))[0]
-            if actual_flag & 0x40: attr = struct.unpack('<I', stream.read(4))[0]
-            if actual_flag & 0x80: race = struct.unpack('<I', stream.read(4))[0]
-            
-            if actual_flag & 0x100: atk = struct.unpack('<i', stream.read(4))[0]
-            if actual_flag & 0x200: defense = struct.unpack('<i', stream.read(4))[0]
-
-            if atk < 0: atk = 0
-            if defense < 0: defense = 0
-
-            # [新增] 装备卡状态雷达
-            if actual_flag & 0x4000:
-                equip_target = struct.unpack('<I', stream.read(4))[0]
-                is_equipped = (equip_target != 0) # 如果有指向目标，说明它是装备/被装备状态
-
-            if actual_flag & 0x10000: 
-                ov_count = struct.unpack('<I', stream.read(4))[0]
-                overlays = [struct.unpack('<I', stream.read(4))[0] for _ in range(ov_count)]
-
-            if actual_flag & 0x20000: 
-                c_count = struct.unpack('<I', stream.read(4))[0]
-                for _ in range(c_count):
-                    tdata = struct.unpack('<I', stream.read(4))[0]
-                    counters += (tdata >> 16) & 0xFFFF
-
-            return {
-                'code': code & 0x7FFFFFFF,
-                'pos': p, 'owner': c,
-                'current_type': ctype, 'current_level': level,  # 实时
-                'current_attr': attr, 'current_race': race,     # 实时
-                'current_atk': atk, 'current_def': defense,
-                'is_equipped': is_equipped,                     # C++ 直接告诉我们有没有装备
-                'overlays': overlays, 'counters': counters
-            }
-        except Exception as e:
-            print(f"⚠️ query_card 解析异常: {e}")
+        """通过公开旧版 query_card 读取一张卡的标准动态状态"""
+        length = self.lib.query_card(
+            self.pduel,
+            player_id,
+            location,
+            sequence,
+            PUBLIC_CARD_QUERY_FLAGS,
+            self.query_buf,
+            0,
+        )
+        if length <= 8:
             return None
+        try:
+            result = parse_legacy_card_query(
+                _copy_ctypes_bytes(self.query_buf, length)
+            )
+            result['code'] &= 0x7FFFFFFF
+            result['pos'] = result['position']
+            result['owner'] = result['controller']
+            result['current_atk'] = max(0, result['current_atk'])
+            result['current_def'] = max(0, result['current_def'])
+            result['base_atk'] = max(0, result['base_atk'])
+            result['base_def'] = max(0, result['base_def'])
+            # 保留旧字段名供现有状态机平滑接线。
+            result['overlays'] = list(result['overlay_codes'])
+            result['counters'] = result['counter_count']
+            result['is_equipped'] = False
+            self.query_card_success_count += 1
+            return result
+        except Exception as e:
+            self.query_card_error_count += 1
+            print(
+                "⚠️ query_card 解析异常: "
+                f"P{player_id} loc={location:#x} seq={sequence} len={length}: {e}"
+            )
+            return None
+
+    def query_zone_count(self, player_id, location):
+        """通过公开 query_field_count 获取连续区域的实际卡片数量"""
+        if not hasattr(self.lib, 'query_field_count'):
+            return None
+        count = self.lib.query_field_count(self.pduel, player_id, location)
+        return max(0, int(count))
 
     def _on_message(self, pduel, msg_type): 
         # 可能会通过 msg_type=1 发送 lua 错误信息
