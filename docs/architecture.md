@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.7.0**。
+> 文档适用于 **Galatea-Core v3.8.1**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -248,6 +248,7 @@ act_dict = {
     'act_code': [...],       # 候选/宣言卡片代码
     'act_place': [...],      # 放置位置 [120, 5]
     'act_operation': [...],  # Yes/No/Select/Unselect/Finish/Cancel 等真实操作
+    'act_summon_method': [...], # 召唤分类；未知特殊召唤使用独立类别
     'act_response': [...],   # 语义响应值
     'act_signature': [...],  # 完整动作语义的 4 字节稳定签名
     'act_context': [...],    # min/max/结果数量/完成与取消条件 [120, 6]
@@ -283,6 +284,10 @@ act_dict = {
 每张卡的 8 个效果槽另有独立槽位嵌入。这样 `used_effect_mask` 的第 N 位才能与 Lua Parser 的第 N 个效果语义建立可学习对应，而不会在 Slot Attention 中退化为无序效果集合。
 
 动作协议 V2 不把 `GameAction.index` 当作学习语义。`index` 与 `decision_bytes` 只负责把最终选择翻译回 Core；策略头看到的是操作、卡密、位置、约束和结果集合。Type 26 保持 Core 原生的逐次 Select/Unselect 过程，每一步都生成新快照并进入轨迹；Type 15/20/22/23/25 等静态组合消息则先由合法性枚举器生成完整响应，再由策略头选择。
+
+V4 结构修订 4 将 `MSG_SELECT_IDLECMD` 的六个固定列表分别编码为通常召唤、特殊召唤、改变表示、盖放怪兽、盖放魔陷和发动，不再全部误标为发动。`act_operation` 与 `act_summon_method` 均为 `[120] uint8` 当前提示快照字段，并进入动作签名、策略网络、ONNX 与回放。标准 Core 的列表序号只能证明通常/特殊召唤这一层级，无法证明融合、仪式、同调、超量、灵摆或连接；因此特殊召唤统一使用 `SPECIAL_UNKNOWN`，只有未来获得 Core 消息或经验证运行上下文的直接证据时才写入精确方式。来源区域和怪兽卡类可以单独展示，但不得被当作召唤方式标签。通常召唤列表同样不推断是否需要解放；`TRIBUTE` 类别仅为直接证据预留。
+
+V4 结构修订 5 按 `playerop.cpp` 逐条固定选择状态机：Type 15 校验张数范围，Type 20 同时校验最大张数与 `release_param` 总和，Type 23 使用必选占位、双值参数及 Core 的 Exact/SumGreater 边界且绝不伪造取消，Type 26 每次只返回一个 Select/Unselect 索引或 `int32(-1)` 的 Finish/Cancel。Type 20/23 现在也生成 Pass1 单素材候选，使模型偏好参与宏组合缩减；Type 26 的终止动作固定置于动作池头部，候选超过 120 时仍保留合法出口。`set_responseb` 缓冲严格匹配 Core 固定读取的 512 字节，消除了旧 64 字节截断与越界读取。
 
 `MODEL_PROTOCOL_VERSION` 独立于框架版本和检查点容器版本维护。它同时写入 PTH 顶层、`net_config`、模型状态、ONNX 元数据与制品清单；版本不同表示输入张量或动作头权重不兼容，加载器会直接拒绝。
 

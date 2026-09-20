@@ -4,6 +4,43 @@
 
 ---
 
+## [v3.8.1] - 2026-09-20
+
+### 🧩 V4 Phase 2 Batch 2: Selection State Machines and Response Closure
+
+- **Preserved native Core boundaries**: Type 26 remains iterative Select/Unselect, while ordinary Type 15 selection, Type 20 tribute selection, and Type 23 sum selection return one complete legal combination. No synthetic intermediate state is introduced
+- **Completed material-intent inputs**: Types 20/23 now expose one Pass-1 action per candidate with release value, single/dual sum values, target, mandatory count, and Exact/SumGreater mode, allowing model preference to influence weighted macro-pool reduction
+- **Mirrored Core checks message by message**: A shared selection validator now covers index bounds, duplicate indices, count ranges, summed release value, mandatory placeholders, dual-value sums, one-index Type 26 replies, and finish/cancel permissions
+- **Removed fake Type 23 cancellation**: `MSG_SELECT_SUM` has no cancel flag. The old unconditional `int32(-1)` package always led to `MSG_RETRY`; it is now absent and rejected both at pool construction and transmission
+- **Fixed Type 26 response transport**: `response_value` previously caused iterative actions to return an integer through `set_responsei`. Select/Unselect now always emits `count=1 + index` bytes, and only Finish/Cancel uses `int32(-1)`
+- **Retained exits under fixed shapes**: Type 26 Finish/Cancel is pinned to the first candidate slot, while genuine Type 15/20 cancel packages are pinned during macro reduction, so an action count above 120 cannot remove the legal exit
+- **Fixed response-buffer over-read**: Core's `set_responseb` copies the fixed `SIZE_RETURN_VALUE=512` bytes. The former 64-byte Python lifetime buffer caused truncation and an out-of-bounds read; responses are now held in a zero-padded 512-byte buffer and oversized payloads are rejected
+- **Unified RuleBot and model legality**: RuleBot no longer maintains approximate random Type 15/20/23 implementations. It reuses the same complete-combination generator and validator, failing the episode explicitly rather than fabricating a response Core may reject
+- **Schema boundary**: Framework version is 3.8.1; Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision becomes 5. This batch adds no parameters or tensors; the revision locks state-machine semantics so development checkpoints cannot cross the boundary silently
+- **Per-card Core-state audit**: `STATUS_PROC_COMPLETE` is the authoritative proper-summon bit used by revive-limit rules and persists through Graveyard/banishment. `summon_info`/`summon_player` preserve summon method, source, and player. Python does not consume these fields yet; exact summon data requires a capability-versioned query extension in the bundled Core and must never be guessed from card category or movement messages
+- **Other public fields queued**: Dynamic alias, rank, base ATK/DEF, reason/reason card, equip target, target-card relations, all overlay materials, typed counters, original owner, disabled/forbidden/proper status, and dynamic scales/link values are now explicit later-batch items
+- **Regression**: The portable UTF-8 Python suite runs 194 tests: 193 pass and one real-Core gated test is skipped as expected. Coverage includes Type 20/23 Pass 1, exact dual-value and SumGreater checks, no fake cancellation, Type 26 response round trips and index bounds, exits beyond 120 candidates, and the 512-byte buffer
+
+---
+
+## [v3.8.0] - 2026-09-20
+
+### 🎯 V4 Phase 2 Batch 1: Action Families and Summon Evidence
+
+- **Corrected the six Main Phase candidate families**: Normal Summon, Special Summon, reposition, Monster Set, Spell/Trap Set, and activate candidates from `MSG_SELECT_IDLECMD` no longer all share the `ACTIVATE` label; the policy can now distinguish their actual operation family
+- **Added a summon-method input**: A `[120] uint8` `act_summon_method` field, dedicated embedding, shared-memory path, and ONNX input now distinguish non-summons, normal summons, and special summons whose exact method is unknown. Exact Ritual/Fusion/Synchro/Xyz/Pendulum/Link values are reserved for future direct evidence
+- **Stopped inferring methods from card types**: Standard Core exposes a generic Special Summon candidate but no exact method. The framework therefore emits `SPECIAL_UNKNOWN`; Extra Deck source and Fusion/Synchro/etc. monster category remain separate replay facts and no longer masquerade as summon-method labels
+- **Preserved Core replies**: Candidates still round-trip deterministically as `(index << 16) | action_type`. The new fields affect learning and auditing only, not legal actions, candidate order, or engine responses
+- **Separated the field-only marker**: The Core `0x80000000` marker on activation candidate codes is moved into prompt flags before exact-vocabulary lookup, preventing field-only effects from appearing as nonexistent oversized card IDs
+- **Corrected replay semantics**: Holographic replay records operation family, summon evidence, source zone, and monster category separately. Legacy/manual actions without the field safely fall back to “Special Summon (exact method unknown)”
+- **Stabilized empty semantics in ONNX**: Fully empty semantic rows use a zero-valued attention sentinel and are forced back to zero after aggregation, preventing all-masked Softmax NaNs in ONNX backends while leaving every row with a valid semantic slot unchanged
+- **Schema boundary**: Framework version is 3.8.0; Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision becomes 4. Development checkpoints from schema revision 3 are rejected before network construction rather than partially loaded
+- **Resource cost**: The only new parameters are `11 × d_model` (5,632 parameters at the baseline `d_model=512`, about 0.0113% of the current 49,653,298 parameters), and each Worker gains 120 bytes of shared input. An isolated local CPU lookup-and-add microbenchmark measured about 57.6 microseconds; board-token count, action capacity, Core interactions, and inference round trips do not increase
+- **Batch boundary**: This release does not change Type 15/20/23/26 selection state machines or add equip, target, full-overlay, typed-counter, or disabled-zone relations; those remain in the next two Phase 2 batches
+- **Regression**: The UTF-8 Windows suite runs 188 default tests: 187 pass and one explicitly gated real-Core case is skipped as expected; enabling that case separately completes a real-Core duel. Coverage includes all six operation mappings, enum-bound rejection, response round trips, field contracts, PyTorch/ONNX parity at `1e-3`, and ONNXRuntime execution
+
+---
+
 ## [v3.7.0] - 2026-09-15
 
 ### 🆔 V4 Phase 1: Identity and Global State (All Three Batches)

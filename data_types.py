@@ -6,6 +6,7 @@ from typing import List, Optional
 # 动作协议固定使用 5 个显式目标槽；超出部分由完整语义签名继续区分
 ACTION_TARGET_SLOTS = 5
 ACTION_OPERATION_COUNT = 32
+SUMMON_METHOD_COUNT = 11
 ACTION_RESPONSE_BUCKETS = 512
 ACTION_SIGNATURE_BYTES = 4
 ACTION_CONTEXT_DIM = 6
@@ -47,6 +48,28 @@ class ActionOperation(IntEnum):
     MACRO_SELECT = 20
     MACRO_SORT = 21
     REMOVE_COUNTER = 22
+    NORMAL_SUMMON = 23
+    SPECIAL_SUMMON = 24
+    CHANGE_POSITION = 25
+    MONSTER_SET = 26
+    SPELL_TRAP_SET = 27
+    TRIBUTE_SUMMON = 28
+
+
+class SummonMethod(IntEnum):
+    """只记录 Core 或可验证上下文直接证明的召唤方式"""
+
+    NONE = 0
+    NORMAL = 1
+    TRIBUTE = 2
+    SPECIAL_UNKNOWN = 3
+    RITUAL = 4
+    FUSION = 5
+    SYNCHRO = 6
+    XYZ = 7
+    PENDULUM = 8
+    LINK = 9
+    OTHER_SPECIAL = 10
 
 # ==========================================
 #  Galatea AI 数据协议定义 (Schema V2.0)
@@ -140,6 +163,7 @@ class GameAction:
     # 动作协议 V2：把过去只存在于 index/文字/原始响应里的语义显式交给模型。
     code: int = 0
     operation_id: int = int(ActionOperation.DEFAULT)
+    summon_method_id: int = int(SummonMethod.NONE)
     response_value: Optional[int] = None
     target_location_raw: int = -1
     selection_min: int = 0

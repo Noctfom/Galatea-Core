@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.7.0**.
+> This document applies to **Galatea-Core v3.8.1**.
 
 ---
 
@@ -132,6 +132,8 @@ Configure and launch AI training tasks.
 
 **Model Action Protocol**:
 - v3.7.0 completes Model Protocol V4 Phase 1: append-only `card_vocab.json` removes real-card collisions and supports exact-prefix compatibility; decision/turn/starting players are separate, while phase, zone, and position use categorical embeddings
+- v3.8.0 completes V4 Phase 2 batch 1: the six Main Phase candidate families have distinct operations, and summon methods are encoded only from direct Core evidence; unproven special-summon methods are explicitly unknown
+- v3.8.1 completes V4 Phase 2 batch 2: Type 26 remains iterative while Types 15/20/23 return complete combinations; tribute values, dual-value sums, cancel/finish boundaries, and the 512-byte Core response buffer are source-checked
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
@@ -352,7 +354,7 @@ Resume and overwrite authorization always use the embedded UUID rather than trus
    - Highlight each player's final chosen action
    - Expose Select/Unselect/Finish/Cancel, selection bounds, result sets, material values, and Core prompt fields
    - Click any candidate row to preview its card images and highlight the actor, targets, and materials on the board without changing the recorded decision
-   - Main Phase operations name their concrete card target; Extra Deck Special Summon entries further distinguish Link, Xyz, Synchro, and Fusion Summons
+   - Main Phase operations name their concrete card target; summon method, source zone, and monster category are displayed separately. When standard Core provides no direct evidence, replay explicitly says the exact method is unknown instead of guessing from an Extra Deck card type
 
 3. **Playback Controls**
    - Previous/Next step

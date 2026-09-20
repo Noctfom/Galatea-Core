@@ -569,6 +569,7 @@ class PPOTrainer:
             'act_code': ((120,), torch.long),
             'act_place': ((120, ACTION_TARGET_SLOTS), torch.long),
             'act_operation': ((120,), torch.uint8),
+            'act_summon_method': ((120,), torch.uint8),
             'act_response': ((120,), torch.int16),
             'act_signature': ((120, ACTION_SIGNATURE_BYTES), torch.uint8),
             'act_context': ((120, ACTION_CONTEXT_DIM), torch.float16),

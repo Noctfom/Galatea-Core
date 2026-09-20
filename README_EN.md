@@ -7,7 +7,7 @@
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.7.0](https://img.shields.io/badge/Release-v3.7.0-brightgreen.svg)](docs/changelog_en.md)
+[![Release: v3.8.1](https://img.shields.io/badge/Release-v3.8.1-brightgreen.svg)](docs/changelog_en.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -24,7 +24,7 @@ English | [简体中文](README.md)
 - 📦 **One-Click Package** - Built-in Python environment, just double-click to start
 - 🔥 **Efficient Training** - Always-on central batching + CPU/CUDA modes + league training
 - 🔐 **Model Identity Management** - Dynamic prefixes, automatic UUIDs, embedded iterations, and complete ONNX artifact bundles
-- 🆔 **V4 Identity & Global State** - Authoritative append-only card IDs, separated player roles, and categorical phase/zone/position encoding
+- 🆔 **V4 Identity, State & Action Semantics** - Authoritative append-only card IDs, separated player state, and Core-evidenced operation/summon categories
 - 🧩 **Action Protocol V2** - Sequential selection, macro combinations, response semantics, and constraints are visible to the policy network
 - 👁️ **Decision Visualization** - Holographic replay system to understand AI thinking process
 

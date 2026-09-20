@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.7.0 (Phase 1 complete) | 3.7.x–3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.8.1 (Phase 2 batch 2 complete) | 3.8.x–3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -44,9 +44,28 @@ Operation families cover normal/tribute/special summon, reposition, monster set,
 
 Type 26 retains iterative Core-native Select/Unselect behavior. Static combination prompts return a complete legal combination. Their state machines remain separate.
 
+Phase 2 batch 1 implements this field contract:
+
+| Field | Visibility and source | Lifetime/default | dtype / shape | Consumers |
+| --- | --- | --- | --- | --- |
+| `act_operation` | Current public prompt; Core candidate family such as a fixed `MSG_SELECT_IDLECMD` list ordinal | Current legal-action snapshot; `DEFAULT=0` | `uint8 [120]` | Action signature, policy network, ONNX, replay |
+| `act_summon_method` | Current public prompt; direct evidence from a Core message or verified runtime context | Current legal-action snapshot; `NONE=0` when not a summon and `SPECIAL_UNKNOWN=3` for generic special summons | `uint8 [120]` | Action signature, policy network, ONNX, replay |
+
+The six standard-Core `MSG_SELECT_IDLECMD` lists prove normal summon, special summon, reposition, monster set, spell/trap set, and activate respectively. They do not carry an exact special-summon method and do not prove whether a normal summon requires tributes. Ritual, Fusion, Synchro, Xyz, Pendulum, Link, and Tribute values are reserved for future direct evidence; neither source zone nor monster card category may stand in for a summon method. The original `(candidate index << 16) | list type` response remains deterministic, so learned fields do not alter the Core reply.
+
+Phase 2 batch 2 freezes the selection boundary: Type 26 is the only per-item Select/Unselect state machine in this batch, while Types 15, 20, and 23 return one complete combination. Type 20's `min` is a minimum release value rather than a card count, and Type 23 has no cancel response. Types 20/23 expose Pass-1 material candidates before the shared legality generator builds packages; every response is checked against Core-equivalent rules before pooling and transmission. `set_responseb` now owns the complete 512-byte lifetime buffer instead of truncating it to 64 bytes.
+
 ### 3.4 Public relations and static semantics
 
 Public observations cover equip targets, overlays, target/material relations, control, disabled zones, and typed counters. Only facts deterministically available from Core are represented.
+
+The source audit also found missing per-card state. Standard `query_card` can already expose dynamic alias, rank, base ATK/DEF, reason/reason card, equip target, target-card relations, every overlay material, typed counters, original owner, dynamic scales/link values, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE`. Python currently consumes only a subset; later batches must add each visible field without replacing dynamic values with CDB defaults.
+
+`STATUS_PROC_COMPLETE` is Core's authoritative “proper procedure completed” flag for revive-limit rules. It is set after a successful proper summon, persists in Graveyard and banishment, and is cleared by Core when the card returns to Hand/Main Deck/Extra Deck or its summon is negated. It must become persistent state on every currently visible monster entity rather than an event-derived guess.
+
+Core also retains `summon_info` and `summon_player` on each card, including normal/tribute/special main type, Fusion/Ritual/Synchro/Xyz/Pendulum/Link subtype, and summon-source zone. Standard query flags do not export them. They must never be inferred from card category, source zone, or message order. The implementation requires a versioned read-only query extension in the bundled Core plus synchronized Windows DLL, Linux SO, Python parsing, visibility masks, and real-Core tests. A binary without that capability must explicitly reject V4 entity-state use instead of silently emitting wrong labels.
+
+The current macro selector groups some same-code off-field candidates as equivalent to bound combinatorial growth. Same-name cards in the Graveyard or banishment can differ in `STATUS_PROC_COMPLETE`, reason, targeting, or equip relations. Once batch 3 exposes those per-card fields, the equivalence key must include all visible state; physical copies remain distinct whenever equivalence cannot be proven.
 
 Static Lua semantics move to model-side lookup tables indexed by exact card identity and effect slot. Per-step trajectories carry identities, slots, and required dynamic overrides instead of duplicating large vectors.
 
@@ -105,9 +124,10 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 2: `decision_player`, `turn_player`, `starting_player`, and relative perspective.
   - [x] Review batch 3: categorical phase, zone, and position representations.
 - [ ] **Phase 2: actions/public relations**—operations, summon methods, selections, relations, audit.
-  - [ ] Review batch 1: correct the six `MSG_SELECT_IDLECMD` operation families and add evidence-backed summon categories. When standard Core does not expose an exact method, encode unknown instead of guessing from card type.
-  - [ ] Review batch 2: audit Type 15/20/23/26 and macro-action state machines, response round trips, finish/cancel boundaries, and fixed-shape encoding message by message.
-  - [ ] Review batch 3: add public equip source-target, card-target, full overlay-material, typed-counter, and disabled-zone relations plus message-coverage auditing.
+  - [x] Review batch 1 (3.8.0 / schema revision 4): correct the six `MSG_SELECT_IDLECMD` operation families and add evidence-backed summon categories. When standard Core does not expose an exact method, encode unknown instead of guessing from card type.
+    - Acceptance evidence: of 188 default tests, 187 pass and one gated real-Core case is skipped; the gated case passes when enabled separately, PyTorch/ONNX agree within `1e-3`, and empty semantic rows remain finite.
+  - [x] Review batch 2 (3.8.1 / schema revision 5): retain Core-native iterative Type 26 and complete-combination Types 15/20/23; add Type 20/23 Pass-1 material semantics, Core-equivalent response validation, retained finish/cancel exits, and a 512-byte response buffer.
+  - [ ] Review batch 3: add public equip source-target, card-target, full overlay-material, typed-counter, original-owner, dynamic rank/scale/link, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE` per-card state; add a versioned Core query capability for `summon_info` / `summon_player`, correct Graveyard/banished same-code macro equivalence, and add message-coverage auditing.
 - [ ] **Phase 3: static semantic lookup**—deduplication, asset hashes, ONNX parity.
 - [ ] **Phase 4: deck protocol/encoder**—profile deduplication, labels, reusable encoder.
 - [ ] **Phase 5: layered FiLM/history**—separate modulation and 16 compact events.

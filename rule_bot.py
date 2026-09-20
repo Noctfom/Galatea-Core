@@ -10,6 +10,11 @@ import random
 import itertools
 from game_constants import LocationInfo
 from card_reader import card_db
+from selection_protocol import (
+    CANCEL_RESPONSE,
+    SELECTION_RESPONSE_MSGS,
+    validate_selection_response,
+)
 
 # --- 消息类型常量 ---
 MSG_SELECT_BATTLECMD = 10
@@ -361,70 +366,44 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 print(f"⚠️ [RuleBot] 处理 MSG_SELECT_POSITION 时发生异常: {e}")
                 decision = bytes([1])
 
-        # [RuleBot 修正 1] 选卡/素材：优先凑满 Max (为了连接召唤)
-        elif msg_type in [MSG_SELECT_CARD, MSG_SELECT_TRIBUTE]:
-            # 真正的 Payload 去掉 Type 后，至少包含 P, Cancel, Min, Max, Count 5个字节
-            if len(payload) < 5: 
-                return bytes([0])
-
-            stream = io.BytesIO(payload)
-            stream.read(1) # 跳过 player_id
-            
-            try:
-                cancelable = struct.unpack('<B', stream.read(1))[0]
-                min_c = struct.unpack('<B', stream.read(1))[0]
-                max_c = struct.unpack('<B', stream.read(1))[0]
-                list_len = struct.unpack('<B', stream.read(1))[0]
-            except Exception as e:
-                print(f"⚠️ [RuleBot] 处理 MSG_SELECT_CARD 时发生异常: {e}")
-                return bytes([0]) 
-            
-            stream.read(list_len * 8) # 跳过卡片数据
-
-            ignored_set = set(b for b in ignore_actions if isinstance(b, bytes))
-            decision = None
-            
-            for _ in range(50):
-                real_max = min(max_c, list_len)
-                real_min = min(min_c, list_len)
-                
-                # 🛡️ 强制纠正大小关系，防崩溃
-                if real_min > real_max: 
-                    real_min = real_max
-                
-                rand_val = random.random()
-                if rand_val < 0.5: count = real_max
-                elif rand_val < 0.8: count = real_min
-                else: count = random.randint(real_min, real_max)
-                
-                if count == 0 and min_c > 0: count = min_c
-                
-                indices = list(range(list_len))
-                random.shuffle(indices)
-                selected_indices = indices[:count]
-                selected_indices.sort()
-                
-                resp_buf = bytearray()
-                resp_buf.append(count)
-                for idx in selected_indices:
-                    resp_buf.append(idx)
-                
-                candidate = bytes(resp_buf)
-                if candidate not in ignored_set:
-                    decision = candidate
-                    break
-            
-            if decision is None:
-                # 如果代码走到这里，说明能选的所有组合，全被引擎 RETRY 拒绝了！
-                # [新增报警]
-                print(f"🚨 [RuleBot 警报] Type {msg_type} (选卡/祭品) 算法穷尽！所有生成组合全在黑名单！")
-                print(f"   -> 引擎要求: Min={min_c}, Max={max_c}, 可选列表长度={list_len}")
-                print(f"   -> 当前黑名单: {ignore_actions}")
-                if cancelable: 
-                    decision = struct.pack('<i', -1)
-                else: 
-                    # 清空黑名单强行选最初的，总比发错格式好
-                    decision = candidate if 'candidate' in locals() else bytes([0])
+        # 普通多选、解放与凑星都复用同一套 Core 合法组合生成器
+        elif msg_type in [MSG_SELECT_CARD, MSG_SELECT_TRIBUTE, MSG_SELECT_SUM]:
+            options = get_macro_options(
+                msg_type,
+                payload,
+                gamestate,
+                limit=5000,
+            )
+            ignored_set = {
+                bytes(value) for value in ignore_actions
+                if isinstance(value, (bytes, bytearray))
+            }
+            available = [
+                option for option in options
+                if bytes(option.get('bytes', b'')) not in ignored_set
+            ]
+            non_cancel = [
+                option for option in available
+                if bytes(option.get('bytes', b'')) != CANCEL_RESPONSE
+            ]
+            if non_cancel:
+                # 规则机器人优先完成选择；同等合法响应中保留随机性
+                if msg_type in (MSG_SELECT_CARD, MSG_SELECT_TRIBUTE):
+                    largest = max(len(option.get('locs', ())) for option in non_cancel)
+                    non_cancel = [
+                        option for option in non_cancel
+                        if len(option.get('locs', ())) == largest
+                    ]
+                decision = bytes(random.choice(non_cancel)['bytes'])
+            elif available:
+                decision = bytes(random.choice(available)['bytes'])
+            elif options:
+                # Retry 黑名单耗尽时仍提交一个已验证合法响应，避免伪造格式
+                decision = bytes(options[0]['bytes'])
+            else:
+                raise RuntimeError(
+                    f"Type {msg_type} 没有生成任何满足 Core 约束的完整组合"
+                )
 
         # =================================================================
         # [新增] 9. 复杂选卡 (Select Unselect) - Type 26
@@ -463,97 +442,6 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                     print(f"⚠️ [RuleBot] 处理 MSG_SELECT_UNSELECT_CARD 时发生异常: {e}")
                     # 解析中途失败（如数据包截断），默认选0
                     decision = struct.pack('<i', 0)
-
-        # =================================================================
-        # 严格修正：MSG_SELECT_SUM (23) - 支持动态双重数值与 DFS 提取
-        # =================================================================
-        elif msg_type == MSG_SELECT_SUM:
-            if len(payload) < 10: return bytes([0])
-            try:
-                stream = io.BytesIO(payload)
-                mode = struct.unpack('<B', stream.read(1))[0]
-                stream.read(1) # 跳过 player_id
-                total_acc = struct.unpack('<I', stream.read(4))[0]
-                min_c = struct.unpack('<B', stream.read(1))[0]
-                max_c = struct.unpack('<B', stream.read(1))[0]
-                
-                must_count = struct.unpack('<B', stream.read(1))[0]
-                must_vals = []
-                for _ in range(must_count):
-                    stream.read(7)
-                    v = struct.unpack('<I', stream.read(4))[0]
-                    must_vals.append(v)
-                
-                count_b = stream.read(1)
-                if not count_b: return bytes([0])
-                count = struct.unpack('<B', count_b)[0]
-
-                candidates = []
-                for i in range(count):
-                    stream.read(7)
-                    val = struct.unpack('<I', stream.read(4))[0]
-                    candidates.append({'index': i, 'val': val})
-                
-                valid_solutions = []
-                real_max = max_c if max_c > 0 else count
-                
-                def check_sum(vals, current_idx, current_sum, current_min):
-                    if current_idx == len(vals):
-                        if mode == 0: return current_sum == total_acc
-                        else: return current_sum >= total_acc and (current_sum - current_min) < total_acc
-                    
-                    v = vals[current_idx]
-                    v1 = v & 0xffff
-                    v2 = v >> 16
-                    
-                    n_min1 = min(current_min, v1) if current_min != -1 else v1
-                    if check_sum(vals, current_idx + 1, current_sum + v1, n_min1): return True
-                    
-                    if v2 > 0 and v2 != v1:
-                        n_min2 = min(current_min, v2) if current_min != -1 else v2
-                        if check_sum(vals, current_idx + 1, current_sum + v2, n_min2): return True
-                    return False
-
-                def backtrack(start, k, path):
-                    if len(valid_solutions) >= 200: return # 规则机器人不需要穷尽，找200个够用了
-                    if k >= min_c:
-                        combined_vals = must_vals + [x['val'] for x in path]
-                        if check_sum(combined_vals, 0, 0, -1):
-                            valid_solutions.append(list(path))
-                    
-                    if k == real_max or start == count: return
-                        
-                    for i in range(start, count):
-                        path.append(candidates[i])
-                        backtrack(i + 1, k + 1, path)
-                        path.pop()
-
-                backtrack(0, 0, [])
-                
-                ignored_set = set(b for b in ignore_actions if isinstance(b, bytes))
-                decision = bytes([0])
-                
-                if valid_solutions:
-                    random.shuffle(valid_solutions) # 洗牌增加盲打多样性
-                    for sol in valid_solutions:
-                        sol_sorted = sorted(sol, key=lambda x: x['index'])
-                        resp_buf = bytearray([must_count + len(sol_sorted)])
-                        for _ in range(must_count): resp_buf.append(0)
-                        for cd in sol_sorted: resp_buf.append(cd['index'])
-                        
-                        candidate_bytes = bytes(resp_buf)
-                        if candidate_bytes not in ignored_set:
-                            decision = candidate_bytes
-                            break
-                else:
-                    print("🚨 [RuleBot 警报] Type 23 (凑星计算) DFS 算法在必须选取的情况下无解！")
-                    print(f"   -> 目标={total_acc}, Mode={mode}, Must={must_vals}, 候选池={[c['val'] for c in candidates]}")
-                    decision = struct.pack('<i', -1) # 只能尝试发送取消指令
-                            
-                return decision
-            except Exception as e:
-                print(f"⚠️ [RuleBot] 处理 MSG_SELECT_SUM 时发生异常: {e}")
-                return bytes([0])
 
         # ==================== 6. 排序与位置 (MSG_SORT_CARD) ====================
         elif msg_type == MSG_SORT_CARD:
@@ -736,6 +624,8 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
         print(f"   -> Payload 长度: {len(payload)}")
         decision = -1
     
+    if msg_type in SELECTION_RESPONSE_MSGS:
+        validate_selection_response(msg_type, payload, decision)
     return decision
 
 
@@ -923,13 +813,31 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                 
             group_lists = list(groups.values())
             valid_solutions = []
-            real_max = max_c if max_c > 0 else count
+            # SumGreater 的包内 max 会被 Core 写成 min，但第二阶段不以它限制张数
+            real_max = max_c if mode == 0 and max_c > 0 else count
             
             # 原版双重星级动态解包校验算法
             def check_sum(vals, current_idx, current_sum, current_min):
+                """按 Core 的精确求和或 SumGreater 边界判断完整素材组"""
+                if mode != 0:
+                    if not vals:
+                        return total_acc <= 0
+                    minimums = []
+                    maximums = []
+                    for raw_value in vals:
+                        value1 = raw_value & 0xffff
+                        value2 = raw_value >> 16
+                        choices = [value1]
+                        if value2:
+                            choices.append(value2)
+                        minimums.append(min(choices))
+                        maximums.append(max(choices))
+                    return (
+                        sum(maximums) >= total_acc
+                        and sum(minimums) - min(minimums) < total_acc
+                    )
                 if current_idx == len(vals):
-                    if mode == 0: return current_sum == total_acc
-                    else: return current_sum >= total_acc and (current_sum - current_min) < total_acc
+                    return current_sum == total_acc
                 
                 v = vals[current_idx]
                 v1 = v & 0xffff
@@ -1005,13 +913,6 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
                     'codes': codes,
                     'values': values,
                 })
-
-            options.append({
-                'bytes': struct.pack('<i', -1),
-                'locs': [],
-                'codes': [],
-                'values': [],
-            })
 
         # 3. 移除指示物大一统解析
         elif msg_type == MSG_SELECT_COUNTER:
@@ -1173,5 +1074,23 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         print(f"⚠️ [参谋部] get_macro_options 解析错误: {e}")
         import traceback
         traceback.print_exc()
-        
+
+    if msg_type in SELECTION_RESPONSE_MSGS:
+        options = [
+            option for option in options
+            if _is_valid_selection_option(msg_type, msg_payload, option)
+        ]
     return options
+
+
+def _is_valid_selection_option(msg_type, msg_payload, option):
+    """只让能够通过 Core 原生约束的完整选择响应进入候选池"""
+    try:
+        validate_selection_response(
+            msg_type,
+            msg_payload,
+            option.get('bytes', b''),
+        )
+        return True
+    except (TypeError, ValueError, OverflowError):
+        return False

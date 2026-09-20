@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.7.0**.
+> This document applies to **Galatea-Core v3.8.1**.
 
 ---
 
@@ -181,6 +181,8 @@ action.decision_bytes = b'...'      # Complete raw Core response
 
 Type 20 follows Core's summed `release_param` rule instead of approximating tribute value by card count. Multi-race/attribute Types 140/141 likewise return an integer mask with exactly `count` bits.
 
+Starting in 3.8.1, Types 20 and 23 expose each candidate's release/dual value to Pass 1 before constructing complete combinations. Type 23 has no Core cancel flag, so its pool no longer invents `-1`. Every Type 15/20/23 package is revalidated against the equivalent Core boundary before reaching the model, and a real cancel package is pinned when the pool is reduced to 120 actions.
+
 ### Type 26: Native Sequential Decisions
 
 Type 26 is not converted into static terminal packages. Arbitrary Lua `special_check` logic exists only inside Core, so one packet cannot reliably enumerate every terminal set; using RuleBot search would change the learning actor and may miss legal paths.
@@ -196,6 +198,8 @@ Model action: Finish
 ```
 
 Every action encodes Select/Unselect/Finish/Cancel semantics, the resulting selected set, candidate code/location, min/max, and finishable/cancelable. Each step becomes its own PPO trajectory row. The network has no recurrent state, but the observation now contains the current selection state, and terminal reward propagates through GAE across the sequence, so MCTS is not required to complete it.
+
+For Type 26, `response_value` is learned metadata only: a physical selection always uses `count=1 + index`, while Finish/Cancel alone uses `int32(-1)`. The terminal action is placed first so an oversized candidate list cannot push it beyond the 120 network slots. Every byte response is finally held in a 512-byte lifetime buffer matching Core's `SIZE_RETURN_VALUE`.
 
 Training retains compact episode-wide visit counts derived from the complete state key, so an A→B→A round-trip such as “enter selection → Cancel/Unselect → return to the original state” is not lost when the intermediate state changes. The first four legal retreats in an identical full state receive no extra penalty; from the fifth Cancel/Unselect, a `-0.005` step reward applies, while ordinary actions retain the tenth-repeat threshold. The action remains legal and PPO continues stochastic sampling—there is no training-time hard mask.
 

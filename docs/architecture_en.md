@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.7.0**.
+> This document applies to **Galatea-Core v3.8.1**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -248,6 +248,7 @@ act_dict = {
     'act_code': [...],       # Candidate/announced card code
     'act_place': [...],      # Placement positions [120, 5]
     'act_operation': [...],  # Yes/No/Select/Unselect/Finish/Cancel semantics
+    'act_summon_method': [...], # Summon category; unknown special summons are explicit
     'act_response': [...],   # Semantic response value
     'act_signature': [...],  # Four-byte stable full-action signature
     'act_context': [...],    # min/max/result count/finish/cancel [120, 6]
@@ -281,6 +282,10 @@ Chain slots 1–12 retain Core insertion order. Each link also encodes card ID, 
 Each card's eight effects also carry explicit slot embeddings. Bit N in `used_effect_mask` can therefore learn a direct relationship with semantic effect N instead of collapsing the Slot Attention input into an unordered effect set.
 
 Action Protocol V2 does not treat `GameAction.index` as learned semantics. `index` and `decision_bytes` only translate the final choice back to Core; the policy sees operation, card code, location, constraints, and resulting selection set. Type 26 retains Core's native sequential Select/Unselect flow, producing a new snapshot and trajectory row at each step. Static combinatorial messages such as Types 15/20/22/23/25 first enumerate complete legal responses and then let the policy choose one.
+
+V4 schema revision 4 maps the six fixed `MSG_SELECT_IDLECMD` lists to normal summon, special summon, reposition, monster set, spell/trap set, and activate instead of labeling all six as activation. `act_operation` and `act_summon_method` are `[120] uint8` fields scoped to the current legal-action snapshot and consumed by the action signature, policy network, ONNX, and replay. Standard Core list ordinals prove only the broad normal/special family; they do not prove Ritual, Fusion, Synchro, Xyz, Pendulum, or Link. Special-summon candidates therefore use `SPECIAL_UNKNOWN` unless a future Core message or verified runtime context supplies direct evidence. Source zone and monster card category may be displayed separately but never become summon-method labels. The normal-summon list likewise does not prove a Tribute subtype; `TRIBUTE` remains reserved for direct evidence.
+
+V4 schema revision 5 fixes each selection state machine against `playerop.cpp`: Type 15 enforces its count range; Type 20 enforces both maximum card count and summed `release_param`; Type 23 carries mandatory placeholders and dual values through Core's Exact/SumGreater boundary and never invents cancellation; Type 26 returns exactly one Select/Unselect index or `int32(-1)` for Finish/Cancel. Types 20/23 now expose Pass-1 material candidates so model preference participates in macro reduction. Type 26 pins its terminal action at the front so the legal exit survives the 120-action fixed shape. The `set_responseb` lifetime buffer now matches Core's fixed 512-byte read, eliminating the former 64-byte truncation and out-of-bounds read.
 
 `MODEL_PROTOCOL_VERSION` is maintained independently from both the framework release and checkpoint-container version. It is embedded in PTH top-level metadata, `net_config`, model state, ONNX metadata, and artifact manifests. A mismatch means the input tensors or action-head weights are incompatible and is rejected.
 

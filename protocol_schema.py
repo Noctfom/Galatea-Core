@@ -10,15 +10,19 @@ from card_vocab import (
     get_default_card_vocabulary,
 )
 from data_types import (
+    ACTION_OPERATION_COUNT,
     GLOBAL_FEATURE_DIM,
     PHASE_CATEGORY_COUNT,
     POSITION_CATEGORY_COUNT,
+    SUMMON_METHOD_COUNT,
     ZONE_CATEGORY_COUNT,
+    ActionOperation,
+    SummonMethod,
 )
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 3
+PROTOCOL_SCHEMA_REVISION = 5
 
 
 def _schema_descriptor(card_vocabulary):
@@ -79,6 +83,58 @@ def _schema_descriptor(card_vocabulary):
             "card_inputs": ["card_zone", "card_position"],
             "chain_inputs": ["c_zone", "c_position"],
             "action_inputs": ["act_location", "act_position"],
+        },
+        "action_semantics": {
+            "operation_input": {
+                "name": "act_operation",
+                "shape": [120],
+                "dtype": "uint8",
+                "categories": ACTION_OPERATION_COUNT,
+                "values": {
+                    operation.name.lower(): int(operation)
+                    for operation in ActionOperation
+                },
+                "visibility": "public_prompt",
+                "source": "core_message_candidate_family",
+                "lifecycle": "current_legal_action_snapshot",
+                "missing_value": int(ActionOperation.DEFAULT),
+                "consumers": [
+                    "action_signature",
+                    "policy_network",
+                    "onnx",
+                    "replay",
+                ],
+            },
+            "summon_method_input": {
+                "name": "act_summon_method",
+                "shape": [120],
+                "dtype": "uint8",
+                "categories": SUMMON_METHOD_COUNT,
+                "values": {
+                    method.name.lower(): int(method)
+                    for method in SummonMethod
+                },
+                "visibility": "public_prompt",
+                "source": "core_message_or_verified_runtime_evidence",
+                "lifecycle": "current_legal_action_snapshot",
+                "missing_value": int(SummonMethod.NONE),
+                "unknown_special_value": int(SummonMethod.SPECIAL_UNKNOWN),
+                "consumers": [
+                    "action_signature",
+                    "policy_network",
+                    "onnx",
+                    "replay",
+                ],
+            },
+            "selection_state_machines": {
+                "iterative_messages": [26],
+                "complete_combination_messages": [15, 20, 23],
+                "type_15_cancel_source": "core_cancelable_flag",
+                "type_20_legality": "max_card_count_and_min_release_value",
+                "type_23_cancelable": False,
+                "type_26_terminal_response": "int32_minus_one",
+                "core_response_buffer_bytes": 512,
+            },
         },
         "inherited_protocol": "galatea_model_protocol_v3",
     }

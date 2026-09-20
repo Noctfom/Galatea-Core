@@ -12,6 +12,8 @@ import random
 import io
 import sys
 
+from selection_protocol import build_core_response_buffer
+
 # --- OCGCore 常量 ---
 LOCATION_DECK = 0x01
 LOCATION_HAND = 0x02
@@ -369,10 +371,11 @@ class GalateaEnv:
         return None
 
     def send_action(self, response):
+        """向 Core 提交整数或固定 512 字节响应，并在调用期间保持缓冲存活"""
         if isinstance(response, int):
             self.lib.set_responsei(self.pduel, ctypes.c_uint32(response))
         elif isinstance(response, (bytes, bytearray)):
-            resp_bytes = bytes(response)[:64].ljust(64, b'\x00')
+            resp_bytes = build_core_response_buffer(response)
 
-            self._lifeline_response = resp_bytes 
+            self._lifeline_response = resp_bytes
             self.lib.set_responseb(self.pduel, self._lifeline_response)

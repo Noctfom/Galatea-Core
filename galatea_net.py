@@ -21,6 +21,7 @@ from data_types import (
     PLAYER_CONTEXT_SLOTS,
     PLAYER_ROLE_COUNT,
     POSITION_CATEGORY_COUNT,
+    SUMMON_METHOD_COUNT,
     ZONE_CATEGORY_COUNT,
 )
 from protocol_schema import (
@@ -360,6 +361,9 @@ class GalateaNet(nn.Module):
         self.action_operation_embed = nn.Embedding(
             ACTION_OPERATION_COUNT, self.d_model, padding_idx=0
         )
+        self.action_summon_method_embed = nn.Embedding(
+            SUMMON_METHOD_COUNT, self.d_model, padding_idx=0
+        )
         self.action_response_embed = nn.Embedding(
             ACTION_RESPONSE_BUCKETS, self.d_model, padding_idx=0
         )
@@ -485,7 +489,15 @@ class GalateaNet(nn.Module):
         slot_v = sem_base_512 + ref_v + race_v + attr_v + slot_position_v
         
         B, N, S, D = slot_v.shape
-        slot_v_flat = slot_v.view(B * N, S, D)           
+        valid_semantic_slots = sem_mask.view(B * N, S)
+        empty_semantic_rows = ~valid_semantic_slots.any(dim=1)
+        # 全掩码注意力在部分 ONNX 后端会产生 NaN；临时开放零值哨兵，聚合后再归零
+        fallback_slot = torch.arange(S, device=sem_mask.device).eq(0).view(1, S)
+        safe_semantic_slots = valid_semantic_slots | (
+            empty_semantic_rows.unsqueeze(1) & fallback_slot
+        )
+        slot_v_flat = slot_v.view(B * N, S, D)
+        slot_v_flat = slot_v_flat * valid_semantic_slots.unsqueeze(-1)
         
         # 【核心】：如果有物理特征传入，用物理特征去查；否则用默认意图查
         if feat_vecs is not None:
@@ -495,7 +507,7 @@ class GalateaNet(nn.Module):
             query = sem_base_512[:, :, 0, :].view(B * N, 1, D)
         
         # 【核心】：构建 Padding Mask，屏蔽全 0 的无效效果槽
-        key_padding_mask = ~(sem_mask.view(B * N, S)) # PyTorch中True代表忽略
+        key_padding_mask = ~safe_semantic_slots # PyTorch中True代表忽略
 
         attn_out, _ = self.slot_attention(
             query, slot_v_flat, slot_v_flat, 
@@ -503,6 +515,10 @@ class GalateaNet(nn.Module):
         )
         
         card_sem_v = self.final_slot_norm(attn_out.view(B, N, D))
+        card_sem_v = card_sem_v.masked_fill(
+            empty_semantic_rows.view(B, N, 1),
+            0.0,
+        )
         if return_slots:
             return card_sem_v, slot_v
         return card_sem_v
@@ -728,6 +744,9 @@ class GalateaNet(nn.Module):
         operation_vecs = self.action_operation_embed(
             batch_dict['act_operation'].long()
         )
+        summon_method_vecs = self.action_summon_method_embed(
+            batch_dict['act_summon_method'].long()
+        )
         response_vecs = self.action_response_embed(
             batch_dict['act_response'].long()
         )
@@ -771,6 +790,7 @@ class GalateaNet(nn.Module):
             + action_effect_vecs
             + place_vecs
             + operation_vecs
+            + summon_method_vecs
             + response_vecs
             + signature_vecs
             + context_vecs

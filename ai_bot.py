@@ -9,6 +9,7 @@ import os
 import random
 import struct
 from checkpoint_utils import load_training_checkpoint
+from selection_protocol import SELECTION_RESPONSE_MSGS, validate_selection_response
 # 引入桥接后的 FeatureEncoder
 try:
     from feature_encoder import GalateaEncoder as FeatureEncoder
@@ -119,8 +120,15 @@ class AiBot:
         # 如果有 decision_bytes，说明这是经过 RuleBot 完美打包的套餐，直接透传
         # ==========================================================
         if hasattr(action, 'decision_bytes') and action.decision_bytes:
-            return action.decision_bytes
-        if getattr(action, 'decision_value', None) is not None:
+            response = action.decision_bytes
+            if msg_type in SELECTION_RESPONSE_MSGS and msg_args is not None:
+                validate_selection_response(msg_type, msg_args, response)
+            return response
+        # 字节选择消息的 response_value 只是候选语义，不能误走 set_responsei
+        if (
+            getattr(action, 'decision_value', None) is not None
+            and msg_type not in SELECTION_RESPONSE_MSGS
+        ):
             return int(action.decision_value)
         # ==========================================================
         # 1. 整型槽类 (调用 C++ set_responsei) - 绝对不能返回 bytes
@@ -140,11 +148,21 @@ class AiBot:
         # 包含: 15(SelectCard), 20(Tribute), 22(Counter), 26(Unselect)
         # ==========================================================
         elif msg_type in [15, 20, 22, 26]:
-            if action.index < 0 or action.index > 255:
+            if action.index < 0:
                 # Cancel 指令 (-1)，转换为 4 字节的 0xFFFFFFFF
-                return int(-1).to_bytes(4, byteorder='little', signed=True)
+                response = int(-1).to_bytes(4, byteorder='little', signed=True)
+                if msg_type in SELECTION_RESPONSE_MSGS and msg_args is not None:
+                    validate_selection_response(msg_type, msg_args, response)
+                return response
+            if action.index > 255:
+                raise ValueError(
+                    f"Type {msg_type} 的响应索引 {action.index} 超出单字节协议范围"
+                )
             # 兜底：数量(Count)=1, 后接选中的索引
-            return bytes([1, action.index]) 
+            response = bytes([1, action.index])
+            if msg_type in SELECTION_RESPONSE_MSGS and msg_args is not None:
+                validate_selection_response(msg_type, msg_args, response)
+            return response
         
         # ==========================================================
         # 3. 物理格子类 (Place / Disfield) - 严格的 3 字节

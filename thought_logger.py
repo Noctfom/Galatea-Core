@@ -6,7 +6,7 @@ import os
 import struct
 
 from card_reader import card_db
-from data_types import ActionOperation
+from data_types import ActionOperation, SummonMethod
 from game_constants import LocationInfo, Phases, Zone
 
 
@@ -52,6 +52,26 @@ _OPERATION_NAMES = {
     int(ActionOperation.MACRO_SELECT): "组合选择",
     int(ActionOperation.MACRO_SORT): "排序",
     int(ActionOperation.REMOVE_COUNTER): "移除指示物",
+    int(ActionOperation.NORMAL_SUMMON): "通常召唤",
+    int(ActionOperation.SPECIAL_SUMMON): "特殊召唤",
+    int(ActionOperation.CHANGE_POSITION): "改变表示形式",
+    int(ActionOperation.MONSTER_SET): "盖放怪兽",
+    int(ActionOperation.SPELL_TRAP_SET): "盖放魔陷",
+    int(ActionOperation.TRIBUTE_SUMMON): "上级召唤",
+}
+
+_SUMMON_METHOD_NAMES = {
+    int(SummonMethod.NONE): "",
+    int(SummonMethod.NORMAL): "通常召唤",
+    int(SummonMethod.TRIBUTE): "上级召唤",
+    int(SummonMethod.SPECIAL_UNKNOWN): "特殊召唤（具体方式未知）",
+    int(SummonMethod.RITUAL): "仪式召唤",
+    int(SummonMethod.FUSION): "融合召唤",
+    int(SummonMethod.SYNCHRO): "同调召唤",
+    int(SummonMethod.XYZ): "超量召唤",
+    int(SummonMethod.PENDULUM): "灵摆召唤",
+    int(SummonMethod.LINK): "连接召唤",
+    int(SummonMethod.OTHER_SPECIAL): "其他特殊召唤",
 }
 
 _EXTRA_SUMMON_TYPES = (
@@ -78,8 +98,8 @@ def _card_name(code):
         return str(pure_code)
 
 
-def _get_special_summon_details(action):
-    """按候选来源与卡片类型生成特殊召唤方式、卡名和可读说明。"""
+def _get_summon_details(action):
+    """按协议证据生成召唤方式，卡片类型只作类别展示而不推断方式"""
     code = _pure_code(getattr(action, "code", 0))
     card_name = _card_name(code)
     raw_location = int(getattr(action, "target_location_raw", -1))
@@ -90,21 +110,21 @@ def _get_special_summon_details(action):
         except (TypeError, ValueError, struct.error):
             location = 0
 
-    summon_method = "特殊召唤"
-    if location == Zone.EXTRA and code:
-        try:
-            card_type = int(card_db.get_full_stats(code)[0] or 0)
-        except Exception:
-            card_type = 0
-        summon_method = next(
-            (name for type_flag, name in _EXTRA_SUMMON_TYPES if card_type & type_flag),
-            "从额外卡组特殊召唤",
-        )
-    elif location:
-        source = _ZONE_NAMES.get(location, f"区域 {location}")
-        summon_method = f"从{source}特殊召唤"
-
-    return summon_method, card_name, f"尝试{summon_method} {card_name}"
+    method_id = int(getattr(action, "summon_method_id", SummonMethod.NONE))
+    if method_id == int(SummonMethod.NONE) and int(
+        getattr(action, "action_type", -1)
+    ) == 1:
+        method_id = int(SummonMethod.SPECIAL_UNKNOWN)
+    summon_method = _SUMMON_METHOD_NAMES.get(method_id, "未知召唤方式")
+    source = _ZONE_NAMES.get(location, f"区域 {location}") if location else ""
+    card_category = _get_extra_monster_category(code) if location == Zone.EXTRA else ""
+    notes = []
+    if source:
+        notes.append(f"来源：{source}")
+    if card_category:
+        notes.append(f"卡片类别：{card_category}")
+    note_text = f"（{'；'.join(notes)}）" if notes else ""
+    return summon_method, card_name, f"尝试{summon_method} {card_name}{note_text}"
 
 
 def _get_extra_monster_category(code):
@@ -228,7 +248,7 @@ def _describe_action(action, msg_type):
     if msg_type == 11:
         card_name = _card_name(getattr(action, "code", 0))
         if action_type == 1:
-            return _get_special_summon_details(action)[2]
+            return _get_summon_details(action)[2]
         return {
             0: f"通常召唤 {card_name}", 2: f"改变 {card_name} 的表示形式",
             3: f"盖放怪兽 {card_name}", 4: f"盖放魔陷 {card_name}",
@@ -320,8 +340,25 @@ def _serialize_action(snapshot, action, msg_type):
     }
     if msg_type == 11 and action_type in (0, 1, 2, 3, 4, 5):
         semantic["card_name"] = _card_name(getattr(action, "code", 0))
-    if msg_type == 11 and action_type == 1:
-        semantic["summon_method"] = _get_special_summon_details(action)[0]
+    if msg_type == 11 and action_type in (0, 1):
+        method_id = int(getattr(action, "summon_method_id", SummonMethod.NONE))
+        if method_id == int(SummonMethod.NONE) and action_type == 1:
+            method_id = int(SummonMethod.SPECIAL_UNKNOWN)
+        summon_method, _, _ = _get_summon_details(action)
+        semantic["summon_method_id"] = method_id
+        semantic["summon_method"] = summon_method
+        raw_location = int(getattr(action, "target_location_raw", -1))
+        if raw_location >= 0:
+            _, summon_location, _, _ = LocationInfo.decode(raw_location)
+            semantic["summon_source"] = _ZONE_NAMES.get(
+                summon_location,
+                f"区域 {summon_location}",
+            )
+            category = _get_extra_monster_category(
+                getattr(action, "code", 0)
+            ) if summon_location == Zone.EXTRA else ""
+            if category:
+                semantic["summoned_card_category"] = category
     return {
         "index": int(getattr(action, "index", -1)),
         "desc": _describe_action(action, msg_type),

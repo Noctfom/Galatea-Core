@@ -18,6 +18,7 @@ from data_types import (
     GameAction,
     GameSnapshot,
     GlobalFeature,
+    SummonMethod,
 )
 from protocol_v3_audit import record_protocol_chain, record_protocol_message
 from effect_slot_binding import resolve_runtime_effect_slot
@@ -26,6 +27,24 @@ _META_STAPLES = None
 
 # 内核协议开关：默认为 True (读取16/31幽灵字节)
 CORE_HAS_GHOST_BYTE = True
+
+# Idle Command 的六个列表顺序由 Core 协议固定，不从卡片类型反推操作
+_IDLE_COMMAND_OPERATIONS = (
+    ActionOperation.NORMAL_SUMMON,
+    ActionOperation.SPECIAL_SUMMON,
+    ActionOperation.CHANGE_POSITION,
+    ActionOperation.MONSTER_SET,
+    ActionOperation.SPELL_TRAP_SET,
+    ActionOperation.ACTIVATE,
+)
+_IDLE_COMMAND_SUMMON_METHODS = (
+    SummonMethod.NORMAL,
+    SummonMethod.SPECIAL_UNKNOWN,
+    SummonMethod.NONE,
+    SummonMethod.NONE,
+    SummonMethod.NONE,
+    SummonMethod.NONE,
+)
 
 class MessageParser:
     # 基于源码的精确长度定义 (Payload长度)
@@ -724,7 +743,11 @@ class DuelState:
                             l = struct.unpack('<B', raw_bytes[5:6])[0]
                             s = struct.unpack('<B', raw_bytes[6:7])[0]
                             desc = 0
-                        
+
+                        field_only = bool(code & 0x80000000)
+                        code &= 0x7FFFFFFF
+                        response_value = (i << 16) | at
+
                         loc_raw = LocationInfo.encode(c, l, s, 0)
                         self.current_valid_actions.append(
                             GameAction(
@@ -733,8 +756,13 @@ class DuelState:
                                 target_entity_idx=loc_raw,
                                 desc_id=desc,
                                 code=code,
-                                operation_id=int(ActionOperation.ACTIVATE),
+                                operation_id=int(_IDLE_COMMAND_OPERATIONS[at]),
+                                summon_method_id=int(
+                                    _IDLE_COMMAND_SUMMON_METHODS[at]
+                                ),
+                                response_value=response_value,
                                 target_location_raw=loc_raw,
+                                prompt_flags=int(field_only),
                             )
                         )
                 
@@ -756,6 +784,7 @@ class DuelState:
                         index=0,
                         desc_str="To BP",
                         operation_id=int(ActionOperation.PHASE),
+                        response_value=6,
                     ))
                 if ep:
                     self.current_valid_actions.append(GameAction(
@@ -763,6 +792,7 @@ class DuelState:
                         index=0,
                         desc_str="To EP",
                         operation_id=int(ActionOperation.PHASE),
+                        response_value=7,
                     ))
                 if can_shuffle:
                     self.current_valid_actions.append(GameAction(
@@ -770,6 +800,7 @@ class DuelState:
                         index=0,
                         desc_str="Shuffle Hand",
                         operation_id=int(ActionOperation.SHUFFLE),
+                        response_value=8,
                     ))
 
             # 2. MSG_SELECT_CHAIN (16)
@@ -855,7 +886,7 @@ class DuelState:
                     )
                     self.current_valid_actions.append(act)
 
-                if can_cancel or count == 0:
+                if can_cancel:
                     self.current_valid_actions.append(GameAction(
                         action_type=15,
                         index=-1,
@@ -865,8 +896,91 @@ class DuelState:
                         selection_max=max_count,
                         cancelable=bool(can_cancel),
                     ))
+
+            # 4. MSG_SELECT_TRIBUTE (20)
+            # 结构与 Type 15 同为 8 字节候选，但末字节是解放值而不是表示形式
+            elif msg_type == 20:
+                stream.read(1) # P
+                can_cancel = struct.unpack('<B', stream.read(1))[0]
+                min_value = struct.unpack('<B', stream.read(1))[0]
+                max_count = struct.unpack('<B', stream.read(1))[0]
+                count = struct.unpack('<B', stream.read(1))[0]
+
+                for i in range(count):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    controller = struct.unpack('<B', stream.read(1))[0]
+                    location = struct.unpack('<B', stream.read(1))[0]
+                    sequence = struct.unpack('<B', stream.read(1))[0]
+                    release_value = struct.unpack('<B', stream.read(1))[0]
+                    loc_val = LocationInfo.encode(controller, location, sequence, 0)
+                    self.current_valid_actions.append(GameAction(
+                        action_type=20,
+                        index=i,
+                        target_entity_idx=loc_val,
+                        desc_str=f"Tribute {code} (value={release_value})",
+                        code=code,
+                        operation_id=int(ActionOperation.SELECT),
+                        response_value=i,
+                        target_location_raw=loc_val,
+                        selection_min=min_value,
+                        selection_max=max_count,
+                        selection_count=1,
+                        cancelable=bool(can_cancel),
+                        context_value=release_value,
+                        macro_target_values=[release_value],
+                    ))
+
+                if can_cancel:
+                    self.current_valid_actions.append(GameAction(
+                        action_type=20,
+                        index=-1,
+                        desc_str="Cancel",
+                        operation_id=int(ActionOperation.CANCEL),
+                        selection_min=min_value,
+                        selection_max=max_count,
+                        cancelable=True,
+                    ))
+
+            # 5. MSG_SELECT_SUM (23)
+            # 必选卡由 Core 自动纳入结果，Pass1 只评价仍可选择的素材
+            elif msg_type == 23:
+                mode = struct.unpack('<B', stream.read(1))[0]
+                stream.read(1) # P
+                target_value = struct.unpack('<I', stream.read(4))[0]
+                min_count = struct.unpack('<B', stream.read(1))[0]
+                max_count = struct.unpack('<B', stream.read(1))[0]
+                must_count = struct.unpack('<B', stream.read(1))[0]
+
+                for _ in range(must_count):
+                    stream.read(11)
+
+                count = struct.unpack('<B', stream.read(1))[0]
+                for i in range(count):
+                    code = struct.unpack('<I', stream.read(4))[0]
+                    controller = struct.unpack('<B', stream.read(1))[0]
+                    location = struct.unpack('<B', stream.read(1))[0]
+                    sequence = struct.unpack('<B', stream.read(1))[0]
+                    sum_value = struct.unpack('<I', stream.read(4))[0]
+                    loc_val = LocationInfo.encode(controller, location, sequence, 0)
+                    self.current_valid_actions.append(GameAction(
+                        action_type=23,
+                        index=i,
+                        target_entity_idx=loc_val,
+                        desc_str=f"Sum Material {code} (value={sum_value})",
+                        code=code,
+                        operation_id=int(ActionOperation.SELECT),
+                        response_value=i,
+                        target_location_raw=loc_val,
+                        selection_min=min_count,
+                        selection_max=max_count,
+                        selection_count=1,
+                        context_value=target_value,
+                        prompt_flags=mode,
+                        prompt_value=must_count,
+                        macro_target_values=[sum_value],
+                    ))
             
-            # 4. MSG_SELECT_BATTLECMD (10)
+            # 6. MSG_SELECT_BATTLECMD (10)
             elif msg_type == 10:
                 stream.read(1) # Player
                 
@@ -1100,6 +1214,13 @@ class DuelState:
                     loc_val = struct.unpack('<I', stream.read(4))[0]
                     selected_cards.append((code, loc_val))
 
+                # Type 26 的返回索引只有一个字节，组合列表不得产生不可寻址动作
+                if count_sel + count_unsel > 256:
+                    raise RuntimeError(
+                        "Type 26 候选总数超过单字节可寻址上限: "
+                        f"select={count_sel}, unselect={count_unsel}"
+                    )
+
                 selected_codes = [code for code, _ in selected_cards]
                 selected_locations = [location for _, location in selected_cards]
                 for i, (code, loc_val) in enumerate(selectable_cards):
@@ -1146,8 +1267,9 @@ class DuelState:
                         macro_target_codes=[result_code for result_code, _ in result_cards],
                     ))
 
+                terminal_action = None
                 if finishable:
-                    self.current_valid_actions.append(GameAction(
+                    terminal_action = GameAction(
                         action_type=26,
                         index=-1,
                         desc_str="Finish",
@@ -1160,9 +1282,9 @@ class DuelState:
                         macro_targets=selected_locations,
                         macro_target_locations=selected_locations,
                         macro_target_codes=selected_codes,
-                    ))
+                    )
                 elif cancelable:
-                    self.current_valid_actions.append(GameAction(
+                    terminal_action = GameAction(
                         action_type=26,
                         index=-1,
                         desc_str="Cancel",
@@ -1174,7 +1296,10 @@ class DuelState:
                         macro_targets=selected_locations,
                         macro_target_locations=selected_locations,
                         macro_target_codes=selected_codes,
-                    ))
+                    )
+                if terminal_action is not None:
+                    # 控制动作固定置顶，候选超过网络上限时也不会丢失完成/取消出口
+                    self.current_valid_actions.insert(0, terminal_action)
 
             # =================================================================
             # [阶段一追加] 9. 宣言类消息解析

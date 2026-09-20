@@ -8,13 +8,18 @@ import rule_bot
 from data_types import ActionOperation, GameAction
 from feature_encoder import MAX_ACTIONS
 from game_constants import LocationInfo
+from selection_protocol import (
+    CANCEL_RESPONSE,
+    SELECTION_RESPONSE_MSGS,
+    is_selection_response_valid,
+    parse_selection_prompt,
+)
 
 
 MACRO_ACTION_MSGS = frozenset({15, 18, 20, 22, 23, 24, 25, 140, 141})
 MODEL_ACTION_MSGS = frozenset(
     {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143}
 )
-_CANCEL_RESPONSE = b"\xff\xff\xff\xff"
 MIN_MACRO_OPTION_WEIGHT = 1e-4
 
 
@@ -33,6 +38,8 @@ def _read_macro_constraints(msg_type, msg_payload):
         "selection_max": 0,
         "cancelable": False,
         "context_value": 0,
+        "prompt_flags": 0,
+        "prompt_value": 0,
     }
     if msg_type in (15, 20) and len(payload) >= 4:
         constraints.update(
@@ -46,7 +53,14 @@ def _read_macro_constraints(msg_type, msg_payload):
         quantity = struct.unpack('<H', payload[3:5])[0]
         constraints.update(context_value=quantity)
     elif msg_type == 23 and len(payload) >= 8:
-        constraints.update(selection_min=payload[6], selection_max=payload[7])
+        prompt = parse_selection_prompt(msg_type, payload)
+        constraints.update(
+            selection_min=prompt["minimum"],
+            selection_max=prompt["maximum"],
+            context_value=prompt["target"],
+            prompt_flags=prompt["mode"],
+            prompt_value=len(prompt["mandatory"]),
+        )
     elif msg_type in (25, 140, 141) and len(payload) >= 2:
         constraints.update(selection_min=payload[1], selection_max=payload[1])
         if msg_type in (140, 141):
@@ -181,6 +195,22 @@ def build_macro_action_pool(
         limit=option_limit,
         pref_weights=code_preferences,
     )
+    if msg_type in SELECTION_RESPONSE_MSGS:
+        valid_options = [
+            option for option in options
+            if is_selection_response_valid(
+                msg_type,
+                msg_payload,
+                option.get("bytes", b""),
+            )
+        ]
+        invalid_count = len(options) - len(valid_options)
+        if invalid_count:
+            print(
+                f"⚠️ [选择协议] Type {msg_type} 过滤了 "
+                f"{invalid_count} 个不满足 Core 约束的宏动作"
+            )
+        options = valid_options
     if not options:
         return []
 
@@ -191,7 +221,7 @@ def build_macro_action_pool(
         # 给每个合法组合保留最低探索权重，避免低分选项被永久排除
         score = MIN_MACRO_OPTION_WEIGHT
 
-        if response == _CANCEL_RESPONSE:
+        if response == CANCEL_RESPONSE:
             score += 0.05
         elif option.get("places"):
             score += sum(
@@ -224,21 +254,34 @@ def build_macro_action_pool(
         scored_options.append((option, score))
 
     if len(scored_options) > max_actions:
-        weights = np.asarray([score for _, score in scored_options], dtype=np.float64)
+        # 取消属于协议出口，固定保留；其余候选再按模型权重无放回采样
+        pinned_options = [
+            item for item in scored_options
+            if bytes(item[0].get("bytes", b"")) == CANCEL_RESPONSE
+        ][:1]
+        sampled_options = [
+            item for item in scored_options
+            if bytes(item[0].get("bytes", b"")) != CANCEL_RESPONSE
+        ]
+        sample_count = max(0, max_actions - len(pinned_options))
+        weights = np.asarray([score for _, score in sampled_options], dtype=np.float64)
         weight_sum = weights.sum()
         if weight_sum <= 0 or not np.isfinite(weight_sum):
-            weights = np.full(len(scored_options), 1.0 / len(scored_options))
+            weights = np.full(len(sampled_options), 1.0 / len(sampled_options))
         else:
             weights /= weight_sum
 
         chooser = rng if rng is not None else np.random
         selected_indices = chooser.choice(
-            len(scored_options),
-            size=max_actions,
+            len(sampled_options),
+            size=sample_count,
             replace=False,
             p=weights,
         )
-        selected_options = [scored_options[int(index)][0] for index in selected_indices]
+        selected_options = [option for option, _ in pinned_options]
+        selected_options.extend(
+            sampled_options[int(index)][0] for index in selected_indices
+        )
     else:
         selected_options = [option for option, _ in scored_options]
 
@@ -246,8 +289,8 @@ def build_macro_action_pool(
     for pool_index, option in enumerate(selected_options):
         response = bytes(option.get("bytes", b""))
         response_value = option.get("value")
-        description = "Cancel" if response == _CANCEL_RESPONSE else f"Macro Action {pool_index}"
-        if response == _CANCEL_RESPONSE:
+        description = "Cancel" if response == CANCEL_RESPONSE else f"Macro Action {pool_index}"
+        if response == CANCEL_RESPONSE:
             operation = ActionOperation.CANCEL
         elif msg_type == 25:
             operation = ActionOperation.MACRO_SORT
@@ -278,6 +321,8 @@ def build_macro_action_pool(
                 selection_count=selected_count,
                 cancelable=macro_constraints["cancelable"],
                 context_value=macro_constraints["context_value"],
+                prompt_flags=macro_constraints["prompt_flags"],
+                prompt_value=macro_constraints["prompt_value"],
                 macro_targets=locations or None,
                 macro_places=places or None,
                 macro_target_codes=codes or None,

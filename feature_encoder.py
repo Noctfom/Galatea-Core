@@ -7,6 +7,7 @@ import numpy as np
 from card_vocab import get_default_card_vocabulary
 from data_types import (
     ACTION_CONTEXT_DIM,
+    ACTION_OPERATION_COUNT,
     ACTION_RESPONSE_BUCKETS,
     ACTION_SIGNATURE_BYTES,
     ACTION_TARGET_SLOTS,
@@ -16,6 +17,7 @@ from data_types import (
     PHASE_CATEGORY_COUNT,
     PLAYER_CONTEXT_SLOTS,
     POSITION_CATEGORY_COUNT,
+    SUMMON_METHOD_COUNT,
     ZONE_CATEGORY_COUNT,
     GameSnapshot,
 )
@@ -95,6 +97,7 @@ class GalateaEncoder:
         values = [
             action.action_type,
             getattr(action, 'operation_id', 0),
+            getattr(action, 'summon_method_id', 0),
             getattr(action, 'response_value', None),
             getattr(action, 'desc_id', 0),
             getattr(action, 'code', 0),
@@ -333,7 +336,7 @@ class GalateaEncoder:
         max_materials = ACTION_TARGET_SLOTS
         act_card_idxs, act_types, act_descs, act_effect_slots, masks = [], [], [], [], []
         act_races, act_attrs, act_codes, act_places = [], [], [], []
-        act_operations, act_responses, act_signatures = [], [], []
+        act_operations, act_summon_methods, act_responses, act_signatures = [], [], [], []
         act_contexts, act_target_codes, act_target_values = [], [], []
         act_controllers, act_locations, act_sequences, act_positions = [], [], [], []
 
@@ -373,7 +376,16 @@ class GalateaEncoder:
             effect_slot = int(getattr(act, 'effect_slot', -1))
             act_effect_slots.append(effect_slot + 1 if 0 <= effect_slot < 8 else 0)
             masks.append(True)
-            act_operations.append(int(getattr(act, 'operation_id', 0)))
+            operation_id = int(getattr(act, 'operation_id', 0))
+            if not 0 <= operation_id < ACTION_OPERATION_COUNT:
+                raise ValueError(f"action operation id is out of range: {operation_id}")
+            summon_method_id = int(getattr(act, 'summon_method_id', 0))
+            if not 0 <= summon_method_id < SUMMON_METHOD_COUNT:
+                raise ValueError(
+                    f"summon method id is out of range: {summon_method_id}"
+                )
+            act_operations.append(operation_id)
+            act_summon_methods.append(summon_method_id)
             act_responses.append(
                 self._hash_action_response(getattr(act, 'response_value', None))
             )
@@ -420,6 +432,7 @@ class GalateaEncoder:
             act_attrs.extend([0] * pad_len)
             act_codes.extend([0] * pad_len)
             act_operations.extend([0] * pad_len)
+            act_summon_methods.extend([0] * pad_len)
             act_responses.extend([0] * pad_len)
             act_signatures.extend([[0] * ACTION_SIGNATURE_BYTES] * pad_len)
             act_contexts.extend([[0.0] * ACTION_CONTEXT_DIM] * pad_len)
@@ -441,6 +454,7 @@ class GalateaEncoder:
             'act_code': torch.tensor(act_codes, dtype=torch.long).unsqueeze(0),
             'act_place': torch.tensor(act_places, dtype=torch.long).unsqueeze(0),
             'act_operation': torch.tensor(act_operations, dtype=torch.uint8).unsqueeze(0),
+            'act_summon_method': torch.tensor(act_summon_methods, dtype=torch.uint8).unsqueeze(0),
             'act_response': torch.tensor(act_responses, dtype=torch.int16).unsqueeze(0),
             'act_signature': torch.tensor(act_signatures, dtype=torch.uint8).unsqueeze(0),
             'act_context': torch.tensor(act_contexts, dtype=torch.float16).unsqueeze(0),
