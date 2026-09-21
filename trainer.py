@@ -53,6 +53,12 @@ from checkpoint_utils import (
     validate_training_checkpoint,
 )
 from protocol_schema import apply_current_protocol_metadata, get_current_protocol_metadata
+from deck_trajectory import (
+    DECK_STATIC_OBSERVATION_KEYS,
+    DeckProfileCatalog,
+    is_deck_static_observation,
+    reconstruct_deck_static_observations,
+)
 from inference_protocol import (
     InferenceProtocolError,
     decode_inference_request,
@@ -168,11 +174,18 @@ def estimate_rollout_commit_requirement(
 ):
     """估算全部 Worker 轨迹池、进程基础空间和 Trainer 安全余量"""
     bytes_per_step = 0
-    for shape, dtype in input_specs.values():
+    uses_deck_profile_index = False
+    for key, (shape, dtype) in input_specs.items():
+        if is_deck_static_observation(key):
+            uses_deck_profile_index = True
+            continue
         elements = 1
         for dimension in shape:
             elements *= int(dimension)
         bytes_per_step += elements * torch.empty((), dtype=dtype).element_size()
+    if uses_deck_profile_index:
+        # Worker 轨迹不再逐步复制三组静态字段，仅保存一个 int32 画像引用。
+        bytes_per_step += torch.empty((), dtype=torch.int32).element_size()
 
     max_worker_steps = int(steps_per_worker) + MAX_EPISODE_STEPS + 100
     rollout_pool_bytes = bytes_per_step * max_worker_steps * int(num_workers)
@@ -466,6 +479,7 @@ class PPOTrainer:
         # [静态内存池] 预先设定最大容量，彻底消灭内存碎片
         self.buffer_allocated = False
         self.merged_memory = None
+        self.deck_profile_catalog = None
         # 容量 = 目标步数 + 容错余量
         self.max_buffer_steps = self.update_timesteps + (self.num_workers * 1000)
 
@@ -667,6 +681,7 @@ class PPOTrainer:
     def _release_merged_memory_pool(self):
         """在最终关闭或采集内存告急时释放可重建的 CPU 轨迹合并池"""
         self.merged_memory = None
+        self.deck_profile_catalog = None
         self.buffer_allocated = False
         gc.collect()
 
@@ -874,6 +889,8 @@ class PPOTrainer:
             return None
         
         print(f"⚡ 正在合并 {len(file_list)} 个数据块...")
+        # 每轮重新建立小型画像目录，索引只在本轮 PPO 轨迹内有效
+        self.deck_profile_catalog = DeckProfileCatalog()
         
         total_rewards = []
         total_lens = []
@@ -896,6 +913,23 @@ class PPOTrainer:
                 # 1. 仅将当前 1 个 Worker 的数据加载到物理内存
                 data = torch.load(f, map_location='cpu', weights_only=True)
                 s = data['action'].shape[0]
+                profile_remap = self.deck_profile_catalog.merge_bundle(
+                    data['deck_profiles']
+                )
+                local_profile_indices = data['deck_profile_index'].long().reshape(-1)
+                if local_profile_indices.numel() != s:
+                    raise ValueError(
+                        "deck_profile_index length does not match rollout steps"
+                    )
+                if (
+                    local_profile_indices.numel() > 0
+                    and (
+                        int(local_profile_indices.min()) < 0
+                        or int(local_profile_indices.max()) >= profile_remap.numel()
+                    )
+                ):
+                    raise ValueError("Worker deck profile index is out of range")
+                global_profile_indices = profile_remap[local_profile_indices]
 
                 # 2. 提取并累加统计信息
                 r = data.get('avg_rew', np.array([0.0]))[0]
@@ -930,6 +964,10 @@ class PPOTrainer:
                     self.merged_memory['log_prob'] = torch.empty(self.max_buffer_steps, dtype=data['log_prob'].dtype)
                     self.merged_memory['return'] = torch.empty(self.max_buffer_steps, dtype=data['return'].dtype)
                     self.merged_memory['advantage'] = torch.empty(self.max_buffer_steps, dtype=data['advantage'].dtype)
+                    self.merged_memory['deck_profile_index'] = torch.empty(
+                        self.max_buffer_steps,
+                        dtype=torch.int32,
+                    )
                     
                     for k, v in data['obs'].items():
                         shape = list(v.shape)
@@ -955,6 +993,9 @@ class PPOTrainer:
                 self.merged_memory['log_prob'][cursor:cursor+s] = data['log_prob'][:s]
                 self.merged_memory['return'][cursor:cursor+s] = data['return'][:s]
                 self.merged_memory['advantage'][cursor:cursor+s] = data['advantage'][:s]
+                self.merged_memory['deck_profile_index'][cursor:cursor+s] = (
+                    global_profile_indices[:s]
+                )
                 
                 for k in self.merged_memory['obs'].keys():
                     self.merged_memory['obs'][k][cursor:cursor+s] = data['obs'][k][:s]
@@ -1209,6 +1250,59 @@ class PPOTrainer:
         cpu_returns = self.merged_memory['return'][:total_steps]
         cpu_advantages = self.merged_memory['advantage'][:total_steps]
 
+        present_static_deck_fields = (
+            DECK_STATIC_OBSERVATION_KEYS.intersection(cpu_obs)
+        )
+        if present_static_deck_fields and (
+            present_static_deck_fields != DECK_STATIC_OBSERVATION_KEYS
+        ):
+            raise RuntimeError(
+                "PPO deck observation contains only part of the static fields"
+            )
+        rebuild_static_deck_fields = (
+            not present_static_deck_fields
+            and "deck_idx" in cpu_obs
+        )
+        device_deck_metadata = None
+        if rebuild_static_deck_fields:
+            if "deck_mask" not in cpu_obs:
+                raise RuntimeError("compressed PPO deck observation is missing deck_mask")
+            if self.deck_profile_catalog is None:
+                raise RuntimeError("compressed PPO rollout has no deck profile catalog")
+            if "deck_profile_index" not in self.merged_memory:
+                raise RuntimeError("compressed PPO rollout has no deck profile index")
+
+            profile_references = self.merged_memory['deck_profile_index'][:total_steps]
+            self.deck_profile_catalog.validate_references(profile_references)
+            deck_metadata = self.deck_profile_catalog.build_metadata_lookup(
+                self.net_config['vocab_size']
+            )
+
+            active_tokens = cpu_obs['deck_idx'][:total_steps][
+                cpu_obs['deck_mask'][:total_steps].bool()
+            ].long()
+            if active_tokens.numel() > 0:
+                if (
+                    int(active_tokens.min()) < 0
+                    or int(active_tokens.max()) >= deck_metadata['known'].numel()
+                ):
+                    raise RuntimeError(
+                        "compressed PPO deck token is outside the vocabulary"
+                    )
+                unknown_tokens = active_tokens[
+                    ~deck_metadata['known'][active_tokens]
+                ].unique()
+                if unknown_tokens.numel() > 0:
+                    raise RuntimeError(
+                        "compressed PPO deck metadata is incomplete for tokens: "
+                        f"{unknown_tokens[:16].tolist()}"
+                    )
+            device_deck_metadata = {
+                key: value.to(self.device)
+                for key, value in deck_metadata.items()
+                if key != 'known'
+            }
+
         # 全局优势归一化，稳定训练方向
         if len(cpu_advantages) > 1:
             adv_mean = cpu_advantages.mean()
@@ -1232,6 +1326,23 @@ class PPOTrainer:
                 gpu_mb_obs[k] = torch.zeros_like(dummy_slice, device=self.device, dtype=torch.bool)
             else:
                 gpu_mb_obs[k] = torch.zeros_like(dummy_slice, device=self.device, dtype=torch.long)
+        if rebuild_static_deck_fields:
+            deck_shape = tuple(gpu_mb_obs['deck_idx'].shape)
+            gpu_mb_obs['deck_race'] = torch.zeros(
+                deck_shape,
+                dtype=torch.long,
+                device=self.device,
+            )
+            gpu_mb_obs['deck_attr'] = torch.zeros(
+                deck_shape,
+                dtype=torch.long,
+                device=self.device,
+            )
+            gpu_mb_obs['deck_setcodes'] = torch.zeros(
+                (*deck_shape, 4),
+                dtype=torch.long,
+                device=self.device,
+            )
         
         # 其他零散张量也预分配
         gpu_actions = torch.zeros(self.mini_batch_size, dtype=torch.long, device=self.device)
@@ -1253,6 +1364,14 @@ class PPOTrainer:
                         v[mb_idx],
                         non_blocking=self.transfer_non_blocking,
                     )
+                if rebuild_static_deck_fields:
+                    # 仅在网络前向前按 token 重建旧字段，保持模型输入逐值不变
+                    rebuilt_deck_fields = reconstruct_deck_static_observations(
+                        gpu_mb_obs['deck_idx'],
+                        device_deck_metadata,
+                    )
+                    for key, value in rebuilt_deck_fields.items():
+                        gpu_mb_obs[key].copy_(value)
 
                 gpu_actions.copy_(cpu_actions[mb_idx], non_blocking=self.transfer_non_blocking)
                 gpu_old_log_probs.copy_(cpu_log_probs[mb_idx], non_blocking=self.transfer_non_blocking)

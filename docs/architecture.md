@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.10.0**。
+> 文档适用于 **Galatea-Core v3.10.1**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -80,6 +80,7 @@ Galatea-Core 采用模块化设计，由以下核心子系统构成：
 | `galatea_env.py` | 环境层 | OCGCore 环境封装 |
 | `gamestate.py` | 环境层 | 游戏状态解析（核心！） |
 | `deck_protocol.py` | 协议层 | 完整构筑、单局卡组画像与 BO3 上层边界 |
+| `deck_trajectory.py` | 轨迹层 | Worker 卡组画像目录、索引重映射与旧网络字段无损重建 |
 | `trainer.py` | 应用层 | PPO 训练器 |
 | `worker.py` | 应用层 | 多进程数据采集 |
 | `model_versus.py` | 应用层 | 普通竞技、逻辑/物理座位映射，以及贪心/训练同分布/部署温度策略 |
@@ -338,6 +339,17 @@ V4 的 `MODEL_PROTOCOL_VERSION=4` 由 `protocol_schema.py` 唯一维护，
 `DuelState` 同时保留一局内不变的初始主/额外画像和随 Core 移动变化的剩余卡组，避免
 后续编码器把“已抽走的卡”误认为构筑本身不存在。`MatchContext`/`DuelSummary` 仅为未来
 BO3 换备与组卡层提供外部接口，当前返回空策略输入，不进入单局观测、网络或 PPO 轨迹。
+
+3.10.1 将稳定画像接入训练轨迹，但仍不改变模型输入。每个 Worker 以 `profile_id`
+登记实际训练座位的一局画像，逐步样本只保存 `int32 deck_profile_index`；动态
+`deck_idx/deck_mask` 继续逐步保存。`deck_race/deck_attr/deck_setcodes` 属于精确
+card token 的静态属性，改为每个 Worker 只登记一次，Trainer 合并时检查冲突并建立
+本轮查找表，在 PPO mini-batch 前按原 token 顺序重建。重建值与旧 Encoder 展开结果
+逐元素一致，因此 GalateaNet、中央推理、PTH/ONNX 和协议结构修订均保持不变。
+
+内部画像目录只含张量，可由 `weights_only=True` 加载；局部索引会在合并时重映射成
+Trainer 全局索引。画像索引当前用于身份校验和为 3.10.2 Deck Encoder 预留稳定入口，
+不会作为新特征偷偷进入现有策略。Side 仍从 `DeckProfile` 的类型层排除。
 
 ### V4 玩家与离散全局状态
 

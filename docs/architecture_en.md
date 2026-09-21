@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.10.0**.
+> This document applies to **Galatea-Core v3.10.1**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -80,6 +80,7 @@ Galatea-Core adopts a modular design consisting of the following core subsystems
 | `galatea_env.py` | Environment | OCGCore environment wrapper |
 | `gamestate.py` | Environment | Game state parsing (core!) |
 | `deck_protocol.py` | Protocol | Full construction, single-duel deck image, and BO3 upper-layer boundary |
+| `deck_trajectory.py` | Trajectory | Worker deck-profile catalogs, index remapping, and lossless legacy-network field reconstruction |
 | `trainer.py` | Application | PPO trainer |
 | `worker.py` | Application | Multi-process data collection |
 | `model_versus.py` | Application | Normal Arena, logical/physical seat mapping, and greedy/training/deployment policies |
@@ -349,6 +350,20 @@ initial Main/Extra image and Core-driven remaining lists, preventing later encod
 mistaking drawn cards for cards absent from the construction. `MatchContext` and `DuelSummary`
 are external extension points for future BO3 siding and deck building; they currently emit no
 policy inputs and never enter single-duel observations, the network, or PPO trajectories.
+
+Version 3.10.1 connects the stable image to training trajectories without changing model inputs.
+Each Worker registers the training seat's per-duel profile by `profile_id`, stores only an
+`int32 deck_profile_index` per sample, and continues storing dynamic `deck_idx/deck_mask` per
+step. Because `deck_race/deck_attr/deck_setcodes` are static properties of an exact card token,
+they are registered once per Worker, conflict-checked during Trainer merge, and reconstructed in
+original token order immediately before each PPO mini-batch. The values match the old expanded
+Encoder output element for element, so GalateaNet, central inference, PTH/ONNX, and the schema
+revision remain unchanged.
+
+The private catalog contains tensors only and remains loadable with `weights_only=True`; local
+indices are remapped to Trainer-global indices during merge. In this batch the profile index is
+an identity check and a stable extension point for the 3.10.2 Deck Encoder, not a hidden new
+policy feature. Side remains excluded at the `DeckProfile` type boundary.
 
 ### V4 Player and Categorical Global State
 

@@ -4,6 +4,18 @@
 
 ---
 
+## [v3.10.1] - 2026-09-21
+
+### 🗂️ V4 Phase 4 batch 2: deck-profile indices and lossless PPO trajectory deduplication
+
+- **Per-duel profile registration**: Adds `deck_trajectory.py`. Workers deduplicate the stable single-duel image with 3.10.0's Side-free `DeckProfile.profile_id`, retaining exact card tokens, Main/Extra sections, and initial copy counts. Each training sample appends only one `int32 deck_profile_index` instead of another complete image
+- **Static-field deduplication**: Worker temporary trajectories and the Trainer merge pool no longer repeat `deck_race`, `deck_attr`, and `deck_setcodes` at every step. Dynamic remaining-card order in `deck_idx` and `deck_mask` is preserved exactly, so draws, searches, and returns to Deck remain visible per step
+- **Lossless legacy-network reconstruction**: The Trainer merges Worker catalogs, remaps local indices, and builds one small exact-token metadata table per PPO update. The three legacy fields are reconstructed immediately before every mini-batch enters the unchanged network. Central-inference shared buffers, GalateaNet input keys, weight shapes, PPO objectives, rewards, ONNX, and duel actions are unchanged
+- **Corruption barriers**: Temporary catalogs remain `weights_only=True` safe and validate format version, tensor shapes, profile hashes, index ranges, cross-Worker token-metadata consistency, and coverage of every active token. Invalid data is rejected rather than silently training with zero-filled fields
+- **Space and hot path**: The three old fields used 3,600 bytes per step; the new index uses 4 bytes, a net reduction of 3,596 bytes or about 112.4 MiB for each 32,768-step Worker/merge trajectory. Repeated deck observations hit a small tensor snapshot instead of repeating Python card iteration; a local 32,768-call identical-observation microbenchmark fell from roughly 13.6 s to 0.4 s. PPO also replaces three CPU-to-device field transfers with device-side indexing
+- **Version boundary**: Framework advances to 3.10.1 while Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision remains 8. `DECK_TRAJECTORY_FORMAT_VERSION=1` covers only the private Worker transport and is not the future public canonical-trajectory format
+- **Validation**: Adds profile-order deduplication, `weights_only` round trips, cross-Worker merge, exact field reconstruction, zero-error full GalateaNet outputs, metadata-conflict rejection, commit-memory accounting, and a real CPU PPO forward/backward test. The default suite passes 217 of 218 tests with one gated real-Core test skipped; the explicitly enabled real-Core duel passes
+
 ## [v3.10.0] - 2026-09-21
 
 ### 🃏 V4 Phase 4 batch 1: deck-protocol boundary and BO3 extension points

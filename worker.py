@@ -31,6 +31,10 @@ from data_types import ActionOperation
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
+from deck_trajectory import (
+    DeckProfileRegistry,
+    is_deck_static_observation,
+)
 from protocol_v3_audit import (
     configure_protocol_v3_audit,
     flush_protocol_v3_audit,
@@ -480,6 +484,7 @@ def worker_process(
         }
 
         deck_records = []
+        deck_profile_registry = DeckProfileRegistry()
         forced_rule_games_remaining = max(
             0,
             int(opp_config.get("forced_rule_games", 0)),
@@ -488,7 +493,8 @@ def worker_process(
         #提前拉起绝对连续的静态内存池
         max_len = target_steps + MAX_EPISODE_STEPS + 100
         columns = {
-            'obs': {}, 
+            'obs': {},
+            'deck_profile_index': torch.zeros(max_len, dtype=torch.int32),
             'action': torch.zeros(max_len, dtype=torch.long),
             'log_prob': torch.zeros(max_len, dtype=torch.float32),
             'return': torch.zeros(max_len, dtype=torch.float32),
@@ -497,6 +503,8 @@ def worker_process(
         gc.collect()
         
         for k, v in shared_buffers[worker_id].items():
+            if is_deck_static_observation(k):
+                continue
             shape = (max_len,) + v.shape
             columns['obs'][k] = torch.empty(shape, dtype=v.dtype)
 
@@ -559,6 +567,15 @@ def worker_process(
             p1_m, p1_e = d2.main, d2.extra
             
             brain = DuelState(p0_m, p0_e, p1_m, p1_e)
+            training_profile = (
+                brain.p0_deck_profile
+                if train_p_id == 0
+                else brain.p1_deck_profile
+            )
+            episode_deck_profile_index = deck_profile_registry.register_profile(
+                training_profile,
+                agent.encoder.card_vocabulary,
+            )
             try:
                 msg_queue = MessageParser.parse(raw_data)
                         
@@ -1005,8 +1022,14 @@ def worker_process(
                             if is_training_agent and not ai_is_broken[player]:
                                 write_index = rollout_cursor.next_write_pos
 
-                                # 内存直写：把特征直接强行塞进连续的静态池坑位里
+                                # 卡组静态字段每个 token 仅登记一次，逐步轨迹只保留动态 token 与画像索引
+                                deck_profile_registry.register_observation(infer_dict)
+                                columns['deck_profile_index'][write_index] = (
+                                    episode_deck_profile_index
+                                )
                                 for k, v in infer_dict.items():
+                                    if is_deck_static_observation(k):
+                                        continue
                                     columns['obs'][k][write_index] = v.squeeze(0)
 
                                 # game_buffer 极速瘦身：只存最轻量的 Python 原生数字！
@@ -1343,9 +1366,17 @@ def worker_process(
         for k in ['action', 'log_prob', 'return', 'advantage']:
             batch_data[k] = columns[k][:committed_steps].clone()
             columns[k] = None
+
+        batch_data['deck_profile_index'] = columns['deck_profile_index'][
+            :committed_steps
+        ].clone()
+        columns['deck_profile_index'] = None
+        batch_data['deck_profiles'] = deck_profile_registry.export()
             
         # 提取 obs 内部特征
         for k in shared_buffers[worker_id].keys():
+            if is_deck_static_observation(k):
+                continue
             if k in columns['obs']:
                 batch_data['obs'][k] = columns['obs'][k][:committed_steps].clone()
                 columns['obs'][k] = None

@@ -4,6 +4,18 @@
 
 ---
 
+## [v3.10.1] - 2026-09-21
+
+### 🗂️ V4 阶段 4 批次 2：卡组画像索引与 PPO 轨迹无损去重
+
+- **每局画像登记**：新增 `deck_trajectory.py`。Worker 使用 3.10.0 的 Side-free `DeckProfile.profile_id` 对一局内稳定画像去重，并保存精确卡片 token、主/额外分区和初始投入数量；每个训练步只追加一个 `int32 deck_profile_index`，不复制整份画像
+- **静态字段去重**：Worker 临时轨迹和 Trainer 合并池不再逐步保存 `deck_race`、`deck_attr`、`deck_setcodes`。动态剩余卡顺序 `deck_idx` 与 `deck_mask` 原样保留，因此抽卡、检索、回卡组等变化仍逐步可见
+- **旧网络无损重建**：Trainer 合并各 Worker 目录并重映射局部索引，在每轮 PPO 开始时生成一次按精确 token 对齐的小型元数据表；每个 mini-batch 送入现有网络前重建旧三字段。中央推理共享内存、GalateaNet 输入键、权重形状、PPO 目标、奖励、ONNX 和单局动作逻辑均未改变
+- **污染阻断**：临时目录保持 `weights_only=True` 可安全加载，并校验格式版本、张量形状、画像哈希、索引范围、跨 Worker token 元数据一致性及全部活跃 token 覆盖；任一异常都会拒绝该数据块或停止 PPO，不会以全零字段继续学习
+- **空间与热路径**：旧三字段每步占 3600 字节，新索引占 4 字节，净减 3596 字节；32,768 步的每份 Worker/合并轨迹约减少 112.4 MiB。相同卡组观测使用小张量快照快速命中，不重复执行 Python 卡片遍历；本机 32,768 次相同登记微测由约 13.6 秒降至约 0.4 秒。PPO 侧用设备内索引代替三字段 CPU→设备传输
+- **版本边界**：框架升至 3.10.1；Model Protocol 保持 4、Checkpoint Format 保持 3、V4 结构修订保持 8。`DECK_TRAJECTORY_FORMAT_VERSION=1` 仅约束内部 Worker 临时传输，不等同于未来公开规范轨迹格式
+- **验证**：新增画像置换去重、`weights_only` 往返、跨 Worker 合并、逐值重建、完整 GalateaNet 输出零误差、元数据冲突阻断、提交内存估算及真实 CPU PPO 前后向测试；默认完整回归 218 项中 217 项通过、1 项真实 Core 门控跳过，显式真实 Core 对局通过
+
 ## [v3.10.0] - 2026-09-21
 
 ### 🃏 V4 阶段 4 批次 1：卡组协议边界与 BO3 上层预留
