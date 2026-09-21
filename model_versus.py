@@ -269,6 +269,13 @@ class ModelArena:
             'card_vocab_hash': self.p0_bot.net.card_vocab_hash,
             'card_vocab_size': self.p0_bot.net.card_vocab_size,
             'card_vocab_card_count': self.p0_bot.net.card_vocab_card_count,
+            'semantic_lookup_format_version': (
+                self.p0_bot.net.semantic_lookup_format_version
+            ),
+            'semantic_lookup_hash': self.p0_bot.net.semantic_lookup_hash,
+            'semantic_lookup_card_count': (
+                self.p0_bot.net.semantic_lookup_card_count
+            ),
         }
         print(f"⚙️ [Arena] P0 模型架构（检查点）: {self.net_config}")
         print(f"🤖 [AiBot] 成功加载模型权重: {model_p0_path}")

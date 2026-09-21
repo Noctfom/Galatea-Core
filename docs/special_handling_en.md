@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.8.2**.
+> This document applies to **Galatea-Core v3.9.0**.
 
 ---
 
@@ -84,6 +84,8 @@ Hash-cluster labels are derived deterministically from normalized code through M
 V3 observation auditing was introduced in 3.6.1. Since 3.6.3, training and Arena keep it disabled unless `--protocol-audit` is explicitly enabled, while RuleBot self-check still collects by default. Runtime collection only aggregates Core messages and public chain fields into per-process reports under `system_logs/protocol_v3_audit/`; it never reads Lua and does not participate in action selection or reward calculation.
 
 Version 3.6.2 no longer treats the low four bits of `desc`, or the Stringid index, as Lua effect-creation order. Semantic generation follows a statically recognizable `SetDescription(aux.Stringid(...))` on the same `Effect.CreateEffect(c)` object and stores the complete `desc` on the corresponding code-semantic slot. Dynamic expressions, ambiguous bindings, and passive effects without descriptions are never guessed; runtime falls back to whole-card semantics and does not set a false “used this turn” bit. WebUI reports unresolved observations as `binding_missing` so static-parser coverage can be expanded safely.
+
+Version 3.9.0 builds a model-side static table aligned by exact card token × Lua effect slot on top of that mapping. Identity hashes cover each slot's actual structured fields and logical code vector, so a harmless physical `.npy` row reorder does not create a false mismatch. Pure card appends preserve older prefixes, while existing-card semantic changes are rejected before PTH/ONNX/package loading. This batch deliberately retains the compatibility tensors so asset identity and trajectory deduplication are not changed simultaneously.
 
 ---
 

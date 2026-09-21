@@ -27,10 +27,14 @@ from data_types import (
     ActionOperation,
     SummonMethod,
 )
+from semantic_lookup import (
+    STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION,
+    get_static_semantic_lookup,
+)
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 6
+PROTOCOL_SCHEMA_REVISION = 7
 
 
 def _schema_descriptor(card_vocabulary):
@@ -159,6 +163,14 @@ def _schema_descriptor(card_vocabulary):
                 "upstream_action": "track_public_api_or_submit_upstream_pr",
             },
         },
+        "static_semantics": {
+            "lookup_format_version": STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION,
+            "index": "exact_card_token_and_lua_effect_slot",
+            "effect_slots": 8,
+            "lookup_owner": "model_side_prepared",
+            "trajectory_mode": "legacy_expanded_until_phase_3_batch_2",
+            "identity_policy": "append_only_card_prefix_with_logical_vectors",
+        },
         "action_semantics": {
             "operation_input": {
                 "name": "act_operation",
@@ -215,9 +227,13 @@ def _schema_descriptor(card_vocabulary):
     }
 
 
-def get_current_protocol_metadata(card_vocabulary=None):
+def get_current_protocol_metadata(card_vocabulary=None, *, semantic_root="."):
     """返回检查点、ONNX 和部署包共用的 V4 协议身份"""
     vocabulary = card_vocabulary or get_default_card_vocabulary()
+    semantic_lookup = get_static_semantic_lookup(
+        semantic_root,
+        card_vocabulary=vocabulary,
+    )
     descriptor = _schema_descriptor(vocabulary)
     encoded = json.dumps(
         descriptor,
@@ -232,14 +248,25 @@ def get_current_protocol_metadata(card_vocabulary=None):
         "card_vocab_hash": vocabulary.vocabulary_hash,
         "card_vocab_size": vocabulary.capacity,
         "card_vocab_card_count": vocabulary.card_count,
+        "semantic_lookup_format_version": STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION,
+        "semantic_lookup_hash": semantic_lookup.prefix_hash(),
+        "semantic_lookup_card_count": vocabulary.card_count,
     }
 
 
-def apply_current_protocol_metadata(config, *, card_vocabulary=None):
+def apply_current_protocol_metadata(
+    config,
+    *,
+    card_vocabulary=None,
+    semantic_root=".",
+):
     """校验已有协议字段后，为新网络配置补全当前协议身份"""
     if not isinstance(config, dict):
         raise ValueError("network config must be a dictionary")
-    metadata = get_current_protocol_metadata(card_vocabulary)
+    metadata = get_current_protocol_metadata(
+        card_vocabulary,
+        semantic_root=semantic_root,
+    )
     normalized = dict(config)
     present_keys = [key for key in metadata if key in normalized]
     if present_keys and len(present_keys) != len(metadata):
@@ -249,6 +276,7 @@ def apply_current_protocol_metadata(config, *, card_vocabulary=None):
             normalized,
             label="network config",
             card_vocabulary=card_vocabulary,
+            semantic_root=semantic_root,
         )
     normalized.update(metadata)
     vocab_size = normalized.get("vocab_size", metadata["card_vocab_size"])
@@ -260,17 +288,27 @@ def apply_current_protocol_metadata(config, *, card_vocabulary=None):
     return normalized
 
 
-def validate_protocol_metadata(container, *, label="artifact", card_vocabulary=None):
+def validate_protocol_metadata(
+    container,
+    *,
+    label="artifact",
+    card_vocabulary=None,
+    semantic_root=".",
+):
     """校验结构一致且词表是当前只追加前缀的产物"""
     if not isinstance(container, dict):
         raise ValueError(f"{label} protocol metadata must be a dictionary")
     vocabulary = card_vocabulary or get_default_card_vocabulary()
-    expected = get_current_protocol_metadata(vocabulary)
+    expected = get_current_protocol_metadata(
+        vocabulary,
+        semantic_root=semantic_root,
+    )
     for key in (
         "model_protocol_version",
         "protocol_schema_revision",
         "protocol_schema_hash",
         "card_vocab_size",
+        "semantic_lookup_format_version",
     ):
         expected_value = expected[key]
         if container.get(key) != expected_value:
@@ -289,5 +327,19 @@ def validate_protocol_metadata(container, *, label="artifact", card_vocabulary=N
     if container.get("card_vocab_hash") != prefix_hash:
         raise ValueError(
             f"{label} card_vocab_hash does not match the current append-only prefix"
+        )
+    semantic_card_count = container.get("semantic_lookup_card_count")
+    if semantic_card_count != card_count:
+        raise ValueError(
+            f"{label} semantic_lookup_card_count must equal card_vocab_card_count"
+        )
+    semantic_lookup = get_static_semantic_lookup(
+        semantic_root,
+        card_vocabulary=vocabulary,
+    )
+    expected_semantic_hash = semantic_lookup.prefix_hash(card_count)
+    if container.get("semantic_lookup_hash") != expected_semantic_hash:
+        raise ValueError(
+            f"{label} semantic_lookup_hash does not match the current semantic prefix"
         )
     return expected

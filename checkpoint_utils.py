@@ -31,6 +31,9 @@ REQUIRED_TRAINING_CHECKPOINT_KEYS = {
     "card_vocab_hash",
     "card_vocab_size",
     "card_vocab_card_count",
+    "semantic_lookup_format_version",
+    "semantic_lookup_hash",
+    "semantic_lookup_card_count",
     "model_id",
     "model_prefix",
     "run_id",
@@ -194,6 +197,7 @@ def validate_training_checkpoint(
     *,
     source_path=None,
     card_vocabulary=None,
+    semantic_root=".",
 ):
     """校验已加载检查点的协议、UUID、结构和可选文件名一致性"""
     if not isinstance(checkpoint, dict):
@@ -213,6 +217,7 @@ def validate_training_checkpoint(
         checkpoint,
         label="checkpoint",
         card_vocabulary=card_vocabulary,
+        semantic_root=semantic_root,
     )
 
     missing = sorted(REQUIRED_TRAINING_CHECKPOINT_KEYS.difference(checkpoint))
@@ -237,8 +242,12 @@ def validate_training_checkpoint(
         net_config,
         label="checkpoint net_config",
         card_vocabulary=card_vocabulary,
+        semantic_root=semantic_root,
     )
-    for key in get_current_protocol_metadata(card_vocabulary):
+    for key in get_current_protocol_metadata(
+        card_vocabulary,
+        semantic_root=semantic_root,
+    ):
         if checkpoint.get(key) != net_config.get(key):
             raise ValueError(
                 f"checkpoint top-level {key} does not match checkpoint net_config"
@@ -275,6 +284,7 @@ def validate_training_checkpoint_file(
     map_location="cpu",
     *,
     card_vocabulary=None,
+    semantic_root=".",
 ):
     """不分配真实张量存储地校验外部检查点的完整协议与模型身份"""
     checkpoint = safe_load_torch_checkpoint(
@@ -286,6 +296,7 @@ def validate_training_checkpoint_file(
         checkpoint,
         source_path=path,
         card_vocabulary=card_vocabulary,
+        semantic_root=semantic_root,
     )
 
 

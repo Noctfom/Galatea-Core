@@ -37,7 +37,6 @@ def _safe_label(value, fallback):
 
 def register_semantic_audit_catalog(knowledge_base):
     """登记知识库中每张卡实际进入模型的效果槽，供运行时审计比对"""
-    global _SEMANTIC_CARD_SLOTS, _RUNTIME_DESC_SLOTS
     catalog = {}
     if isinstance(knowledge_base, dict):
         for raw_card_id, card_data in knowledge_base.items():
@@ -57,8 +56,19 @@ def register_semantic_audit_catalog(knowledge_base):
                 if 1 <= slot <= 8:
                     slots.add(slot - 1)
             catalog[int(raw_card_id)] = tuple(sorted(slots))
-    _SEMANTIC_CARD_SLOTS = catalog
-    _RUNTIME_DESC_SLOTS = build_runtime_effect_binding_catalog(knowledge_base)
+    register_compiled_semantic_audit_catalog(
+        catalog,
+        build_runtime_effect_binding_catalog(knowledge_base),
+    )
+
+
+def register_compiled_semantic_audit_catalog(card_slots, runtime_bindings):
+    """登记静态语义编译器生成的卡片槽位与运行时 desc 索引"""
+    global _SEMANTIC_CARD_SLOTS, _RUNTIME_DESC_SLOTS
+    if not isinstance(card_slots, dict) or not isinstance(runtime_bindings, dict):
+        raise ValueError("compiled semantic audit catalogs must be dictionaries")
+    _SEMANTIC_CARD_SLOTS = dict(card_slots)
+    _RUNTIME_DESC_SLOTS = dict(runtime_bindings)
     inspect_lua_description_slots.cache_clear()
 
 

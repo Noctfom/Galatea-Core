@@ -76,6 +76,9 @@ ONNX_IDENTITY_KEYS = {
     "card_vocab_hash": "galatea.card_vocab_hash",
     "card_vocab_size": "galatea.card_vocab_size",
     "card_vocab_card_count": "galatea.card_vocab_card_count",
+    "semantic_lookup_format_version": "galatea.semantic_lookup_format_version",
+    "semantic_lookup_hash": "galatea.semantic_lookup_hash",
+    "semantic_lookup_card_count": "galatea.semantic_lookup_card_count",
 }
 
 
@@ -245,6 +248,15 @@ def tag_onnx_model_identity(
             ONNX_IDENTITY_KEYS["card_vocab_card_count"]: str(
                 protocol_metadata["card_vocab_card_count"]
             ),
+            ONNX_IDENTITY_KEYS["semantic_lookup_format_version"]: str(
+                protocol_metadata["semantic_lookup_format_version"]
+            ),
+            ONNX_IDENTITY_KEYS["semantic_lookup_hash"]: protocol_metadata[
+                "semantic_lookup_hash"
+            ],
+            ONNX_IDENTITY_KEYS["semantic_lookup_card_count"]: str(
+                protocol_metadata["semantic_lookup_card_count"]
+            ),
         }
     )
     onnx.helper.set_model_props(model, properties)
@@ -272,7 +284,12 @@ def _safe_external_data_path(model_dir, location):
     return resolved
 
 
-def _read_artifact_manifest(marker_path, *, card_vocabulary=None):
+def _read_artifact_manifest(
+    marker_path,
+    *,
+    card_vocabulary=None,
+    semantic_root=".",
+):
     """读取并校验当前版本产物清单的基础结构"""
     marker_path = Path(marker_path)
     validate_safe_filename(marker_path.name, allowed_suffixes=(".artifacts.json",))
@@ -306,6 +323,7 @@ def _read_artifact_manifest(marker_path, *, card_vocabulary=None):
         payload,
         label=f"artifact manifest {marker_path.name}",
         card_vocabulary=card_vocabulary,
+        semantic_root=semantic_root,
     )
     validate_model_id(payload.get("model_id"))
     validate_model_prefix(payload.get("model_prefix"))
@@ -328,6 +346,7 @@ def _validate_onnx_artifact_manifest(
     expected_model_id=None,
     *,
     card_vocabulary=None,
+    semantic_root=".",
 ):
     """确认 ONNX 与产物清单属于同一模型且依赖文件完整"""
     marker_path = graph_path.with_name(f"{graph_path.stem}.artifacts.json")
@@ -341,6 +360,7 @@ def _validate_onnx_artifact_manifest(
     payload = _read_artifact_manifest(
         marker_path,
         card_vocabulary=card_vocabulary,
+        semantic_root=semantic_root,
     )
     if expected_model_id is not None and payload["model_id"] != expected_model_id:
         raise PermissionError(
@@ -366,6 +386,9 @@ def _validate_onnx_artifact_manifest(
         "card_vocab_hash",
         "card_vocab_size",
         "card_vocab_card_count",
+        "semantic_lookup_format_version",
+        "semantic_lookup_hash",
+        "semantic_lookup_card_count",
     ):
         if onnx_record.get(key) != payload.get(key):
             raise ValueError(
@@ -388,6 +411,7 @@ def describe_onnx_artifact(
     iteration=None,
     model_protocol_version=None,
     card_vocabulary=None,
+    semantic_root=".",
 ):
     """读取 ONNX 主图引用并返回主图与全部外置权重的完整记录"""
     import onnx
@@ -425,6 +449,15 @@ def describe_onnx_artifact(
     embedded_card_vocab_card_count = properties.get(
         ONNX_IDENTITY_KEYS["card_vocab_card_count"]
     )
+    embedded_semantic_lookup_format_version = properties.get(
+        ONNX_IDENTITY_KEYS["semantic_lookup_format_version"]
+    )
+    embedded_semantic_lookup_hash = properties.get(
+        ONNX_IDENTITY_KEYS["semantic_lookup_hash"]
+    )
+    embedded_semantic_lookup_card_count = properties.get(
+        ONNX_IDENTITY_KEYS["semantic_lookup_card_count"]
+    )
     if embedded_iteration is not None:
         try:
             embedded_iteration = int(embedded_iteration)
@@ -441,6 +474,11 @@ def describe_onnx_artifact(
         ("protocol_schema_revision", embedded_protocol_schema_revision),
         ("card_vocab_size", embedded_card_vocab_size),
         ("card_vocab_card_count", embedded_card_vocab_card_count),
+        (
+            "semantic_lookup_format_version",
+            embedded_semantic_lookup_format_version,
+        ),
+        ("semantic_lookup_card_count", embedded_semantic_lookup_card_count),
     ):
         if raw_value is not None:
             try:
@@ -451,8 +489,12 @@ def describe_onnx_artifact(
                 embedded_protocol_schema_revision = parsed_value
             elif name == "card_vocab_size":
                 embedded_card_vocab_size = parsed_value
-            else:
+            elif name == "card_vocab_card_count":
                 embedded_card_vocab_card_count = parsed_value
+            elif name == "semantic_lookup_format_version":
+                embedded_semantic_lookup_format_version = parsed_value
+            else:
+                embedded_semantic_lookup_card_count = parsed_value
 
     embedded_identity = (
         embedded_model_id,
@@ -464,6 +506,9 @@ def describe_onnx_artifact(
         embedded_card_vocab_hash,
         embedded_card_vocab_size,
         embedded_card_vocab_card_count,
+        embedded_semantic_lookup_format_version,
+        embedded_semantic_lookup_hash,
+        embedded_semantic_lookup_card_count,
     )
     if any(value is not None for value in embedded_identity):
         if any(value is None for value in embedded_identity):
@@ -482,9 +527,13 @@ def describe_onnx_artifact(
                 "card_vocab_hash": embedded_card_vocab_hash,
                 "card_vocab_size": embedded_card_vocab_size,
                 "card_vocab_card_count": embedded_card_vocab_card_count,
+                "semantic_lookup_format_version": embedded_semantic_lookup_format_version,
+                "semantic_lookup_hash": embedded_semantic_lookup_hash,
+                "semantic_lookup_card_count": embedded_semantic_lookup_card_count,
             },
             label="ONNX metadata",
             card_vocabulary=card_vocabulary,
+            semantic_root=semantic_root,
         )
     if expected_model_id is not None and embedded_model_id != expected_model_id:
         raise PermissionError(
@@ -537,6 +586,9 @@ def describe_onnx_artifact(
         "card_vocab_hash": embedded_card_vocab_hash,
         "card_vocab_size": embedded_card_vocab_size,
         "card_vocab_card_count": embedded_card_vocab_card_count,
+        "semantic_lookup_format_version": embedded_semantic_lookup_format_version,
+        "semantic_lookup_hash": embedded_semantic_lookup_hash,
+        "semantic_lookup_card_count": embedded_semantic_lookup_card_count,
         "primary": graph_path.name,
         "files": files,
         "external_data": files[1:],
@@ -548,6 +600,7 @@ def describe_onnx_artifact(
             record,
             expected_model_id=expected_model_id,
             card_vocabulary=card_vocabulary,
+            semantic_root=semantic_root,
         )
     return record
 
@@ -603,6 +656,15 @@ def discover_checkpoint_artifacts(
                     "card_vocab_card_count": payload.get(
                         "card_vocab_card_count"
                     ),
+                    "semantic_lookup_format_version": payload.get(
+                        "semantic_lookup_format_version"
+                    ),
+                    "semantic_lookup_hash": payload.get(
+                        "semantic_lookup_hash"
+                    ),
+                    "semantic_lookup_card_count": payload.get(
+                        "semantic_lookup_card_count"
+                    ),
                     "checkpoint_path": str(checkpoint_path),
                     "manifest_path": str(marker_path),
                 }
@@ -649,6 +711,15 @@ def discover_checkpoint_artifacts(
                         "card_vocab_size": metadata["card_vocab_size"],
                         "card_vocab_card_count": metadata[
                             "card_vocab_card_count"
+                        ],
+                        "semantic_lookup_format_version": metadata[
+                            "semantic_lookup_format_version"
+                        ],
+                        "semantic_lookup_hash": metadata[
+                            "semantic_lookup_hash"
+                        ],
+                        "semantic_lookup_card_count": metadata[
+                            "semantic_lookup_card_count"
                         ],
                         "checkpoint_path": str(checkpoint_path.resolve()),
                         "manifest_path": None,
@@ -742,6 +813,7 @@ def collect_model_artifact_files(
     selected_models,
     *,
     card_vocabulary=None,
+    semantic_root=".",
 ):
     """展开用户选择，自动补齐 ONNX 外置权重和同轮次产物清单"""
     model_root = Path(model_dir).resolve()
@@ -766,6 +838,7 @@ def collect_model_artifact_files(
                 primary_path,
                 require_complete=True,
                 card_vocabulary=card_vocabulary,
+                semantic_root=semantic_root,
             )
             for relative_name in record["files"]:
                 append_once(relative_name)
@@ -785,6 +858,7 @@ def build_package_model_records(
     selected_models,
     *,
     card_vocabulary=None,
+    semantic_root=".",
 ):
     """为部署包清单生成带轮次和依赖文件的模型记录"""
     model_root = Path(model_dir).resolve()
@@ -802,6 +876,7 @@ def build_package_model_records(
                     primary_path,
                     require_complete=True,
                     card_vocabulary=card_vocabulary,
+                    semantic_root=semantic_root,
                 )
             )
         else:
@@ -809,12 +884,14 @@ def build_package_model_records(
                 primary_path,
                 map_location="cpu",
                 card_vocabulary=card_vocabulary,
+                semantic_root=semantic_root,
             )
             marker_path = checkpoint_artifact_manifest_path(primary_path)
             if marker_path.is_file():
                 payload = _read_artifact_manifest(
                     marker_path,
                     card_vocabulary=card_vocabulary,
+                    semantic_root=semantic_root,
                 )
                 for key in (
                     "model_id",
@@ -826,6 +903,9 @@ def build_package_model_records(
                     "card_vocab_hash",
                     "card_vocab_size",
                     "card_vocab_card_count",
+                    "semantic_lookup_format_version",
+                    "semantic_lookup_hash",
+                    "semantic_lookup_card_count",
                 ):
                     if payload[key] != checkpoint[key]:
                         raise ValueError(
@@ -857,6 +937,15 @@ def build_package_model_records(
                     "card_vocab_size": checkpoint["card_vocab_size"],
                     "card_vocab_card_count": checkpoint[
                         "card_vocab_card_count"
+                    ],
+                    "semantic_lookup_format_version": checkpoint[
+                        "semantic_lookup_format_version"
+                    ],
+                    "semantic_lookup_hash": checkpoint[
+                        "semantic_lookup_hash"
+                    ],
+                    "semantic_lookup_card_count": checkpoint[
+                        "semantic_lookup_card_count"
                     ],
                     "primary": name,
                     "files": [name],
@@ -891,6 +980,7 @@ def validate_package_model_records(
     *,
     expected_model_id=None,
     card_vocabulary=None,
+    semantic_root=".",
 ):
     """校验部署包只能包含同一 UUID 的模型，且双格式轮次必须成对一致"""
     if not isinstance(records, list):
@@ -919,6 +1009,7 @@ def validate_package_model_records(
             record,
             label="deployment model record",
             card_vocabulary=card_vocabulary,
+            semantic_root=semantic_root,
         )
     if expected_model_id is not None and model_ids and model_ids != {expected_model_id}:
         raise PermissionError("selected models do not belong to the requested model_id pool")
@@ -968,6 +1059,9 @@ def discover_model_repository(model_dir):
                         "card_vocab_hash",
                         "card_vocab_size",
                         "card_vocab_card_count",
+                        "semantic_lookup_format_version",
+                        "semantic_lookup_hash",
+                        "semantic_lookup_card_count",
                     ):
                         if payload[key] != checkpoint[key]:
                             raise ValueError(
@@ -999,6 +1093,15 @@ def discover_model_repository(model_dir):
                         "card_vocab_card_count": checkpoint[
                             "card_vocab_card_count"
                         ],
+                        "semantic_lookup_format_version": checkpoint[
+                            "semantic_lookup_format_version"
+                        ],
+                        "semantic_lookup_hash": checkpoint[
+                            "semantic_lookup_hash"
+                        ],
+                        "semantic_lookup_card_count": checkpoint[
+                            "semantic_lookup_card_count"
+                        ],
                         "primary": primary_path.name,
                         "files": [primary_path.name, marker_path.name],
                         "identity_source": "checkpoint",
@@ -1023,6 +1126,15 @@ def discover_model_repository(model_dir):
                         "card_vocab_size": checkpoint["card_vocab_size"],
                         "card_vocab_card_count": checkpoint[
                             "card_vocab_card_count"
+                        ],
+                        "semantic_lookup_format_version": checkpoint[
+                            "semantic_lookup_format_version"
+                        ],
+                        "semantic_lookup_hash": checkpoint[
+                            "semantic_lookup_hash"
+                        ],
+                        "semantic_lookup_card_count": checkpoint[
+                            "semantic_lookup_card_count"
                         ],
                         "primary": primary_path.name,
                         "files": [primary_path.name],
@@ -1245,19 +1357,34 @@ def create_deployment_package(
     if raw_vocabulary_source.is_symlink():
         raise ValueError("deployment card vocabulary must not be a symlink")
     packaged_vocabulary = load_card_vocabulary(raw_vocabulary_source.resolve())
+    semantic_root = Path(".").resolve()
+    if all(
+        filename in requested_extras
+        for filename in (
+            KNOWLEDGE_BASE_FILENAME,
+            CODE_EMBEDDINGS_FILENAME,
+            CODE_EMBEDDINGS_INDEX_FILENAME,
+        )
+    ):
+        semantic_root = Path(
+            requested_extras[KNOWLEDGE_BASE_FILENAME]
+        ).resolve().parent
     records = build_package_model_records(
         model_dir,
         selected_models,
         card_vocabulary=packaged_vocabulary,
+        semantic_root=semantic_root,
     )
     validate_package_model_records(
         records,
         card_vocabulary=packaged_vocabulary,
+        semantic_root=semantic_root,
     )
     model_files = collect_model_artifact_files(
         model_dir,
         selected_models,
         card_vocabulary=packaged_vocabulary,
+        semantic_root=semantic_root,
     )
     model_total_size = validate_model_artifact_file_set(model_dir, model_files)
     extras = {}
@@ -1303,13 +1430,17 @@ def create_deployment_package(
     if HASH_MAPPING_FILENAME in extras and KNOWLEDGE_BASE_FILENAME not in extras:
         raise ValueError("hash mapping requires knowledge_base.json")
 
-    protocol_metadata = get_current_protocol_metadata(packaged_vocabulary)
+    protocol_metadata = get_current_protocol_metadata(
+        packaged_vocabulary,
+        semantic_root=semantic_root,
+    )
     if records:
         for record in records:
             validate_protocol_metadata(
                 record,
                 label="deployment model record",
                 card_vocabulary=packaged_vocabulary,
+                semantic_root=semantic_root,
             )
 
     manifest = {
@@ -1411,14 +1542,25 @@ def validate_deployment_package(stage_dir):
         raise ValueError("manifest primary model list does not match package contents")
 
     packaged_vocabulary = load_card_vocabulary(stage_root / CARD_VOCAB_FILENAME)
+    staged_semantic_root = (
+        stage_root
+        if {
+            KNOWLEDGE_BASE_FILENAME,
+            CODE_EMBEDDINGS_FILENAME,
+            CODE_EMBEDDINGS_INDEX_FILENAME,
+        }.issubset(actual_names)
+        else Path(".").resolve()
+    )
     actual_records = build_package_model_records(
         stage_root,
         declared_models,
         card_vocabulary=packaged_vocabulary,
+        semantic_root=staged_semantic_root,
     )
     validate_package_model_records(
         actual_records,
         card_vocabulary=packaged_vocabulary,
+        semantic_root=staged_semantic_root,
     )
     declared_records = manifest.get("model_artifacts")
     if not isinstance(declared_records, list) or declared_records != actual_records:
@@ -1427,6 +1569,7 @@ def validate_deployment_package(stage_dir):
         stage_root,
         declared_models,
         card_vocabulary=packaged_vocabulary,
+        semantic_root=staged_semantic_root,
     )
     declared_model_files = manifest.get("model_files_included")
     if (
@@ -1470,12 +1613,14 @@ def validate_deployment_package(stage_dir):
         manifest,
         label="deployment package manifest",
         card_vocabulary=packaged_vocabulary,
+        semantic_root=staged_semantic_root,
     )
     for record in actual_records:
         validate_protocol_metadata(
             record,
             label="deployment model record",
             card_vocabulary=packaged_vocabulary,
+            semantic_root=staged_semantic_root,
         )
     if actual_names != expected_names:
         raise ValueError(

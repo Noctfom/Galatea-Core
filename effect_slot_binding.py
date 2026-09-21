@@ -159,8 +159,17 @@ def build_runtime_effect_binding_catalog(knowledge_base):
 
 def register_runtime_effect_bindings(knowledge_base):
     """登记当前知识库的运行时效果绑定，供 GameState 和编码器无 I/O 查询"""
+    return register_runtime_effect_binding_catalog(
+        build_runtime_effect_binding_catalog(knowledge_base)
+    )
+
+
+def register_runtime_effect_binding_catalog(catalog):
+    """登记已经过静态语义编译器校验的运行时效果绑定。"""
     global _RUNTIME_EFFECT_SLOTS
-    _RUNTIME_EFFECT_SLOTS = build_runtime_effect_binding_catalog(knowledge_base)
+    if not isinstance(catalog, dict):
+        raise ValueError("runtime effect binding catalog must be a dictionary")
+    _RUNTIME_EFFECT_SLOTS = dict(catalog)
     return len(_RUNTIME_EFFECT_SLOTS)
 
 

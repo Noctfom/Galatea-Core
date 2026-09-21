@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-import numpy as np
 from data_types import (
     ACTION_CONTEXT_DIM,
     ACTION_OPERATION_COUNT,
@@ -31,6 +30,7 @@ from protocol_schema import (
     MODEL_PROTOCOL_VERSION,
     apply_current_protocol_metadata,
 )
+from semantic_lookup import get_static_semantic_lookup
 
 class RunningMeanStd(nn.Module):
     # 动态记录输入的均值和方差，用于 RND 归一化
@@ -241,6 +241,13 @@ class GalateaNet(nn.Module):
         self.card_vocab_hash = config['card_vocab_hash']
         self.card_vocab_size = config['card_vocab_size']
         self.card_vocab_card_count = config['card_vocab_card_count']
+        self.semantic_lookup_format_version = config[
+            'semantic_lookup_format_version'
+        ]
+        self.semantic_lookup_hash = config['semantic_lookup_hash']
+        self.semantic_lookup_card_count = config[
+            'semantic_lookup_card_count'
+        ]
         self.register_buffer(
             '_model_protocol_version',
             torch.tensor(MODEL_PROTOCOL_VERSION, dtype=torch.int32),
@@ -251,24 +258,12 @@ class GalateaNet(nn.Module):
         self.n_layers = config.get('n_layers', 6)
         self.vocab_size = config['vocab_size']
 
-        try:
-            code_emb_np = None
-            for _ in range(5):
-                try:
-                    code_emb_np = np.load('code_embeddings.npy')
-                    break
-                except Exception:
-                    import time
-                    time.sleep(0.1) # 遇到并发锁就等 0.1 秒重试
-                    
-            if code_emb_np is None:
-                raise FileNotFoundError("重试 5 次后依然无法读取")
-                
-            padded_emb = np.vstack([np.zeros((1, 384), dtype=np.float32), code_emb_np])
-            self.register_buffer('code_dict', torch.from_numpy(padded_emb), persistent=False)
-        except Exception:
-            print("⚠️ 网络层未找到 code_embeddings.npy，使用全0回退")
-            self.register_buffer('code_dict', torch.zeros((1, 384), dtype=torch.float32), persistent=False)
+        semantic_lookup = get_static_semantic_lookup()
+        self.register_buffer(
+            'code_dict',
+            torch.from_numpy(semantic_lookup.code_dictionary),
+            persistent=False,
+        )
         
         # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)

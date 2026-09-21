@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.8.2**.
+> This document applies to **Galatea-Core v3.9.0**.
 
 ---
 
@@ -93,6 +93,8 @@ Go to **🧠 Semantic Knowledge Engine**:
 > 📖 See [Special Handling - Semantic KB](special_handling.md#语义化模块semantic-kb) for Hash clustering details.
 
 Wait for parsing to complete (first time may take several minutes). Structured knowledge, the Hash continuation index, and code-semantic vectors are stored together in the project root.
+
+Starting in 3.9.0, training/Arena startup also compiles this bundle into an exact card-token × Lua-effect-slot table and embeds its logical prefix hash in model identity. Pure card/vocabulary appends remain compatible with older prefixes; changing existing-card semantics requires a new model lineage and cannot be bypassed by renaming files.
 
 Training and Arena create reports only when **V3 Observation Audit (`--protocol-audit`)** is enabled; RuleBot self-check keeps it enabled by default. Inspect reports under **Semantic Knowledge Engine → V3 Observation Audit** or as raw JSON under `system_logs/protocol_v3_audit/`. Before the first real training run, use **Validate Semantic Bundle**.
 

@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.8.2**.
+> This document applies to **Galatea-Core v3.9.0**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -315,6 +315,12 @@ which keeps older V4 models usable while rejecting reordered or independently fo
 Ordinary resource updates synchronize Galatea's authority by default and may target a custom
 source. Custom cards can be appended through WebUI or `python main.py vocab`, but every machine
 in one model lineage must receive the same file. A locally newer CDB only excludes affected decks.
+Starting in 3.9.0, Lua static semantics have their own append-only prefix identity.
+`semantic_lookup.py` compiles each card's eight Lua effect slots onto the same token row,
+and PTH, ONNX, artifact manifests, and deployment packages record a logical semantic hash.
+Appending a card and its effects preserves older prefixes; changing an existing card's
+structured fields or code vector is rejected. Version 3.9.0 still emits legacy semantic
+tensors from the Encoder; 3.9.1 switches to in-network lookup and removes trajectory copies.
 `protocol_schema.py` is the single owner of V4's `MODEL_PROTOCOL_VERSION=4`, while
 `checkpoint_utils.py` owns `CHECKPOINT_FORMAT_VERSION=3`. V3 checkpoints are
 intentionally not migrated.
@@ -331,6 +337,12 @@ categorical embeddings instead of treating bit masks divided by constants as dis
 ---
 
 ## Semantic Knowledge Base
+
+Version 3.9.0 compiles runtime structured semantics into one
+`[card_token, effect_slot]` static table. The Encoder compatibility interface and network
+code-vector path share this process cache, avoiding repeated parsing of the 25 MB KB and a
+second vector-matrix load. Incomplete bundles, slot/index mismatches, and an existing-card
+semantic identity mismatch stop before network construction.
 
 ### Construction Flow
 

@@ -4,6 +4,20 @@
 
 ---
 
+## [v3.9.0] - 2026-09-21
+
+### 🧠 V4 Phase 3 Batch 1: Model-Side Static Semantics and Asset Identity
+
+- **Unified static-semantic compilation**: Added `semantic_lookup.py`, which compiles structured semantics, requirements, referenced cards, code-vector indices, and valid effect slots once into dense tables aligned to exact `card_vocab.json` tokens and Lua effect slots. Lookup never uses printed-effect numbering or modulo hashes
+- **Compatibility bridge without input changes**: The existing Encoder temporarily reads the unified tables through the `SemanticKnowledgeBase` compatibility interface. Field shapes, numeric IDs, action protocol, network parameters, rewards, and PPO remain unchanged; removal of duplicated trajectory tensors is reserved for 3.9.1
+- **Removed duplicate in-process assets**: Encoder and `GalateaNet` now share one code-vector/structured-semantic cache. The former random KB startup delay and the network's separate `.npy` copy are gone. Missing or incoherent semantic assets remain fatal instead of silently falling back to zero semantics
+- **Semantic prefix identity**: Added `semantic_lookup_format_version`, `semantic_lookup_hash`, and `semantic_lookup_card_count`. The hash covers exact card tokens, effect slots, structured fields, and logical code vectors rather than physical `.npy` row numbers. Pure card/semantic appends preserve older prefixes, while any existing-card semantic change is rejected before network construction
+- **Artifact identity closure**: PTH top-level/config metadata, ONNX metadata, per-iteration manifests, and `.gkg` manifests now carry the semantic identity. Package creation and extraction recompute it from the semantic bundle actually being packaged, so a shape-valid but content-replaced vector matrix is rejected
+- **Live-update cache invalidation**: Cache keys track timestamp/size signatures for the KB, code vectors, and index. A new Encoder switches to the rebuilt table after remote sync or local continuation instead of retaining stale WebUI-process semantics
+- **Resource benchmark**: The current 14,981-card vocabulary and 27,647 effect slots compile in about 0.35 seconds. Structured tables use about 12.97 MiB and the shared code dictionary 40.50 MiB, for 53.47 MiB total. The former two code-vector copies alone used roughly 81 MiB before per-card Python caches; 100,000 card lookups take about 0.095 seconds
+- **Schema boundary**: Framework version is 3.9.0; Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision becomes 7. Revision-6 development checkpoints lack the semantic identity and are explicitly rejected under the scratch-trained V4 policy
+- **Regression scope**: Added exact token/slot alignment, append-only semantic-prefix, physical-row-reorder equivalence, existing-vector tamper, and deployment-package tamper coverage. The full suite runs 206 tests (205 passed and one environment-gated skip), with the separately enabled real-Core decision loop also passing. Automated coverage includes ONNX export/runtime parity. This batch deliberately retains the legacy semantic tensors in shared memory/trajectories and preserves current ONNX inputs as an independently reviewable bridge before 3.9.1
+
 ## [v3.8.2] - 2026-09-20
 
 ### 🔗 V4 Phase 2 Batch 3: Public Card Relations and Core-State Closure

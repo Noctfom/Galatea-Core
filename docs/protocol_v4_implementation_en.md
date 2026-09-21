@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.8.2 (Phase 2 batch 3 complete) | 3.8.x–3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.9.0 (Phase 3 batch 1 complete) | 3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -71,6 +71,8 @@ The macro selector now preserves physical instances on the field, in the Graveya
 
 Static Lua semantics move to model-side lookup tables indexed by exact card identity and effect slot. Per-step trajectories carry identities, slots, and required dynamic overrides instead of duplicating large vectors.
 
+Version 3.9.0 establishes the unified static compiler and prefix identity. Structured fields and code vectors are aligned to exact card tokens and Lua effect slots, Encoder/network consumers share one cache, and PTH, ONNX, artifacts, and `.gkg` validate the same logical semantic hash. For an independently reviewable first batch, the Encoder still emits legacy semantic tensors; 3.9.1 switches the network inputs and trajectory storage.
+
 ### 3.5 Deck protocol
 
 - Initial Main, Extra, and Side sections have distinct section and copy-count labels.
@@ -131,6 +133,9 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 2 (3.8.1 / schema revision 5): retain Core-native iterative Type 26 and complete-combination Types 15/20/23; add Type 20/23 Pass-1 material semantics, Core-equivalent response validation, retained finish/cancel exits, and a 512-byte response buffer.
   - [x] Review batch 3 (3.8.2 / schema revision 6): use the public legacy Core query API for equip source-target, effect target, reason card, all overlay identities, typed counters, original owner, dynamic Level/Rank/Scale/Link values, disabled zones, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE`; preserve Graveyard/banished physical copies, classify audited messages as explicitly applied, query-reconciled, or known observation gaps, and connect Type 21 sorting plus Type 22 Pass-1 semantics. Exact summon provenance remains an explicit upstream item because public Core does not export it; this batch has no private-Core dependency.
 - [ ] **Phase 3: static semantic lookup**—deduplication, asset hashes, ONNX parity.
+  - [x] Review batch 1 (3.9.0 / schema revision 7): compile one table aligned to exact tokens and Lua effect slots, share it across Encoder/network consumers, and carry a prefix-compatible semantic hash through PTH, ONNX, artifacts, and deployment packages. Legacy network inputs remain as a lossless bridge.
+  - [ ] Review batch 2 (planned 3.9.1): perform model-side lookup from card/effect-slot identities, remove repeated structured-semantic matrices from Encoder/shared memory/PPO trajectories, and verify numerical parity plus memory savings.
+  - [ ] Review batch 3 (planned 3.9.2): close ONNX constant/external-data and cross-machine package validation, then complete PyTorch/ONNX, real-Core, and throughput gates.
 - [ ] **Phase 4: deck protocol/encoder**—profile deduplication, labels, reusable encoder.
 - [ ] **Phase 5: layered FiLM/history**—separate modulation and 16 compact events.
 - [ ] **Phase 6: auxiliary heads/planning**—verifiable tasks, future summaries, `plan_latent`.

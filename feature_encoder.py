@@ -66,8 +66,12 @@ class GalateaEncoder:
         elif (
             _GLOBAL_SEM_KB.card_vocabulary.vocabulary_hash
             != self.card_vocabulary.vocabulary_hash
+            or not _GLOBAL_SEM_KB.is_current()
         ):
-            raise ValueError("semantic cache and encoder card vocabularies do not match")
+            _GLOBAL_SEM_KB = SemanticKnowledgeBase(
+                'knowledge_base.json',
+                card_vocabulary=self.card_vocabulary,
+            )
         self.sem_kb = _GLOBAL_SEM_KB
 
     def _encode_card_code(self, code):
