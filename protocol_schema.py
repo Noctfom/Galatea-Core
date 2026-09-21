@@ -34,7 +34,7 @@ from semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 7
+PROTOCOL_SCHEMA_REVISION = 8
 
 
 def _schema_descriptor(card_vocabulary):
@@ -55,12 +55,9 @@ def _schema_descriptor(card_vocabulary):
                 "card_overlay_rest_idx",
                 "deck_idx",
                 "c_card_idx",
+                "h_card_idx",
                 "act_code",
                 "act_target_code",
-                "sem_ref",
-                "d_sem_ref",
-                "c_sem_ref",
-                "h_sem_ref",
             ],
         },
         "global_state": {
@@ -167,8 +164,25 @@ def _schema_descriptor(card_vocabulary):
             "lookup_format_version": STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION,
             "index": "exact_card_token_and_lua_effect_slot",
             "effect_slots": 8,
-            "lookup_owner": "model_side_prepared",
-            "trajectory_mode": "legacy_expanded_until_phase_3_batch_2",
+            "lookup_owner": "model_side_registered_buffers",
+            "trajectory_mode": "card_and_effect_slot_ids_only",
+            "card_identity_inputs": [
+                "card_idx",
+                "deck_idx",
+                "c_card_idx",
+                "h_card_idx",
+            ],
+            "effect_slot_inputs": [
+                "c_effect_slot",
+                "h_effect_slot",
+                "act_effect_slot",
+            ],
+            "removed_expanded_prefixes": [
+                "sem_",
+                "d_sem_",
+                "c_sem_",
+                "h_sem_",
+            ],
             "identity_policy": "append_only_card_prefix_with_logical_vectors",
         },
         "action_semantics": {

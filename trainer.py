@@ -519,63 +519,23 @@ class PPOTrainer:
             'card_position': ((120,), torch.long),
             'padding_mask': ((120,), torch.bool),
             
-            # ---前场/后场/手牌 语义大脑皮层槽位 ---
-            'sem_category': ((120, 8, 8), torch.int16),
-            'sem_req': ((120, 8, 16), torch.int8),
-            'sem_setcode': ((120, 8, 4), torch.int16),
-            'sem_number': ((120, 8, 4), torch.float16),
-            'sem_ref': ((120, 8, 4), torch.int32),
-            'sem_race': ((120, 8, 4), torch.int16),
-            'sem_attr': ((120, 8, 4), torch.int16),
-            'sem_code_idx': ((120, 8), torch.long),  # [新增]
-            'sem_mask': ((120, 8), torch.bool),
-            
             'deck_idx': ((75,), torch.long),
             'deck_race': ((75,), torch.long),
             'deck_attr': ((75,), torch.long),
             'deck_setcodes': ((75, 4), torch.long),
             'deck_mask': ((75,), torch.bool),
             
-            # --- 上帝视角卡组残像 语义槽位 ---
-            'd_sem_category': ((75, 8, 8), torch.int16),
-            'd_sem_req': ((75, 8, 16), torch.int8),
-            'd_sem_setcode': ((75, 8, 4), torch.int16),
-            'd_sem_number': ((75, 8, 4), torch.float16),
-            'd_sem_ref': ((75, 8, 4), torch.int32),
-            'd_sem_race': ((75, 8, 4), torch.int16),
-            'd_sem_attr': ((75, 8, 4), torch.int16),
-            'd_sem_code_idx': ((75, 8), torch.long), # [新增]
-            'd_sem_mask': ((75, 8), torch.bool),
-            
             'c_mask': ((12,), torch.bool),
             'c_card_idx': ((12,), torch.long),
+            'c_effect_slot': ((12,), torch.uint8),
             'c_desc': ((12,), torch.long),
             'c_context': ((12, CHAIN_CONTEXT_DIM), torch.float16),
             'c_zone': ((12, 2), torch.long),
             'c_position': ((12,), torch.long),
 
-            # --- 瞬间时点连锁堆栈 语义槽位 ---
-            'c_sem_category': ((12, 8, 8), torch.int16),
-            'c_sem_req': ((12, 8, 16), torch.int8),
-            'c_sem_setcode': ((12, 8, 4), torch.int16),
-            'c_sem_number': ((12, 8, 4), torch.float16),
-            'c_sem_ref': ((12, 8, 4), torch.int32),
-            'c_sem_race': ((12, 8, 4), torch.int16),
-            'c_sem_attr': ((12, 8, 4), torch.int16),
-            'c_sem_code_idx': ((12, 8), torch.long), # [新增]
-            'c_sem_mask': ((12, 8), torch.bool),
             'h_mask': ((8,), torch.bool),
-            
-            # --- 历史施法雷达 语义槽位 ---
-            'h_sem_category': ((8, 8, 8), torch.int16),
-            'h_sem_req': ((8, 8, 16), torch.int8),
-            'h_sem_setcode': ((8, 8, 4), torch.int16),
-            'h_sem_number': ((8, 8, 4), torch.float16),
-            'h_sem_ref': ((8, 8, 4), torch.int32),
-            'h_sem_race': ((8, 8, 4), torch.int16),
-            'h_sem_attr': ((8, 8, 4), torch.int16),
-            'h_sem_code_idx': ((8, 8), torch.long), # [新增]
-            'h_sem_mask': ((8, 8), torch.bool),
+            'h_card_idx': ((8,), torch.long),
+            'h_effect_slot': ((8,), torch.uint8),
             'act_card_idx': ((120, ACTION_TARGET_SLOTS), torch.long),
             'act_type': ((120,), torch.long),
             'act_desc': ((120,), torch.long),

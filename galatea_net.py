@@ -264,6 +264,24 @@ class GalateaNet(nn.Module):
             torch.from_numpy(semantic_lookup.code_dictionary),
             persistent=False,
         )
+        # 静态语义随模型驻留一次，逐步观测只需传递卡片与效果槽身份
+        semantic_buffers = {
+            'semantic_category_table': semantic_lookup.category,
+            'semantic_requirement_table': semantic_lookup.requirement,
+            'semantic_setcode_table': semantic_lookup.setcode,
+            'semantic_number_table': semantic_lookup.number,
+            'semantic_reference_table': semantic_lookup.reference,
+            'semantic_race_table': semantic_lookup.race,
+            'semantic_attribute_table': semantic_lookup.attribute,
+            'semantic_code_index_table': semantic_lookup.code_index,
+            'semantic_effect_mask_table': semantic_lookup.effect_mask,
+        }
+        for name, array in semantic_buffers.items():
+            self.register_buffer(
+                name,
+                torch.from_numpy(array),
+                persistent=False,
+            )
         
         # --- 1. 基础物理感知层 (Physical Embeddings) ---
         self.card_embed = nn.Embedding(self.vocab_size, self.d_model, padding_idx=0)
@@ -541,6 +559,61 @@ class GalateaNet(nn.Module):
             return card_sem_v, slot_v
         return card_sem_v
 
+    def lookup_static_semantics(self, card_ids, effect_slots=None):
+        """按卡片 token 与可选效果槽身份还原完整静态语义张量"""
+        safe_card_ids = card_ids.long().clamp(
+            0,
+            self.semantic_category_table.shape[0] - 1,
+        )
+        semantic_inputs = (
+            self.semantic_category_table[safe_card_ids],
+            self.semantic_requirement_table[safe_card_ids],
+            self.semantic_setcode_table[safe_card_ids],
+            self.semantic_number_table[safe_card_ids],
+            self.semantic_reference_table[safe_card_ids],
+            self.semantic_race_table[safe_card_ids],
+            self.semantic_attribute_table[safe_card_ids],
+            self.semantic_code_index_table[safe_card_ids],
+        )
+        semantic_mask = self.semantic_effect_mask_table[safe_card_ids]
+
+        # 复刻旧编码器的空语义哨兵，保证隐藏卡与空槽数值完全一致
+        empty_rows = ~semantic_mask.any(dim=-1)
+        fallback_slot = torch.arange(
+            semantic_mask.shape[-1],
+            device=semantic_mask.device,
+        ).eq(0)
+        semantic_mask = semantic_mask | (
+            empty_rows.unsqueeze(-1) & fallback_slot
+        )
+
+        if effect_slots is not None:
+            slot_ids = effect_slots.long()
+            safe_slot_ids = (slot_ids - 1).clamp(
+                0,
+                semantic_mask.shape[-1] - 1,
+            )
+            selected_valid = torch.gather(
+                semantic_mask,
+                -1,
+                safe_slot_ids.unsqueeze(-1),
+            ).squeeze(-1)
+            known_slots = (
+                (slot_ids > 0)
+                & (slot_ids <= semantic_mask.shape[-1])
+                & selected_valid
+            )
+            focused_mask = torch.nn.functional.one_hot(
+                safe_slot_ids,
+                num_classes=semantic_mask.shape[-1],
+            ).to(torch.bool)
+            focus_selector = known_slots.unsqueeze(-1)
+            semantic_mask = (
+                (focused_mask & focus_selector)
+                | (semantic_mask & ~focus_selector)
+            )
+        return (*semantic_inputs, semantic_mask)
+
     def _unpack_bit_bytes(self, packed):
         """把轨迹中的紧凑字节无损展开为供线性层使用的逐位特征"""
         expanded = torch.bitwise_and(
@@ -596,7 +669,7 @@ class GalateaNet(nn.Module):
             counter_mask.sum(dim=-2).clamp(min=1).to(x_counter_slots.dtype)
         )
 
-        # 接入语义大脑！
+        # 接入语义大脑；生产路径只携带 card_idx，旧展开路径仅保留给数值等价测试
         if 'sem_category' in batch_dict:
             x_sem, x_sem_slots = self.process_semantics(
                 batch_dict['sem_category'], batch_dict['sem_req'],
@@ -606,8 +679,11 @@ class GalateaNet(nn.Module):
                 return_slots=True,
             )
         else:
-            x_sem = 0.0
-            x_sem_slots = None
+            x_sem, x_sem_slots = self.process_semantics(
+                *self.lookup_static_semantics(batch_dict['card_idx']),
+                x_feat,
+                return_slots=True,
+            )
         # 全息物理与语义的大一统！
         x_zone = self.zone_embed(batch_dict['card_zone'].long())
         x_position = self.position_embed(batch_dict['card_position'].long())
@@ -685,8 +761,10 @@ class GalateaNet(nn.Module):
                     batch_dict['d_sem_code_idx'], batch_dict['d_sem_mask'], None
                 )
             else:
-                d_sem = 0
-                d_sem_code_idx = None
+                d_sem = self.process_semantics(
+                    *self.lookup_static_semantics(batch_dict['deck_idx']),
+                    None,
+                )
             x_deck = e_d_code + e_d_race + e_d_attr + e_d_setcode + d_sem # 连卡组都知道自己有什么效果了！
             
             d_mask_f = batch_dict['deck_mask'].float().unsqueeze(-1)
@@ -697,13 +775,23 @@ class GalateaNet(nn.Module):
             deck_pooled = 0
             
         # 连锁雷达：嗅探正在发动的效果！
-        if 'c_sem_category' in batch_dict:
+        if 'c_card_idx' in batch_dict:
+            if 'c_sem_category' in batch_dict:
+                c_semantic_inputs = (
+                    batch_dict['c_sem_category'], batch_dict['c_sem_req'],
+                    batch_dict['c_sem_setcode'], batch_dict['c_sem_number'],
+                    batch_dict['c_sem_ref'], batch_dict['c_sem_race'], batch_dict['c_sem_attr'],
+                    batch_dict['c_sem_code_idx'], batch_dict['c_sem_mask'],
+                )
+            else:
+                c_semantic_inputs = self.lookup_static_semantics(
+                    batch_dict['c_card_idx'],
+                    batch_dict['c_effect_slot'],
+                )
             c_sem = self.process_semantics(
-                batch_dict['c_sem_category'], batch_dict['c_sem_req'],
-                batch_dict['c_sem_setcode'], batch_dict['c_sem_number'],
-                batch_dict['c_sem_ref'], batch_dict['c_sem_race'], batch_dict['c_sem_attr'],
-                batch_dict['c_sem_code_idx'], batch_dict['c_sem_mask'], None
-            ) # [B, 5, 512]
+                *c_semantic_inputs,
+                None,
+            ) # [B, 12, 512]
             c_sem = (
                 c_sem
                 + self.card_embed(batch_dict['c_card_idx'].long())
@@ -723,12 +811,22 @@ class GalateaNet(nn.Module):
             chain_pooled = 0
         
         # 历史动作雷达：回想过去 8 步的施法记录
-        if 'h_sem_category' in batch_dict:
+        if 'h_card_idx' in batch_dict:
+            if 'h_sem_category' in batch_dict:
+                h_semantic_inputs = (
+                    batch_dict['h_sem_category'], batch_dict['h_sem_req'],
+                    batch_dict['h_sem_setcode'], batch_dict['h_sem_number'],
+                    batch_dict['h_sem_ref'], batch_dict['h_sem_race'], batch_dict['h_sem_attr'],
+                    batch_dict['h_sem_code_idx'], batch_dict['h_sem_mask'],
+                )
+            else:
+                h_semantic_inputs = self.lookup_static_semantics(
+                    batch_dict['h_card_idx'],
+                    batch_dict['h_effect_slot'],
+                )
             h_sem = self.process_semantics(
-                batch_dict['h_sem_category'], batch_dict['h_sem_req'],
-                batch_dict['h_sem_setcode'], batch_dict['h_sem_number'],
-                batch_dict['h_sem_ref'], batch_dict['h_sem_race'], batch_dict['h_sem_attr'],
-                batch_dict['h_sem_code_idx'], batch_dict['h_sem_mask'], None
+                *h_semantic_inputs,
+                None,
             ) # [B, 8, 512]
 
             history_pooled = self.history_context_pool(

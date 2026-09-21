@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.9.0**.
+> This document applies to **Galatea-Core v3.9.1**.
 
 ---
 
@@ -135,7 +135,8 @@ Configure and launch AI training tasks.
 - v3.8.0 completes V4 Phase 2 batch 1: the six Main Phase candidate families have distinct operations, and summon methods are encoded only from direct Core evidence; unproven special-summon methods are explicitly unknown
 - v3.8.1 completes V4 Phase 2 batch 2: Type 26 remains iterative while Types 15/20/23 return complete combinations; tribute values, dual-value sums, cancel/finish boundaries, and the 512-byte Core response buffer are source-checked
 - v3.8.2 completes V4 Phase 2 batch 3: public `query_card/query_field_count` now supplies dynamic identity, Level/Rank/Link/Scale values, proper-summon status, equip/target/reason-card relations, all overlay identities, typed counters, and disabled zones. Exact summon provenance remains an upstream public-API item; no private Core fork or guessed value is used
-- v3.9.0 completes V4 Phase 3 batch 1: Lua structured semantics and code vectors compile into an exact card-token × effect-slot table whose append-only prefix hash is embedded in PTH, ONNX, artifacts, and deployment packages. Legacy inputs remain for this batch; 3.9.1 removes repeated trajectory matrices
+- v3.9.0 completes V4 Phase 3 batch 1: Lua structured semantics and code vectors compile into an exact card-token × effect-slot table whose append-only prefix hash is embedded in PTH, ONNX, artifacts, and deployment packages
+- v3.9.1 completes V4 Phase 3 batch 2: Encoder/shared-memory/PPO trajectories carry only card/effect-slot IDs, and the model reconstructs exactly the same static semantics on device. This removes about 149.4 KiB per step, or about 4.67 GiB from one 32,768-step trajectory pool
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow

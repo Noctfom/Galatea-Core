@@ -29,7 +29,6 @@ from data_types import (
     GameSnapshot,
 )
 from game_constants import LocationInfo, Position, Zone
-from semantic_kb import SemanticKnowledgeBase  # 导入语义库
 
 # --- 配置参数 ---
 MAX_CARDS = 120
@@ -43,8 +42,6 @@ HIDDEN_OPPONENT_ZONES = {
     Zone.EXTRA,
 }
 
-_GLOBAL_SEM_KB = None
-
 class GalateaEncoder:
     def __init__(self, vocab_size=None, card_vocabulary=None):
         self.card_vocabulary = card_vocabulary or get_default_card_vocabulary()
@@ -55,28 +52,19 @@ class GalateaEncoder:
         self.vocab_size = self.card_vocabulary.capacity
         self.global_dim = GLOBAL_FEATURE_DIM
         self.card_feat_dim = 7
-        
-        # 单例模式：防止每开一局卡顿，所有环境共享一个缓存！
-        global _GLOBAL_SEM_KB
-        if _GLOBAL_SEM_KB is None:
-            _GLOBAL_SEM_KB = SemanticKnowledgeBase(
-                'knowledge_base.json',
-                card_vocabulary=self.card_vocabulary,
-            )
-        elif (
-            _GLOBAL_SEM_KB.card_vocabulary.vocabulary_hash
-            != self.card_vocabulary.vocabulary_hash
-            or not _GLOBAL_SEM_KB.is_current()
-        ):
-            _GLOBAL_SEM_KB = SemanticKnowledgeBase(
-                'knowledge_base.json',
-                card_vocabulary=self.card_vocabulary,
-            )
-        self.sem_kb = _GLOBAL_SEM_KB
 
     def _encode_card_code(self, code):
         """把真实卡片代码映射为无碰撞的固定词表索引"""
         return self.card_vocabulary.encode(code)
+
+    @staticmethod
+    def _encode_effect_slot(effect_slot):
+        """把内部 0～7 效果槽编码为 1～8，并以 0 表示未知槽位"""
+        try:
+            slot_index = int(effect_slot)
+        except (TypeError, ValueError):
+            return 0
+        return slot_index + 1 if 0 <= slot_index < 8 else 0
 
     @staticmethod
     def _hash_action_response(value):
@@ -309,29 +297,6 @@ class GalateaEncoder:
             return bool(entity.is_public)
         return True
     
-    def _get_sem_mask(self, cat_out, code_idx_out):
-        """动态侦测哪些槽位是有效的，生成 Attention 掩码"""
-        m = np.zeros(8, dtype=np.bool_)
-        for j in range(8):
-            # 【修改】如果分类非 0，或者索引非 0，说明该槽位有效
-            if cat_out[j, 0] != 0 or code_idx_out[j] != 0:
-                m[j] = True
-        if not np.any(m): m[0] = True
-        return m
-
-    @staticmethod
-    def _focus_semantic_mask(base_mask, effect_slot):
-        """精确槽可用时只关注该 Lua 效果，否则保留整卡语义回退"""
-        try:
-            slot_index = int(effect_slot)
-        except (TypeError, ValueError):
-            return base_mask
-        if not 0 <= slot_index < 8 or not bool(base_mask[slot_index]):
-            return base_mask
-        focused = np.zeros(8, dtype=np.bool_)
-        focused[slot_index] = True
-        return focused
-    
     def _get_coords(self, player_id, owner, location, sequence):
         """将一维的 location 和 sequence 转换为二维平面坐标 (X, Y)"""
         # 非场上卡片，放入异次元坐标
@@ -559,18 +524,6 @@ class GalateaEncoder:
         card_positions = np.zeros(MAX_CARDS, dtype=np.int64)
         masks = np.zeros(MAX_CARDS, dtype=np.bool_)
 
-        # 语义大矩阵全量预分配，消灭碎片
-        sem_cats = np.zeros((MAX_CARDS, 8, 8), dtype=np.int16)
-        sem_reqs = np.full((MAX_CARDS, 8, 16), -1, dtype=np.int8)
-        sem_scs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
-        sem_nums = np.zeros((MAX_CARDS, 8, 4), dtype=np.float16)
-        sem_refs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int32)
-        sem_races = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
-        sem_attrs = np.zeros((MAX_CARDS, 8, 4), dtype=np.int16)
-        sem_code_idx = np.zeros((MAX_CARDS, 8), dtype=np.int32)
-        sem_mask = np.zeros((MAX_CARDS, 8), dtype=np.bool_)
-        sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
-
         # ==========================================
         # 1. 处理场上/手牌/墓地实体 
         # ==========================================
@@ -741,8 +694,6 @@ class GalateaEncoder:
                             25.0,
                         )
 
-                # 写入预分配矩阵对应切片
-                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(visible_code)
             else:
                 if e.location == Zone.HAND:
                     card_indices[i] = self.card_vocabulary.hidden_hand_id
@@ -753,12 +704,6 @@ class GalateaEncoder:
                 card_overlay_indices[i] = self.card_vocabulary.padding_id
                 masks[i] = True
                 card_feats[i, :4] = [-1.0, e.sequence / 10.0, -1.0, -1.0]
-                cat_out, req_out, set_out, num_out, ref_out, race_out, attr_out, code_out = self.sem_kb.get_card_semantics(0)
-
-            sem_cats[i] = cat_out; sem_reqs[i] = req_out; sem_scs[i] = set_out
-            sem_nums[i] = num_out; sem_refs[i] = ref_out; sem_races[i] = race_out; sem_attrs[i] = attr_out
-            sem_code_idx[i] = code_out
-            sem_mask[i] = self._get_sem_mask(cat_out, code_out)
 
         # ==========================================
         # 2. 处理上帝视角卡组残像 (MAX_DECK_CARDS = 75)
@@ -776,17 +721,6 @@ class GalateaEncoder:
         deck_setcodes = np.zeros((MAX_DECK_CARDS, 4), dtype=np.int64)
         deck_masks = np.zeros(MAX_DECK_CARDS, dtype=np.bool_)
 
-        d_sem_cats = np.zeros((MAX_DECK_CARDS, 8, 8), dtype=np.int16)
-        d_sem_reqs = np.full((MAX_DECK_CARDS, 8, 16), -1, dtype=np.int8)
-        d_sem_scs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
-        d_sem_nums = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.float16)
-        d_sem_refs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int32)
-        d_sem_races = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
-        d_sem_attrs = np.zeros((MAX_DECK_CARDS, 8, 4), dtype=np.int16)
-        d_sem_code_idx = np.zeros((MAX_DECK_CARDS, 8), dtype=np.int32)
-        d_sem_mask = np.zeros((MAX_DECK_CARDS, 8), dtype=np.bool_)
-        d_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
-
         from card_reader import card_db
         for i, code in enumerate(my_deck[:MAX_DECK_CARDS]):
             try:
@@ -800,45 +734,24 @@ class GalateaEncoder:
                 
             deck_idx[i] = self._encode_card_code(code)
             deck_masks[i] = True
-            
-            dc_out, dr_out, ds_out, dn_out, dref_out, drace_out, dattr_out, dcode_out = self.sem_kb.get_card_semantics(code)
-            d_sem_cats[i] = dc_out; d_sem_reqs[i] = dr_out; d_sem_scs[i] = ds_out
-            d_sem_nums[i] = dn_out; d_sem_refs[i] = dref_out; d_sem_races[i] = drace_out; d_sem_attrs[i] = dattr_out
-            d_sem_code_idx[i] = dcode_out
-            d_sem_mask[i] = self._get_sem_mask(dc_out, dcode_out)
 
         # ==========================================
         # 2.5 处理连锁堆栈 (MAX_CHAIN = 12)
         # ==========================================
         MAX_CHAIN = 12
         c_masks = np.zeros(MAX_CHAIN, dtype=np.bool_)
-        c_sem_cats = np.zeros((MAX_CHAIN, 8, 8), dtype=np.int16)
-        c_sem_reqs = np.full((MAX_CHAIN, 8, 16), -1, dtype=np.int8)
-        c_sem_scs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
-        c_sem_nums = np.zeros((MAX_CHAIN, 8, 4), dtype=np.float16)
-        c_sem_refs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int32)
-        c_sem_races = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
-        c_sem_attrs = np.zeros((MAX_CHAIN, 8, 4), dtype=np.int16)
-        c_sem_code_idx = np.zeros((MAX_CHAIN, 8), dtype=np.int32)
-        c_sem_mask = np.zeros((MAX_CHAIN, 8), dtype=np.bool_)
         c_card_idx = np.zeros(MAX_CHAIN, dtype=np.int64)
+        c_effect_slots = np.zeros(MAX_CHAIN, dtype=np.uint8)
         c_desc = np.zeros(MAX_CHAIN, dtype=np.int64)
         c_context = np.zeros((MAX_CHAIN, CHAIN_CONTEXT_DIM), dtype=np.float16)
         c_zones = np.zeros((MAX_CHAIN, 2), dtype=np.int64)
         c_positions = np.zeros(MAX_CHAIN, dtype=np.int64)
-        c_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
         if hasattr(snapshot, 'chain_stack'):
             for i, item in enumerate(snapshot.chain_stack[:MAX_CHAIN]):
-                cc_out, cr_out, cs_out, cn_out, cref_out, crace_out, cattr_out, ccode_out = self.sem_kb.get_card_semantics(item['code'])
-                c_sem_cats[i] = cc_out; c_sem_reqs[i] = cr_out; c_sem_scs[i] = cs_out
-                c_sem_nums[i] = cn_out; c_sem_refs[i] = cref_out; c_sem_races[i] = crace_out; c_sem_attrs[i] = cattr_out
-                c_sem_code_idx[i] = ccode_out
-                base_mask = self._get_sem_mask(cc_out, ccode_out)
-                c_sem_mask[i] = self._focus_semantic_mask(
-                    base_mask,
-                    item.get('effect_slot', -1),
-                )
                 c_card_idx[i] = self._encode_card_code(item['code'])
+                c_effect_slots[i] = self._encode_effect_slot(
+                    item.get('effect_slot', -1)
+                )
                 c_desc[i] = int(item.get('desc', 0)) % 1024
                 c_context[i] = self._encode_chain_context(item, player_id)
                 c_zones[i] = [
@@ -853,27 +766,14 @@ class GalateaEncoder:
         # ==========================================
         MAX_HISTORY = 8
         h_masks = np.zeros(MAX_HISTORY, dtype=np.bool_)
-        h_sem_cats = np.zeros((MAX_HISTORY, 8, 8), dtype=np.int16)
-        h_sem_reqs = np.full((MAX_HISTORY, 8, 16), -1, dtype=np.int8)
-        h_sem_scs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
-        h_sem_nums = np.zeros((MAX_HISTORY, 8, 4), dtype=np.float16)
-        h_sem_refs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int32)
-        h_sem_races = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
-        h_sem_attrs = np.zeros((MAX_HISTORY, 8, 4), dtype=np.int16)
-        h_sem_code_idx = np.zeros((MAX_HISTORY, 8), dtype=np.int32)
-        h_sem_mask = np.zeros((MAX_HISTORY, 8), dtype=np.bool_)
-        h_sem_mask[:, 0] = True  # 兜底：默认第一个语义槽位永远有效，防止全空 NaN 崩溃
+        h_card_idx = np.zeros(MAX_HISTORY, dtype=np.int64)
+        h_effect_slots = np.zeros(MAX_HISTORY, dtype=np.uint8)
 
         if hasattr(snapshot, 'history_stack'):
             for i, item in enumerate(snapshot.history_stack[:MAX_HISTORY]):
-                hc_out, hr_out, hs_out, hn_out, href_out, hrace_out, hattr_out, hcode_out = self.sem_kb.get_card_semantics(item['code'])
-                h_sem_cats[i] = hc_out; h_sem_reqs[i] = hr_out; h_sem_scs[i] = hs_out
-                h_sem_nums[i] = hn_out; h_sem_refs[i] = href_out; h_sem_races[i] = hrace_out; h_sem_attrs[i] = hattr_out
-                h_sem_code_idx[i] = hcode_out
-                base_mask = self._get_sem_mask(hc_out, hcode_out)
-                h_sem_mask[i] = self._focus_semantic_mask(
-                    base_mask,
-                    item.get('effect_slot', -1),
+                h_card_idx[i] = self._encode_card_code(item['code'])
+                h_effect_slots[i] = self._encode_effect_slot(
+                    item.get('effect_slot', -1)
                 )
                 h_masks[i] = True
 
@@ -954,58 +854,22 @@ class GalateaEncoder:
             'card_position': torch.from_numpy(card_positions).unsqueeze(0),
             'padding_mask': torch.from_numpy(masks).unsqueeze(0),
             
-            'sem_category': torch.from_numpy(sem_cats).unsqueeze(0),
-            'sem_req': torch.from_numpy(sem_reqs).unsqueeze(0),
-            'sem_setcode': torch.from_numpy(sem_scs).unsqueeze(0),
-            'sem_number': torch.from_numpy(sem_nums).unsqueeze(0),
-            'sem_ref': torch.from_numpy(sem_refs).unsqueeze(0),
-            'sem_race': torch.from_numpy(sem_races).unsqueeze(0),
-            'sem_attr': torch.from_numpy(sem_attrs).unsqueeze(0),
-            'sem_code_idx': torch.from_numpy(sem_code_idx).unsqueeze(0),
-            'sem_mask': torch.from_numpy(sem_mask).unsqueeze(0),
-            
             'deck_idx': torch.from_numpy(deck_idx).unsqueeze(0),
             'deck_race': torch.from_numpy(deck_race).unsqueeze(0),
             'deck_attr': torch.from_numpy(deck_attr).unsqueeze(0),
             'deck_setcodes': torch.from_numpy(deck_setcodes).unsqueeze(0),
             'deck_mask': torch.from_numpy(deck_masks).unsqueeze(0),
             
-            'd_sem_category': torch.from_numpy(d_sem_cats).unsqueeze(0),
-            'd_sem_req': torch.from_numpy(d_sem_reqs).unsqueeze(0),
-            'd_sem_setcode': torch.from_numpy(d_sem_scs).unsqueeze(0),
-            'd_sem_number': torch.from_numpy(d_sem_nums).unsqueeze(0),
-            'd_sem_ref': torch.from_numpy(d_sem_refs).unsqueeze(0),
-            'd_sem_race': torch.from_numpy(d_sem_races).unsqueeze(0),
-            'd_sem_attr': torch.from_numpy(d_sem_attrs).unsqueeze(0),
-            'd_sem_code_idx': torch.from_numpy(d_sem_code_idx).unsqueeze(0),
-            'd_sem_mask': torch.from_numpy(d_sem_mask).unsqueeze(0),
-
             'c_mask': torch.from_numpy(c_masks).unsqueeze(0),
             'c_card_idx': torch.from_numpy(c_card_idx).unsqueeze(0),
+            'c_effect_slot': torch.from_numpy(c_effect_slots).unsqueeze(0),
             'c_desc': torch.from_numpy(c_desc).unsqueeze(0),
             'c_context': torch.from_numpy(c_context).unsqueeze(0),
             'c_zone': torch.from_numpy(c_zones).unsqueeze(0),
             'c_position': torch.from_numpy(c_positions).unsqueeze(0),
-            'c_sem_category': torch.from_numpy(c_sem_cats).unsqueeze(0),
-            'c_sem_req': torch.from_numpy(c_sem_reqs).unsqueeze(0),
-            'c_sem_setcode': torch.from_numpy(c_sem_scs).unsqueeze(0),
-            'c_sem_number': torch.from_numpy(c_sem_nums).unsqueeze(0),
-            'c_sem_ref': torch.from_numpy(c_sem_refs).unsqueeze(0),
-            'c_sem_race': torch.from_numpy(c_sem_races).unsqueeze(0),
-            'c_sem_attr': torch.from_numpy(c_sem_attrs).unsqueeze(0),
-            'c_sem_code_idx': torch.from_numpy(c_sem_code_idx).unsqueeze(0),
-            'c_sem_mask': torch.from_numpy(c_sem_mask).unsqueeze(0),
-
             'h_mask': torch.from_numpy(h_masks).unsqueeze(0),
-            'h_sem_category': torch.from_numpy(h_sem_cats).unsqueeze(0),
-            'h_sem_req': torch.from_numpy(h_sem_reqs).unsqueeze(0),
-            'h_sem_setcode': torch.from_numpy(h_sem_scs).unsqueeze(0),
-            'h_sem_number': torch.from_numpy(h_sem_nums).unsqueeze(0),
-            'h_sem_ref': torch.from_numpy(h_sem_refs).unsqueeze(0),
-            'h_sem_race': torch.from_numpy(h_sem_races).unsqueeze(0),
-            'h_sem_attr': torch.from_numpy(h_sem_attrs).unsqueeze(0),
-            'h_sem_code_idx': torch.from_numpy(h_sem_code_idx).unsqueeze(0),
-            'h_sem_mask': torch.from_numpy(h_sem_mask).unsqueeze(0),
+            'h_card_idx': torch.from_numpy(h_card_idx).unsqueeze(0),
+            'h_effect_slot': torch.from_numpy(h_effect_slots).unsqueeze(0),
         }
         
         base_dict.update(act_dict)

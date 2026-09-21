@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.9.1] - 2026-09-21
+
+### 🧠 V4 Phase 3 Batch 2: Model-Side Semantic Lookup and Trajectory Deduplication
+
+- **Lossless observation switch**: Scene/deck rows keep the existing `card_idx/deck_idx`; chain adds `c_effect_slot`, while recent history adds `h_card_idx/h_effect_slot`. Values 1–8 select exact Lua effect slots, and 0 preserves whole-card fallback for unknown bindings. Hidden-information masking, public relations, action candidates, and Core responses are unchanged
+- **Unified model-side lookup**: `GalateaNet` registers the 3.9.0 structured tables as non-parameter buffers and reconstructs the former nine semantic tensors from card tokens/effect slots on the active device. These buffers are not trainable parameters or checkpoint weights and do not alter gradients or PPO objectives
+- **Removed per-step matrix copies**: Encoder no longer loads/compiles semantics or emits `sem_* / d_sem_* / c_sem_* / h_sem_*`. Trainer shared memory, pinned staging, Worker trajectories, and the PPO merge pool remove them as well. Central-inference Workers therefore no longer retain roughly 53.47 MiB of static semantic assets each
+- **Memory result**: Expanded fields used 153,080 bytes per step; replacement identities use 84 bytes, a net reduction of 152,996 bytes (about 149.4 KiB/step), or about 4.67 GiB for one 32,768-step trajectory pool. A default 512-sample PPO mini-batch also replaces roughly 74.75 MiB of repeated semantics with one roughly 12.97 MiB resident structured table
+- **Performance boundary**: On-device lookup has a fixed indexing cost. On the local RTX 5070 Ti with a 512/8/6 single-sample benchmark, pure forward rose by about 1.59 ms, but removing CPU-to-CUDA expanded-matrix transfer reduced total time from about 13.11 ms to 12.16 ms. Real batching/async overlap varies, so this is directional evidence only; no extra Lua/CDB lookup or per-step disk I/O is introduced
+- **Elementwise parity gate**: A legacy-expanded branch remains solely for tests. Full compact and expanded forwards under identical weights match `logits/value/v_input` at `rtol=0, atol=0`. ONNX Runtime also validates the compact signature, which contains no expanded `sem_*` input
+- **Schema boundary**: Framework becomes 3.9.1; Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision becomes 8. Trainable parameter shapes are unchanged, but revision-7 development artifacts remain rejected under the V4 scratch-training policy
+- **Regression result**: The default suite runs 207 tests (206 passed and one real-Core environment-gated skip). The explicitly enabled public-Core decision loop passes separately, and ONNX/PyTorch outputs remain within the existing tolerance
+
 ## [v3.9.0] - 2026-09-21
 
 ### 🧠 V4 Phase 3 Batch 1: Model-Side Static Semantics and Asset Identity
