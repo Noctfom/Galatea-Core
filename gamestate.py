@@ -12,6 +12,7 @@ from copy import copy
 from game_constants import LocationInfo, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
+from deck_protocol import DeckProfile
 from data_types import (
     ActionOperation,
     CardEntity,
@@ -447,10 +448,22 @@ class DuelState:
         self.decision_player = -1
         
         # 初始化双边记牌器
-        self.p0_deck = list(p0_main) if p0_main else []
-        self.p0_extra = list(p0_extra) if p0_extra else []
-        self.p1_deck = list(p1_main) if p1_main else []
-        self.p1_extra = list(p1_extra) if p1_extra else []
+        self.p0_deck_profile = DeckProfile(
+            main=tuple(p0_main or ()),
+            extra=tuple(p0_extra or ()),
+        )
+        self.p1_deck_profile = DeckProfile(
+            main=tuple(p1_main or ()),
+            extra=tuple(p1_extra or ()),
+        )
+        self.p0_initial_deck = list(self.p0_deck_profile.main)
+        self.p0_initial_extra = list(self.p0_deck_profile.extra)
+        self.p1_initial_deck = list(self.p1_deck_profile.main)
+        self.p1_initial_extra = list(self.p1_deck_profile.extra)
+        self.p0_deck = self.p0_initial_deck.copy()
+        self.p0_extra = self.p0_initial_extra.copy()
+        self.p1_deck = self.p1_initial_deck.copy()
+        self.p1_extra = self.p1_initial_extra.copy()
         
         # 初始化基础状态
         self.turn = 0
@@ -468,6 +481,7 @@ class DuelState:
         self.audit_enabled = bool(audit_enabled)
 
     def reset(self):
+        """重置动态对局状态，并从稳定初始画像恢复剩余卡组"""
         self.turn = 0
         self.phase = 0
         self.my_lp = 8000
@@ -486,8 +500,12 @@ class DuelState:
 
         self.chain_stack = []
         self.history_stack = []
-        self.known_hand_codes = {0: [], 1: []} 
+        self.known_hand_codes = {0: [], 1: []}
         self.recently_confirmed = []
+        self.p0_deck = self.p0_initial_deck.copy()
+        self.p0_extra = self.p0_initial_extra.copy()
+        self.p1_deck = self.p1_initial_deck.copy()
+        self.p1_extra = self.p1_initial_extra.copy()
 
     def _get_field_entry(self, raw_location):
         """按 Core 位置值查找当前镜像中的卡片条目"""
@@ -1876,8 +1894,12 @@ class DuelState:
             valid_actions=final_actions,
             p0_deck_codes=self.p0_deck.copy(),
             p0_extra_codes=self.p0_extra.copy(),
-            p1_deck_codes=self.p1_deck.copy(), 
-            p1_extra_codes=self.p1_extra.copy() 
+            p1_deck_codes=self.p1_deck.copy(),
+            p1_extra_codes=self.p1_extra.copy(),
+            p0_initial_deck_codes=self.p0_initial_deck.copy(),
+            p0_initial_extra_codes=self.p0_initial_extra.copy(),
+            p1_initial_deck_codes=self.p1_initial_deck.copy(),
+            p1_initial_extra_codes=self.p1_initial_extra.copy(),
         )
         # 动态外挂连锁堆栈
         snap.chain_stack = self.chain_stack.copy()

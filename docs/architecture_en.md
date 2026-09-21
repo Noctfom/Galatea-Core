@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.9.2**.
+> This document applies to **Galatea-Core v3.10.0**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -79,6 +79,7 @@ Galatea-Core adopts a modular design consisting of the following core subsystems
 | `semantic_kb.py` | Perception | Semantic knowledge base queries |
 | `galatea_env.py` | Environment | OCGCore environment wrapper |
 | `gamestate.py` | Environment | Game state parsing (core!) |
+| `deck_protocol.py` | Protocol | Full construction, single-duel deck image, and BO3 upper-layer boundary |
 | `trainer.py` | Application | PPO trainer |
 | `worker.py` | Application | Multi-process data collection |
 | `model_versus.py` | Application | Normal Arena, logical/physical seat mapping, and greedy/training/deployment policies |
@@ -332,6 +333,22 @@ These two rebuildable files stay out of Git but are included automatically in on
 `protocol_schema.py` is the single owner of V4's `MODEL_PROTOCOL_VERSION=4`, while
 `checkpoint_utils.py` owns `CHECKPOINT_FORMAT_VERSION=3`. V3 checkpoints are
 intentionally not migrated.
+
+### Phase 4 deck-protocol boundary
+
+Version 3.10.0 introduces independent `DeckSpec`, `DeckProfile`, `MatchContext`, and
+`DuelSummary` contracts. `DeckSpec` retains the complete Main/Extra/Side construction and
+derives content identity from section, exact card code, and copy count rather than filename
+or `.ydk` ordering. `DeckProfile` is derived from Main and Extra only; its serialized form has
+no Side field and is the only stable deck boundary available to the current BO1 policy.
+
+The resource layer now parses and separately validates `.ydk` `!side` sections. A Side-only
+unknown-card warning does not exclude an otherwise valid deck from current BO1 training or
+Arena sampling, while Main/Extra failures still do. `DuelState` retains both an immutable
+initial Main/Extra image and Core-driven remaining lists, preventing later encoders from
+mistaking drawn cards for cards absent from the construction. `MatchContext` and `DuelSummary`
+are external extension points for future BO3 siding and deck building; they currently emit no
+policy inputs and never enter single-duel observations, the network, or PPO trajectories.
 
 ### V4 Player and Categorical Global State
 

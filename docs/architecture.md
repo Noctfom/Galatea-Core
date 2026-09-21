@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.9.2**。
+> 文档适用于 **Galatea-Core v3.10.0**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -79,6 +79,7 @@ Galatea-Core 采用模块化设计，由以下核心子系统构成：
 | `semantic_kb.py` | 感知层 | 语义知识库查询 |
 | `galatea_env.py` | 环境层 | OCGCore 环境封装 |
 | `gamestate.py` | 环境层 | 游戏状态解析（核心！） |
+| `deck_protocol.py` | 协议层 | 完整构筑、单局卡组画像与 BO3 上层边界 |
 | `trainer.py` | 应用层 | PPO 训练器 |
 | `worker.py` | 应用层 | 多进程数据采集 |
 | `model_versus.py` | 应用层 | 普通竞技、逻辑/物理座位映射，以及贪心/训练同分布/部署温度策略 |
@@ -324,6 +325,19 @@ spawn Worker 只加载后者；ONNX 在导出时把同一数值表固化进主�
 读取源知识库。两份编译资产是可重建缓存，不提交 Git，但一键包和 `.gkg` 会自动携带。
 V4 的 `MODEL_PROTOCOL_VERSION=4` 由 `protocol_schema.py` 唯一维护，
 `CHECKPOINT_FORMAT_VERSION=3` 由 `checkpoint_utils.py` 维护；V3 检查点不进行迁移。
+
+### Phase 4 卡组协议边界
+
+3.10.0 新增独立 `DeckSpec`、`DeckProfile`、`MatchContext` 和 `DuelSummary` 协议。
+`DeckSpec` 保存主卡组、额外卡组和 Side Deck 的完整构筑，内容身份按“分区 + 卡密 +
+投入数量”计算，不受文件名或 `.ydk` 排列影响；`DeckProfile` 只由主卡组和额外卡组派生，
+其序列化结构中不存在 Side 字段，是当前 BO1 策略允许接收的唯一稳定卡组边界。
+
+`.ydk` 的 `!side` 现会被资源层读取并单独校验。仅 Side 含尚未收录的新卡时，WebUI
+发出警告但不阻断当前 BO1 训练/竞技抽样；主卡组或额外卡组异常仍会退出抽样。
+`DuelState` 同时保留一局内不变的初始主/额外画像和随 Core 移动变化的剩余卡组，避免
+后续编码器把“已抽走的卡”误认为构筑本身不存在。`MatchContext`/`DuelSummary` 仅为未来
+BO3 换备与组卡层提供外部接口，当前返回空策略输入，不进入单局观测、网络或 PPO 轨迹。
 
 ### V4 玩家与离散全局状态
 

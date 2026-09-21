@@ -1958,8 +1958,8 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
 
         with st.expander(_("🧪 卡组兼容性预检", "🧪 Deck Compatibility Preflight")):
             st.caption(_(
-                "检查主卡组/额外卡组是否同时存在于当前 cards.cdb 和 V4 权威词表。不兼容卡组不会被删除，只会暂时退出训练/随机竞技抽样",
-                "Checks whether every Main/Extra card exists in both cards.cdb and the V4 authoritative vocabulary. Incompatible decks are retained but temporarily excluded from training and random Arena sampling.",
+                "检查主卡组、额外卡组与 Side Deck 是否存在于当前 cards.cdb 和 V4 权威词表。主/额外异常会退出 BO1 抽样；仅 Side 异常只会警告，不会影响当前单局训练",
+                "Checks Main, Extra, and Side cards against cards.cdb and the V4 vocabulary. Main/Extra failures exclude a deck from BO1 sampling; Side-only failures warn without affecting current single-duel training.",
             ))
             if st.button(_("扫描全部卡组", "Scan All Decks"), key="scan_deck_compatibility"):
                 with st.spinner(_("正在扫描卡组...", "Scanning decks...")):
@@ -1976,6 +1976,11 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             deck_audit = st.session_state.get("deck_compatibility_audit")
             if deck_audit is not None:
                 invalid_decks = [record for record in deck_audit if not record["valid"]]
+                side_warnings = [
+                    record
+                    for record in deck_audit
+                    if record["valid"] and not record.get("full_valid", True)
+                ]
                 st.metric(
                     _("V4 可用卡组", "V4-compatible decks"),
                     f"{len(deck_audit) - len(invalid_decks)} / {len(deck_audit)}",
@@ -2001,7 +2006,26 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                     ))
                     st.dataframe(display_records, width="stretch", hide_index=True)
                 else:
-                    st.success(_("全部卡组均可用。", "All decks are compatible."))
+                    st.success(_("全部卡组均可用于 BO1。", "All decks are BO1-compatible."))
+                if side_warnings:
+                    side_records = []
+                    for record in side_warnings:
+                        side_records.append(
+                            {
+                                _("物理池", "Pool"): record["pool"],
+                                _("卡组", "Deck"): record["deck"],
+                                _("Side 数量", "Side count"): record["side_count"],
+                                _("Side 未支持卡密", "Unsupported Side codes"): ", ".join(
+                                    str(code)
+                                    for code in record["unsupported_side_codes"]
+                                ),
+                            }
+                        )
+                    st.info(_(
+                        f"另有 {len(side_warnings)} 副卡组仅 Side Deck 含未支持卡；当前 BO1 仍可使用。",
+                        f"{len(side_warnings)} additional decks contain unsupported Side cards only; current BO1 use remains available.",
+                    ))
+                    st.dataframe(side_records, width="stretch", hide_index=True)
 
         # 1. 环境池基础导航
         deck_root_real = os.path.realpath(deck_root)

@@ -9,6 +9,7 @@ import math
 from dataclasses import dataclass
 from card_reader import card_db
 from card_vocab import get_default_card_vocabulary
+from deck_protocol import DeckSpec
 
 _last_io_check = {'global': 0, 'virtual': 0}
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,21 @@ class Deck:
         self.extra = [] 
         self.side = []
         self.invalid_codes = []
+        self.invalid_side_codes = []
+
+    def to_spec(self, source=""):
+        """转换为包含 Side Deck 的稳定外部卡组协议对象。"""
+        return DeckSpec(
+            main=tuple(self.main),
+            extra=tuple(self.extra),
+            side=tuple(self.side),
+            name=self.name,
+            source=source,
+        )
+
+    def duel_profile(self):
+        """派生不含 Side Deck 的当前单局模型画像。"""
+        return self.to_spec().duel_profile()
 
 
 class DeckCompatibilityError(ValueError):
@@ -318,6 +334,8 @@ def select_arena_deck(
         copied_deck.main = list(p0_pick.deck.main)
         copied_deck.extra = list(p0_pick.deck.extra)
         copied_deck.side = list(p0_pick.deck.side)
+        copied_deck.invalid_codes = list(p0_pick.deck.invalid_codes)
+        copied_deck.invalid_side_codes = list(p0_pick.deck.invalid_side_codes)
         return ArenaDeckPick(
             range_kind=p0_pick.range_kind,
             range_name=p0_pick.range_name,
@@ -407,14 +425,15 @@ def load_deck(base_dir, deck_name, *, card_database=None, vocabulary=None):
         for line in f:
             line = line.strip()
             if not line: continue
-            if line.startswith('!'): 
-                current_section = 'ignore' # 暂时忽略 side
+            if line.startswith('!'):
+                current_section = 'side' if line.lower() == '!side' else 'ignore'
                 continue
                 
             # 核心修复：绝对白名单区域划分
             if line.startswith('#'):
                 if line == '#main': current_section = 'main'
                 elif line == '#extra': current_section = 'extra'
+                elif line == '#side': current_section = 'side'
                 else: current_section = 'ignore' # 屏蔽 #pickup, #case 等一切杂音
                 continue
             
@@ -429,19 +448,26 @@ def load_deck(base_dir, deck_name, *, card_database=None, vocabulary=None):
                     not active_card_database.has_card(raw_code)
                     or not active_vocabulary.contains(code)
                 ):
-                    d.invalid_codes.append(raw_code)
+                    if current_section == 'side':
+                        d.invalid_side_codes.append(raw_code)
+                    else:
+                        d.invalid_codes.append(raw_code)
                 if current_section == 'main': d.main.append(code)
                 elif current_section == 'extra': d.extra.append(code)
+                elif current_section == 'side': d.side.append(code)
             except Exception:
                 print(f"[Deck] ⚠️ 解析 {deck_name}.ydk 时遇到非整数行: {line}")
             
     d.invalid_codes = sorted(set(d.invalid_codes))
+    d.invalid_side_codes = sorted(set(d.invalid_side_codes))
     return d
 
 
-def is_deck_compatible(deck):
-    """判断卡组的主卡组和额外卡组是否都能被当前协议识别"""
-    return isinstance(deck, Deck) and not deck.invalid_codes
+def is_deck_compatible(deck, *, include_side=False):
+    """判断所需卡组分区是否可用；BO1 默认不因未使用的 Side Deck 阻断"""
+    if not isinstance(deck, Deck) or deck.invalid_codes:
+        return False
+    return not include_side or not deck.invalid_side_codes
 
 
 def _load_random_compatible_deck(base_dir, names, rng=random):
@@ -498,8 +524,11 @@ def audit_deck_directory(
                         "deck": deck_name,
                         "main_count": len(deck.main),
                         "extra_count": len(deck.extra),
+                        "side_count": len(deck.side),
                         "valid": is_deck_compatible(deck),
+                        "full_valid": is_deck_compatible(deck, include_side=True),
                         "unsupported_codes": list(deck.invalid_codes),
+                        "unsupported_side_codes": list(deck.invalid_side_codes),
                     }
                 )
     finally:

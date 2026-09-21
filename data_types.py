@@ -240,5 +240,11 @@ class GameSnapshot:
     p1_deck_codes: List[int] = field(default_factory=list)
     p1_extra_codes: List[int] = field(default_factory=list)
 
+    # 一局内保持不变的初始卡组画像；与上方动态剩余卡组严格分离
+    p0_initial_deck_codes: List[int] = field(default_factory=list)
+    p0_initial_extra_codes: List[int] = field(default_factory=list)
+    p1_initial_deck_codes: List[int] = field(default_factory=list)
+    p1_initial_extra_codes: List[int] = field(default_factory=list)
+
     chain_stack: List[dict] = field(default_factory=list)
     history_stack: List[dict] = field(default_factory=list)

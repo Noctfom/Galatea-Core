@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.9.2**.
+> This document applies to **Galatea-Core v3.10.0**.
 
 ---
 
@@ -138,6 +138,7 @@ Configure and launch AI training tasks.
 - v3.9.0 completes V4 Phase 3 batch 1: Lua structured semantics and code vectors compile into an exact card-token × effect-slot table whose append-only prefix hash is embedded in PTH, ONNX, artifacts, and deployment packages
 - v3.9.1 completes V4 Phase 3 batch 2: Encoder/shared-memory/PPO trajectories carry only card/effect-slot IDs, and the model reconstructs exactly the same static semantics on device. This removes about 149.4 KiB per step, or about 4.67 GiB from one 32,768-step trajectory pool
 - v3.9.2 completes Phase 3: the compiled static-semantic table is materialized with automatic invalidation/rebuild, spawn Workers load only the lightweight effect-slot catalog, and GKG V4 requires runtime tables while leaving source KB/vectors optional for continued semantic maintenance
+- v3.10.0 starts Phase 4: full `DeckSpec` objects retain Main/Extra/Side while single-duel `DeckProfile` objects exclude Side by construction; `DuelState` separates the stable initial image from dynamic remaining cards and reserves BO3/deck-building context interfaces outside the current policy
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow

@@ -4,6 +4,18 @@
 
 ---
 
+## [v3.10.0] - 2026-09-21
+
+### 🃏 V4 Phase 4 batch 1: deck-protocol boundary and BO3 extension points
+
+- **Full construction vs single-duel image**: Adds `deck_protocol.py`. `DeckSpec` retains Main, Extra, and Side, while `DeckProfile` contains Main/Extra only and excludes Side both by type and serialized payload, making it the sole deck-image boundary for the current BO1 policy
+- **Stable content identities**: Full `deck_id` and single-duel `profile_id` are derived from section, exact card code, and copy count, independent of `.ydk` order, filename, or display name. These keys prepare per-duel Worker registration and profile deduplication
+- **Initial/remaining state separation**: `DuelState` now retains immutable initial Main/Extra copies while the existing `p0/p1_deck/extra` lists continue following Core-driven remaining cards. `GameSnapshot` exposes both, preventing later encoders from treating drawn or summoned cards as absent from the original construction
+- **Side resource closure without policy exposure**: `.ydk` `!side`/`#side` sections are parsed and unknown Side cards are tracked separately. A Main/Extra-valid deck with incomplete Side remains usable in current BO1 training and Arena; WebUI preflight reports a separate Side warning instead of marking it BO1-incompatible
+- **BO3/deck-building extension points**: Adds external `MatchContext` and `DuelSummary` contracts outside `DuelState`. `policy_inputs()` is intentionally empty, so score, siding, and Side data do not enter current observations, the network, ONNX, or PPO trajectories
+- **Compatibility/version boundary**: Framework advances to 3.10.0 while Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision remains 8. This batch establishes resource/state contracts and a stable profile source without changing network inputs, weight shapes, rewards, or duel-action behavior
+- **Validation**: Adds tests for permutation-invariant identities, Side isolation, Side-only BO1 compatibility, section/copy labels, and restoration of initial images through `DuelState.reset()`. The default suite passes 211 of 212 tests with one real-Core gate skipped; the explicit real-Core duel passes with zero query parse errors
+
 ## [v3.9.2] - 2026-09-21
 
 ### 📦 V4 Phase 3 Batch 3: Static-Semantic Runtime Assets and Cross-Machine ONNX/GKG Closure

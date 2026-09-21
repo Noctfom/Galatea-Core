@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.9.2 (Phase 3 complete) | 3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.10.0 (Phase 4 batch 1) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -83,6 +83,14 @@ Version 3.9.2 materializes the compiled result as two independent runtime assets
 - Workers register one profile per duel; samples reference `deck_profile_index`.
 - Side Deck is reserved but does not condition BO1 duel actions.
 
+Version 3.10.0 establishes the boundary: `DeckSpec` stores full Main, Extra, and Side sections
+with construction identity independent of filename and ordering, while `DeckProfile` contains
+Main/Extra only and is the sole stable image visible to the current single-duel policy. `.ydk`
+Side sections now participate in resource parsing and separate compatibility checks but never
+enter `DuelState` model inputs. `DuelState` separately retains the stable initial image and the
+dynamic remaining cards. `MatchContext` and `DuelSummary` live outside single-duel state as
+future BO3/deck-building extension points and currently produce no policy inputs.
+
 ## 4. Target network
 
 ### 4.1 Reusable Deck Encoder
@@ -139,6 +147,9 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 2 (3.9.1 / schema revision 8): perform model-side lookup from card/effect-slot identities and remove repeated structured-semantic matrices from Encoder/shared memory/PPO trajectories. Compact and legacy-expanded full forwards match with zero elementwise error; net storage drops by 152,996 bytes per step, or about 4.67 GiB for one 32,768-step trajectory pool.
   - [x] Review batch 3 (3.9.2 / schema revision 8): materialize and validate independent static-semantic runtime assets; restore effect-slot catalog registration in spawn Workers; keep compact ONNX inputs while freezing static tables into external data; bump GKG to format 4 and require the vocabulary plus compiled runtime pair cross-machine while source semantics remain optional maintenance assets. The default suite passes 207 of 208 tests with one gated skip; explicit real-Core and external ONNX Runtime smoke gates pass.
 - [ ] **Phase 4: deck protocol/encoder**—profile deduplication, labels, reusable encoder.
+  - [x] Review batch 1 (3.10.0 / schema revision 8): add full `DeckSpec` and Side-free `DeckProfile`; parse and independently validate `.ydk` Side sections; separate stable initial images from dynamic remaining cards; reserve `MatchContext`/`DuelSummary` outside `DuelState` without exposing them to the current policy. The default suite passes 211 of 212 tests with one real-Core gate skipped; the explicit real-Core duel passes with zero query parse errors.
+  - [ ] Review batch 2: per-duel Worker profile registration, per-step index references, and trajectory deduplication.
+  - [ ] Review batch 3: Main/Extra and initial/remaining-count labels, reusable permutation-invariant Deck Encoder, and network integration.
 - [ ] **Phase 5: layered FiLM/history**—separate modulation and 16 compact events.
 - [ ] **Phase 6: auxiliary heads/planning**—verifiable tasks, future summaries, `plan_latent`.
 - [ ] **Phase 7: PPO/canonical trajectories**—GAE/KL controls and Link/YRP inputs.
