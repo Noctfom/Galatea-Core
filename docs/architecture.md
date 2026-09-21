@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.9.1**。
+> 文档适用于 **Galatea-Core v3.9.2**。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -318,6 +318,10 @@ V4 结构修订 5 按 `playerop.cpp` 逐条固定选择状态机：Type 15 校�
 新增卡及其效果不会破坏旧前缀；修改旧卡结构字段或代码向量会被明确拒绝。3.9.1 起，
 Encoder 只输出卡片 token 和连锁/历史效果槽 ID，网络在设备侧还原同一份静态语义；
 观测内容不变，但共享内存、Worker 轨迹和 PPO 合并池不再重复保存语义矩阵。
+3.9.2 将编译结果物化为 `semantic_lookup_v1.npz`（模型数值表）和
+`semantic_lookup_v1.json`（效果槽运行目录及完整性信息）。训练/PTH 启动直接加载前者；
+spawn Worker 只加载后者；ONNX 在导出时把同一数值表固化进主图/`.onnx.data`，运行时不再
+读取源知识库。两份编译资产是可重建缓存，不提交 Git，但一键包和 `.gkg` 会自动携带。
 V4 的 `MODEL_PROTOCOL_VERSION=4` 由 `protocol_schema.py` 唯一维护，
 `CHECKPOINT_FORMAT_VERSION=3` 由 `checkpoint_utils.py` 维护；V3 检查点不进行迁移。
 
@@ -336,7 +340,8 @@ Embedding，不再把位掩码除以常数当作连续距离。
 3.9.1 将 `[card_token, effect_slot]` 静态表注册为模型侧非参数缓冲。场面和卡组直接按
 `card_idx/deck_idx` 查表；连锁与最近历史额外携带 1～8 的效果槽 ID，0 表示绑定未知并
 回退整卡语义。该路径与 3.9.0 展开张量逐元素等价；三件套不完整、槽位/向量索引错位
-或旧卡语义身份不一致时仍在建网前停止。
+或旧卡语义身份不一致时仍在建网前停止。3.9.2 后，已通过完整校验的编译运行资产可独立
+替代源三件套建网；若选择携带源资产，则仍必须三件齐全且与编译表一致。
 
 ### 构建流程
 
@@ -354,7 +359,9 @@ Lua 脚本 (c12345678.lua)
     └──────┬──────┘
            ↓
     knowledge_base.json + hash_mapping_report.json
-    code_embeddings.npy + code_embeddings_idx.json
+code_embeddings.npy + code_embeddings_idx.json
+           ↓ 一次性编译
+semantic_lookup_v1.npz + semantic_lookup_v1.json
 ```
 
 ### 语义特征结构

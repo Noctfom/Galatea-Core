@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.9.1**.
+> This document applies to **Galatea-Core v3.9.2**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -323,6 +323,12 @@ structured fields or code vector is rejected. Starting in 3.9.1, the Encoder emi
 tokens and chain/history effect-slot IDs. The model reconstructs the same static semantics on
 device, so observation content is unchanged while shared memory, Worker trajectories, and the
 PPO merge pool no longer duplicate the matrices.
+Version 3.9.2 materializes the result as `semantic_lookup_v1.npz` (model-side numeric
+tables) plus `semantic_lookup_v1.json` (effect-slot runtime catalogs and integrity metadata).
+Training/PTH loads the former directly, spawn Workers load only the latter, and ONNX export
+freezes the same tables into the graph/`.onnx.data` so inference does not reread source assets.
+These two rebuildable files stay out of Git but are included automatically in one-click and
+`.gkg` packages.
 `protocol_schema.py` is the single owner of V4's `MODEL_PROTOCOL_VERSION=4`, while
 `checkpoint_utils.py` owns `CHECKPOINT_FORMAT_VERSION=3`. V3 checkpoints are
 intentionally not migrated.
@@ -345,6 +351,8 @@ Scene/deck semantics use `card_idx/deck_idx`; chain and recent-history rows addi
 effect-slot IDs 1–8, while 0 means an unknown binding and preserves whole-card fallback. This
 path is elementwise equivalent to the 3.9.0 expanded tensors. Incomplete bundles, slot/index
 mismatches, and existing-card semantic identity mismatches still stop before construction.
+Starting in 3.9.2, a fully validated compiled runtime pair can construct the model without the
+source trio. If sources are included, all three remain mandatory and must match the compiled table.
 
 ### Construction Flow
 
@@ -363,6 +371,8 @@ Lua Script (c12345678.lua)
            ↓
     knowledge_base.json + hash_mapping_report.json
     code_embeddings.npy + code_embeddings_idx.json
+           ↓ one-time compilation
+semantic_lookup_v1.npz + semantic_lookup_v1.json
 ```
 
 ### Semantic Feature Structure

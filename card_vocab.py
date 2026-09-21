@@ -8,6 +8,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+from semantic_assets import invalidate_static_semantic_assets
+
 
 CARD_VOCAB_FILENAME = "card_vocab.json"
 CARD_VOCAB_FORMAT_VERSION = 1
@@ -162,7 +164,7 @@ class CardVocabulary:
             return False
 
     def prefix(self, card_count):
-        """截取指定长度的只追加前缀，用于校验旧 V4 产物。"""
+        """截取指定长度的只追加前缀，用于校验旧 V4 产物"""
         if isinstance(card_count, bool) or not isinstance(card_count, int):
             raise ValueError("card vocabulary prefix length must be an integer")
         if card_count < 0 or card_count > self.card_count:
@@ -252,7 +254,7 @@ def synchronize_authoritative_card_vocabulary(
     source_path,
     target_path=CARD_VOCAB_FILENAME,
 ):
-    """仅在远程词表是本地只追加扩展时安全安装。"""
+    """仅在远程词表是本地只追加扩展时安全安装"""
     global _DEFAULT_VOCAB_CACHE, _DEFAULT_VOCAB_CACHE_PATH
     global _DEFAULT_VOCAB_CACHE_SIGNATURE
     source = Path(source_path).resolve()
@@ -299,6 +301,7 @@ def synchronize_authoritative_card_vocabulary(
     _DEFAULT_VOCAB_CACHE = authoritative
     _DEFAULT_VOCAB_CACHE_PATH = target
     _DEFAULT_VOCAB_CACHE_SIGNATURE = _card_vocab_file_signature(target)
+    invalidate_static_semantic_assets(target.parent)
     return {"status": "installed", "vocabulary": authoritative}
 
 
@@ -359,6 +362,7 @@ def update_card_vocabulary(
     _DEFAULT_VOCAB_CACHE = vocabulary
     _DEFAULT_VOCAB_CACHE_PATH = target
     _DEFAULT_VOCAB_CACHE_SIGNATURE = _card_vocab_file_signature(target)
+    invalidate_static_semantic_assets(target.parent)
     return vocabulary
 
 

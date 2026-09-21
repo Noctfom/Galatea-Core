@@ -9,6 +9,7 @@ from pathlib import Path
 from semantic_assets import (
     build_expected_code_semantic_keys,
     CODE_EMBEDDINGS_INDEX_FILENAME,
+    invalidate_static_semantic_assets,
     validate_code_semantic_assets,
     validate_semantic_bundle,
 )
@@ -162,6 +163,10 @@ class CodeSemanticEmbedder:
                     key_to_idx[key] = start_index + offset
             else:
                 print("[代码语义] 向量已覆盖当前知识库，无需重复提取。")
+                validate_semantic_bundle(
+                    output_path.parent,
+                    knowledge_base_filename=Path(kb_file).resolve().name,
+                )
                 return
 
         self._write_embedding_pair(output_path, embeddings, key_to_idx)
@@ -169,6 +174,7 @@ class CodeSemanticEmbedder:
             output_path.parent,
             knowledge_base_filename=Path(kb_file).resolve().name,
         )
+        invalidate_static_semantic_assets(output_path.parent)
         print(f"[代码语义] 提取完成，已保存至 {output_path} (维度: {embeddings.shape})")
 
 if __name__ == "__main__":

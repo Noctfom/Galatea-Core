@@ -9,6 +9,7 @@ from semantic_assets import (
     CODE_SEMANTIC_FILENAMES,
     HASH_MAPPING_FILENAME,
     download_remote_semantic_bundle,
+    invalidate_static_semantic_assets,
 )
 from effect_slot_binding import apply_runtime_effect_bindings
 
@@ -413,6 +414,7 @@ class YGOProLuaParser:
 
         with open(mapping_file, 'w', encoding='utf-8') as f:
             json.dump(self.hash_registry, f, indent=2, ensure_ascii=False)
+        invalidate_static_semantic_assets(output_path.parent)
 
         # =======================================================
         # 6. 终极清晰报告

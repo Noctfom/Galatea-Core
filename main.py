@@ -448,12 +448,15 @@ def main():
         print("🧠 启动语义资产管理模块...")
         from semantic_assets import (
             clear_local_semantic_assets,
+            invalidate_static_semantic_assets,
             synchronize_remote_semantic_bundle,
         )
+        from semantic_lookup import ensure_static_semantic_assets
 
         output_path = os.path.abspath(args.output)
         output_directory = os.path.dirname(output_path)
         local_update = bool(args.local_update or args.embed)
+        semantic_ready = False
         if args.clear:
             removed = clear_local_semantic_assets(
                 output_directory,
@@ -470,6 +473,7 @@ def main():
             )
             if sync_result["installed_code_semantics"]:
                 print("✅ 远程结构语义、Hash 映射及代码向量已同步完成。")
+                semantic_ready = True
             else:
                 print("⚠️ 远程代码向量不完整，已仅安装结构语义；可启用 --local-update 重建向量。")
 
@@ -494,8 +498,17 @@ def main():
                 output_file=embedding_path,
                 incremental=True,
             )
+            invalidate_static_semantic_assets(output_directory)
+            semantic_ready = True
         elif not args.sync and not args.clear:
             print("⚠️ 未选择任何操作；请使用 --sync 和/或 --local-update。")
+        if semantic_ready:
+            lookup = ensure_static_semantic_assets(output_directory)
+            print(
+                "📦 静态语义运行资产已生成: "
+                f"{lookup.card_vocabulary.card_count} 张卡 / "
+                f"{len(lookup.runtime_effect_bindings)} 个运行时效果绑定"
+            )
         
     elif args.command == 'update':
         print("🌐 启动自动同步更新模块...")

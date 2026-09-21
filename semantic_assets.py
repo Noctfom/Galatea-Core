@@ -16,6 +16,12 @@ KNOWLEDGE_BASE_FILENAME = "knowledge_base.json"
 HASH_MAPPING_FILENAME = "hash_mapping_report.json"
 CODE_EMBEDDINGS_FILENAME = "code_embeddings.npy"
 CODE_EMBEDDINGS_INDEX_FILENAME = "code_embeddings_idx.json"
+STATIC_SEMANTIC_TABLE_FILENAME = "semantic_lookup_v1.npz"
+STATIC_SEMANTIC_CATALOG_FILENAME = "semantic_lookup_v1.json"
+STATIC_SEMANTIC_ASSET_FILENAMES = (
+    STATIC_SEMANTIC_TABLE_FILENAME,
+    STATIC_SEMANTIC_CATALOG_FILENAME,
+)
 CODE_SEMANTIC_FILENAMES = (
     CODE_EMBEDDINGS_FILENAME,
     CODE_EMBEDDINGS_INDEX_FILENAME,
@@ -29,6 +35,20 @@ DEFAULT_SEMANTIC_REPOSITORY_URL = "https://github.com/Noctfom/Galatea-Core.git"
 MAX_CODE_EMBEDDINGS_BYTES = 2 * 1024 * 1024 * 1024
 MAX_CODE_EMBEDDING_INDEX_BYTES = 256 * 1024 * 1024
 MAX_KNOWLEDGE_BASE_BYTES = 512 * 1024 * 1024
+
+
+def invalidate_static_semantic_assets(target_directory):
+    """删除可重建的静态语义编译资产，避免源文件更新后继续使用旧表"""
+    root = Path(target_directory).resolve()
+    removed = []
+    for filename in STATIC_SEMANTIC_ASSET_FILENAMES:
+        path = root / filename
+        if path.is_symlink():
+            raise ValueError(f"static semantic asset must not be a symlink: {path}")
+        if path.is_file():
+            path.unlink()
+            removed.append(path.name)
+    return removed
 
 
 def semantic_sibling_url(base_url, filename):
@@ -85,6 +105,7 @@ def clear_local_semantic_assets(
         if path.is_file():
             path.unlink()
             removed.append(path.name)
+    removed.extend(invalidate_static_semantic_assets(root))
     return removed
 
 
@@ -434,6 +455,8 @@ def synchronize_remote_semantic_bundle(
             path = target_root / filename
             if path.is_file() and not path.is_symlink():
                 path.unlink()
+
+    invalidate_static_semantic_assets(target_root)
 
     return {
         **bundle,

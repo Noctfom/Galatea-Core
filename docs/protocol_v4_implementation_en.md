@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.9.1 (Phase 3 batch 2 complete) | 3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.9.2 (Phase 3 complete) | 3.9.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -73,6 +73,8 @@ Static Lua semantics move to model-side lookup tables indexed by exact card iden
 
 Version 3.9.0 establishes the unified compiler, logical prefix identity, and artifact validation. Version 3.9.1 registers the table on the model: Encoder/shared-memory/PPO trajectories carry existing card tokens plus compact chain/history effect-slot IDs, and the model reconstructs semantics elementwise-identically to expanded inputs on device. Unknown slots retain whole-card fallback, with no change to visibility or action logic.
 
+Version 3.9.2 materializes the compiled result as two independent runtime assets: a pickle-free NPZ of numeric arrays and a JSON catalog carrying vocabulary/logical identity, array integrity, and lightweight effect-slot bindings. PTH/training restores the NPZ directly, spawn Workers register only the JSON catalog, and ONNX freezes the same constants into `.onnx.data`. GKG V4 requires the runtime pair while keeping the source KB/vector trio optional for continued semantic generation.
+
 ### 3.5 Deck protocol
 
 - Initial Main, Extra, and Side sections have distinct section and copy-count labels.
@@ -132,10 +134,10 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
     - Acceptance evidence: of 188 default tests, 187 pass and one gated real-Core case is skipped; the gated case passes when enabled separately, PyTorch/ONNX agree within `1e-3`, and empty semantic rows remain finite.
   - [x] Review batch 2 (3.8.1 / schema revision 5): retain Core-native iterative Type 26 and complete-combination Types 15/20/23; add Type 20/23 Pass-1 material semantics, Core-equivalent response validation, retained finish/cancel exits, and a 512-byte response buffer.
   - [x] Review batch 3 (3.8.2 / schema revision 6): use the public legacy Core query API for equip source-target, effect target, reason card, all overlay identities, typed counters, original owner, dynamic Level/Rank/Scale/Link values, disabled zones, and `STATUS_DISABLED | STATUS_FORBIDDEN | STATUS_PROC_COMPLETE`; preserve Graveyard/banished physical copies, classify audited messages as explicitly applied, query-reconciled, or known observation gaps, and connect Type 21 sorting plus Type 22 Pass-1 semantics. Exact summon provenance remains an explicit upstream item because public Core does not export it; this batch has no private-Core dependency.
-- [ ] **Phase 3: static semantic lookup**—deduplication, asset hashes, ONNX parity.
+- [x] **Phase 3: static semantic lookup**—deduplication, asset hashes, ONNX parity.
   - [x] Review batch 1 (3.9.0 / schema revision 7): compile one table aligned to exact tokens and Lua effect slots, share it across Encoder/network consumers, and carry a prefix-compatible semantic hash through PTH, ONNX, artifacts, and deployment packages. Legacy network inputs remain as a lossless bridge.
   - [x] Review batch 2 (3.9.1 / schema revision 8): perform model-side lookup from card/effect-slot identities and remove repeated structured-semantic matrices from Encoder/shared memory/PPO trajectories. Compact and legacy-expanded full forwards match with zero elementwise error; net storage drops by 152,996 bytes per step, or about 4.67 GiB for one 32,768-step trajectory pool.
-  - [ ] Review batch 3 (planned 3.9.2): close ONNX constant/external-data and cross-machine package validation, then complete PyTorch/ONNX, real-Core, and throughput gates.
+  - [x] Review batch 3 (3.9.2 / schema revision 8): materialize and validate independent static-semantic runtime assets; restore effect-slot catalog registration in spawn Workers; keep compact ONNX inputs while freezing static tables into external data; bump GKG to format 4 and require the vocabulary plus compiled runtime pair cross-machine while source semantics remain optional maintenance assets. The default suite passes 207 of 208 tests with one gated skip; explicit real-Core and external ONNX Runtime smoke gates pass.
 - [ ] **Phase 4: deck protocol/encoder**—profile deduplication, labels, reusable encoder.
 - [ ] **Phase 5: layered FiLM/history**—separate modulation and 16 compact events.
 - [ ] **Phase 6: auxiliary heads/planning**—verifiable tasks, future summaries, `plan_latent`.

@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.9.1**。
+> 文档适用于 **Galatea-Core v3.9.2**。
 
 ---
 
@@ -136,6 +136,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 - v3.8.2 完成 V4 阶段 2 批次 3：基于公开 `query_card/query_field_count` 补全动态卡名、等级/阶级/连接/刻度、正规出场、装备/取对象/原因卡关系、全部叠放素材、带类型指示物和禁用区域；精确召唤来源仍等待公开 Core API，不使用私有内核或推测值
 - v3.9.0 完成 V4 阶段 3 批次 1：Lua 结构语义与代码向量被编译为精确卡片 token × 效果槽静态表，并以可追加前缀哈希写入 PTH、ONNX、制品和部署包
 - v3.9.1 完成 V4 阶段 3 批次 2：Encoder、共享内存和 PPO 轨迹只传卡片/效果槽 ID，网络在设备侧查回完全相同的静态语义；每步减少约 149.4 KiB，32,768 步的单份轨迹池约减少 4.67 GiB
+- v3.9.2 完成阶段 3：静态语义编译表独立物化并自动失效/重建，spawn Worker 只读取轻量效果槽目录；GKG V4 强制携带运行表，源知识库与代码向量改为可选的接续维护资产
 - v3.5.0 引入动作语义 V2；v3.6.0 使用 Model Protocol V3，为效果槽绑定身份，并为当前连锁和最近发动历史加入真正顺序敏感的上下文聚合。检查点、网络权重、ONNX 与制品清单会共同记录并校验该版本
 - v3.6.2 以 Lua `Effect.CreateEffect(c)` 对象为身份，把完整运行时 `desc` 绑定到已有代码语义槽；候选动作可直接取得对应效果向量，连锁、历史和本回合已用标记使用同一映射。Stringid 只用于生成 Core 标识，不再被解释成槽序号
 - 动作编码包含操作类型、真实响应、选择约束、目标卡密/位置/素材数值以及稳定语义签名；Type 26 由模型按 Core 原生 Select/Unselect 流程逐步决策
@@ -395,8 +396,9 @@ ONNX、外置权重和制品清单。
 - 先按内置 `model_id` 选择模型池，再选择该池内的 `.pth`/`.onnx` 主文件
 - ONNX 引用的 `.onnx.data` 会自动补齐，不能单独遗漏
 - 同时选择 PTH 与 ONNX 时，两种格式的内置轮次集合必须一致
-- 可选包含完整运行时语义组（`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`，存在时附带 `hash_mapping_report.json`）和泛用卡池 (`meta_staples.json`)
-- 运行时语义三件套不可拆分导入或导出；清单会记录并交叉校验知识库效果槽、向量行与索引键
+- 强制包含 `semantic_lookup_v1.npz` + `semantic_lookup_v1.json` 编译运行资产和精确词表；PTH 可直接建网，ONNX 可完成跨机器身份校验
+- 可选包含用于继续生成的语义源（`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`，存在时附带 `hash_mapping_report.json`）和泛用卡池 (`meta_staples.json`)
+- 语义源三件套不可拆分导入或导出；清单会交叉校验源文件、编译表、词表与模型内逻辑语义身份
 - 强制生成并校验清单文件 (`manifest.json`)
 - 支持自定义包名
 

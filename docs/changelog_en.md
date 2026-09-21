@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.9.2] - 2026-09-21
+
+### 📦 V4 Phase 3 Batch 3: Static-Semantic Runtime Assets and Cross-Machine ONNX/GKG Closure
+
+- **Independent compiled runtime assets**: Added derived `semantic_lookup_v1.npz` and `semantic_lookup_v1.json`. The former stores model-side structured tables and the shared code-vector dictionary as pickle-free validated arrays; the latter stores exact-vocabulary identity, logical semantic hash, array integrity, valid effect slots, and the full `desc → Lua slot` catalog. Both are deterministically rebuildable from the semantic source trio and are not committed to Git
+- **No stale cache after dynamic updates**: Remote semantic sync, local Lua extraction, code-vector generation, and authoritative-vocabulary appends explicitly invalidate the previous compiled pair; semantic management eagerly rebuilds it afterward. Training, Arena, and one-click packaging also perform a one-time pre-network build when missing—never per duel or per step
+- **Fixed spawn-Worker effect-slot degradation**: After 3.9.1 removed the Encoder semantic KB, Windows spawn Workers could lack the main process's runtime effect bindings and downgrade chain/history slots to unknown. Encoder now registers only the roughly 0.6 MiB on-disk catalog rather than loading the 53.47 MiB numeric table. Local `tracemalloc` retained about 6.8 MiB of Python catalog memory, still about 46.7 MiB less per Worker than the complete table
+- **Clear PTH/ONNX responsibilities**: Training/PTH loads NPZ once during construction and registers non-parameter buffers. ONNX export freezes the same tables into `.onnx.data`, so inference needs neither NPZ nor JSON and exposes no `sem_*` input. The external-data smoke model retained 57 compact inputs and produced the expected ONNX Runtime output shapes
+- **GKG deployment format V4**: `.gkg` now requires `card_vocab.json` plus the compiled runtime pair and cross-checks file digests, array dtype/shape, logical semantics, model UUID/iteration, and ONNX external data. `knowledge_base.json + code_embeddings.npy + code_embeddings_idx.json` become optional continuation sources while remaining indivisible. WebUI/CLI installs runtime assets automatically and rejects an older package's semantic sources from overwriting a locally newer vocabulary
+- **Space and startup cost**: Across five local runs, source compilation averaged about 0.528 s versus about 0.140 s to restore materialized tables while rechecking source digests, roughly 3.8× faster at startup. Expanded runtime assets occupy about 54.06 MiB, 18.7% below the approximately 66.49 MiB maintenance sources including the Hash map. A runtime-only sample GKG was about 1.54 MiB versus 3.93 MiB with maintenance sources; real model packages remain dominated by PTH/ONNX weights. Keeping both sources and rebuildable cache locally adds about 54.06 MiB
+- **Unchanged hot path**: No per-step I/O, Core query, network parameter, or PPO-objective change was introduced; 3.9.1's 152,996-byte-per-step and roughly 4.67-GiB-per-32,768-step trajectory savings remain intact. Framework becomes 3.9.2 while Model Protocol stays 4, Checkpoint Format stays 3, and V4 schema revision stays 8, so 3.9.1 checkpoints are not invalidated by a deployment-asset format change. GKG independently advances to format 4
+- **Acceptance**: The default suite passed 207 of 208 tests with one real-Core gate skipped; the explicitly enabled real-Core decision loop passed. External `.onnx.data` export, identity tagging, dependency enumeration, CPU ONNX Runtime inference, and absence of `sem_*` inputs also passed
+
 ## [v3.9.1] - 2026-09-21
 
 ### 🧠 V4 Phase 3 Batch 2: Model-Side Semantic Lookup and Trajectory Deduplication

@@ -29,6 +29,7 @@ from data_types import (
     GameSnapshot,
 )
 from game_constants import LocationInfo, Position, Zone
+from semantic_lookup import register_static_semantic_runtime_catalog
 
 # --- 配置参数 ---
 MAX_CARDS = 120
@@ -52,6 +53,10 @@ class GalateaEncoder:
         self.vocab_size = self.card_vocabulary.capacity
         self.global_dim = GLOBAL_FEATURE_DIM
         self.card_feat_dim = 7
+        # spawn Worker 只加载轻量效果槽目录，不复制模型侧静态语义大表
+        register_static_semantic_runtime_catalog(
+            card_vocabulary=self.card_vocabulary,
+        )
 
     def _encode_card_code(self, code):
         """把真实卡片代码映射为无碰撞的固定词表索引"""

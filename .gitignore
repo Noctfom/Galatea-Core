@@ -21,6 +21,8 @@ web_data/
 crash_report.txts
 deploy_packages/
 debug.log
+semantic_lookup_v1.npz
+semantic_lookup_v1.json
 tests/
 .galatea_train.lock
 .galatea_train.lock.owner.json

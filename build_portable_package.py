@@ -385,6 +385,10 @@ def main(argv=None):
             "不会从现有 python_env 裁剪 CUDA 运行库。"
         )
     validate_portable_environment(require_cuda=not args.allow_cpu_only)
+    from semantic_lookup import ensure_static_semantic_assets
+
+    # 发布包预先生成运行表，目标机器无需首次启动时重新编译大语义资产
+    ensure_static_semantic_assets(PROJECT_ROOT)
     files = list(iter_package_files())
     if not files:
         raise RuntimeError("没有找到可打包文件")

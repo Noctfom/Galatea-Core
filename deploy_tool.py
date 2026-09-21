@@ -198,6 +198,18 @@ def unpack_model():
                 f"{vocabulary_result['status']} "
                 f"({vocabulary_result['vocabulary'].card_count} 张卡)"
             )
+            compiled_runtime_files = (
+                "semantic_lookup_v1.npz",
+                "semantic_lookup_v1.json",
+            )
+            if vocabulary_result["status"] == "local_newer":
+                from semantic_lookup import ensure_static_semantic_assets
+
+                ensure_static_semantic_assets(".")
+                print(
+                    "  -> 包内词表旧于本机：保留本机语义源与静态运行资产，"
+                    "仅导入兼容模型"
+                )
             model_ids = sorted({record["model_id"] for record in validated["records"]})
             primary_models = validated["manifest"]["models_included"]
             if primary_models:
@@ -210,11 +222,23 @@ def unpack_model():
                 for filename in installed["files"]:
                     print(f"  -> 提取模型产物至 ./models/: {filename}")
 
+            source_semantic_files = (
+                ()
+                if vocabulary_result["status"] == "local_newer"
+                else (
+                    "knowledge_base.json",
+                    "hash_mapping_report.json",
+                    "code_embeddings.npy",
+                    "code_embeddings_idx.json",
+                )
+            )
             for filename in (
-                "knowledge_base.json",
-                "hash_mapping_report.json",
-                "code_embeddings.npy",
-                "code_embeddings_idx.json",
+                *source_semantic_files,
+                *(
+                    ()
+                    if vocabulary_result["status"] == "local_newer"
+                    else compiled_runtime_files
+                ),
                 "meta_staples.json",
             ):
                 source = os.path.join(stage_dir, filename)

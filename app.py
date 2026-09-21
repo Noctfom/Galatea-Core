@@ -3945,17 +3945,17 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
             with st.form("pack_form"):
                 st.markdown("##### 🗂️ 附加数据组件")
                 st.caption(_(
-                    "V4 精确卡片词表 card_vocab.json 会作为必选协议资产自动打包。",
-                    "The V4 exact card vocabulary (card_vocab.json) is always packaged as a required protocol asset.",
+                    "V4 精确卡片词表与编译静态语义运行表会作为必选协议资产自动打包。",
+                    "The V4 exact card vocabulary and compiled static-semantic runtime table are always packaged as required protocol assets.",
                 ))
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     inc_semantic_bundle = st.checkbox(
-                        "包含 完整运行时语义",
+                        "包含 可接续语义源",
                         value=True,
                         help=(
                             "knowledge_base.json + code_embeddings.npy + "
-                            "code_embeddings_idx.json；Hash 接续索引存在时一并携带"
+                            "code_embeddings_idx.json；用于继续生成语义，关闭后仍会自动携带运行表"
                         ),
                     )
                 with c2: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
@@ -4127,8 +4127,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                             selected_stage_models = []
                             selected_root_files = []
                             st.caption(_(
-                                "精确卡片词表是 V4 必选协议资产，将按只追加兼容规则自动同步，不能取消",
-                                "The exact card vocabulary is a mandatory V4 protocol asset and will be synchronized with append-only compatibility checks.",
+                                "精确卡片词表与静态语义运行表是 V4 必选协议资产，将自动校验并同步，不能取消",
+                                "The exact card vocabulary and compiled static-semantic runtime table are mandatory V4 assets and are validated and synchronized automatically.",
                             ))
 
                             if models_in_stage:
@@ -4152,7 +4152,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
 
                             root_file_groups = [
                                 (
-                                    "完整运行时语义（知识库 + 代码向量 + 索引 + 可选 Hash 接续索引）",
+                                    "可接续语义源（知识库 + 代码向量 + 索引 + 可选 Hash 接续索引）",
                                     [
                                         filename
                                         for filename in (
@@ -4197,8 +4197,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     }.issubset(selected_root_files)
                                 ):
                                     st.warning(_(
-                                        "运行时语义必须将知识库、代码向量和索引作为同一组导入。",
-                                        "Import the knowledge base, code vectors and index as one runtime semantic bundle.",
+                                        "接续语义源必须将知识库、代码向量和索引作为同一组导入。",
+                                        "Import the knowledge base, code vectors and index as one semantic source bundle.",
                                     ))
                                 else:
                                     try:
@@ -4207,6 +4207,21 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                             os.path.join(stage_path, "card_vocab.json"),
                                             "card_vocab.json",
                                         )
+                                        semantic_source_names = {
+                                            "knowledge_base.json",
+                                            "hash_mapping_report.json",
+                                            "code_embeddings.npy",
+                                            "code_embeddings_idx.json",
+                                        }
+                                        if (
+                                            vocabulary_result["status"] == "local_newer"
+                                            and semantic_source_names.intersection(
+                                                selected_root_files
+                                            )
+                                        ):
+                                            raise ValueError(
+                                                "包内词表旧于本机，不能用旧语义源覆盖本机新资产"
+                                            )
                                         if selected_stage_models:
                                             install_model_artifact_bundle(
                                                 stage_path,
@@ -4234,6 +4249,31 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                             finally:
                                                 if os.path.exists(temporary):
                                                     os.remove(temporary)
+                                        compiled_runtime_files = (
+                                            "semantic_lookup_v1.npz",
+                                            "semantic_lookup_v1.json",
+                                        )
+                                        if vocabulary_result["status"] == "local_newer":
+                                            from semantic_lookup import ensure_static_semantic_assets
+
+                                            ensure_static_semantic_assets(".")
+                                        else:
+                                            for filename in compiled_runtime_files:
+                                                source = os.path.join(stage_path, filename)
+                                                destination = os.path.abspath(filename)
+                                                with tempfile.NamedTemporaryFile(
+                                                    prefix=f".{filename}.",
+                                                    suffix=".import.tmp",
+                                                    dir=os.path.dirname(destination),
+                                                    delete=False,
+                                                ) as temporary_stream:
+                                                    temporary = temporary_stream.name
+                                                try:
+                                                    shutil.copy2(source, temporary)
+                                                    os.replace(temporary, destination)
+                                                finally:
+                                                    if os.path.exists(temporary):
+                                                        os.remove(temporary)
                                         load_model_repository.clear()
                                         st.success(_(
                                             f"✅ 导入成功！精确词表状态: {vocabulary_result['status']}，系统环境已更新。",

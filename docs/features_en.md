@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.9.1**.
+> This document applies to **Galatea-Core v3.9.2**.
 
 ---
 
@@ -137,6 +137,7 @@ Configure and launch AI training tasks.
 - v3.8.2 completes V4 Phase 2 batch 3: public `query_card/query_field_count` now supplies dynamic identity, Level/Rank/Link/Scale values, proper-summon status, equip/target/reason-card relations, all overlay identities, typed counters, and disabled zones. Exact summon provenance remains an upstream public-API item; no private Core fork or guessed value is used
 - v3.9.0 completes V4 Phase 3 batch 1: Lua structured semantics and code vectors compile into an exact card-token × effect-slot table whose append-only prefix hash is embedded in PTH, ONNX, artifacts, and deployment packages
 - v3.9.1 completes V4 Phase 3 batch 2: Encoder/shared-memory/PPO trajectories carry only card/effect-slot IDs, and the model reconstructs exactly the same static semantics on device. This removes about 149.4 KiB per step, or about 4.67 GiB from one 32,768-step trajectory pool
+- v3.9.2 completes Phase 3: the compiled static-semantic table is materialized with automatic invalidation/rebuild, spawn Workers load only the lightweight effect-slot catalog, and GKG V4 requires runtime tables while leaving source KB/vectors optional for continued semantic maintenance
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
@@ -397,8 +398,9 @@ Package models as .gkg format:
 - Select an embedded `model_id` pool first, then choose `.pth`/`.onnx` primaries from that pool
 - Referenced `.onnx.data` files are included automatically
 - When both PTH and ONNX are selected, their embedded iteration sets must match
-- Optionally include the complete runtime semantic bundle (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, plus `hash_mapping_report.json` when present) and the staple pool (`meta_staples.json`)
-- The three runtime semantic files cannot be imported or exported separately; the manifest cross-checks KB effect slots, vector rows, and index keys
+- Always include the compiled `semantic_lookup_v1.npz` + `semantic_lookup_v1.json` runtime assets and exact vocabulary, allowing PTH construction and cross-machine ONNX identity validation
+- Optionally include semantic sources for continued generation (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, plus `hash_mapping_report.json` when present) and the staple pool (`meta_staples.json`)
+- The three semantic source files cannot be imported or exported separately; the manifest cross-checks source files, compiled tables, vocabulary, and the model's logical semantic identity
 - Always generate and validate `manifest.json`
 - Custom package name support
 

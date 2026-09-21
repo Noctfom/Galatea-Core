@@ -30,13 +30,19 @@ from semantic_assets import (
     HASH_MAPPING_FILENAME,
     KNOWLEDGE_BASE_FILENAME,
     SEMANTIC_ASSET_FILENAMES,
+    STATIC_SEMANTIC_ASSET_FILENAMES,
     validate_semantic_bundle,
+)
+from semantic_lookup import (
+    ensure_static_semantic_assets,
+    load_static_semantic_assets,
+    write_static_semantic_assets,
 )
 
 
 ARTIFACT_MANIFEST_FORMAT_VERSION = 3
 # 仅表示 .gkg 部署包协议，必须独立于 WebUI/框架版本维护
-DEPLOY_PACKAGE_FORMAT_VERSION = 3
+DEPLOY_PACKAGE_FORMAT_VERSION = 4
 MAX_ONNX_GRAPH_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_FILE_BYTES = 32 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
@@ -59,6 +65,7 @@ WINDOWS_RESERVED_FILENAMES = {
 MODEL_ARTIFACT_SUFFIXES = (".artifacts.json", ".onnx.data", ".onnx", ".pth")
 DEPLOY_ROOT_FILES = {
     *SEMANTIC_ASSET_FILENAMES,
+    *STATIC_SEMANTIC_ASSET_FILENAMES,
     CARD_VOCAB_FILENAME,
     "meta_staples.json",
 }
@@ -66,6 +73,7 @@ CODE_SEMANTIC_FILE_SET = {
     CODE_EMBEDDINGS_FILENAME,
     CODE_EMBEDDINGS_INDEX_FILENAME,
 }
+STATIC_SEMANTIC_FILE_SET = set(STATIC_SEMANTIC_ASSET_FILENAMES)
 ONNX_IDENTITY_KEYS = {
     "model_id": "galatea.model_id",
     "model_prefix": "galatea.model_prefix",
@@ -1357,6 +1365,7 @@ def create_deployment_package(
     if raw_vocabulary_source.is_symlink():
         raise ValueError("deployment card vocabulary must not be a symlink")
     packaged_vocabulary = load_card_vocabulary(raw_vocabulary_source.resolve())
+    compiled_temp_directory = None
     semantic_root = Path(".").resolve()
     if all(
         filename in requested_extras
@@ -1369,22 +1378,52 @@ def create_deployment_package(
         semantic_root = Path(
             requested_extras[KNOWLEDGE_BASE_FILENAME]
         ).resolve().parent
+    source_semantic_root = semantic_root
+    # 部署包始终携带可直接运行的编译语义资产；源知识库仍是可选的维护组件
+    if raw_vocabulary_source.resolve() == Path(CARD_VOCAB_FILENAME).resolve():
+        ensure_static_semantic_assets(
+            semantic_root,
+            card_vocabulary=packaged_vocabulary,
+        )
+        compiled_semantic_paths = {
+            filename: semantic_root / filename
+            for filename in STATIC_SEMANTIC_ASSET_FILENAMES
+        }
+    else:
+        compiled_temp_directory = tempfile.TemporaryDirectory(
+            prefix="galatea_semantic_package_",
+            dir=target.parent,
+        )
+        _, compiled_semantic_paths = write_static_semantic_assets(
+            semantic_root,
+            output_directory=compiled_temp_directory.name,
+            card_vocabulary=packaged_vocabulary,
+        )
+    compiled_root = Path(
+        compiled_semantic_paths[STATIC_SEMANTIC_ASSET_FILENAMES[0]]
+    ).resolve().parent
+    requested_extras.update(
+        {
+            filename: str(path)
+            for filename, path in compiled_semantic_paths.items()
+        }
+    )
     records = build_package_model_records(
         model_dir,
         selected_models,
         card_vocabulary=packaged_vocabulary,
-        semantic_root=semantic_root,
+        semantic_root=compiled_root,
     )
     validate_package_model_records(
         records,
         card_vocabulary=packaged_vocabulary,
-        semantic_root=semantic_root,
+        semantic_root=compiled_root,
     )
     model_files = collect_model_artifact_files(
         model_dir,
         selected_models,
         card_vocabulary=packaged_vocabulary,
-        semantic_root=semantic_root,
+        semantic_root=compiled_root,
     )
     model_total_size = validate_model_artifact_file_set(model_dir, model_files)
     extras = {}
@@ -1406,6 +1445,9 @@ def create_deployment_package(
         extras[archive_name] = source
 
     included_code_semantics = CODE_SEMANTIC_FILE_SET.intersection(extras)
+    included_static_semantics = STATIC_SEMANTIC_FILE_SET.intersection(extras)
+    if included_static_semantics != STATIC_SEMANTIC_FILE_SET:
+        raise ValueError("compiled static semantic table and catalog are both required")
     if included_code_semantics and included_code_semantics != CODE_SEMANTIC_FILE_SET:
         raise ValueError("code semantic vectors and their index must be packaged together")
     includes_knowledge_base = KNOWLEDGE_BASE_FILENAME in extras
@@ -1413,11 +1455,11 @@ def create_deployment_package(
     if includes_knowledge_base is not includes_complete_code_semantics:
         raise ValueError(
             "knowledge_base.json, code_embeddings.npy and "
-            "code_embeddings_idx.json must be packaged as one complete runtime semantic bundle"
+            "code_embeddings_idx.json must be packaged as one complete semantic source bundle"
         )
     if included_code_semantics:
-        semantic_root = extras[CODE_EMBEDDINGS_FILENAME].parent
-        validated_semantics = validate_semantic_bundle(semantic_root)
+        source_semantic_root = extras[CODE_EMBEDDINGS_FILENAME].parent
+        validated_semantics = validate_semantic_bundle(source_semantic_root)
         if (
             validated_semantics["embedding_path"]
             != extras[CODE_EMBEDDINGS_FILENAME]
@@ -1427,6 +1469,22 @@ def create_deployment_package(
             != extras[KNOWLEDGE_BASE_FILENAME]
         ):
             raise ValueError("semantic assets must come from one coherent directory")
+    compiled_root = extras[STATIC_SEMANTIC_ASSET_FILENAMES[0]].parent
+    if any(
+        extras[filename].parent != compiled_root
+        for filename in STATIC_SEMANTIC_ASSET_FILENAMES
+    ):
+        raise ValueError("compiled static semantic assets must come from one directory")
+    load_static_semantic_assets(
+        compiled_root,
+        card_vocabulary=packaged_vocabulary,
+        verify_source_files=(
+            includes_complete_code_semantics
+            and compiled_root == source_semantic_root
+        ),
+        verify_logical_hash=True,
+    )
+    semantic_root = compiled_root
     if HASH_MAPPING_FILENAME in extras and KNOWLEDGE_BASE_FILENAME not in extras:
         raise ValueError("hash mapping requires knowledge_base.json")
 
@@ -1455,6 +1513,7 @@ def create_deployment_package(
         "includes_staples": "meta_staples.json" in extras,
         "includes_hash_mapping": HASH_MAPPING_FILENAME in extras,
         "includes_code_semantics": includes_complete_code_semantics,
+        "includes_static_semantics": True,
         "includes_card_vocab": True,
     }
 
@@ -1493,6 +1552,8 @@ def create_deployment_package(
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
+        if compiled_temp_directory is not None:
+            compiled_temp_directory.cleanup()
     return manifest
 
 
@@ -1542,15 +1603,16 @@ def validate_deployment_package(stage_dir):
         raise ValueError("manifest primary model list does not match package contents")
 
     packaged_vocabulary = load_card_vocabulary(stage_root / CARD_VOCAB_FILENAME)
-    staged_semantic_root = (
-        stage_root
-        if {
-            KNOWLEDGE_BASE_FILENAME,
-            CODE_EMBEDDINGS_FILENAME,
-            CODE_EMBEDDINGS_INDEX_FILENAME,
-        }.issubset(actual_names)
-        else Path(".").resolve()
-    )
+    actual_static_semantics = STATIC_SEMANTIC_FILE_SET.intersection(actual_names)
+    if actual_static_semantics != STATIC_SEMANTIC_FILE_SET:
+        raise ValueError(
+            "deployment package requires the compiled static semantic table and catalog"
+        )
+    if manifest.get("includes_static_semantics") is not True:
+        raise ValueError(
+            "manifest includes_static_semantics does not match package contents"
+        )
+    staged_semantic_root = stage_root
     actual_records = build_package_model_records(
         stage_root,
         declared_models,
@@ -1602,11 +1664,18 @@ def validate_deployment_package(stage_dir):
     if has_knowledge_base is not has_complete_code_semantics:
         raise ValueError(
             "deployment package must contain knowledge_base.json, code_embeddings.npy and "
-            "code_embeddings_idx.json as one complete runtime semantic bundle"
+            "code_embeddings_idx.json as one complete semantic source bundle"
         )
     if actual_code_semantics:
         validate_semantic_bundle(stage_root)
         expected_names.update(CODE_SEMANTIC_FILE_SET)
+    load_static_semantic_assets(
+        stage_root,
+        card_vocabulary=packaged_vocabulary,
+        verify_source_files=has_complete_code_semantics,
+        verify_logical_hash=True,
+    )
+    expected_names.update(STATIC_SEMANTIC_FILE_SET)
     if HASH_MAPPING_FILENAME in actual_names and KNOWLEDGE_BASE_FILENAME not in actual_names:
         raise ValueError("hash mapping requires knowledge_base.json")
     validate_protocol_metadata(

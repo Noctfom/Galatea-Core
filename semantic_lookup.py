@@ -3,7 +3,10 @@
 
 import hashlib
 import json
+import os
+import tempfile
 import threading
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +17,9 @@ from semantic_assets import (
     CODE_EMBEDDINGS_FILENAME,
     CODE_EMBEDDINGS_INDEX_FILENAME,
     KNOWLEDGE_BASE_FILENAME,
+    STATIC_SEMANTIC_ASSET_FILENAMES,
+    STATIC_SEMANTIC_CATALOG_FILENAME,
+    STATIC_SEMANTIC_TABLE_FILENAME,
     validate_semantic_bundle,
 )
 
@@ -25,6 +31,8 @@ SEMANTIC_REQUIREMENT_SLOTS = 16
 SEMANTIC_RELATION_SLOTS = 4
 SEMANTIC_REQUIREMENT_CAPACITY = 128
 SEMANTIC_CATEGORY_CAPACITY = 4000
+MAX_STATIC_SEMANTIC_TABLE_BYTES = 1024 * 1024 * 1024
+MAX_STATIC_SEMANTIC_CATALOG_BYTES = 16 * 1024 * 1024
 
 RACE_MAP = {
     "RACE_WARRIOR": 0x1,
@@ -85,6 +93,175 @@ def _canonical_array_bytes(array):
     if dtype.byteorder not in ("|", "<"):
         dtype = dtype.newbyteorder("<")
     return np.ascontiguousarray(array, dtype=dtype).tobytes(order="C")
+
+
+def _sha256_file(path):
+    """流式计算编译资产摘要，避免校验大表时制造额外整文件副本"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _compiled_asset_paths(directory):
+    """返回静态语义数值表与轻量运行目录的固定路径"""
+    root = Path(directory).resolve()
+    return (
+        root / STATIC_SEMANTIC_TABLE_FILENAME,
+        root / STATIC_SEMANTIC_CATALOG_FILENAME,
+    )
+
+
+def _serialize_runtime_bindings(bindings):
+    """把二元组键目录转成不依赖 pickle 的稳定 JSON 三元组。"""
+    return [
+        [int(card_code), int(runtime_desc), int(slot_index)]
+        for (card_code, runtime_desc), slot_index in sorted(bindings.items())
+    ]
+
+
+def _deserialize_runtime_bindings(records):
+    """严格还原运行时效果绑定，并拒绝重复键或越界槽位。"""
+    if not isinstance(records, list):
+        raise ValueError("static semantic runtime bindings must be a list")
+    bindings = {}
+    for record in records:
+        if not isinstance(record, list) or len(record) != 3:
+            raise ValueError("static semantic runtime binding must be a triple")
+        card_code, runtime_desc, slot_index = record
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in record):
+            raise ValueError("static semantic runtime binding values must be integers")
+        if not 0 < card_code <= 0x7FFFFFFF or not 0 < runtime_desc <= 0xFFFFFFFF:
+            raise ValueError("static semantic runtime binding identity is invalid")
+        if not 0 <= slot_index < SEMANTIC_EFFECT_SLOTS:
+            raise ValueError("static semantic runtime binding slot is invalid")
+        key = (card_code, runtime_desc)
+        if key in bindings:
+            raise ValueError("static semantic runtime binding contains a duplicate key")
+        bindings[key] = slot_index
+    return bindings
+
+
+def _deserialize_card_slots(records):
+    """严格还原卡片到有效 Lua 效果槽的轻量审计目录"""
+    if not isinstance(records, dict):
+        raise ValueError("static semantic card slots must be an object")
+    card_slots = {}
+    for raw_card_code, raw_slots in records.items():
+        if not str(raw_card_code).isdigit() or not isinstance(raw_slots, list):
+            raise ValueError("static semantic card slot record is invalid")
+        card_code = int(raw_card_code)
+        slots = tuple(int(slot) for slot in raw_slots)
+        if (
+            card_code <= 0
+            or any(isinstance(slot, bool) for slot in raw_slots)
+            or tuple(sorted(set(slots))) != slots
+            or any(not 0 <= slot < SEMANTIC_EFFECT_SLOTS for slot in slots)
+        ):
+            raise ValueError("static semantic card slot values are invalid")
+        card_slots[card_code] = slots
+    return card_slots
+
+
+def _read_compiled_catalog(directory, card_vocabulary):
+    """读取并校验轻量目录身份，不加载约 53 MiB 的模型侧数值表"""
+    table_path, catalog_path = _compiled_asset_paths(directory)
+    for path, size_limit in (
+        (table_path, MAX_STATIC_SEMANTIC_TABLE_BYTES),
+        (catalog_path, MAX_STATIC_SEMANTIC_CATALOG_BYTES),
+    ):
+        if path.is_symlink() or not path.is_file():
+            raise FileNotFoundError(f"static semantic asset is missing: {path.name}")
+        if path.stat().st_size <= 0 or path.stat().st_size > size_limit:
+            raise ValueError(f"static semantic asset size is invalid: {path.name}")
+    with open(catalog_path, "r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if not isinstance(payload, dict):
+        raise ValueError("static semantic catalog must be an object")
+    if payload.get("format_version") != STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION:
+        raise ValueError("static semantic catalog format version mismatch")
+    if payload.get("table_file") != STATIC_SEMANTIC_TABLE_FILENAME:
+        raise ValueError("static semantic catalog table filename mismatch")
+    if payload.get("table_size") != table_path.stat().st_size:
+        raise ValueError("static semantic table size does not match its catalog")
+    if payload.get("card_vocab_hash") != card_vocabulary.vocabulary_hash:
+        raise ValueError("static semantic catalog card vocabulary hash mismatch")
+    if payload.get("card_vocab_size") != card_vocabulary.capacity:
+        raise ValueError("static semantic catalog card vocabulary capacity mismatch")
+    if payload.get("card_vocab_card_count") != card_vocabulary.card_count:
+        raise ValueError("static semantic catalog card count mismatch")
+    semantic_card_slots = _deserialize_card_slots(
+        payload.get("semantic_card_slots")
+    )
+    runtime_effect_bindings = _deserialize_runtime_bindings(
+        payload.get("runtime_effect_bindings")
+    )
+    return payload, semantic_card_slots, runtime_effect_bindings
+
+
+def _validate_static_npz_container(table_path, card_vocabulary):
+    """限制 NPZ 内层成员与展开体积，拒绝嵌套压缩炸弹和额外载荷"""
+    expected_names = {f"{name}.npy" for name in _COMPILED_ARRAY_NAMES}
+    with zipfile.ZipFile(table_path, "r") as archive:
+        members = archive.infolist()
+        actual_names = {item.filename for item in members}
+        if len(members) != len(expected_names) or actual_names != expected_names:
+            raise ValueError("static semantic NPZ members are invalid")
+        if any(
+            item.is_dir()
+            or "/" in item.filename
+            or "\\" in item.filename
+            or item.compress_type != zipfile.ZIP_STORED
+            or item.flag_bits & 0x1
+            for item in members
+        ):
+            raise ValueError("static semantic NPZ member encoding is unsafe")
+        max_payload_bytes = (
+            64 * 1024
+            + card_vocabulary.capacity
+            * SEMANTIC_EFFECT_SLOTS
+            * (
+                SEMANTIC_CATEGORY_SLOTS * np.dtype(np.int16).itemsize
+                + SEMANTIC_REQUIREMENT_SLOTS * np.dtype(np.int8).itemsize
+                + SEMANTIC_RELATION_SLOTS
+                * (
+                    np.dtype(np.int16).itemsize * 3
+                    + np.dtype(np.float16).itemsize
+                    + np.dtype(np.int32).itemsize
+                )
+                + np.dtype(np.int32).itemsize
+                + np.dtype(np.bool_).itemsize
+            )
+            + (card_vocabulary.capacity * SEMANTIC_EFFECT_SLOTS + 1)
+            * 512
+            * np.dtype(np.float32).itemsize
+        )
+        if sum(item.file_size for item in members) > max_payload_bytes:
+            raise ValueError("static semantic NPZ expanded size exceeds protocol bounds")
+
+
+_REGISTERED_CATALOGS = None
+
+
+def _register_lookup_catalogs(semantic_card_slots, runtime_effect_bindings):
+    """登记小型效果槽目录，确保 spawn Worker 与主进程看到同一语义"""
+    global _REGISTERED_CATALOGS
+    if (
+        _REGISTERED_CATALOGS is not None
+        and _REGISTERED_CATALOGS[0] is semantic_card_slots
+        and _REGISTERED_CATALOGS[1] is runtime_effect_bindings
+    ):
+        return
+    from effect_slot_binding import register_runtime_effect_binding_catalog
+    from protocol_v3_audit import register_compiled_semantic_audit_catalog
+
+    register_runtime_effect_binding_catalog(runtime_effect_bindings)
+    register_compiled_semantic_audit_catalog(
+        semantic_card_slots,
+        runtime_effect_bindings,
+    )
+    _REGISTERED_CATALOGS = (semantic_card_slots, runtime_effect_bindings)
 
 
 class StaticSemanticLookup:
@@ -438,6 +615,442 @@ def build_static_semantic_lookup(
     )
 
 
+_COMPILED_ARRAY_NAMES = (
+    "category",
+    "requirement",
+    "setcode",
+    "number",
+    "reference",
+    "race",
+    "attribute",
+    "code_index",
+    "effect_mask",
+    "code_dictionary",
+)
+
+
+def _lookup_array_mapping(lookup):
+    """返回写入独立数值资产的固定数组集合"""
+    return {
+        "category": lookup.category,
+        "requirement": lookup.requirement,
+        "setcode": lookup.setcode,
+        "number": lookup.number,
+        "reference": lookup.reference,
+        "race": lookup.race,
+        "attribute": lookup.attribute,
+        "code_index": lookup.code_index,
+        "effect_mask": lookup.effect_mask,
+        "code_dictionary": lookup.code_dictionary,
+    }
+
+
+def write_static_semantic_assets(
+    source_directory=".",
+    *,
+    output_directory=None,
+    card_vocabulary=None,
+    knowledge_base_filename=KNOWLEDGE_BASE_FILENAME,
+    lookup=None,
+):
+    """把已编译语义表原子写成安全 NPZ 与轻量运行目录"""
+    vocabulary = card_vocabulary or get_default_card_vocabulary()
+    source_root = Path(source_directory).resolve()
+    output_root = Path(output_directory or source_root).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    compiled = lookup or build_static_semantic_lookup(
+        source_root,
+        card_vocabulary=vocabulary,
+        knowledge_base_filename=knowledge_base_filename,
+    )
+    if compiled.card_vocabulary.vocabulary_hash != vocabulary.vocabulary_hash:
+        raise ValueError("compiled semantic lookup vocabulary mismatch")
+
+    table_path, catalog_path = _compiled_asset_paths(output_root)
+    temporary_table = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{table_path.name}.",
+            suffix=".compile.tmp",
+            dir=output_root,
+            delete=False,
+        ) as stream:
+            temporary_table = Path(stream.name)
+            np.savez(stream, **_lookup_array_mapping(compiled))
+        os.replace(temporary_table, table_path)
+        temporary_table = None
+    finally:
+        if temporary_table is not None and temporary_table.exists():
+            temporary_table.unlink()
+
+    source_records = {}
+    for filename in (
+        knowledge_base_filename,
+        CODE_EMBEDDINGS_FILENAME,
+        CODE_EMBEDDINGS_INDEX_FILENAME,
+    ):
+        source_path = source_root / filename
+        stat = source_path.stat()
+        source_records[filename] = {
+            "size": stat.st_size,
+            "sha256": _sha256_file(source_path),
+        }
+    arrays = _lookup_array_mapping(compiled)
+    catalog = {
+        "format_version": STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION,
+        "table_file": STATIC_SEMANTIC_TABLE_FILENAME,
+        "table_size": table_path.stat().st_size,
+        "table_sha256": _sha256_file(table_path),
+        "card_vocab_hash": vocabulary.vocabulary_hash,
+        "card_vocab_size": vocabulary.capacity,
+        "card_vocab_card_count": vocabulary.card_count,
+        "semantic_lookup_hash": compiled.prefix_hash(),
+        "semantic_lookup_card_count": vocabulary.card_count,
+        "category_to_index": compiled.category_to_index,
+        "requirement_to_index": compiled.requirement_to_index,
+        "arrays": {
+            name: {
+                "dtype": array.dtype.str,
+                "shape": list(array.shape),
+            }
+            for name, array in arrays.items()
+        },
+        "semantic_card_slots": {
+            str(card_code): list(slots)
+            for card_code, slots in sorted(compiled.semantic_card_slots.items())
+        },
+        "runtime_effect_bindings": _serialize_runtime_bindings(
+            compiled.runtime_effect_bindings
+        ),
+        "source_files": source_records,
+    }
+    temporary_catalog = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{catalog_path.name}.",
+            suffix=".compile.tmp",
+            dir=output_root,
+            delete=False,
+        ) as stream:
+            temporary_catalog = Path(stream.name)
+            json.dump(catalog, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.write("\n")
+        os.replace(temporary_catalog, catalog_path)
+        temporary_catalog = None
+    finally:
+        if temporary_catalog is not None and temporary_catalog.exists():
+            temporary_catalog.unlink()
+    return compiled, {
+        STATIC_SEMANTIC_TABLE_FILENAME: table_path,
+        STATIC_SEMANTIC_CATALOG_FILENAME: catalog_path,
+    }
+
+
+def load_static_semantic_assets(
+    directory=".",
+    *,
+    card_vocabulary=None,
+    verify_source_files=False,
+    verify_logical_hash=False,
+):
+    """从独立资产恢复模型查表，并验证数值表、词表和逻辑语义身份"""
+    vocabulary = card_vocabulary or get_default_card_vocabulary()
+    root = Path(directory).resolve()
+    table_path, _ = _compiled_asset_paths(root)
+    catalog, semantic_card_slots, runtime_effect_bindings = _read_compiled_catalog(
+        root,
+        vocabulary,
+    )
+    if catalog.get("table_sha256") != _sha256_file(table_path):
+        raise ValueError("static semantic table hash does not match its catalog")
+    if verify_source_files:
+        source_records = catalog.get("source_files")
+        if not isinstance(source_records, dict):
+            raise ValueError("static semantic source records are missing")
+        source_names = set(source_records)
+        if (
+            len(source_names) != 3
+            or CODE_EMBEDDINGS_FILENAME not in source_names
+            or CODE_EMBEDDINGS_INDEX_FILENAME not in source_names
+            or any(
+                not isinstance(filename, str)
+                or filename != Path(filename).name
+                or filename in {"", ".", ".."}
+                for filename in source_names
+            )
+        ):
+            raise ValueError("static semantic source filename set is invalid")
+        for filename, record in source_records.items():
+            source_path = root / filename
+            if source_path.is_symlink() or not source_path.is_file():
+                raise FileNotFoundError(
+                    f"static semantic source is missing: {filename}"
+                )
+            if (
+                not isinstance(record, dict)
+                or record.get("size") != source_path.stat().st_size
+                or record.get("sha256") != _sha256_file(source_path)
+            ):
+                raise ValueError(
+                    "semantic_lookup_hash source mismatch with compiled asset: "
+                    f"{filename}"
+                )
+
+    expected_arrays = catalog.get("arrays")
+    if not isinstance(expected_arrays, dict):
+        raise ValueError("static semantic array manifest is missing")
+    _validate_static_npz_container(table_path, vocabulary)
+    with np.load(table_path, allow_pickle=False) as archive:
+        if set(archive.files) != set(_COMPILED_ARRAY_NAMES):
+            raise ValueError("static semantic table contains unexpected arrays")
+        arrays = {}
+        for name in _COMPILED_ARRAY_NAMES:
+            array = np.asarray(archive[name])
+            record = expected_arrays.get(name)
+            if not isinstance(record, dict):
+                raise ValueError(f"static semantic array record is missing: {name}")
+            if record.get("dtype") != array.dtype.str or record.get("shape") != list(
+                array.shape
+            ):
+                raise ValueError(f"static semantic array shape mismatch: {name}")
+            if array.dtype.hasobject:
+                raise ValueError(f"static semantic object array is not allowed: {name}")
+            arrays[name] = np.array(array, copy=True)
+
+    capacity = vocabulary.capacity
+    expected_shapes = {
+        "category": (capacity, SEMANTIC_EFFECT_SLOTS, SEMANTIC_CATEGORY_SLOTS),
+        "requirement": (
+            capacity,
+            SEMANTIC_EFFECT_SLOTS,
+            SEMANTIC_REQUIREMENT_SLOTS,
+        ),
+        "setcode": (capacity, SEMANTIC_EFFECT_SLOTS, SEMANTIC_RELATION_SLOTS),
+        "number": (capacity, SEMANTIC_EFFECT_SLOTS, SEMANTIC_RELATION_SLOTS),
+        "reference": (capacity, SEMANTIC_EFFECT_SLOTS, SEMANTIC_RELATION_SLOTS),
+        "race": (capacity, SEMANTIC_EFFECT_SLOTS, SEMANTIC_RELATION_SLOTS),
+        "attribute": (capacity, SEMANTIC_EFFECT_SLOTS, SEMANTIC_RELATION_SLOTS),
+        "code_index": (capacity, SEMANTIC_EFFECT_SLOTS),
+        "effect_mask": (capacity, SEMANTIC_EFFECT_SLOTS),
+    }
+    expected_dtypes = {
+        "category": np.dtype(np.int16),
+        "requirement": np.dtype(np.int8),
+        "setcode": np.dtype(np.int16),
+        "number": np.dtype(np.float16),
+        "reference": np.dtype(np.int32),
+        "race": np.dtype(np.int16),
+        "attribute": np.dtype(np.int16),
+        "code_index": np.dtype(np.int32),
+        "effect_mask": np.dtype(np.bool_),
+    }
+    for name, shape in expected_shapes.items():
+        if arrays[name].shape != shape or arrays[name].dtype != expected_dtypes[name]:
+            raise ValueError(f"static semantic array contract mismatch: {name}")
+    code_dictionary = arrays["code_dictionary"]
+    if (
+        code_dictionary.ndim != 2
+        or code_dictionary.dtype != np.float32
+        or not 1 <= code_dictionary.shape[1] <= 512
+        or code_dictionary.shape[0]
+        > capacity * SEMANTIC_EFFECT_SLOTS + 1
+    ):
+        raise ValueError("static semantic code dictionary is invalid")
+    if arrays["code_index"].size and (
+        arrays["code_index"].min() < 0
+        or arrays["code_index"].max() >= code_dictionary.shape[0]
+    ):
+        raise ValueError("static semantic code index exceeds its dictionary")
+
+    category_to_index = catalog.get("category_to_index")
+    requirement_to_index = catalog.get("requirement_to_index")
+    if not isinstance(category_to_index, dict) or not isinstance(
+        requirement_to_index, dict
+    ):
+        raise ValueError("static semantic label vocabularies are invalid")
+    for mapping, lower_bound, upper_bound, label in (
+        (
+            category_to_index,
+            0,
+            SEMANTIC_CATEGORY_CAPACITY,
+            "category",
+        ),
+        (
+            requirement_to_index,
+            0,
+            SEMANTIC_REQUIREMENT_CAPACITY,
+            "requirement",
+        ),
+    ):
+        values = list(mapping.values())
+        if (
+            any(not isinstance(key, str) or not key for key in mapping)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not lower_bound <= value < upper_bound
+                for value in values
+            )
+            or len(values) != len(set(values))
+        ):
+            raise ValueError(f"static semantic {label} vocabulary is invalid")
+    if category_to_index.get("<PAD>") != 0 or category_to_index.get("<UNK>") != 1:
+        raise ValueError("static semantic category reserved indices are invalid")
+    bounded_arrays = (
+        (arrays["category"], 0, SEMANTIC_CATEGORY_CAPACITY, "category"),
+        (arrays["requirement"], -1, SEMANTIC_REQUIREMENT_CAPACITY, "requirement"),
+        (arrays["setcode"], 0, 4096, "setcode"),
+        (arrays["reference"], 0, capacity, "reference"),
+        (arrays["race"], 0, 30, "race"),
+        (arrays["attribute"], 0, 10, "attribute"),
+    )
+    for array, lower_bound, upper_bound, label in bounded_arrays:
+        if array.size and (
+            array.min() < lower_bound or array.max() >= upper_bound
+        ):
+            raise ValueError(f"static semantic {label} values are outside bounds")
+    if not np.isfinite(arrays["number"]).all() or not np.isfinite(
+        code_dictionary
+    ).all():
+        raise ValueError("static semantic floating-point values must be finite")
+    lookup = StaticSemanticLookup(
+        card_vocabulary=vocabulary,
+        category_to_index=category_to_index,
+        requirement_to_index=requirement_to_index,
+        category=arrays["category"],
+        requirement=arrays["requirement"],
+        setcode=arrays["setcode"],
+        number=arrays["number"],
+        reference=arrays["reference"],
+        race=arrays["race"],
+        attribute=arrays["attribute"],
+        code_index=arrays["code_index"],
+        effect_mask=arrays["effect_mask"],
+        code_dictionary=code_dictionary,
+        semantic_card_slots=semantic_card_slots,
+        runtime_effect_bindings=runtime_effect_bindings,
+    )
+    if catalog.get("semantic_lookup_card_count") != vocabulary.card_count:
+        raise ValueError("static semantic lookup card count mismatch")
+    logical_hash = catalog.get("semantic_lookup_hash")
+    if (
+        not isinstance(logical_hash, str)
+        or len(logical_hash) != 64
+        or any(char not in "0123456789abcdef" for char in logical_hash)
+    ):
+        raise ValueError("static semantic logical hash is invalid")
+    if verify_logical_hash:
+        if logical_hash != lookup.prefix_hash():
+            raise ValueError("static semantic logical hash does not match its table")
+    else:
+        # 表文件摘要已验证，正常启动直接复用编译时逻辑身份，避免重复扫描向量
+        lookup._prefix_hashes[vocabulary.card_count] = logical_hash
+    _register_lookup_catalogs(semantic_card_slots, runtime_effect_bindings)
+    return lookup
+
+
+def ensure_static_semantic_assets(
+    directory=".",
+    *,
+    card_vocabulary=None,
+    knowledge_base_filename=KNOWLEDGE_BASE_FILENAME,
+):
+    """优先加载预编译资产；缺失时从完整源语义组一次性生成"""
+    vocabulary = card_vocabulary or get_default_card_vocabulary()
+    root = Path(directory).resolve()
+    source_paths = (
+        root / knowledge_base_filename,
+        root / CODE_EMBEDDINGS_FILENAME,
+        root / CODE_EMBEDDINGS_INDEX_FILENAME,
+    )
+    has_complete_sources = all(
+        path.is_file() and not path.is_symlink() for path in source_paths
+    )
+    try:
+        return load_static_semantic_assets(
+            root,
+            card_vocabulary=vocabulary,
+            verify_source_files=has_complete_sources,
+        )
+    except (
+        FileNotFoundError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        zipfile.BadZipFile,
+    ):
+        if not has_complete_sources:
+            raise
+    lookup = build_static_semantic_lookup(
+        root,
+        card_vocabulary=vocabulary,
+        knowledge_base_filename=knowledge_base_filename,
+    )
+    write_static_semantic_assets(
+        root,
+        card_vocabulary=vocabulary,
+        knowledge_base_filename=knowledge_base_filename,
+        lookup=lookup,
+    )
+    _register_lookup_catalogs(
+        lookup.semantic_card_slots,
+        lookup.runtime_effect_bindings,
+    )
+    return lookup
+
+
+_RUNTIME_CATALOG_CACHE = {}
+
+
+def register_static_semantic_runtime_catalog(
+    directory=".",
+    *,
+    card_vocabulary=None,
+):
+    """仅加载约 0.55 MiB 的效果槽目录，供无模型 Worker 保留 V4 观测"""
+    vocabulary = card_vocabulary or get_default_card_vocabulary()
+    root = Path(directory).resolve()
+    table_path, catalog_path = _compiled_asset_paths(root)
+    if not table_path.is_file() or not catalog_path.is_file():
+        ensure_static_semantic_assets(root, card_vocabulary=vocabulary)
+    cache_key = (
+        str(root),
+        vocabulary.vocabulary_hash,
+        _file_signature(table_path),
+        _file_signature(catalog_path),
+    )
+    cached = _RUNTIME_CATALOG_CACHE.get(cache_key)
+    if cached is None:
+        try:
+            _, card_slots, runtime_bindings = _read_compiled_catalog(
+                root,
+                vocabulary,
+            )
+        except (
+            FileNotFoundError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            zipfile.BadZipFile,
+        ):
+            ensure_static_semantic_assets(root, card_vocabulary=vocabulary)
+            _, card_slots, runtime_bindings = _read_compiled_catalog(
+                root,
+                vocabulary,
+            )
+        _RUNTIME_CATALOG_CACHE.clear()
+        cached = (card_slots, runtime_bindings)
+        _RUNTIME_CATALOG_CACHE[cache_key] = cached
+    _register_lookup_catalogs(*cached)
+    return {
+        "semantic_card_count": len(cached[0]),
+        "runtime_effect_binding_count": len(cached[1]),
+    }
+
+
 _LOOKUP_CACHE = {}
 _LOOKUP_CACHE_LOCK = threading.Lock()
 
@@ -451,11 +1064,13 @@ def get_static_semantic_lookup(
     """按资产签名复用模型侧查表，并在文件更新后自动重建"""
     vocabulary = card_vocabulary or get_default_card_vocabulary()
     root = Path(directory).resolve()
-    asset_paths = (
-        root / knowledge_base_filename,
-        root / CODE_EMBEDDINGS_FILENAME,
-        root / CODE_EMBEDDINGS_INDEX_FILENAME,
-    )
+    asset_paths = tuple(root / filename for filename in STATIC_SEMANTIC_ASSET_FILENAMES)
+    if not all(path.is_file() for path in asset_paths):
+        ensure_static_semantic_assets(
+            root,
+            card_vocabulary=vocabulary,
+            knowledge_base_filename=knowledge_base_filename,
+        )
     cache_key = (
         str(root),
         knowledge_base_filename,
@@ -465,17 +1080,24 @@ def get_static_semantic_lookup(
     with _LOOKUP_CACHE_LOCK:
         lookup = _LOOKUP_CACHE.get(cache_key)
         if lookup is None:
-            lookup = build_static_semantic_lookup(
+            lookup = ensure_static_semantic_assets(
                 root,
                 card_vocabulary=vocabulary,
                 knowledge_base_filename=knowledge_base_filename,
             )
             _LOOKUP_CACHE.clear()
             _LOOKUP_CACHE[cache_key] = lookup
+        _register_lookup_catalogs(
+            lookup.semantic_card_slots,
+            lookup.runtime_effect_bindings,
+        )
         return lookup
 
 
 def clear_static_semantic_lookup_cache():
     """清除进程内查表，供资产更新流程和隔离测试显式调用"""
+    global _REGISTERED_CATALOGS
     with _LOOKUP_CACHE_LOCK:
         _LOOKUP_CACHE.clear()
+    _RUNTIME_CATALOG_CACHE.clear()
+    _REGISTERED_CATALOGS = None
