@@ -32,8 +32,22 @@ from data_types import (
     PLAYER_CONTEXT_SLOTS,
     POSITION_CATEGORY_COUNT,
     SUMMON_METHOD_COUNT,
+    TRANSITION_BOUNDARY_COUNT,
+    TRANSITION_EVENT_CHAIN_DIM,
+    TRANSITION_EVENT_COUNT_DIM,
+    TRANSITION_EVENT_HISTORY_SIZE,
+    TRANSITION_EVENT_LOCATION_DIM,
+    TRANSITION_EVENT_LP_DIM,
+    TRANSITION_EVENT_MESSAGE_BYTES,
+    TRANSITION_EVENT_RESULT_BYTES,
+    TRANSITION_EVENT_TARGET_SLOTS,
+    TRANSITION_ZONE_COUNT,
     ZONE_CATEGORY_COUNT,
     GameSnapshot,
+)
+from event_history import (
+    encode_transition_message_groups,
+    visible_transition_history,
 )
 from game_constants import LocationInfo, Position, Zone
 from semantic_lookup import register_static_semantic_runtime_catalog
@@ -264,6 +278,221 @@ class GalateaEncoder:
             min(int(sequence), 31) + 1,
             GalateaEncoder._encode_position_category(position),
         )
+
+    @staticmethod
+    def _encode_transition_location(raw_location, player_id):
+        """把事件中的原始位置编码为当前观察者视角的紧凑四元组"""
+        if raw_location is None or int(raw_location) < 0:
+            return 0, 0, 0, 0
+        controller, location, sequence, position = LocationInfo.decode(
+            int(raw_location)
+        )
+        if controller not in (0, 1):
+            relative_controller = 0
+        else:
+            relative_controller = 1 if controller == player_id else 2
+        return (
+            relative_controller,
+            GalateaEncoder._encode_zone_category(location),
+            min(max(int(sequence), 0), 31) + 1,
+            GalateaEncoder._encode_position_category(position),
+        )
+
+    @staticmethod
+    def _pack_transition_bits(value, width):
+        """把事件位图按小端顺序压缩为固定宽度字节"""
+        value = max(int(value), 0)
+        return [(value >> (index * 8)) & 0xFF for index in range(width)]
+
+    def _encode_transition_history(self, snapshot, player_id):
+        """按观察者可见性编码最近的决策间状态转移历史"""
+        event_mask = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.bool_,
+        )
+        event_card_idx = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.int32,
+        )
+        event_effect_slot = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.uint8,
+        )
+        event_actor_role = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.uint8,
+        )
+        event_prompt = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.uint8,
+        )
+        event_operation = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.uint8,
+        )
+        event_summon_method = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.uint8,
+        )
+        event_phase = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.uint8,
+        )
+        event_boundary = np.zeros(
+            TRANSITION_EVENT_HISTORY_SIZE,
+            dtype=np.uint8,
+        )
+        event_result_bytes = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_RESULT_BYTES),
+            dtype=np.uint8,
+        )
+        event_message_bytes = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_MESSAGE_BYTES),
+            dtype=np.uint8,
+        )
+        event_source_context = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_LOCATION_DIM),
+            dtype=np.uint8,
+        )
+        event_target_card_idx = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_TARGET_SLOTS),
+            dtype=np.int32,
+        )
+        event_target_context = np.zeros(
+            (
+                TRANSITION_EVENT_HISTORY_SIZE,
+                TRANSITION_EVENT_TARGET_SLOTS,
+                TRANSITION_EVENT_LOCATION_DIM,
+            ),
+            dtype=np.uint8,
+        )
+        event_target_mask = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_TARGET_SLOTS),
+            dtype=np.bool_,
+        )
+        event_lp_delta = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_LP_DIM),
+            dtype=np.float16,
+        )
+        event_zone_delta = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, 2 * TRANSITION_ZONE_COUNT),
+            dtype=np.int8,
+        )
+        event_chain = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_CHAIN_DIM),
+            dtype=np.uint8,
+        )
+        event_counts = np.zeros(
+            (TRANSITION_EVENT_HISTORY_SIZE, TRANSITION_EVENT_COUNT_DIM),
+            dtype=np.uint8,
+        )
+
+        events = visible_transition_history(
+            getattr(snapshot, "transition_history", ()),
+            player_id,
+        )
+        for index, event in enumerate(events):
+            event_mask[index] = True
+            if event.source_code:
+                event_card_idx[index] = self._encode_card_code(
+                    event.source_code
+                )
+            event_effect_slot[index] = self._encode_effect_slot(
+                event.effect_slot
+            )
+            event_actor_role[index] = 1 if event.actor == player_id else 2
+            event_prompt[index] = min(max(int(event.prompt_type), 0), 255)
+            if 0 <= int(event.operation_id) < ACTION_OPERATION_COUNT:
+                event_operation[index] = int(event.operation_id)
+            if 0 <= int(event.summon_method_id) < SUMMON_METHOD_COUNT:
+                event_summon_method[index] = int(event.summon_method_id)
+            event_phase[index] = self._encode_phase_category(event.phase_id)
+            if 0 <= int(event.boundary) < TRANSITION_BOUNDARY_COUNT:
+                event_boundary[index] = int(event.boundary)
+            event_result_bytes[index] = self._pack_transition_bits(
+                event.result_flags,
+                TRANSITION_EVENT_RESULT_BYTES,
+            )
+            event_message_bytes[index] = self._pack_transition_bits(
+                encode_transition_message_groups(event.message_types),
+                TRANSITION_EVENT_MESSAGE_BYTES,
+            )
+            event_source_context[index] = self._encode_transition_location(
+                event.source_location_raw,
+                player_id,
+            )
+
+            for target_index, (code, raw_location) in enumerate(
+                zip(event.target_codes, event.target_locations)
+            ):
+                if target_index >= TRANSITION_EVENT_TARGET_SLOTS:
+                    break
+                if code:
+                    event_target_card_idx[index, target_index] = (
+                        self._encode_card_code(code)
+                    )
+                event_target_context[index, target_index] = (
+                    self._encode_transition_location(raw_location, player_id)
+                )
+                event_target_mask[index, target_index] = True
+
+            lp_delta = [event.lp_delta_p0, event.lp_delta_p1]
+            zone_delta = list(event.zone_deltas)
+            if player_id == 1:
+                lp_delta.reverse()
+                zone_delta = (
+                    zone_delta[TRANSITION_ZONE_COUNT:]
+                    + zone_delta[:TRANSITION_ZONE_COUNT]
+                )
+            event_lp_delta[index] = np.clip(
+                np.asarray(lp_delta, dtype=np.float32) / 8000.0,
+                -8.0,
+                8.0,
+            ).astype(np.float16)
+            event_zone_delta[index] = np.clip(
+                np.asarray(zone_delta, dtype=np.int64),
+                -127,
+                127,
+            ).astype(np.int8)
+            event_chain[index] = np.clip(
+                [
+                    event.chain_depth_before,
+                    event.chain_depth_after,
+                    event.max_chain_depth,
+                ],
+                0,
+                255,
+            )
+            event_counts[index] = [
+                min(int(event.target_count), 255),
+                min(int(event.message_count), 255),
+            ]
+
+        arrays = {
+            "event_mask": event_mask,
+            "event_card_idx": event_card_idx,
+            "event_effect_slot": event_effect_slot,
+            "event_actor_role": event_actor_role,
+            "event_prompt": event_prompt,
+            "event_operation": event_operation,
+            "event_summon_method": event_summon_method,
+            "event_phase": event_phase,
+            "event_boundary": event_boundary,
+            "event_result_bytes": event_result_bytes,
+            "event_message_bytes": event_message_bytes,
+            "event_source_context": event_source_context,
+            "event_target_card_idx": event_target_card_idx,
+            "event_target_context": event_target_context,
+            "event_target_mask": event_target_mask,
+            "event_lp_delta": event_lp_delta,
+            "event_zone_delta": event_zone_delta,
+            "event_chain": event_chain,
+            "event_counts": event_counts,
+        }
+        return {
+            name: torch.from_numpy(value).unsqueeze(0)
+            for name, value in arrays.items()
+        }
 
     @staticmethod
     def _encode_chain_context(item, player_id):
@@ -981,8 +1210,9 @@ class GalateaEncoder:
             'h_card_idx': torch.from_numpy(h_card_idx).unsqueeze(0),
             'h_effect_slot': torch.from_numpy(h_effect_slots).unsqueeze(0),
         }
-        
+
         base_dict.update(self._encode_deck_profile(snapshot, player_id))
+        base_dict.update(self._encode_transition_history(snapshot, player_id))
         base_dict.update(act_dict)
         return base_dict
 

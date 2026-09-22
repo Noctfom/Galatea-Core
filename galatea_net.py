@@ -31,6 +31,7 @@ from protocol_schema import (
     apply_current_protocol_metadata,
 )
 from deck_encoder import DeckEncoder
+from event_encoder import EventHistoryEncoder
 from semantic_lookup import get_static_semantic_lookup
 
 
@@ -493,6 +494,11 @@ class GalateaNet(nn.Module):
         # 连锁与历史使用顺序敏感聚合，避免位置向量在普通均值中被数学抵消
         self.chain_context_pool = OrderedContextPool(self.d_model, 12)
         self.history_context_pool = OrderedContextPool(self.d_model, 8)
+        self.event_history_encoder = EventHistoryEncoder(self.d_model)
+        # 零门控保证新历史分支初始时不改变既有策略，并允许训练逐步启用
+        self.event_history_gate = nn.Parameter(
+            torch.zeros(1, self.d_model)
+        )
         self.chain_metadata_proj = nn.Linear(
             CHAIN_CONTEXT_DIM,
             self.d_model,
@@ -738,6 +744,30 @@ class GalateaNet(nn.Module):
             batch_dict['deck_profile_remaining_count'],
             batch_dict['deck_profile_mask'],
             return_per_card=return_per_card,
+        )
+
+    def encode_event_history(self, batch_dict):
+        """编码可见事件历史，并复用模型侧静态 Lua 语义资产"""
+        source_card_ids = batch_dict['event_card_idx'].long()
+        source_semantic = (
+            self.card_embed(source_card_ids)
+            + self.process_semantics(
+                *self.lookup_static_semantics(
+                    source_card_ids,
+                    batch_dict['event_effect_slot'],
+                ),
+                None,
+            )
+        )
+        target_card_ids = batch_dict['event_target_card_idx'].long()
+        target_semantic = (
+            self.card_embed(target_card_ids)
+            + self.summarize_deck_code_semantics(target_card_ids)
+        )
+        return self.event_history_encoder(
+            batch_dict,
+            source_semantic,
+            target_semantic,
         )
 
     def build_layered_film(
@@ -987,6 +1017,14 @@ class GalateaNet(nn.Module):
         else:
             history_pooled = 0
 
+        if 'event_mask' in batch_dict:
+            event_pooled = self.encode_event_history(batch_dict)
+            event_pooled = (
+                torch.tanh(self.event_history_gate) * event_pooled
+            ).unsqueeze(1)
+        else:
+            event_pooled = 0
+
         # 大一统评分底蕴：加入历史记忆
         v_input = (
             g_embed
@@ -995,6 +1033,7 @@ class GalateaNet(nn.Module):
             + deck_style
             + chain_pooled
             + history_pooled
+            + event_pooled
         )
         v_input = self.v_norm(v_input)
         value = self.value_head(v_input.squeeze(1)) 

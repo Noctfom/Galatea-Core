@@ -4,6 +4,18 @@
 
 ---
 
+## [v3.11.2] - 2026-09-22
+
+### 🧠 V4 Phase 5 batch 3: transition history enters the policy network
+
+- **Compact event tensors**: The latest 16 visible 3.11.1 events now use fixed-shape inputs for source identity and exact Lua effect slot, up to five target identities/locations, actor, prompt/operation/summon method, phase/boundary, result bits, ten public Core-message groups, relative LP/eight-zone deltas, and chain depth. Private events and fields are removed or masked for the observing player before tensorization
+- **Independent ordered encoder**: New `event_encoder.py` reuses model-side exact card-by-effect-slot semantics for the source and card identity plus all-Lua-code summaries for targets. It performs masked slot-aware target pooling, then chronological positional mixing, depthwise local convolution, and attention pooling. An empty history produces an exact zero vector
+- **Safe policy/value fusion**: A per-channel zero-initialized gate adds the event vector to shared `v_input`. At initialization, policy/value outputs are bitwise identical to the same network without event inputs; the gate receives gradients on the first update and subsequently opens normal learning through the event encoder. Legality, reward, GAE, PPO loss, and duel state are unchanged
+- **End-to-end transport**: Nineteen compact fields now pass through the Encoder, central-inference shared memory, Worker temporary trajectories, Trainer merge storage, PPO mini-batches, and ONNX. ONNX Runtime consumes the same observation contract and remains numerically aligned with PyTorch, including historical-opponent inference
+- **Size and performance**: Event inputs use exactly 1,440 bytes/step, or 45.0 MiB for 32,768 steps. A 512/8/6 model adds 589,056 parameters for 52,212,658 total. Local isolated measurements showed about +2.72% single-sample CPU forward overhead and +10.65% for batch-6 CUDA BF16; tensorization took about 0.031/0.252 ms for empty/full-16 history, remaining below the phase's 15% gate. CUDA BF16 forward/backward produced finite gradients for every event parameter
+- **Version boundary**: Framework advances to 3.11.2; Model Protocol remains 4 and Checkpoint Format remains 3, while V4 schema revision advances to 11. New inputs and weights prevent revision-10 development checkpoints/ONNX graphs from being mixed with the current structure; V4 still trains from scratch
+- **Validation**: Covers field shapes/types, player-relative symmetry, private-event isolation, empty history, order sensitivity, zero-gate equivalence, gate gradients, and complete ONNX inputs. The project suite passes 238 tests with one real-Core gate skipped, and the explicitly enabled real-Core decision loop passes
+
 ## [v3.11.1] - 2026-09-22
 
 ### 🧭 V4 Phase 5 Batch 2: Between-decision transition-event protocol

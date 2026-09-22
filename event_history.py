@@ -20,6 +20,19 @@ from game_constants import Zone
 TRANSITION_EVENT_FORMAT_VERSION = 1
 MAX_RECORDED_MESSAGE_TYPES = 32
 ALL_PLAYERS_VISIBILITY_MASK = 0b11
+TRANSITION_MESSAGE_GROUP_NAMES = (
+    "turn_phase",
+    "move_position",
+    "field_control",
+    "summon",
+    "chain",
+    "target_equip",
+    "draw",
+    "life_points",
+    "counter",
+    "battle",
+)
+TRANSITION_MESSAGE_GROUP_COUNT = len(TRANSITION_MESSAGE_GROUP_NAMES)
 TRANSITION_ZONE_ORDER = (
     Zone.DECK,
     Zone.HAND,
@@ -62,6 +75,18 @@ _PUBLIC_EVENT_MESSAGES = {
     83, 90, 91, 92, 93, 94, 95, 96, 97,
     100, 101, 102, 110, 111, 112, 113, 114,
 }
+_TRANSITION_MESSAGE_GROUPS = (
+    {40, 41},
+    {50, 53, 54, 55},
+    {56},
+    {60, 61, 62, 63, 64, 65},
+    {70, 71, 72, 73, 74, 75, 76},
+    {83, 93, 95, 96, 97},
+    {90},
+    {91, 92, 94, 100},
+    {101, 102},
+    {110, 111, 112, 113, 114},
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +112,7 @@ class _PendingTransition:
     source_location_raw: int
     effect_slot: int
     target_locations: tuple
+    target_codes: tuple
     target_count: int
     event_visibility_mask: int
     intent_visibility_mask: int
@@ -159,8 +185,20 @@ class TransitionEventRecorder:
             location = int(getattr(action, "target_location_raw", -1))
             if location >= 0:
                 target_locations = (location,)
-        target_count = len(target_locations)
-        target_locations = target_locations[:ACTION_TARGET_SLOTS]
+        target_codes = tuple(
+            int(value) & 0x7FFFFFFF
+            for value in (getattr(action, "macro_target_codes", None) or ())
+        )
+        if not target_codes and target_locations:
+            action_code = int(getattr(action, "code", 0)) & 0x7FFFFFFF
+            target_codes = (action_code,) if action_code else ()
+        target_count = max(len(target_locations), len(target_codes))
+        target_locations = (
+            target_locations + (-1,) * target_count
+        )[:ACTION_TARGET_SLOTS]
+        target_codes = (
+            target_codes + (0,) * target_count
+        )[:ACTION_TARGET_SLOTS]
 
         result_flags = TransitionResultFlag.NONE
         if operation_id == int(ActionOperation.CANCEL):
@@ -182,6 +220,7 @@ class TransitionEventRecorder:
             source_location_raw=int(getattr(action, "target_location_raw", -1)),
             effect_slot=int(getattr(action, "effect_slot", -1)),
             target_locations=target_locations,
+            target_codes=target_codes,
             target_count=target_count,
             event_visibility_mask=int(intent_visibility),
             intent_visibility_mask=int(intent_visibility),
@@ -280,6 +319,7 @@ class TransitionEventRecorder:
             source_location_raw=pending.source_location_raw,
             effect_slot=pending.effect_slot,
             target_locations=pending.target_locations,
+            target_codes=pending.target_codes,
             target_count=pending.target_count,
             event_visibility_mask=pending.event_visibility_mask,
             intent_visibility_mask=pending.intent_visibility_mask,
@@ -328,7 +368,7 @@ def mask_transition_event_for_player(event, player_id):
     if not (event.source_visibility_mask & player_mask):
         updates.update(source_code=0, source_location_raw=-1)
     if not (event.target_visibility_mask & player_mask):
-        updates.update(target_locations=(), target_count=0)
+        updates.update(target_locations=(), target_codes=(), target_count=0)
     return replace(event, **updates) if updates else event
 
 
@@ -369,6 +409,8 @@ def validate_transition_history(events: Iterable[StateTransitionEvent]):
             raise ValueError("transition zone delta width is invalid")
         if len(event.target_locations) > ACTION_TARGET_SLOTS:
             raise ValueError("transition target capacity is invalid")
+        if len(event.target_codes) != len(event.target_locations):
+            raise ValueError("transition target identities are not aligned")
         if len(event.message_types) > MAX_RECORDED_MESSAGE_TYPES:
             raise ValueError("transition message label capacity is invalid")
         if event.message_count < len(event.message_types):
@@ -376,8 +418,18 @@ def validate_transition_history(events: Iterable[StateTransitionEvent]):
     return True
 
 
+def encode_transition_message_groups(message_types):
+    """把公开 Core 消息集合压缩为稳定的语义类别位图"""
+    message_types = {int(value) for value in message_types}
+    result = 0
+    for index, group in enumerate(_TRANSITION_MESSAGE_GROUPS):
+        if message_types.intersection(group):
+            result |= 1 << index
+    return result
+
+
 def get_transition_event_protocol_descriptor():
-    """返回独立于模型结构修订的 3.11.1 内部事件协议说明"""
+    """返回由 3.11.2 网络消费的决策间事件协议说明"""
     return {
         "format_version": TRANSITION_EVENT_FORMAT_VERSION,
         "history_size": TRANSITION_EVENT_HISTORY_SIZE,
@@ -385,7 +437,8 @@ def get_transition_event_protocol_descriptor():
         "zone_order": TRANSITION_ZONE_NAMES,
         "target_slots": ACTION_TARGET_SLOTS,
         "message_type_slots": MAX_RECORDED_MESSAGE_TYPES,
+        "message_groups": TRANSITION_MESSAGE_GROUP_NAMES,
         "order": "oldest_to_newest",
         "visibility": "field_level_player_bitmask",
-        "network_consumed": False,
+        "network_consumed": True,
     }

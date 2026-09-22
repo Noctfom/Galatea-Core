@@ -25,10 +25,20 @@ from data_types import (
     PHASE_CATEGORY_COUNT,
     POSITION_CATEGORY_COUNT,
     SUMMON_METHOD_COUNT,
+    TRANSITION_EVENT_CHAIN_DIM,
+    TRANSITION_EVENT_COUNT_DIM,
+    TRANSITION_EVENT_HISTORY_SIZE,
+    TRANSITION_EVENT_LOCATION_DIM,
+    TRANSITION_EVENT_LP_DIM,
+    TRANSITION_EVENT_MESSAGE_BYTES,
+    TRANSITION_EVENT_RESULT_BYTES,
+    TRANSITION_EVENT_TARGET_SLOTS,
+    TRANSITION_ZONE_COUNT,
     ZONE_CATEGORY_COUNT,
     ActionOperation,
     SummonMethod,
 )
+from event_history import get_transition_event_protocol_descriptor
 from semantic_lookup import (
     STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION,
     get_static_semantic_lookup,
@@ -36,7 +46,7 @@ from semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 10
+PROTOCOL_SCHEMA_REVISION = 11
 
 
 def _schema_descriptor(card_vocabulary):
@@ -61,6 +71,8 @@ def _schema_descriptor(card_vocabulary):
                 "h_card_idx",
                 "act_code",
                 "act_target_code",
+                "event_card_idx",
+                "event_target_card_idx",
             ],
         },
         "global_state": {
@@ -174,11 +186,14 @@ def _schema_descriptor(card_vocabulary):
                 "deck_idx",
                 "c_card_idx",
                 "h_card_idx",
+                "event_card_idx",
+                "event_target_card_idx",
             ],
             "effect_slot_inputs": [
                 "c_effect_slot",
                 "h_effect_slot",
                 "act_effect_slot",
+                "event_effect_slot",
             ],
             "removed_expanded_prefixes": [
                 "sem_",
@@ -290,6 +305,63 @@ def _schema_descriptor(card_vocabulary):
                 "type_26_terminal_response": "int32_minus_one",
                 "core_response_buffer_bytes": 512,
             },
+        },
+        "transition_history": {
+            "event_protocol": get_transition_event_protocol_descriptor(),
+            "history_size": TRANSITION_EVENT_HISTORY_SIZE,
+            "order": "oldest_to_newest_after_visibility_filtering",
+            "visibility": "field_level_player_mask_before_tensor_encoding",
+            "inputs": {
+                "mask": [TRANSITION_EVENT_HISTORY_SIZE],
+                "source_card": [TRANSITION_EVENT_HISTORY_SIZE],
+                "source_effect_slot": [TRANSITION_EVENT_HISTORY_SIZE],
+                "source_context": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_LOCATION_DIM,
+                ],
+                "target_card": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_TARGET_SLOTS,
+                ],
+                "target_context": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_TARGET_SLOTS,
+                    TRANSITION_EVENT_LOCATION_DIM,
+                ],
+                "target_mask": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_TARGET_SLOTS,
+                ],
+                "result_bytes": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_RESULT_BYTES,
+                ],
+                "message_bytes": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_MESSAGE_BYTES,
+                ],
+                "lp_delta": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_LP_DIM,
+                ],
+                "zone_delta": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    2 * TRANSITION_ZONE_COUNT,
+                ],
+                "chain": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_CHAIN_DIM,
+                ],
+                "counts": [
+                    TRANSITION_EVENT_HISTORY_SIZE,
+                    TRANSITION_EVENT_COUNT_DIM,
+                ],
+            },
+            "source_semantics": "exact_card_and_lua_effect_slot",
+            "target_semantics": "card_identity_and_all_lua_code_mean",
+            "encoder": "target_pool_then_ordered_depthwise_context_pool_v1",
+            "policy_value_fusion": "zero_initialized_bounded_residual_gate",
+            "empty_history": "all_zero_masked_vector",
         },
         "inherited_protocol": "galatea_model_protocol_v3",
     }

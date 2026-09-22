@@ -32,9 +32,17 @@ POSITION_CATEGORY_COUNT = 64
 # 训练局中按整局关闭卡组 FiLM 的概率；掩码会写入轨迹以保持 PPO 同分布
 DECK_FILM_DROPOUT = 0.1
 
-# 状态转移历史固定保留最近 16 次已完成决策，3.11.1 仅写入快照，不进入网络
+# 状态转移历史固定保留最近 16 次已完成决策，3.11.2 编码后进入网络
 TRANSITION_EVENT_HISTORY_SIZE = 16
 TRANSITION_ZONE_COUNT = 8
+TRANSITION_EVENT_TARGET_SLOTS = ACTION_TARGET_SLOTS
+TRANSITION_EVENT_RESULT_BYTES = 2
+TRANSITION_EVENT_MESSAGE_BYTES = 2
+TRANSITION_EVENT_LOCATION_DIM = 4
+TRANSITION_EVENT_CHAIN_DIM = 3
+TRANSITION_EVENT_COUNT_DIM = 2
+TRANSITION_EVENT_LP_DIM = 2
+TRANSITION_BOUNDARY_COUNT = 4
 
 
 class ActionOperation(IntEnum):
@@ -270,6 +278,7 @@ class StateTransitionEvent:
     source_location_raw: int
     effect_slot: int
     target_locations: tuple
+    target_codes: tuple
     target_count: int
     event_visibility_mask: int
     intent_visibility_mask: int
@@ -310,5 +319,5 @@ class GameSnapshot:
 
     chain_stack: List[dict] = field(default_factory=list)
     history_stack: List[dict] = field(default_factory=list)
-    # 3.11.1 内部事件协议；3.11.2 才会编码为网络输入
+    # 3.11.2 事件协议历史，按视角脱敏后进入模型
     transition_history: List[StateTransitionEvent] = field(default_factory=list)

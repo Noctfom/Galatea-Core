@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.11.1**.
+> This document applies to **Galatea-Core v3.11.2**.
 
 ---
 
@@ -143,6 +143,7 @@ Configure and launch AI training tasks.
 - v3.10.2 completes Phase 4: Main/Extra labels plus initial and per-step remaining counts enter a dedicated permutation-invariant Deck Encoder. Eight fixed latents and permutation-equivariant per-card outputs are reusable by the later deck-building layer, while Side remains invisible to the current BO1 policy
 - v3.11.0 starts Phase 5: global state and deck style use independent low-rank FiLM branches with separate γ/β for every layer's attention and FFN sublayer. A zero-initialized deck gate, ±0.5 bound, and replayable per-duel mask integrate deck conditioning without breaking PPO old/new log-prob consistency
 - v3.11.1 adds the latest 16 between-decision state-transition events with strict submitted-action and next-decision/Retry/terminal boundaries, public outcomes, and field-level player visibility masks. They are snapshot/audit-only for now and do not change the network, PPO, ONNX, rewards, or schema revision
+- v3.11.2 compacts the 16 masked events into fixed tensors and an independent ordered encoder. Sources use exact Lua effect-slot semantics, targets use card/code semantics, a zero-initialized gate preserves initial policy behavior, and the same contract spans shared memory, PPO, and ONNX
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow

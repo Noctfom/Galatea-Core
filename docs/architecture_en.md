@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.11.1**.
+> This document applies to **Galatea-Core v3.11.2**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -419,8 +419,15 @@ semantics, source/targets/effect slot/summon method, public Core message labels,
 player, and chain-depth deltas. Cancel, decline, selection finish, Retry, chain negation, and disable
 have deterministic result bits. Event existence, intent, source, and targets have separate player
 visibility masks: fully private internal selections disappear from the opponent sequence while public
-consequences remain. The history is currently attached only to `GameSnapshot`; network, PPO, shared
-memory, and ONNX integration belong to 3.11.2.
+consequences remain.
+
+Version 3.11.2 tensorizes these events into 19 fixed-shape compact fields after player-view masking.
+Sources recover exact Lua effect-slot semantics, while targets use card identity and all-code semantic
+summaries. Up to five targets are pooled within an event; fixed temporal positions, a depthwise local
+convolution, and attention pooling retain order across events. Empty history is exactly zero. The final
+vector enters shared policy/value `v_input` through a per-channel zero-initialized gate, preserving
+initial behavior while allowing the first backward pass to open the path. The same contract now spans
+central inference, Worker/PPO trajectories, and ONNX without changing rewards, legal actions, or GAE.
 
 ### V4 Player and Categorical Global State
 
