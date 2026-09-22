@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.10.2 (Phase 4 complete) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.11.0 (Phase 5 batch 1) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -120,7 +120,14 @@ Global state and deck style use separate branches. Every Transformer layer recei
 
 `global_film + deck_gate * deck_film`
 
-`deck_gate` starts at zero, modulation is bounded, and light deck-condition dropout limits early over-reliance. Deck summaries also enter policy/value heads directly.
+`deck_gate` starts at zero, modulation is bounded, and a light per-duel persisted deck-condition mask limits early over-reliance while keeping PPO old/new log-probs under the same condition. Deck summaries also enter policy/value heads directly.
+
+Version 3.11.0 implements this structure with low-rank layered generators: global/deck branches
+are independent, every layer's attention and FFN receive separate γ/β, and tanh bounds total
+modulation to ±0.5. The per-channel deck gate starts at zero while its generator is nonzero, so
+the first main-loss step can move the gate. A separate Worker RNG writes a false
+`deck_film_mask` for 10% of complete training duels, and central inference plus PPO trajectories
+reuse that value; deployment defaults to true. The direct deck policy/value path is never masked.
 
 ### 4.3 Compact event history
 
@@ -168,6 +175,9 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 2 (3.10.1 / schema revision 8): Workers register stable Side-free profiles once per duel and store an `int32 deck_profile_index` per sample; dynamic `deck_idx/deck_mask` remain exact while three token-static fields are reconstructed losslessly before each PPO mini-batch. Net storage falls by 3,596 bytes per step, about 112.4 MiB for each 32,768-step trajectory. The default suite passes 217 of 218 tests with one gated skip; the explicit real-Core gate passes.
   - [x] Review batch 3 (3.10.2 / schema revision 9): the 128-entry image explicitly carries Main/Extra and initial/remaining counts; an eight-latent Deck Encoder exposes an invariant style plus reusable per-card representations, and style conditions the shared policy/value intent. Side stays isolated and the dynamic sequence remains as an in-duel insertion fallback. 512/8/6 microbenchmarks measured about +2.42% for single-sample CPU and +14.03% for batch-6 CUDA BF16; BF16 forward/backward passed and 1,582,592 parameters were added. Of 225 default tests, 224 pass with one gated skip, while ONNX Runtime and the explicit real-Core loop pass.
 - [ ] **Phase 5: layered FiLM/history**—separate modulation and 16 compact events.
+  - [x] Review batch 1 (3.11.0 / schema revision 10): low-rank global/deck branches generate separate γ/β for every layer's attention and FFN. A zero deck gate, ±0.5 bound, and persisted 10% per-duel mask provide gradual integration with PPO-consistent conditions. Net cost is 315,008 parameters and one byte per step; isolated overhead is about +0.42% on CPU and +2.91% for batch-6 CUDA BF16, with forward/backward, ONNX Runtime, and the explicit real-Core loop passing. Of 229 default tests, 228 pass and one gate is skipped.
+  - [ ] Review batch 2: define and capture the latest 16 state-transition events between model decisions; audit lifecycle, visibility, and deterministic labels before network integration.
+  - [ ] Review batch 3: compact event tensors, an independent ordered encoder, trajectory/ONNX integration, and performance acceptance.
 - [ ] **Phase 6: auxiliary heads/planning**—verifiable tasks, future summaries, `plan_latent`.
 - [ ] **Phase 7: PPO/canonical trajectories**—GAE/KL controls and Link/YRP inputs.
 - [ ] **Phase 8: V4 scratch-training validation**—short, medium, and long gates.

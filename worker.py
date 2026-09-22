@@ -27,7 +27,7 @@ from action_candidates import (
 )
 from inference_protocol import InferenceProtocolError, request_shared_inference_result
 from model_artifacts import describe_onnx_artifact
-from data_types import ActionOperation
+from data_types import ActionOperation, DECK_FILM_DROPOUT
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
@@ -345,6 +345,8 @@ def worker_process(
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    # 独立随机源避免正则掩码改变卡组、座位和动作抽样的原有随机序列
+    regularization_rng = random.Random(seed ^ 0x5A17C0DE)
 
     # 连接延迟到大型内存池分配完成后创建，避免初始化失败绕过统一清理
     context = None
@@ -538,9 +540,13 @@ def worker_process(
             }
 
             # --- 每局开始前随机摇号决定座位 ---
-            train_p_id = random.choice([0, 1]) 
+            train_p_id = random.choice([0, 1])
             opp_p_id = 1 - train_p_id
             ai_is_broken = {0: False, 1: False}
+            # 按整局固定卡组 FiLM 掩码，确保采样 old log-prob 与 PPO 更新完全一致
+            episode_deck_film_enabled = (
+                regularization_rng.random() >= DECK_FILM_DROPOUT
+            )
 
             current_turn = 0
             turn_steps = 0
@@ -770,6 +776,10 @@ def worker_process(
                                     # 📍 桩点 B1：精准分离 Pass 1 的表征生成耗时
                                     t_enc_p1 = time.time()
                                     dict_pass1 = current_agent.encoder.encode(current_snap, player_id=player)
+                                    if is_training_agent:
+                                        dict_pass1['deck_film_mask'].fill_(
+                                            episode_deck_film_enabled
+                                        )
                                     perf_ledger['t_encoder'] += (time.time() - t_enc_p1)
                                     
                                     # 📍 桩点 C1：精准分离 Pass 1 的本地推理耗时
@@ -840,6 +850,10 @@ def worker_process(
                             t_enc_anchor = time.time()# 计时器2
                             # 修复旧版错写成 agent.encoder 的 Bug，确保能兼容不同权重的对手
                             tensor_dict = current_agent.encoder.encode(current_snap, player_id=player)
+                            if is_training_agent:
+                                tensor_dict['deck_film_mask'].fill_(
+                                    episode_deck_film_enabled
+                                )
                             perf_ledger['t_encoder'] += (time.time() - t_enc_anchor) # 计时器2
                             
                             # 核心防死锁：把在错题本里的选项强制 Mask 掉，迫使 AI 在下次重试时选择“备胎”

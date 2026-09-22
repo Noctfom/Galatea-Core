@@ -29,6 +29,8 @@ CARD_NUMERIC_FEATURE_DIM = 66
 PHASE_CATEGORY_COUNT = 11
 ZONE_CATEGORY_COUNT = 9
 POSITION_CATEGORY_COUNT = 64
+# 训练局中按整局关闭卡组 FiLM 的概率；掩码会写入轨迹以保持 PPO 同分布
+DECK_FILM_DROPOUT = 0.1
 
 
 class ActionOperation(IntEnum):

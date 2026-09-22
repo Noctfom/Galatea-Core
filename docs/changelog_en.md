@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.11.0] - 2026-09-22
+
+### 🎛️ V4 Phase 5 batch 1: safe layered FiLM and deck-style modulation
+
+- **Layered rather than globally shared**: The previous global FiLM reused one γ/β pair across every Transformer layer and both attention/FFN. A low-rank `LayeredFiLMGenerator` now gives each layer and sublayer independent γ/β, allowing phase, turn order, current resources, and deck style to play different roles in shallow representation and deeper reasoning
+- **Separated global and deck branches**: The global branch retains the 17-value relative state plus phase embedding, while the deck branch consumes 3.10.2's `deck_style`. `0.5 * tanh(global_raw + tanh(deck_gate) * deck_raw)` hard-bounds total modulation to ±0.5 so extreme scales cannot destabilize the post-LayerNorm backbone
+- **Zero gate without a gradient dead path**: Deck gates start at exactly zero per layer, attention/FFN, γ/β, and channel, making initial deck modulation identically zero. The deck generator remains nonzero-initialized, so the policy/value loss can move the gate on its first step. The direct policy/value `deck_style` path stays active, letting the Deck Encoder learn before the gate opens
+- **PPO-consistent condition dropping**: Ordinary train-mode Dropout would change the conditions behind saved old and recomputed new log-probs, so it is not used. A separate Worker RNG disables deck FiLM for 10% of complete training duels and writes the one-byte `deck_film_mask` to both Pass1/Pass2 central inference and every trajectory sample. PPO reuses that mask. Arena, Link, historical ONNX, and deployment default to enabled, and the direct policy/value path is never masked
+- **Boundary and non-goals**: No Core query, reward, action logic, or visible deck information changes; Side remains outside BO1. Version 3.11.0 completes only Phase 5's layered FiLM. The 16 state-transition events between model decisions remain for 3.11.1/3.11.2
+- **Size and performance**: Adds a net 315,008 parameters over 3.10.2 (+0.61%) for 51,623,602 total; trajectories add one byte per step. In isolated 512/8/6 microbenchmarks, layered FiLM added about 0.42% to single-sample CPU forward and 2.91% to batch-6 CUDA BF16; CUDA BF16 forward/backward passes
+- **Version boundary**: Framework advances to 3.11.0; Model Protocol remains 4 and Checkpoint Format remains 3, while V4 schema revision advances to 10. New inputs and parameters make revision-9 development models incompatible under the established V4 scratch-training policy
+- **Validation**: Covers layer/sublayer shapes, exactly zero initial modulation, the total amplitude bound, zero-gate gradients, per-duel masking limited to deck FiLM, the existing Deck Encoder gradient path, and PyTorch/ONNX Runtime. Of 229 default tests, 228 pass with one gated real-Core skip; the explicitly enabled real-Core decision loop passes
+
 ## [v3.10.2] - 2026-09-21
 
 ### 🧠 V4 Phase 4 batch 3: section-aware deck images and reusable Deck Encoder

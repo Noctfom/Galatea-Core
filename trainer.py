@@ -516,6 +516,7 @@ class PPOTrainer:
             'global': ((GLOBAL_FEATURE_DIM,), torch.float32),
             'phase': ((1,), torch.long),
             'player_context': ((PLAYER_CONTEXT_SLOTS,), torch.long),
+            'deck_film_mask': ((1,), torch.bool),
             'card_idx': ((120,), torch.long),
             'card_alias_idx': ((120,), torch.int16),
             'card_overlay_idx': ((120,), torch.long),

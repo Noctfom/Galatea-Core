@@ -33,6 +33,11 @@ from protocol_schema import (
 from deck_encoder import DeckEncoder
 from semantic_lookup import get_static_semantic_lookup
 
+
+FILM_SUBLAYER_COUNT = 2
+FILM_PARAMETER_COUNT = 2
+FILM_MAX_AMPLITUDE = 0.5
+
 class RunningMeanStd(nn.Module):
     # 动态记录输入的均值和方差，用于 RND 归一化
     def __init__(self, shape=()):
@@ -78,19 +83,55 @@ class SwiGLU(nn.Module):
         # 核心逻辑：SiLU(Gate) * Up -> Down
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
-class FiLMGenerator(nn.Module):
-    """全局状态调制器：根据当前阶段/回合生成 Transformer 的缩放与偏移参数"""
-    def __init__(self, condition_dim, d_model):
+class LayeredFiLMGenerator(nn.Module):
+    """为每层注意力和前馈子层生成彼此独立的 FiLM 参数"""
+
+    def __init__(
+        self,
+        condition_dim,
+        d_model,
+        n_layers,
+        *,
+        hidden_dim=128,
+        zero_output=False,
+    ):
+        """初始化低秩分层条件投影，避免直接生成巨型全连接矩阵"""
         super().__init__()
-        # 输出 2 倍的 d_model，一半用于乘法缩放(gamma)，一半用于加法偏移(beta)
-        self.proj = nn.Linear(condition_dim, 2 * d_model)
-        nn.init.zeros_(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
+        self.n_layers = int(n_layers)
+        self.d_model = int(d_model)
+        self.condition_proj = nn.Sequential(
+            nn.Linear(condition_dim, hidden_dim, bias=False),
+            nn.SiLU(),
+            nn.LayerNorm(hidden_dim),
+        )
+        self.layer_scale = nn.Parameter(
+            torch.ones(
+                1,
+                self.n_layers,
+                FILM_SUBLAYER_COUNT,
+                hidden_dim,
+            )
+            + torch.randn(
+                1,
+                self.n_layers,
+                FILM_SUBLAYER_COUNT,
+                hidden_dim,
+            ) * 0.02
+        )
+        self.output_proj = nn.Linear(
+            hidden_dim,
+            FILM_PARAMETER_COUNT * self.d_model,
+        )
+        if zero_output:
+            nn.init.zeros_(self.output_proj.weight)
+            nn.init.zeros_(self.output_proj.bias)
 
     def forward(self, condition):
-        out = self.proj(condition)
-        gamma, beta = out.chunk(2, dim=-1)
-        return gamma.unsqueeze(1), beta.unsqueeze(1) # [B, 1, d_model] 方便广播
+        """返回 `[B, layer, attention/ffn, gamma/beta, d_model]` 原始参数"""
+        shared = self.condition_proj(condition).unsqueeze(1).unsqueeze(1)
+        layer_context = shared * self.layer_scale
+        gamma, beta = self.output_proj(layer_context).chunk(2, dim=-1)
+        return torch.stack((gamma, beta), dim=3)
 
 class GalateaTransformerBlock(nn.Module):
     """单层游戏王思考核心：融合 FiLM 宏观调控、SwiGLU 门控逻辑 与 极速 SDPA"""
@@ -107,11 +148,16 @@ class GalateaTransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
         self.ffn = SwiGLU(in_features=d_model, multiple_of=64)
 
-    def forward(self, x, padding_mask, gamma, beta):
+    def forward(self, x, padding_mask, film):
+        """使用本层独立的注意力/前馈 FiLM 参数更新场面 token"""
+        attention_gamma = film[:, 0, 0, :].unsqueeze(1)
+        attention_beta = film[:, 0, 1, :].unsqueeze(1)
+        ffn_gamma = film[:, 1, 0, :].unsqueeze(1)
+        ffn_beta = film[:, 1, 1, :].unsqueeze(1)
         # --- 1. 意图调制 + 极速 SDPA (FlashAttention) ---
         residual = x
         x = self.norm1(x)
-        x = x * (1.0 + gamma) + beta  # FiLM
+        x = x * (1.0 + attention_gamma) + attention_beta
         
         B, L, D = x.shape
         # 生成 QKV 并拆分
@@ -131,7 +177,7 @@ class GalateaTransformerBlock(nn.Module):
         # --- 2. 意图调制 + 深度门控前馈 ---
         residual = x
         x = self.norm2(x)
-        x = x * (1.0 + gamma) + beta  # FiLM
+        x = x * (1.0 + ffn_gamma) + ffn_beta
         x = self.ffn(x)
         x = residual + x
         return x
@@ -146,9 +192,10 @@ class GalateaTransformerStack(nn.Module):
         ])
         self.final_norm = nn.LayerNorm(d_model)
 
-    def forward(self, x, padding_mask, gamma, beta):
-        for layer in self.layers:
-            x = layer(x, padding_mask, gamma, beta)
+    def forward(self, x, padding_mask, film):
+        """按层分发独立 FiLM 参数并执行 Transformer 堆叠"""
+        for layer_index, layer in enumerate(self.layers):
+            x = layer(x, padding_mask, film[:, layer_index])
         return self.final_norm(x)
 
 
@@ -378,11 +425,25 @@ class GalateaNet(nn.Module):
         # ==========================================================
 
         # --- 3. Transformer Encoder (逻辑推演引擎) ---
-        # 1. 挂载全局环境信号发生器
-        self.film_gen = FiLMGenerator(
+        # 全局时局与卡组风格使用独立分层调制器，避免语义互相覆盖
+        self.global_film_gen = LayeredFiLMGenerator(
             condition_dim=GLOBAL_FEATURE_DIM + 16,
             d_model=self.d_model,
+            n_layers=self.n_layers,
+            zero_output=True,
         )
+        self.deck_film_gen = LayeredFiLMGenerator(
+            condition_dim=self.d_model,
+            d_model=self.d_model,
+            n_layers=self.n_layers,
+        )
+        self.deck_film_gate = nn.Parameter(torch.zeros(
+            1,
+            self.n_layers,
+            FILM_SUBLAYER_COUNT,
+            FILM_PARAMETER_COUNT,
+            self.d_model,
+        ))
         self.deck_encoder = DeckEncoder(
             d_model=self.d_model,
             n_heads=self.n_heads,
@@ -679,16 +740,40 @@ class GalateaNet(nn.Module):
             return_per_card=return_per_card,
         )
 
+    def build_layered_film(
+        self,
+        global_context,
+        deck_style,
+        deck_film_mask,
+    ):
+        """融合全局与卡组分支，并用零门控和双曲正切限制调制幅度"""
+        global_film = self.global_film_gen(global_context)
+        mask = deck_film_mask.to(deck_style.dtype).reshape(-1, 1)
+        deck_film = self.deck_film_gen(deck_style * mask)
+        deck_film = deck_film * mask.reshape(-1, 1, 1, 1, 1)
+        deck_gate = torch.tanh(self.deck_film_gate)
+        return FILM_MAX_AMPLITUDE * torch.tanh(
+            global_film + deck_gate * deck_film
+        )
+
     def forward(self, batch_dict):
         # --- 全局状态调制器 ---
         phase_context = self.phase_context_embed(
             batch_dict['phase'][:, 0].long()
         )
+        deck_style, _, _ = self.encode_deck_profile(
+            batch_dict,
+            return_per_card=False,
+        )
         film_context = torch.cat(
             [batch_dict['global'], phase_context],
             dim=-1,
         )
-        gamma, beta = self.film_gen(film_context)
+        layered_film = self.build_layered_film(
+            film_context,
+            deck_style,
+            batch_dict['deck_film_mask'],
+        )
 
         # 物理基础感知
         x_code = self.card_embed(batch_dict['card_idx'])
@@ -782,9 +867,15 @@ class GalateaNet(nn.Module):
         
         if self.training:
             # 强行向 PyTorch 声明这是一个需要计算梯度的连续隐空间，同时带入控制信号
-            memory = checkpoint(self.transformer, x, src_mask, gamma, beta, use_reentrant=False)
+            memory = checkpoint(
+                self.transformer,
+                x,
+                src_mask,
+                layered_film,
+                use_reentrant=False,
+            )
         else:
-            memory = self.transformer(x, src_mask, gamma, beta)
+            memory = self.transformer(x, src_mask, layered_film)
         
         # --- 全局局面掌控 ---
         player_context = batch_dict['player_context'].long()
@@ -831,11 +922,7 @@ class GalateaNet(nn.Module):
         else:
             deck_pooled = 0
 
-        # 稳定初始画像显式携带主/额外分区和投入/剩余数量；Side 不由 BO1 Encoder 发出
-        deck_style, _, _ = self.encode_deck_profile(
-            batch_dict,
-            return_per_card=False,
-        )
+        # 稳定画像已参与分层 FiLM，此处保留策略/价值头的直接信息通道
         deck_style = deck_style.unsqueeze(1)
             
         # 连锁雷达：嗅探正在发动的效果！

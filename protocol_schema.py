@@ -36,7 +36,7 @@ from semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 9
+PROTOCOL_SCHEMA_REVISION = 10
 
 
 def _schema_descriptor(card_vocabulary):
@@ -215,6 +215,29 @@ def _schema_descriptor(card_vocabulary):
             "side_policy": "reserved_for_upper_layer_not_emitted_to_bo1_policy",
             "dynamic_overflow_fallback": "legacy_remaining_deck_sequence",
             "policy_fusion": "direct_policy_and_value_intent_summary",
+        },
+        "layered_film": {
+            "scope": "per_transformer_layer_and_sublayer",
+            "sublayers": ["attention", "ffn"],
+            "parameters": ["gamma", "beta"],
+            "global_condition": ["global", "phase_context"],
+            "deck_condition": "deck_style",
+            "deck_gate": "zero_initialized_per_layer_sublayer_parameter_channel",
+            "deck_condition_dropout": {
+                "probability": 0.1,
+                "scope": "whole_training_duel",
+                "mask_input": {
+                    "name": "deck_film_mask",
+                    "dtype": "bool",
+                    "shape": [1],
+                    "false_meaning": "disable_deck_film_only",
+                },
+                "ppo_consistency": "sampled_once_and_stored_per_step",
+                "deployment_default": True,
+            },
+            "maximum_absolute_modulation": 0.5,
+            "combination": "0.5*tanh(global_raw+tanh(deck_gate)*deck_raw)",
+            "direct_deck_intent_path": True,
         },
         "action_semantics": {
             "operation_input": {

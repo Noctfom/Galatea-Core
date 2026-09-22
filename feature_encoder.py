@@ -936,6 +936,8 @@ class GalateaEncoder:
                 player_context,
                 dtype=torch.long,
             ).unsqueeze(0),
+            # 部署/竞技默认启用；训练 Worker 会按整局覆写并把同一掩码存入 PPO
+            'deck_film_mask': torch.ones((1, 1), dtype=torch.bool),
             
             'card_idx': torch.from_numpy(card_indices).unsqueeze(0),
             'card_alias_idx': torch.from_numpy(card_alias_indices).unsqueeze(0),

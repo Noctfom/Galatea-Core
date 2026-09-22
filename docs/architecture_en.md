@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.10.2**.
+> This document applies to **Galatea-Core v3.11.0**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -382,6 +382,31 @@ explicit upper-layer calls still receive all three outputs. Layered FiLM, planni
 the upper deck-building consumer remain later phases. Legacy dynamic `deck_idx/deck_mask` stays
 as an exact fallback for cards inserted into the Deck during play but absent from the initial
 profile.
+
+The eight learned latents are not hand-authored labels such as “starter” or “end board.” They are
+trainable query vectors that read every unordered deck entry and acquire distinct relational
+summaries through policy and value gradients. Their meanings are not named by the framework and
+they do not persist across duels. `deck_style` is an invariant aggregate, `deck_latents` retains a
+fixed set of relations, and `per_card_features` remains aligned and equivariant to input cards.
+The standalone API exposes all three, so a future deck-building layer need not reverse-engineer
+the duel action head.
+
+Version 3.11.0 replaces the one γ/β pair previously shared by all layers and both sublayers with
+two low-rank branches. Global state/phase and `deck_style` independently produce γ/β for every
+Transformer layer's attention and FFN. They combine as
+`0.5 * tanh(global_raw + tanh(deck_gate) * deck_raw)`, bounding total modulation to ±0.5. The
+per-layer, per-sublayer, per-channel deck gate starts at exactly zero, so deck modulation cannot
+disturb the initial backbone. The deck generator itself is nonzero-initialized, allowing the main
+loss to move the gate on its first gradient step instead of creating a double-zero dead path. The
+direct `deck_style` policy/value path remains active, so the Deck Encoder learns before the gate
+opens.
+
+To reduce fixed-construction overfitting without violating PPO ratios, Workers disable deck FiLM
+for 10% of complete training duels using a separate RNG and store the same `deck_film_mask` in
+central inference and every PPO sample. Updates therefore replay the exact condition used by the
+saved old log-prob, unlike ordinary train-mode Dropout. The mask never disables the direct
+policy/value path; Arena, Link, and deployment default to enabled. The 16-transition event history
+is not part of 3.11.0 yet.
 
 ### V4 Player and Categorical Global State
 
