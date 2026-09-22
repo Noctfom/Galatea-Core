@@ -23,6 +23,10 @@ from contextlib import nullcontext
 from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
 
+from auxiliary_targets import (
+    AUXILIARY_TARGET_BYTES_PER_STEP,
+    summarize_auxiliary_targets,
+)
 from galatea_env import GalateaEnv
 from worker import worker_process
 from ai_bot import AiBot
@@ -198,6 +202,8 @@ def estimate_rollout_commit_requirement(
     if uses_deck_profile_index:
         # Worker 轨迹不再逐步复制三组静态字段，仅保存一个 int32 画像引用。
         bytes_per_step += torch.empty((), dtype=torch.int32).element_size()
+    # 3.12.0 Worker 还会保存独立于观测的紧凑后验标签
+    bytes_per_step += AUXILIARY_TARGET_BYTES_PER_STEP
 
     max_worker_steps = int(steps_per_worker) + MAX_EPISODE_STEPS + 100
     rollout_pool_bytes = bytes_per_step * max_worker_steps * int(num_workers)
@@ -1002,7 +1008,7 @@ class PPOTrainer:
                 # 3. 如果是第一个文件，初始化静态内存池
                 if not self.buffer_allocated:
                     print(f"📦 [内存管理] 首次初始化主进程静态内存池 (容量: {self.max_buffer_steps} 步)...")
-                    self.merged_memory = {'obs': {}}
+                    self.merged_memory = {'obs': {}, 'aux': {}}
                     self.merged_memory['action'] = torch.empty(self.max_buffer_steps, dtype=data['action'].dtype)
                     self.merged_memory['log_prob'] = torch.empty(self.max_buffer_steps, dtype=data['log_prob'].dtype)
                     self.merged_memory['return'] = torch.empty(self.max_buffer_steps, dtype=data['return'].dtype)
@@ -1016,6 +1022,10 @@ class PPOTrainer:
                         shape = list(v.shape)
                         shape[0] = self.max_buffer_steps
                         self.merged_memory['obs'][k] = torch.empty(*shape, dtype=v.dtype)
+                    for k, v in data['aux'].items():
+                        shape = list(v.shape)
+                        shape[0] = self.max_buffer_steps
+                        self.merged_memory['aux'][k] = torch.empty(*shape, dtype=v.dtype)
                         
                     self.buffer_allocated = True
 
@@ -1042,6 +1052,10 @@ class PPOTrainer:
                 
                 for k in self.merged_memory['obs'].keys():
                     self.merged_memory['obs'][k][cursor:cursor+s] = data['obs'][k][:s]
+                if set(data['aux']) != set(self.merged_memory['aux']):
+                    raise ValueError("Worker auxiliary target fields do not match")
+                for k in self.merged_memory['aux'].keys():
+                    self.merged_memory['aux'][k][cursor:cursor+s] = data['aux'][k][:s]
                     
                 cursor += s
                 
@@ -1099,6 +1113,20 @@ class PPOTrainer:
 
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
         self.writer.add_scalar('Rollout/Average_Length', avg_len, self.iteration)
+
+        # 3.12.0 仅审计后验标签覆盖率，不把这些字段送入网络或 PPO 损失
+        auxiliary_audit = summarize_auxiliary_targets({
+            key: value[:cursor]
+            for key, value in self.merged_memory['aux'].items()
+        })
+        for key, value in auxiliary_audit.items():
+            if key == 'step_count':
+                continue
+            self.writer.add_scalar(
+                f"Auxiliary_Targets/{key}",
+                value,
+                self.iteration,
+            )
 
         # WebUI 数据脱水：将本轮卡组胜率抛出给前端，零性能损耗
         if all_match_records:

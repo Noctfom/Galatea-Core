@@ -445,6 +445,7 @@ class DuelState:
         p1_main=None,
         p1_extra=None,
         audit_enabled=True,
+        retain_completed_transitions=False,
     ):
         """初始化单局状态；双状态镜像模式可关闭其中一份重复审计"""
         self.entities = {}
@@ -486,7 +487,9 @@ class DuelState:
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
         self.audit_enabled = bool(audit_enabled)
-        self.transition_recorder = TransitionEventRecorder()
+        self.transition_recorder = TransitionEventRecorder(
+            retain_completed_events=retain_completed_transitions
+        )
 
     def reset(self):
         """重置动态对局状态，并从稳定初始画像恢复剩余卡组"""
@@ -637,7 +640,7 @@ class DuelState:
             and all(self._is_public_event_location(value) for value in target_locations)
             else actor_mask
         )
-        self.transition_recorder.begin(
+        return self.transition_recorder.begin(
             actor=int(actor),
             turn_count=self.turn,
             phase_id=self.phase,

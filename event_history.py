@@ -129,8 +129,10 @@ class _PendingTransition:
 class TransitionEventRecorder:
     """按动作提交和下一决策边界聚合最近 16 个状态转移事件"""
 
-    def __init__(self):
+    def __init__(self, retain_completed_events=False):
         self._history = []
+        # 网络只读取最近 16 项；完整列表仅在单局结束时构建后验辅助标签
+        self._completed_events = [] if retain_completed_events else None
         self._pending = None
         self._next_sequence_id = 0
 
@@ -145,6 +147,8 @@ class TransitionEventRecorder:
     def reset(self):
         """清空单局事件与未完成转移"""
         self._history.clear()
+        if self._completed_events is not None:
+            self._completed_events.clear()
         self._pending = None
         self._next_sequence_id = 0
 
@@ -208,8 +212,9 @@ class TransitionEventRecorder:
         elif operation_id == int(ActionOperation.FINISH):
             result_flags |= TransitionResultFlag.SELECTION_FINISHED
 
+        sequence_id = self._next_sequence_id
         self._pending = _PendingTransition(
-            sequence_id=self._next_sequence_id,
+            sequence_id=sequence_id,
             actor=int(actor),
             turn_count=int(turn_count),
             phase_id=int(phase_id),
@@ -233,6 +238,7 @@ class TransitionEventRecorder:
             max_chain_depth=int(start_digest.chain_depth),
         )
         self._next_sequence_id += 1
+        return sequence_id
 
     def observe_message(self, msg_type, payload, current_chain_depth):
         """吸收动作之后、下一决策之前的 Core 消息标签"""
@@ -339,6 +345,8 @@ class TransitionEventRecorder:
                 int(end_digest.chain_depth),
             ),
         )
+        if self._completed_events is not None:
+            self._completed_events.append(event)
         self._history.append(event)
         if len(self._history) > TRANSITION_EVENT_HISTORY_SIZE:
             self._history.pop(0)
@@ -348,6 +356,12 @@ class TransitionEventRecorder:
     def snapshot(self):
         """返回按时间从旧到新排列的不可变事件副本"""
         return list(self._history)
+
+    def completed_snapshot(self):
+        """返回本局完整事件引用，供局末构建训练后验标签"""
+        if self._completed_events is None:
+            raise RuntimeError("complete transition retention is not enabled")
+        return list(self._completed_events)
 
 
 def mask_transition_event_for_player(event, player_id):

@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.11.2**.
+> This document applies to **Galatea-Core v3.12.0**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -428,6 +428,27 @@ convolution, and attention pooling retain order across events. Empty history is 
 vector enters shared policy/value `v_input` through a per-channel zero-initialized gate, preserving
 initial behavior while allowing the first backward pass to open the path. The same contract now spans
 central inference, Worker/PPO trajectories, and ONNX without changing rewards, legal actions, or GAE.
+
+Version 3.12.0 adds the independent training-posterior contract
+`AUXILIARY_TARGET_FORMAT_VERSION=1`. The network still consumes only the latest 16 visible events;
+the training Worker explicitly asks the recorder to retain references to all completed events within
+the current duel, aligns
+training steps through the monotonically increasing sequence ID returned by action submission, and
+builds four horizons at commit time: next decision, chain end, turn end, and genuine Core terminal.
+Targets contain validity masks, accumulated LP and both players' eight-zone deltas, event counts, plus
+immediate result bits, public message groups, boundary, summon method, chain depths, player-relative
+outcome, terminal reason, and remaining event count. Aborted duels still roll back atomically. A
+truncation or unfinished final action remains missing instead of receiving a fabricated zero label.
+Full-event references and temporary prefix sums are released at duel end; only 187 compact bytes per
+step travel with the rollout. Arena, Link, and ordinary inference do not enable complete-event
+retention.
+
+These posterior targets remain outside observations and are not consumed by central inference,
+standard ONNX, PPO losses, or the model-protocol hash. The Trainer currently writes only horizon
+coverage and Retry/cancel/state-change/chain-negation rates under `Auxiliary_Targets/*` in TensorBoard.
+Consequently 3.12.0 changes no policy, value, reward, GAE, network parameter, or deployment behavior;
+it exists to validate alignment, visibility, and label distribution before auxiliary gradients are
+allowed into the model.
 
 ### V4 Player and Categorical Global State
 

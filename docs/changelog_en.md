@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.12.0] - 2026-09-22
+
+### 🧭 V4 Phase 6 batch 1: multi-horizon auxiliary-target contract and audit
+
+- **Independent posterior contract**: Added `auxiliary_targets.py` and `AUXILIARY_TARGET_FORMAT_VERSION=1`. Every submitted action receives a strictly increasing event sequence ID. The latest-16 rolling history consumed by the network is unchanged. Only a training Worker explicitly enables complete finalized-event references for the current duel lifetime; Arena, Link, and ordinary inference pay no such resident-memory cost
+- **Four verifiable horizons**: Duel commit now builds next-decision, chain-end, turn-end, and genuine-Core-terminal targets. They contain validity masks, accumulated LP and both players' Deck/Hand/MZone/SZone/Grave/Removed/Extra/Overlay deltas, event counts, and immediate result bits, ten public message groups, boundary, summon method, chain depths, player-relative outcome, terminal reason, and remaining-event count
+- **Strict alignment and missingness**: A training step maps only to its submitted action by sequence ID. One reverse scan produces future boundaries and prefix sums produce resource deltas. Aborted duels still roll back atomically; a timeout truncation or unfinished final action remains invalid instead of receiving a fabricated all-zero future. Framework-forced stops outside a genuine Core terminal do not produce terminal supervision
+- **Hidden-information boundary**: Immediate events pass through existing player-visibility filtering, while multi-horizon aggregation uses only public LP, zone counts, and boundaries. Opponent-private internal selections do not become intent/source/target labels. Future information enters only the post-duel training target and never the sampling-time observation
+- **Audit, not learning**: The Trainer writes four horizon-coverage rates plus Retry, Cancel, state-change, chain-negated, and chain-disabled rates under `Auxiliary_Targets/*` in TensorBoard. This batch adds no auxiliary loss, Planner, reward, or gradient and changes no policy logits, value, GAE, central inference, shared observation, or standard ONNX graph
+- **Size and performance boundary**: Compact targets use exactly 187 bytes/step, about 5.84 MiB for 32,768 steps. Complete events are retained only as object references and released at duel end. Boundary indexes and resource prefixes are linear; a local synthetic maximum of 1,500 events/750 training steps took about 186 ms, while normal 300–400-step duels are far smaller and no work enters the per-decision inference hot path
+- **Version boundary**: Framework advances to 3.12.0; Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision remains 11. `AUXILIARY_TARGET_FORMAT_VERSION` describes only Worker/Trainer training posterior data and is excluded from the model-input hash, so 3.11.2 network/deployment graphs are not invalidated by this batch
+- **Validation**: Added tests for multi-horizon accumulation, terminal preemption, unfinished final actions, internal-gap rejection, actor validation, truncation without terminal supervision, storage budget, and audit statistics. The project `tests/` suite passes 244 tests with one real-Core gate skipped, and the explicitly enabled real-Core decision loop passes
+
 ## [v3.11.2] - 2026-09-22
 
 ### 🧠 V4 Phase 5 batch 3: transition history enters the policy network

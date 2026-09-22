@@ -25,6 +25,10 @@ from action_candidates import (
     build_action_state_key,
     build_macro_action_pool,
 )
+from auxiliary_targets import (
+    allocate_auxiliary_target_columns,
+    build_auxiliary_targets,
+)
 from inference_protocol import InferenceProtocolError, request_shared_inference_result
 from model_artifacts import describe_onnx_artifact
 from data_types import ActionOperation, DECK_FILM_DROPOUT
@@ -496,6 +500,7 @@ def worker_process(
         max_len = target_steps + MAX_EPISODE_STEPS + 100
         columns = {
             'obs': {},
+            'aux': allocate_auxiliary_target_columns(max_len),
             'deck_profile_index': torch.zeros(max_len, dtype=torch.int32),
             'action': torch.zeros(max_len, dtype=torch.long),
             'log_prob': torch.zeros(max_len, dtype=torch.float32),
@@ -572,7 +577,13 @@ def worker_process(
             p0_m, p0_e = d1.main, d1.extra
             p1_m, p1_e = d2.main, d2.extra
             
-            brain = DuelState(p0_m, p0_e, p1_m, p1_e)
+            brain = DuelState(
+                p0_m,
+                p0_e,
+                p1_m,
+                p1_e,
+                retain_completed_transitions=True,
+            )
             training_profile = (
                 brain.p0_deck_profile
                 if train_p_id == 0
@@ -1027,7 +1038,7 @@ def worker_process(
                                 resp = current_agent._pack_response(chosen, msg_type=msg_type, msg_args=msg[1:])
                             
                             env.send_action(resp)
-                            brain.begin_transition_event(
+                            transition_sequence_id = brain.begin_transition_event(
                                 player,
                                 msg_type,
                                 resp,
@@ -1057,7 +1068,8 @@ def worker_process(
                                     'action': int(action_idx.item() if isinstance(action_idx, torch.Tensor) else action_idx),
                                     'log_prob': float(log_prob.item() if isinstance(log_prob, torch.Tensor) else log_prob),
                                     'value': float(value.item() if isinstance(value, torch.Tensor) else value),
-                                    'step_reward': float(step_reward)
+                                    'step_reward': float(step_reward),
+                                    'transition_sequence_id': int(transition_sequence_id),
                                 })
 
                                 recorded_index = rollout_cursor.record_step()
@@ -1223,6 +1235,39 @@ def worker_process(
                 trajectory_length = len(traj)
                 rollout_cursor.validate_episode(trajectory_length)
                 if traj:
+                    try:
+                        # 后验标签只在单局结束后构建，未来信息绝不会进入采样时观测
+                        episode_aux_targets = build_auxiliary_targets(
+                            [
+                                item['transition_sequence_id']
+                                for item in traj
+                            ],
+                            brain.transition_recorder.completed_snapshot(),
+                            player_id=train_p_id,
+                            winner=winner,
+                            win_reason=win_reason,
+                        )
+                    except Exception as aux_error:
+                        discarded_rows = (
+                            rollout_cursor.write_pos
+                            - rollout_cursor.episode_start_pos
+                        )
+                        rollout_cursor.rollback_episode()
+                        game_buffer[0].clear()
+                        game_buffer[1].clear()
+                        print(
+                            f"⚠️ [Worker {worker_id}] 辅助标签对齐失败，"
+                            f"本局已回滚 {discarded_rows} 条样本: {aux_error}"
+                        )
+                        continue
+
+                    episode_start = rollout_cursor.episode_start_pos
+                    episode_end = episode_start + trajectory_length
+                    for key, values in episode_aux_targets.items():
+                        columns['aux'][key][episode_start:episode_end].copy_(
+                            values
+                        )
+
                     if train_p_id == 0:
                         stats['games_all_first'] += 1
                         if opp_type == "self":
@@ -1385,7 +1430,7 @@ def worker_process(
         if committed_steps < (target_steps * 0.6):
             print(f"⚠️ [Worker {worker_id}] 数据仅收集了 {committed_steps}/{target_steps} 步 (<60%)，但仍然保存以便训练继续")
 
-        batch_data = {'obs': {}}
+        batch_data = {'obs': {}, 'aux': {}}
 
         # 提取外层特征
         for k in ['action', 'log_prob', 'return', 'advantage']:
@@ -1397,6 +1442,14 @@ def worker_process(
         ].clone()
         columns['deck_profile_index'] = None
         batch_data['deck_profiles'] = deck_profile_registry.export()
+
+        # 辅助标签保持独立于模型观测，3.12.0 仅供覆盖率审计与后续头训练
+        for key in list(columns['aux'].keys()):
+            batch_data['aux'][key] = columns['aux'][key][
+                :committed_steps
+            ].clone()
+            columns['aux'][key] = None
+        columns['aux'].clear()
             
         # 提取 obs 内部特征
         for k in shared_buffers[worker_id].keys():
@@ -1426,7 +1479,7 @@ def worker_process(
 
         batch_data['deck_records'] = deck_records
         
-        # 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局！
+        # 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局
         tmp_write_file = tmp_file + ".tmp"
         torch.save(batch_data, tmp_write_file)
         # 替换原来的 os.replace
@@ -1465,6 +1518,10 @@ def worker_process(
                         for k in list(columns['obs'].keys()):
                             columns['obs'][k] = None
                         columns['obs'].clear()
+                    if 'aux' in columns and columns['aux']:
+                        for k in list(columns['aux'].keys()):
+                            columns['aux'][k] = None
+                        columns['aux'].clear()
                     # 清理外层张量
                     for k in list(columns.keys()):
                         columns[k] = None
@@ -1482,6 +1539,9 @@ def worker_process(
                 if 'obs' in batch_data:
                     for k in list(batch_data['obs'].keys()):
                         batch_data['obs'][k] = None
+                if 'aux' in batch_data:
+                    for k in list(batch_data['aux'].keys()):
+                        batch_data['aux'][k] = None
                 for k in list(batch_data.keys()):
                     batch_data[k] = None
                 batch_data = None
