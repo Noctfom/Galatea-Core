@@ -3,6 +3,22 @@
 import hashlib
 import json
 
+from auxiliary_heads import (
+    AUXILIARY_BACKBONE_SCALE_MAX,
+    AUXILIARY_BOUNDARY_CLASS_COUNT,
+    AUXILIARY_COMPONENT_WEIGHTS,
+    AUXILIARY_FUTURE_DELTA_WIDTH,
+    AUXILIARY_FUTURE_HORIZONS,
+    AUXILIARY_HEAD_HIDDEN_DIM,
+    AUXILIARY_IMMEDIATE_DELTA_WIDTH,
+    AUXILIARY_LOSS_COEF,
+    AUXILIARY_MESSAGE_GROUP_COUNT,
+    AUXILIARY_PROBE_STEPS,
+    AUXILIARY_RAMP_STEPS,
+    AUXILIARY_RESULT_BIT_COUNT,
+    AUXILIARY_TERMINAL_OUTCOME_CLASS_COUNT,
+)
+from auxiliary_targets import AUXILIARY_TARGET_FORMAT_VERSION
 from card_vocab import (
     CARD_VOCAB_FORMAT_VERSION,
     CARD_VOCAB_RESERVED_TOKENS,
@@ -46,7 +62,7 @@ from semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 11
+PROTOCOL_SCHEMA_REVISION = 12
 
 
 def _schema_descriptor(card_vocabulary):
@@ -362,6 +378,30 @@ def _schema_descriptor(card_vocabulary):
             "encoder": "target_pool_then_ordered_depthwise_context_pool_v1",
             "policy_value_fusion": "zero_initialized_bounded_residual_gate",
             "empty_history": "all_zero_masked_vector",
+        },
+        "training_auxiliary_heads": {
+            "target_format_version": AUXILIARY_TARGET_FORMAT_VERSION,
+            "inputs": ["shared_state", "selected_option"],
+            "result_bits": AUXILIARY_RESULT_BIT_COUNT,
+            "message_groups": AUXILIARY_MESSAGE_GROUP_COUNT,
+            "boundary_classes": AUXILIARY_BOUNDARY_CLASS_COUNT,
+            "terminal_outcome_classes": AUXILIARY_TERMINAL_OUTCOME_CLASS_COUNT,
+            "head_hidden_dim": AUXILIARY_HEAD_HIDDEN_DIM,
+            "immediate_delta_width": AUXILIARY_IMMEDIATE_DELTA_WIDTH,
+            "future_horizons": [
+                item.name.lower() for item in AUXILIARY_FUTURE_HORIZONS
+            ],
+            "future_resource_width": AUXILIARY_FUTURE_DELTA_WIDTH,
+            "loss_coefficient": AUXILIARY_LOSS_COEF,
+            "component_weights": AUXILIARY_COMPONENT_WEIGHTS,
+            "policy_value_feedback": False,
+            "standard_onnx_output": False,
+            "backbone_gradient": {
+                "method": "trainer_scaled_stop_gradient_bridge",
+                "probe_updates": AUXILIARY_PROBE_STEPS,
+                "ramp_updates": AUXILIARY_RAMP_STEPS,
+                "maximum_scale": AUXILIARY_BACKBONE_SCALE_MAX,
+            },
         },
         "inherited_protocol": "galatea_model_protocol_v3",
     }

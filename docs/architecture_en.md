@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.12.0**.
+> This document applies to **Galatea-Core v3.12.1**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -449,6 +449,28 @@ coverage and Retry/cancel/state-change/chain-negation rates under `Auxiliary_Tar
 Consequently 3.12.0 changes no policy, value, reward, GAE, network parameter, or deployment behavior;
 it exists to validate alignment, visibility, and label distribution before auxiliary gradients are
 allowed into the model.
+
+Version 3.12.1 advances the posterior contract to `AUXILIARY_TARGET_FORMAT_VERSION=2`, adds the
+actor seat per step, and connects training-only `StructuredAuxiliaryHeads`. The heads consume the
+shared state representation plus the option representation that was actually executed, then use an
+independent 256-wide MLP to predict immediate result bits/public messages/boundary, immediate
+resource and chain changes, chain-end/turn-end/terminal resource changes, terminal outcome, and
+remaining-event length. Classification uses BCE or cross entropy and continuous targets use Smooth
+L1. Every horizon is normalized through its validity mask, so missing futures contribute no loss.
+
+The normalized auxiliary objective enters PPO with coefficient `0.1`, but predictions never feed
+policy logits or value. For the first 100 mini-batch updates the shared representations are fully
+detached and only the heads train as probes. During the next 900 updates, the gradient returned to
+the shared backbone ramps linearly from zero to 0.2. Base and head parameters are clipped separately
+at 0.5/1.0, preserving the original PPO gradient budget and metric meaning. The schedule resumes from
+checkpointed `train_step` rather than restarting.
+
+The ordinary three-output forward does not execute the auxiliary MLP. Central inference, Arena,
+Link, and historical ONNX opponents use that path. The standard ONNX wrapper still returns only
+`action_logits` and `values`, so export prunes unused head weights; PTH training checkpoints retain
+them for exact resume. Curves are written under `Auxiliary_Train/*`, while raw target-distribution
+audits remain under `Auxiliary_Targets/*`. Schema revision 12 prevents a development checkpoint
+without the head parameters from being resumed accidentally.
 
 ### V4 Player and Categorical Global State
 

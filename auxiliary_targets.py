@@ -13,7 +13,7 @@ from event_history import (
 )
 
 
-AUXILIARY_TARGET_FORMAT_VERSION = 1
+AUXILIARY_TARGET_FORMAT_VERSION = 2
 
 
 class AuxiliaryHorizon(IntEnum):
@@ -34,6 +34,7 @@ _CHAIN_MESSAGE_TYPES = frozenset({70, 71, 72, 73, 74, 75, 76})
 # 这些字段仅随 rollout 保存，不进入观测、中央推理或标准 ONNX 图
 AUXILIARY_TARGET_SPECS = {
     "valid": ((AUXILIARY_HORIZON_COUNT,), torch.bool),
+    "actor": ((), torch.uint8),
     "lp_delta": (
         (AUXILIARY_HORIZON_COUNT, AUXILIARY_LP_DIM),
         torch.int32,
@@ -219,6 +220,7 @@ def build_auxiliary_targets(
         event_indices[sequence_id] = index
 
     targets = allocate_auxiliary_target_columns(len(sequence_ids))
+    targets["actor"].fill_(int(player_id))
     lp_prefix, zone_prefix = _build_delta_prefixes(events)
     chain_ends, turn_ends, terminals = _build_boundary_indices(events)
     max_completed_sequence = previous_sequence
@@ -348,7 +350,7 @@ def summarize_auxiliary_targets(targets):
 
 
 def get_auxiliary_target_protocol_descriptor():
-    """返回 3.12.0 后验标签协议的机器可读说明"""
+    """返回当前训练后验标签协议的机器可读说明"""
     return {
         "format_version": AUXILIARY_TARGET_FORMAT_VERSION,
         "horizons": tuple(item.name.lower() for item in AuxiliaryHorizon),
@@ -361,7 +363,7 @@ def get_auxiliary_target_protocol_descriptor():
         "message_group_count": TRANSITION_MESSAGE_GROUP_COUNT,
         "visibility": "actor-visible transition plus public state deltas",
         "network_input": False,
-        "ppo_loss_consumed": False,
+        "ppo_loss_consumed": True,
         "standard_onnx_output": False,
         "fields": {
             name: {

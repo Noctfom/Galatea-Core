@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.12.0**.
+> This document applies to **Galatea-Core v3.12.1**.
 
 ---
 
@@ -262,6 +262,10 @@ Go to **📉 Training Manifold**, click **🚀 Start TensorBoard** to view:
 | `Rollout/Average_Reward` | Compare smoothed trends within the same opponent category |
 | `League_Overall/WinRate_Total` | Interpret together with Rule/Self/Hist splits |
 | `Performance/Rollout_Steps_Per_Second` | Stable or increasing |
+| `Auxiliary_Train/Total_Loss` | Compare smoothed trends only within the same version; it is not on the PPO-loss scale |
+| `Auxiliary_Train/Backbone_Scale` | Zero for 100 updates, then linearly rises to 0.2 over 900 updates |
+| `Auxiliary_Train/Boundary_Accuracy` | Should rise after coverage stabilizes; interpret with `Auxiliary_Targets/coverage_next` |
+| `Auxiliary_Train/Terminal_Accuracy` | Counts genuine Core-terminal labels only, never timeout/truncation as truth |
 
 ### Meta Dashboard
 

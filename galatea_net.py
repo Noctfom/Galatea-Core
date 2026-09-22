@@ -32,6 +32,7 @@ from protocol_schema import (
 )
 from deck_encoder import DeckEncoder
 from event_encoder import EventHistoryEncoder
+from auxiliary_heads import StructuredAuxiliaryHeads
 from semantic_lookup import get_static_semantic_lookup
 
 
@@ -538,6 +539,9 @@ class GalateaNet(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=1.0)
                 nn.init.constant_(m.bias, 0.0)
 
+        # 训练专用预测头最后初始化，避免改变既有策略/价值参数的随机初始化顺序
+        self.auxiliary_heads = StructuredAuxiliaryHeads(self.d_model)
+
     def process_semantics(
         self,
         sem_cat,
@@ -786,7 +790,12 @@ class GalateaNet(nn.Module):
             global_film + deck_gate * deck_film
         )
 
-    def forward(self, batch_dict):
+    def forward(
+        self,
+        batch_dict,
+        auxiliary_actions=None,
+        auxiliary_backbone_scale=0.0,
+    ):
         # --- 全局状态调制器 ---
         phase_context = self.phase_context_embed(
             batch_dict['phase'][:, 0].long()
@@ -1036,7 +1045,8 @@ class GalateaNet(nn.Module):
             + event_pooled
         )
         v_input = self.v_norm(v_input)
-        value = self.value_head(v_input.squeeze(1)) 
+        state_repr = v_input.squeeze(1)
+        value = self.value_head(state_repr)
 
         # === Action Head (因果决策) ===
         act_card_idx = batch_dict['act_card_idx'] # 新形状: [B, 120, 5]
@@ -1154,7 +1164,7 @@ class GalateaNet(nn.Module):
 
         # 终极双塔匹配机制 (Dual-Tower Matching)
         # 1. 意图塔 (Intent)：全局底蕴决定了ai想干什么
-        intent_vec = self.intent_proj(v_input) 
+        intent_vec = self.intent_proj(state_repr.unsqueeze(1))
         intent_vec = intent_vec.expand(-1, act_mask.shape[1], -1) 
         
         # 2. 选项塔 (Option)：把目标卡片、类型、隐藏语义全部融合
@@ -1185,7 +1195,20 @@ class GalateaNet(nn.Module):
         logits = self.policy_head(combined_vecs).squeeze(-1) 
         logits = logits.masked_fill(~act_mask, -65000.0)
 
-        return logits, value, v_input.squeeze(1)
+        if auxiliary_actions is None:
+            return logits, value, state_repr
+
+        selected_option = torch.gather(
+            option_vec,
+            1,
+            auxiliary_actions.long().reshape(B, 1, 1).expand(-1, 1, D),
+        ).squeeze(1)
+        auxiliary_predictions = self.auxiliary_heads(
+            state_repr,
+            selected_option,
+            auxiliary_backbone_scale,
+        )
+        return logits, value, state_repr, auxiliary_predictions
     
     def update_rnd_stats(self, v_input):
         with torch.no_grad():

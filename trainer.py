@@ -27,6 +27,13 @@ from auxiliary_targets import (
     AUXILIARY_TARGET_BYTES_PER_STEP,
     summarize_auxiliary_targets,
 )
+from auxiliary_heads import (
+    AUXILIARY_BACKBONE_SCALE_MAX,
+    AUXILIARY_LOSS_COEF,
+    AUXILIARY_PROBE_STEPS,
+    AUXILIARY_RAMP_STEPS,
+    compute_structured_auxiliary_loss,
+)
 from galatea_env import GalateaEnv
 from worker import worker_process
 from ai_bot import AiBot
@@ -129,6 +136,37 @@ VALUE_LOSS_COEF = 0.5   # 价值网络权中
 MAX_EPISODE_STEPS = 1500 # 单局最大步数，防止死循环
 WORKER_PROCESS_COMMIT_RESERVE_BYTES = 2 * 1024**3
 TRAINER_COMMIT_SAFETY_BYTES = 2 * 1024**3
+
+
+def get_auxiliary_backbone_scale(train_step):
+    """先纯探针训练辅助头，再平滑开放最多 20% 的主干梯度"""
+    train_step = int(train_step)
+    if train_step < AUXILIARY_PROBE_STEPS:
+        return 0.0
+    progress = (
+        train_step - AUXILIARY_PROBE_STEPS + 1
+    ) / max(1, AUXILIARY_RAMP_STEPS)
+    return AUXILIARY_BACKBONE_SCALE_MAX * min(1.0, max(0.0, progress))
+
+
+def split_auxiliary_parameter_groups(network):
+    """把辅助头与 PPO 主干参数分开，避免两类梯度共享裁剪额度"""
+    base_network = getattr(network, '_orig_mod', network)
+    auxiliary_module = getattr(base_network, 'auxiliary_heads', None)
+    auxiliary_parameters = (
+        list(auxiliary_module.parameters())
+        if auxiliary_module is not None
+        else []
+    )
+    auxiliary_parameter_ids = {
+        id(parameter) for parameter in auxiliary_parameters
+    }
+    base_parameters = [
+        parameter
+        for parameter in network.parameters()
+        if id(parameter) not in auxiliary_parameter_ids
+    ]
+    return base_parameters, auxiliary_parameters
 
 
 def get_windows_commit_status():
@@ -463,6 +501,10 @@ class PPOTrainer:
         if resume_checkpoint is not None:
             restore_model_state_strict(self.agent.net, resume_checkpoint)
 
+        (
+            self.base_parameters,
+            self.auxiliary_parameters,
+        ) = split_auxiliary_parameter_groups(self.agent.net)
         self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
         # 只有 CUDA FP16 需要梯度缩放；CPU 与 CUDA BF16 均保持关闭
         self.scaler = torch.amp.GradScaler(
@@ -1114,7 +1156,7 @@ class PPOTrainer:
         self.writer.add_scalar('Rollout/Average_Reward', avg_rew, self.iteration)
         self.writer.add_scalar('Rollout/Average_Length', avg_len, self.iteration)
 
-        # 3.12.0 仅审计后验标签覆盖率，不把这些字段送入网络或 PPO 损失
+        # 原始标签审计与辅助头训练指标分开记录，便于判断缺失率和学习质量
         auxiliary_audit = summarize_auxiliary_targets({
             key: value[:cursor]
             for key, value in self.merged_memory['aux'].items()
@@ -1320,6 +1362,21 @@ class PPOTrainer:
         cpu_log_probs = self.merged_memory['log_prob'][:total_steps]
         cpu_returns = self.merged_memory['return'][:total_steps]
         cpu_advantages = self.merged_memory['advantage'][:total_steps]
+        base_network = getattr(self.agent.net, '_orig_mod', self.agent.net)
+        use_auxiliary_heads = hasattr(base_network, 'auxiliary_heads')
+        if use_auxiliary_heads and 'aux' not in self.merged_memory:
+            raise RuntimeError("structured auxiliary network has no rollout targets")
+        cpu_auxiliary = (
+            self.merged_memory['aux']
+            if use_auxiliary_heads
+            else None
+        )
+        base_parameters = getattr(self, 'base_parameters', None)
+        auxiliary_parameters = getattr(self, 'auxiliary_parameters', None)
+        if base_parameters is None or auxiliary_parameters is None:
+            base_parameters, auxiliary_parameters = (
+                split_auxiliary_parameter_groups(self.agent.net)
+            )
 
         present_static_deck_fields = (
             LEGACY_DECK_STATIC_OBSERVATION_KEYS.intersection(cpu_obs)
@@ -1452,6 +1509,15 @@ class PPOTrainer:
         gpu_old_log_probs = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
         gpu_returns = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
         gpu_advs = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
+        gpu_auxiliary = None
+        if use_auxiliary_heads:
+            gpu_auxiliary = {
+                key: torch.zeros_like(
+                    value[:self.mini_batch_size],
+                    device=self.device,
+                )
+                for key, value in cpu_auxiliary.items()
+            }
         gpu_deck_profile_indices = None
         if rebuild_static_profile_fields:
             gpu_deck_profile_indices = torch.zeros(
@@ -1498,11 +1564,30 @@ class PPOTrainer:
                 gpu_old_log_probs.copy_(cpu_log_probs[mb_idx], non_blocking=self.transfer_non_blocking)
                 gpu_returns.copy_(cpu_returns[mb_idx], non_blocking=self.transfer_non_blocking)
                 gpu_advs.copy_(cpu_advantages[mb_idx], non_blocking=self.transfer_non_blocking)
-                
+                if use_auxiliary_heads:
+                    for key, value in cpu_auxiliary.items():
+                        gpu_auxiliary[key].copy_(
+                            value[mb_idx],
+                            non_blocking=self.transfer_non_blocking,
+                        )
+
 
                 # --- 网络前向传播与反向传播 (完全保持原样) ---
                 with training_autocast(self.device, self.amp_dtype):
-                    logits, values, v_input = self.agent.net(gpu_mb_obs)
+                    auxiliary_backbone_scale = get_auxiliary_backbone_scale(
+                        self.train_step
+                    )
+                    if use_auxiliary_heads:
+                        logits, values, v_input, auxiliary_predictions = (
+                            self.agent.net(
+                                gpu_mb_obs,
+                                auxiliary_actions=gpu_actions,
+                                auxiliary_backbone_scale=auxiliary_backbone_scale,
+                            )
+                        )
+                    else:
+                        logits, values, v_input = self.agent.net(gpu_mb_obs)
+                        auxiliary_predictions = None
                     values = values.squeeze(1)
 
                     # 计算 RND 预测误差损失，让 Predictor 学习当前状态(暂时舍弃)
@@ -1521,7 +1606,24 @@ class PPOTrainer:
                     value_loss = value_loss_fn(values, gpu_returns)
                     entropy_loss = -entropy.mean()
                     
-                    loss = policy_loss + VALUE_LOSS_COEF * value_loss + self.entropy * entropy_loss # + rnd_loss 暂时舍弃
+                    base_loss = (
+                        policy_loss
+                        + VALUE_LOSS_COEF * value_loss
+                        + self.entropy * entropy_loss
+                    )
+                    if use_auxiliary_heads:
+                        auxiliary_loss, auxiliary_components, auxiliary_metrics = (
+                            compute_structured_auxiliary_loss(
+                                auxiliary_predictions,
+                                gpu_auxiliary,
+                            )
+                        )
+                        loss = base_loss + AUXILIARY_LOSS_COEF * auxiliary_loss
+                    else:
+                        auxiliary_loss = base_loss.detach() * 0.0
+                        auxiliary_components = {}
+                        auxiliary_metrics = {}
+                        loss = base_loss
 
                 if torch.isnan(loss) or torch.isinf(loss):
                     self.optimizer.zero_grad(set_to_none=True)
@@ -1551,7 +1653,12 @@ class PPOTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                gradient_norm = nn.utils.clip_grad_norm_(self.agent.net.parameters(), 0.5)
+                gradient_norm = nn.utils.clip_grad_norm_(base_parameters, 0.5)
+                auxiliary_gradient_norm = (
+                    nn.utils.clip_grad_norm_(auxiliary_parameters, 1.0)
+                    if auxiliary_parameters
+                    else torch.zeros((), device=loss.device)
+                )
 
                 if should_log_diagnostics:
                     diagnostic_values = torch.stack((
@@ -1587,10 +1694,42 @@ class PPOTrainer:
                             metric_value,
                             log_step,
                         )
+                    if use_auxiliary_heads:
+                        self.writer.add_scalar(
+                            'Auxiliary_Train/Total_Loss',
+                            float(auxiliary_loss.detach().float().cpu()),
+                            log_step,
+                        )
+                        self.writer.add_scalar(
+                            'Auxiliary_Train/Backbone_Scale',
+                            auxiliary_backbone_scale,
+                            log_step,
+                        )
+                        self.writer.add_scalar(
+                            'Auxiliary_Train/Gradient_Norm',
+                            float(
+                                torch.as_tensor(auxiliary_gradient_norm)
+                                .detach()
+                                .float()
+                                .cpu()
+                            ),
+                            log_step,
+                        )
+                        for metric_name, metric_value in {
+                            **auxiliary_components,
+                            **auxiliary_metrics,
+                        }.items():
+                            self.writer.add_scalar(
+                                f'Auxiliary_Train/{metric_name}',
+                                float(metric_value.detach().float().cpu()),
+                                log_step,
+                            )
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
 
-                del logits, values, v_input, surr1, surr2, ratio, entropy, loss, policy_loss, value_loss, entropy_loss
+                del logits, values, v_input, surr1, surr2, ratio, entropy, loss, policy_loss, value_loss, entropy_loss, base_loss
+                if use_auxiliary_heads:
+                    del auxiliary_predictions, auxiliary_loss
 
     def run_training_loop(
         self,

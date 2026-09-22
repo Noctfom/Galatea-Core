@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.12.0**.
+> This document applies to **Galatea-Core v3.12.1**.
 
 ---
 
@@ -145,6 +145,7 @@ Configure and launch AI training tasks.
 - v3.11.1 adds the latest 16 between-decision state-transition events with strict submitted-action and next-decision/Retry/terminal boundaries, public outcomes, and field-level player visibility masks. They are snapshot/audit-only for now and do not change the network, PPO, ONNX, rewards, or schema revision
 - v3.11.2 compacts the 16 masked events into fixed tensors and an independent ordered encoder. Sources use exact Lua effect-slot semantics, targets use card/code semantics, a zero-initialized gate preserves initial policy behavior, and the same contract spans shared memory, PPO, and ONNX
 - v3.12.0 adds an independent four-horizon training-posterior contract aligned by action sequence ID: next decision, chain end, turn end, and genuine terminal. Missing masks prevent truncated or unfinished outcomes from becoming fake zeros; only coverage and result distributions are currently audited under `Auxiliary_Targets/*`, with no network, PPO-loss, or ONNX consumption
+- v3.12.1 connects training-only structured heads during PPO updates. They predict immediate action outcomes, multi-horizon public-resource changes, and genuine terminals, using 100 probe-only updates, a 900-update linear ramp, and at most 20% shared gradient. Predictions never feed action logits/value, and central inference plus standard ONNX add no computation
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow

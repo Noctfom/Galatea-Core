@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.12.1] - 2026-09-22
+
+### 🧠 V4 Phase 6 batch 2: structured auxiliary heads and controlled shared gradients
+
+- **Training-only structured heads**: Added `auxiliary_heads.py`. The branch reads only the shared policy/value state representation and the actually selected option representation, then predicts immediate result bits, ten public Core-message groups, transition boundary, immediate LP/both-player eight-zone/chain changes, chain-end/turn-end/terminal resource changes, terminal outcome, and remaining-event length. Posterior targets never become observations, and neither RuleBot actions nor next-action imitation are treated as truth
+- **Missing-safe multitask loss**: Binary results use BCE, boundary/outcome use cross entropy, and resource/remaining-length regression uses Smooth L1. Every horizon is independently normalized through the 3.12.0 validity mask, so incomplete chains, truncations, and non-Core stops cannot become fake zero labels. The normalized seven-task objective enters total PPO loss with coefficient `0.1`; rewards, GAE, advantages, PPO clipping, and entropy equations are unchanged
+- **Controlled instead of dominant backbone gradients**: The first 100 resumable mini-batch updates train the heads as probes only. The following 900 updates linearly open shared gradients to a maximum factor of `0.2`, without changing forward values. PPO-base and auxiliary-head parameters are clipped separately at `0.5` and `1.0`, preventing head gradients from consuming the original PPO clipping budget
+- **Action/deployment isolation**: Predictions never feed policy logits or value, and ordinary `GalateaNet(batch)` keeps its three-output contract. Central rollout inference, Arena, Link, and historical opponents do not execute the branch. Standard ONNX still emits only `action_logits` and `values` and contains no auxiliary-head weights. PTH training checkpoints retain the parameters for exact resume
+- **Audit metrics**: TensorBoard adds `Auxiliary_Train/Total_Loss`, seven component losses, result/message bit accuracy, boundary/terminal accuracy, future-target validity, backbone-gradient scale, and auxiliary gradient norm. Existing `Auxiliary_Targets/*` distribution audits remain available
+- **Size and performance**: The posterior contract becomes `AUXILIARY_TARGET_FORMAT_VERSION=2`, adding one actor-seat byte for strict player-relative reordering: 188 bytes/step, about 5.875 MiB for 32,768 steps. A 512/8/6 model adds 356,709 parameters (about 1.36 MiB of FP32 weights) for 52,569,367 total. On the local RTX 5070 Ti with batch 128 and CUDA BF16 eager forward/backward, median time rose about 1.09% and peak allocated memory about 2.86 MiB; per-decision central inference adds no computation
+- **Version boundary**: Framework advances to 3.12.1; Model Protocol remains 4 and Checkpoint Format remains 3, while V4 schema revision advances to 12. The new training parameters prevent revision-11 development checkpoints from being resumed as current training checkpoints. The standard deployment ONNX interface is unchanged, though schema identity still rejects mixed development artifacts
+- **Validation**: Covers output shapes, missing masks, player-seat symmetry, probe/ramped gradients, bitwise-identical default forward outputs, a real lightweight PPO update, separate gradient clipping, and exclusion of auxiliary weights from ONNX. The project `tests/` suite passes 250 tests with one real-Core gate skipped, and the explicitly enabled real-Core decision loop passes
+
 ## [v3.12.0] - 2026-09-22
 
 ### 🧭 V4 Phase 6 batch 1: multi-horizon auxiliary-target contract and audit

@@ -1443,7 +1443,7 @@ def worker_process(
         columns['deck_profile_index'] = None
         batch_data['deck_profiles'] = deck_profile_registry.export()
 
-        # 辅助标签保持独立于模型观测，3.12.0 仅供覆盖率审计与后续头训练
+        # 辅助标签保持独立于模型观测，供训练专用预测头监督使用
         for key in list(columns['aux'].keys()):
             batch_data['aux'][key] = columns['aux'][key][
                 :committed_steps

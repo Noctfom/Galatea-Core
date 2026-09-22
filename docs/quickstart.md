@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置，预计耗时 **5-10 分钟**。
 
-> 文档适用于 **Galatea-Core v3.12.0**。
+> 文档适用于 **Galatea-Core v3.12.1**。
 
 ---
 
@@ -248,6 +248,10 @@ Galatea-Core 的训练参数分为三个层级，理解这个分类有助于你�
 | `Rollout/Average_Reward` | 比较同对手分组的平滑趋势 |
 | `League_Overall/WinRate_Total` | 结合 Rule/Self/Hist 分项解读 |
 | `Performance/Rollout_Steps_Per_Second` | 稳定或提升 |
+| `Auxiliary_Train/Total_Loss` | 只比较同版本平滑趋势；不要求与 PPO Loss 同尺度 |
+| `Auxiliary_Train/Backbone_Scale` | 前 100 次更新为 0，随后 900 次线性升至 0.2 |
+| `Auxiliary_Train/Boundary_Accuracy` | 在覆盖率稳定时逐渐上升；需结合 `Auxiliary_Targets/coverage_next` 解读 |
+| `Auxiliary_Train/Terminal_Accuracy` | 只统计真实 Core 终局标签，不把超时/截断当答案 |
 
 ### 卡组生态大盘
 
