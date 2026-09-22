@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.11.1] - 2026-09-22
+
+### 🧭 V4 Phase 5 Batch 2: Between-decision transition-event protocol
+
+- **Strict lifecycle**: Added independent `event_history.py` and `TRANSITION_EVENT_FORMAT_VERSION=1`. An event starts only after an action is successfully sent to Core and ends at the next decision, Retry, or terminal boundary. LP/zone/chain deltas are frozen after query reconciliation, and the latest 16 events are attached oldest-first to `GameSnapshot.transition_history`
+- **Deterministic labels**: Each event carries actor, turn/phase, prompt/operation, summon method, source card, effect slot, up to five target locations, public Core message types, both LP deltas, Deck/Hand/MZone/SZone/Grave/Removed/Extra/Overlay count deltas, and cancel/decline/finish/Retry/chain-negated/disabled/terminal flags. RuleBot and external responses are matched back to the same legal-action semantics when possible
+- **Hidden-information isolation**: Event existence, intent, source, and targets have separate two-player bitmasks. Fully private hand/deck selections disappear from the opponent view. Summon, chain, and public board changes may promote visibility without exposing card identity or location that remains hidden
+- **All decision paths**: Training Workers, history/self play, Arena, RuleBot self-check, and the simple AI test register events after successful submission. The dual-mirror self-check updates both states so one side cannot lose opponent history
+- **Cost boundary**: Ordinary Core messages update only compact labels and chain depth; the complete 16-zone resource digest is produced once at action start and once at boundary finalization. A local 100,000-event begin/finalize microbenchmark measured about 6.64 µs/event. Version 3.11.1 adds no network parameter, input tensor, shared-memory field, PPO trajectory field, ONNX input, or reward
+- **Deck Encoder Dropout decision**: Ordinary elementwise Dropout is not added to the Deck Encoder or direct `deck_style` policy/value path. That path preserves stable construction identity and sparse key-card relations; the replayable 10% whole-duel mask remains limited to optional Deck FiLM. If held-out deck-family evaluation later shows overfitting, use whole-duel structured ablation or deck-variant consistency instead
+- **Version boundary**: Framework advances to 3.11.1; Model Protocol remains 4, Checkpoint Format remains 3, and V4 schema revision remains 10. Because the event protocol is not yet consumed by the network, 3.11.0 development checkpoints and ONNX structure are not invalidated by this batch
+- **Validation**: Added six tests for lifecycle, Retry, visibility, hidden-selection isolation, fixed capacity, and RuleBot response recovery. The project suite passes 234 tests with one real-Core gate skipped, and the explicit real-Core decision loop passes
+
 ## [v3.11.0] - 2026-09-22
 
 ### 🎛️ V4 Phase 5 batch 1: safe layered FiLM and deck-style modulation

@@ -74,6 +74,11 @@ def main():
             if resp:
                 print(f"🤖 AI 执行操作: {resp.hex()}")
                 env.send_action(resp)
+                brain.begin_transition_event(
+                    snap.global_data.to_play,
+                    msg[0],
+                    resp,
+                )
                 msg_queue = []
         
         if msg[0] == 5:

@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.11.0**.
+> This document applies to **Galatea-Core v3.11.1**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -405,8 +405,22 @@ To reduce fixed-construction overfitting without violating PPO ratios, Workers d
 for 10% of complete training duels using a separate RNG and store the same `deck_film_mask` in
 central inference and every PPO sample. Updates therefore replay the exact condition used by the
 saved old log-prob, unlike ordinary train-mode Dropout. The mask never disables the direct
-policy/value path; Arena, Link, and deployment default to enabled. The 16-transition event history
-is not part of 3.11.0 yet.
+policy/value path; Arena, Link, and deployment default to enabled. The Deck Encoder and direct
+`deck_style` path do not use ordinary Dropout: this path is the stable construction identity and
+rare key-card relations should not disappear independently at each PPO evaluation. Online deck
+diversity reduces exact-list memorization but does not replace held-out deck-family evaluation. If
+the direct path later proves overfit, use replayable whole-duel structured ablation or consistency
+between deck variants instead of resampling elementwise Dropout during PPO updates.
+
+Version 3.11.1 adds independent `TRANSITION_EVENT_FORMAT_VERSION=1`. A record starts only after an
+action is successfully submitted to Core and ends at the next decision, Retry, or terminal boundary;
+the latest 16 completed transitions are retained. Each event carries actor, turn/phase, action
+semantics, source/targets/effect slot/summon method, public Core message labels, and LP, eight-zone-per-
+player, and chain-depth deltas. Cancel, decline, selection finish, Retry, chain negation, and disable
+have deterministic result bits. Event existence, intent, source, and targets have separate player
+visibility masks: fully private internal selections disappear from the opponent sequence while public
+consequences remain. The history is currently attached only to `GameSnapshot`; network, PPO, shared
+memory, and ONNX integration belong to 3.11.2.
 
 ### V4 Player and Categorical Global State
 

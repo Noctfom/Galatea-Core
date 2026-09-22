@@ -271,6 +271,12 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                     last_action_log = f"交互操作: Type={msg_type}"
 
                 env.send_action(resp)
+                for event_brain in (brain_0, brain_1):
+                    event_brain.begin_transition_event(
+                        active_player,
+                        msg_type,
+                        resp,
+                    )
                 msg_queue = [] # 发送动作后清空队列，等待新状态
 
             else:

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import IntEnum, IntFlag
 from typing import List, Optional
 
 
@@ -31,6 +31,10 @@ ZONE_CATEGORY_COUNT = 9
 POSITION_CATEGORY_COUNT = 64
 # 训练局中按整局关闭卡组 FiLM 的概率；掩码会写入轨迹以保持 PPO 同分布
 DECK_FILM_DROPOUT = 0.1
+
+# 状态转移历史固定保留最近 16 次已完成决策，3.11.1 仅写入快照，不进入网络
+TRANSITION_EVENT_HISTORY_SIZE = 16
+TRANSITION_ZONE_COUNT = 8
 
 
 class ActionOperation(IntEnum):
@@ -91,6 +95,30 @@ class CardRelationType(IntEnum):
     EFFECT_TARGET = 2
     REASON_CARD = 3
     EQUIP_SOURCE = 4
+
+
+class TransitionBoundary(IntEnum):
+    """标记一次决策间状态转移由什么边界结束"""
+
+    NEXT_DECISION = 1
+    RETRY = 2
+    TERMINAL = 3
+
+
+class TransitionResultFlag(IntFlag):
+    """记录可由动作或公开 Core 消息确定的转移结果"""
+
+    NONE = 0
+    RESOLVED = 1 << 0
+    RETRY = 1 << 1
+    CANCELLED = 1 << 2
+    DECLINED = 1 << 3
+    SELECTION_FINISHED = 1 << 4
+    CHAIN_NEGATED = 1 << 5
+    CHAIN_DISABLED = 1 << 6
+    TERMINAL = 1 << 7
+    STATE_CHANGED = 1 << 8
+    MESSAGE_OVERFLOW = 1 << 9
 
 # ==========================================
 #  Galatea AI 数据协议定义 (Schema V2.0)
@@ -226,6 +254,38 @@ class GameAction:
     decision_bytes: bytes = b''
     decision_value: Optional[int] = None
 
+
+@dataclass(frozen=True)
+class StateTransitionEvent:
+    """一次已提交动作到下一决策边界之间的确定性公开状态转移"""
+
+    sequence_id: int
+    actor: int
+    turn_count: int
+    phase_id: int
+    prompt_type: int
+    operation_id: int
+    summon_method_id: int
+    source_code: int
+    source_location_raw: int
+    effect_slot: int
+    target_locations: tuple
+    target_count: int
+    event_visibility_mask: int
+    intent_visibility_mask: int
+    source_visibility_mask: int
+    target_visibility_mask: int
+    boundary: int
+    result_flags: int
+    message_types: tuple
+    message_count: int
+    lp_delta_p0: int
+    lp_delta_p1: int
+    zone_deltas: tuple
+    chain_depth_before: int
+    chain_depth_after: int
+    max_chain_depth: int
+
 @dataclass
 class GameSnapshot:
     """单一决策帧的完整快照"""
@@ -250,3 +310,5 @@ class GameSnapshot:
 
     chain_stack: List[dict] = field(default_factory=list)
     history_stack: List[dict] = field(default_factory=list)
+    # 3.11.1 内部事件协议；3.11.2 才会编码为网络输入
+    transition_history: List[StateTransitionEvent] = field(default_factory=list)

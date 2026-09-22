@@ -9,7 +9,7 @@ import traceback
 import json
 import os
 from copy import copy
-from game_constants import LocationInfo, Zone, Phases
+from game_constants import LocationInfo, Position, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
 from deck_protocol import DeckProfile
@@ -21,6 +21,7 @@ from data_types import (
     GameSnapshot,
     GlobalFeature,
     SummonMethod,
+    TransitionBoundary,
 )
 from protocol_v3_audit import (
     record_protocol_chain,
@@ -28,6 +29,12 @@ from protocol_v3_audit import (
     record_protocol_message,
 )
 from effect_slot_binding import resolve_runtime_effect_slot
+from event_history import (
+    TransitionEventRecorder,
+    TransitionStateDigest,
+    TRANSITION_ZONE_ORDER,
+    validate_transition_history,
+)
 
 _META_STAPLES = None
 
@@ -479,6 +486,7 @@ class DuelState:
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
         self.audit_enabled = bool(audit_enabled)
+        self.transition_recorder = TransitionEventRecorder()
 
     def reset(self):
         """重置动态对局状态，并从稳定初始画像恢复剩余卡组"""
@@ -502,6 +510,7 @@ class DuelState:
         self.history_stack = []
         self.known_hand_codes = {0: [], 1: []}
         self.recently_confirmed = []
+        self.transition_recorder.reset()
         self.p0_deck = self.p0_initial_deck.copy()
         self.p0_extra = self.p0_initial_extra.copy()
         self.p1_deck = self.p1_initial_deck.copy()
@@ -513,6 +522,131 @@ class DuelState:
         if controller not in (0, 1):
             return None
         return self.field_map[controller].get(location, {}).get(sequence)
+
+    def _transition_state_digest(self):
+        """生成事件边界使用的固定宽度公开资源摘要"""
+        counts = []
+        for player in (0, 1):
+            for zone in TRANSITION_ZONE_ORDER:
+                if zone == Zone.DECK:
+                    value = len(self.p0_deck if player == 0 else self.p1_deck)
+                elif zone == Zone.EXTRA:
+                    value = len(self.p0_extra if player == 0 else self.p1_extra)
+                elif zone == Zone.OVERLAY:
+                    value = sum(
+                        len(card.get('overlay_codes', card.get('overlays', [])))
+                        for cards in self.field_map[player].values()
+                        for card in cards.values()
+                    )
+                else:
+                    value = len(self.field_map[player].get(zone, {}))
+                counts.append(int(value))
+        return TransitionStateDigest(
+            lp_p0=int(self.my_lp),
+            lp_p1=int(self.op_lp),
+            zone_counts=tuple(counts),
+            chain_depth=len(self.chain_stack),
+        )
+
+    def _is_public_event_location(self, raw_location):
+        """判断动作位置是否已对双方公开，避免历史事件泄露隐藏卡"""
+        if raw_location is None or int(raw_location) < 0:
+            return False
+        controller, location, sequence, position = LocationInfo.decode(
+            int(raw_location)
+        )
+        location &= 0x7F
+        if location == Zone.GRAVE:
+            return True
+        if location not in (Zone.MZONE, Zone.SZONE, Zone.REMOVED, Zone.EXTRA):
+            return False
+        entry = self.field_map.get(controller, {}).get(location, {}).get(sequence)
+        if entry is not None:
+            position = int(entry.get('pos', position))
+        return bool(position & (Position.FACEUP | Position.REVEAL))
+
+    @staticmethod
+    def _response_matches_action(action, msg_type, response):
+        """把 RuleBot/外部响应尽量还原为当前合法动作语义"""
+        decision_bytes = bytes(getattr(action, 'decision_bytes', b'') or b'')
+        if isinstance(response, (bytes, bytearray, memoryview)):
+            packed = bytes(response)
+            if decision_bytes and decision_bytes == packed:
+                return True
+            if msg_type in (15, 20, 22, 26):
+                if int(getattr(action, 'index', -1)) < 0:
+                    return packed == int(-1).to_bytes(4, 'little', signed=True)
+                return packed == bytes([1, int(action.index) & 0xFF])
+            return False
+
+        try:
+            response_value = int(response)
+        except (TypeError, ValueError):
+            return False
+        if getattr(action, 'decision_value', None) is not None:
+            return int(action.decision_value) == response_value
+        if msg_type in (10, 11):
+            return ((int(action.index) << 16) | int(action.action_type)) == response_value
+        if msg_type in (140, 141, 142):
+            return int(action.desc_id) == response_value
+        return int(action.index) == response_value
+
+    def _resolve_transition_action(self, msg_type, response, action=None):
+        """优先采用模型已选动作，否则从响应反查 RuleBot 动作"""
+        if action is not None:
+            return action
+        for candidate in self.current_valid_actions:
+            if self._response_matches_action(candidate, msg_type, response):
+                return candidate
+        prompt_operation = {
+            15: ActionOperation.MACRO_SELECT,
+            18: ActionOperation.PLACE,
+            19: ActionOperation.SELECT,
+            20: ActionOperation.MACRO_SELECT,
+            21: ActionOperation.MACRO_SORT,
+            22: ActionOperation.REMOVE_COUNTER,
+            23: ActionOperation.MACRO_SELECT,
+            24: ActionOperation.PLACE,
+            25: ActionOperation.MACRO_SORT,
+            26: ActionOperation.SELECT,
+        }.get(int(msg_type), ActionOperation.DEFAULT)
+        return GameAction(
+            action_type=0,
+            index=-1,
+            operation_id=int(prompt_operation),
+        )
+
+    def begin_transition_event(self, actor, msg_type, response, action=None):
+        """登记一个已经成功发给 Core 的模型、规则或外部动作"""
+        if self.transition_recorder.has_pending_boundary:
+            self.transition_recorder.finalize(self._transition_state_digest())
+        resolved_action = self._resolve_transition_action(msg_type, response, action)
+        source_location = int(getattr(resolved_action, 'target_location_raw', -1))
+        target_locations = list(
+            getattr(resolved_action, 'macro_target_locations', None) or ()
+        )
+        if not target_locations and source_location >= 0:
+            target_locations = [source_location]
+        actor_mask = 1 << int(actor)
+        source_visibility = (
+            0b11 if self._is_public_event_location(source_location) else actor_mask
+        )
+        target_visibility = (
+            0b11
+            if target_locations
+            and all(self._is_public_event_location(value) for value in target_locations)
+            else actor_mask
+        )
+        self.transition_recorder.begin(
+            actor=int(actor),
+            turn_count=self.turn,
+            phase_id=self.phase,
+            prompt_type=int(msg_type),
+            action=resolved_action,
+            start_digest=self._transition_state_digest(),
+            source_visibility_mask=source_visibility,
+            target_visibility_mask=target_visibility,
+        )
 
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
@@ -767,6 +901,21 @@ class DuelState:
                             self.field_map[p][loc][seq]['used_effect_mask'] = 0
 
             elif msg_type == 41: self.phase = struct.unpack('<H', stream.read(2))[0]
+
+            # 决策边界先登记，普通 Core 消息则归入当前转移事件
+            if msg_type == 1:
+                self.transition_recorder.mark_boundary(TransitionBoundary.RETRY)
+            elif msg_type == 5:
+                self.transition_recorder.mark_boundary(TransitionBoundary.TERMINAL)
+                self.transition_recorder.finalize(self._transition_state_digest())
+            elif msg_type in _DECISION_MESSAGES:
+                self.transition_recorder.mark_boundary(TransitionBoundary.NEXT_DECISION)
+            else:
+                self.transition_recorder.observe_message(
+                    msg_type,
+                    bytes(msg_payload),
+                    len(self.chain_stack),
+                )
 
             # --- 动作空间解析 (Action Parsing) ---
             # 如果是交互消息，解析出 valid_actions
@@ -1698,6 +1847,10 @@ class DuelState:
         if env is not None:
             self.sync_active_field(env)
 
+        # 查询校准可能补齐仅由 Core query 暴露的变化，必须在其后结算事件
+        if self.transition_recorder.has_pending_boundary:
+            self.transition_recorder.finalize(self._transition_state_digest())
+
         def count_zone(p, loc): return len(self.field_map[p].get(loc, {}))
         
         global_feat = GlobalFeature(
@@ -1904,6 +2057,8 @@ class DuelState:
         # 动态外挂连锁堆栈
         snap.chain_stack = self.chain_stack.copy()
         snap.history_stack = self.history_stack.copy()
+        snap.transition_history = self.transition_recorder.snapshot()
+        validate_transition_history(snap.transition_history)
         snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
         return snap
     

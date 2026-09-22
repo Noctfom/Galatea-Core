@@ -1027,6 +1027,12 @@ def worker_process(
                                 resp = current_agent._pack_response(chosen, msg_type=msg_type, msg_args=msg[1:])
                             
                             env.send_action(resp)
+                            brain.begin_transition_event(
+                                player,
+                                msg_type,
+                                resp,
+                                action=chosen,
+                            )
                             last_decision_value = resp
                             last_decision_idx = sel_idx 
 
@@ -1137,6 +1143,11 @@ def worker_process(
                         
                         try:
                             env.send_action(resp)
+                            brain.begin_transition_event(
+                                p,
+                                msg_type,
+                                resp,
+                            )
                             msg_queue = []
                         except OSError as e:
                             if "access violation" in str(e).lower() or "exception" in str(e).lower():

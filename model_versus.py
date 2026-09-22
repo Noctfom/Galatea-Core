@@ -757,6 +757,11 @@ class ModelArena:
                         )
 
                 self.env.send_action(resp)
+                brain.begin_transition_event(
+                    player_to_act,
+                    msg_type,
+                    resp,
+                )
                 msg_queue = []
                 steps += 1
         
