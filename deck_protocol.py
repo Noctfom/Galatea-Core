@@ -10,6 +10,7 @@ from typing import Iterable, Mapping, Optional, Sequence, Tuple
 
 
 DECK_PROTOCOL_FORMAT_VERSION = 1
+MAX_DECK_PROFILE_ENTRIES = 128
 
 
 class DeckSection(IntEnum):

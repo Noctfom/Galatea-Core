@@ -9,6 +9,8 @@ from card_vocab import (
     FIRST_CARD_TOKEN_ID,
     get_default_card_vocabulary,
 )
+from deck_encoder import DECK_LATENT_COUNT, DECK_SECTION_COUNT
+from deck_protocol import MAX_DECK_PROFILE_ENTRIES, DeckSection
 from data_types import (
     ACTION_OPERATION_COUNT,
     CARD_ADDITIONAL_OVERLAY_SLOTS,
@@ -34,7 +36,7 @@ from semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 8
+PROTOCOL_SCHEMA_REVISION = 9
 
 
 def _schema_descriptor(card_vocabulary):
@@ -54,6 +56,7 @@ def _schema_descriptor(card_vocabulary):
                 "card_overlay_idx",
                 "card_overlay_rest_idx",
                 "deck_idx",
+                "deck_profile_card_idx",
                 "c_card_idx",
                 "h_card_idx",
                 "act_code",
@@ -184,6 +187,34 @@ def _schema_descriptor(card_vocabulary):
                 "h_sem_",
             ],
             "identity_policy": "append_only_card_prefix_with_logical_vectors",
+        },
+        "deck_profile": {
+            "max_entries": MAX_DECK_PROFILE_ENTRIES,
+            "identity_input": "deck_profile_card_idx",
+            "section_input": "deck_profile_section",
+            "section_categories": DECK_SECTION_COUNT,
+            "section_values": {
+                section.name.lower(): int(section)
+                for section in DeckSection
+            },
+            "initial_count_input": "deck_profile_initial_count",
+            "remaining_count_input": "deck_profile_remaining_count",
+            "mask_input": "deck_profile_mask",
+            "static_card_inputs": [
+                "deck_profile_race",
+                "deck_profile_attr",
+                "deck_profile_setcodes",
+            ],
+            "latent_count": DECK_LATENT_COUNT,
+            "encoder": "permutation_invariant_latent_cross_attention_v1",
+            "semantic_summary": "masked_mean_of_all_lua_code_vectors",
+            "current_policy_sections": [
+                int(DeckSection.MAIN),
+                int(DeckSection.EXTRA),
+            ],
+            "side_policy": "reserved_for_upper_layer_not_emitted_to_bo1_policy",
+            "dynamic_overflow_fallback": "legacy_remaining_deck_sequence",
+            "policy_fusion": "direct_policy_and_value_intent_summary",
         },
         "action_semantics": {
             "operation_input": {

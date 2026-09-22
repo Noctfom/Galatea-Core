@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.10.2] - 2026-09-21
+
+### 🧠 V4 Phase 4 batch 3: section-aware deck images and reusable Deck Encoder
+
+- **Complete profile labels reach the model**: Adds up to 128 `deck_profile_*` entries. Every unique card entry explicitly carries an exact token, Main/Extra section, initial and current remaining counts, plus race, attribute, and set-code labels. Main and Extra counts remain independent, and the current BO1 Encoder emits no Side entry
+- **Permutation-invariant Deck Encoder**: Adds standalone `deck_encoder.py`. Eight learned latents cross-attend to unordered entries without positional embeddings. Reordering leaves `deck_style/deck_latents` invariant while `per_card_features` follows the same permutation, providing a reusable boundary for later layered FiLM, auxiliary heads, and the upper deck-building module
+- **Lua semantics without printed-text guesses**: Each profile entry receives the masked mean of all valid Lua code vectors for that card from the compiled static assets. There is no per-step script/CDB I/O and printed-effect numbering is never treated as a code slot. `deck_style` now enters shared `v_input`, conditioning both the policy intent tower and value head; layered FiLM remains Phase 5
+- **Exact dynamic fallback retained**: Existing per-step `deck_idx/deck_mask` remains for effects that insert cards absent from the initial construction. Stable profile fields are still reconstructed from the per-duel catalog before PPO mini-batches; only the 128-byte `deck_profile_remaining_count` is added per sample. A stable image uses about 7,552 bytes per unique profile, and private `DECK_TRAJECTORY_FORMAT_VERSION` advances to 2
+- **Unchanged BO3/deck-building boundary**: A future external Deck Encoder caller may use `DeckSection.SIDE`, but the current `DeckProfile`, `DuelState`, training, Arena, and ONNX BO1 path emits Main/Extra only. Match score, siding, and complete opponent construction remain hidden
+- **Performance and size**: The current policy skips unused per-card writeback while explicit upper-layer calls still receive it. In local 512/8/6 microbenchmarks, single-sample single-thread CPU moved from about 74.61 ms to 76.42 ms (+2.42%), while batch-6 CUDA BF16 moved from about 7.50 ms to 8.56 ms (+14.03%) and completed BF16 forward/backward. The Deck Encoder adds 1,582,592 parameters, about 3.08% of the current 51,308,594. These are directional; real short training remains an acceptance gate
+- **Version boundary**: Framework advances to 3.10.2; Model Protocol remains 4 and Checkpoint Format remains 3, while V4 schema revision advances to 9. New inputs and weights make revision-8 development models incompatible; the established V4 scratch-training policy provides no migration
+- **Validation**: Covers field shapes/types, section/count alignment, Side isolation, permutation invariance/per-card equivariance, fast/full-path numerical identity, finite all-empty profiles, policy/value gradients, zero-error compressed reconstruction, and complete PyTorch/ONNX Runtime forwards. The default suite passes 224 of 225 tests with one gated real-Core skip; the explicitly enabled real-Core decision loop passes
+
 ## [v3.10.1] - 2026-09-21
 
 ### 🗂️ V4 Phase 4 batch 2: deck-profile indices and lossless PPO trajectory deduplication

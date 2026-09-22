@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.10.1**.
+> This document applies to **Galatea-Core v3.10.2**.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -364,6 +364,24 @@ The private catalog contains tensors only and remains loadable with `weights_onl
 indices are remapped to Trainer-global indices during merge. In this batch the profile index is
 an identity check and a stable extension point for the 3.10.2 Deck Encoder, not a hidden new
 policy feature. Side remains excluded at the `DeckProfile` type boundary.
+
+Version 3.10.2 adds a 128-entry model image. Each unique entry carries an exact card token,
+Main/Extra section, initial and current remaining copy counts, plus the existing race, attribute,
+and set-code labels. The same code in different sections is counted independently. PPO still
+reconstructs stable fields from the per-duel catalog; only `deck_profile_remaining_count` is
+stored per decision. The BO1 Encoder emits Main/Extra only. `DeckSection.SIDE` is reserved for a
+future deck-building/BO3 caller outside `DuelState`.
+
+The standalone `DeckEncoder` uses no positional embedding. Eight learned latents cross-attend to
+the unordered entries and expose a permutation-invariant `deck_style`, fixed-shape latents, and
+permutation-equivariant per-card outputs. Card inputs reuse exact tokens and static labels, plus a
+masked mean of every valid Lua code vector for that card; no printed text, per-step script I/O, or
+CDB lookup enters the network hot path. The current policy adds only `deck_style` to the shared
+intent representation, affecting both policy and value, and skips unused per-card writeback;
+explicit upper-layer calls still receive all three outputs. Layered FiLM, planning latents, and
+the upper deck-building consumer remain later phases. Legacy dynamic `deck_idx/deck_mask` stays
+as an exact fallback for cards inserted into the Deck during play but absent from the initial
+profile.
 
 ### V4 Player and Categorical Global State
 

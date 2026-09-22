@@ -54,11 +54,14 @@ from checkpoint_utils import (
 )
 from protocol_schema import apply_current_protocol_metadata, get_current_protocol_metadata
 from deck_trajectory import (
-    DECK_STATIC_OBSERVATION_KEYS,
+    DECK_PROFILE_STATIC_OBSERVATION_KEYS,
+    LEGACY_DECK_STATIC_OBSERVATION_KEYS,
     DeckProfileCatalog,
     is_deck_static_observation,
+    reconstruct_deck_profile_observations,
     reconstruct_deck_static_observations,
 )
+from deck_protocol import MAX_DECK_PROFILE_ENTRIES
 from inference_protocol import (
     InferenceProtocolError,
     decode_inference_request,
@@ -538,6 +541,15 @@ class PPOTrainer:
             'deck_attr': ((75,), torch.long),
             'deck_setcodes': ((75, 4), torch.long),
             'deck_mask': ((75,), torch.bool),
+
+            'deck_profile_card_idx': ((MAX_DECK_PROFILE_ENTRIES,), torch.long),
+            'deck_profile_race': ((MAX_DECK_PROFILE_ENTRIES,), torch.long),
+            'deck_profile_attr': ((MAX_DECK_PROFILE_ENTRIES,), torch.long),
+            'deck_profile_setcodes': ((MAX_DECK_PROFILE_ENTRIES, 4), torch.long),
+            'deck_profile_section': ((MAX_DECK_PROFILE_ENTRIES,), torch.uint8),
+            'deck_profile_initial_count': ((MAX_DECK_PROFILE_ENTRIES,), torch.uint8),
+            'deck_profile_remaining_count': ((MAX_DECK_PROFILE_ENTRIES,), torch.uint8),
+            'deck_profile_mask': ((MAX_DECK_PROFILE_ENTRIES,), torch.bool),
             
             'c_mask': ((12,), torch.bool),
             'c_card_idx': ((12,), torch.long),
@@ -1251,10 +1263,10 @@ class PPOTrainer:
         cpu_advantages = self.merged_memory['advantage'][:total_steps]
 
         present_static_deck_fields = (
-            DECK_STATIC_OBSERVATION_KEYS.intersection(cpu_obs)
+            LEGACY_DECK_STATIC_OBSERVATION_KEYS.intersection(cpu_obs)
         )
         if present_static_deck_fields and (
-            present_static_deck_fields != DECK_STATIC_OBSERVATION_KEYS
+            present_static_deck_fields != LEGACY_DECK_STATIC_OBSERVATION_KEYS
         ):
             raise RuntimeError(
                 "PPO deck observation contains only part of the static fields"
@@ -1263,17 +1275,34 @@ class PPOTrainer:
             not present_static_deck_fields
             and "deck_idx" in cpu_obs
         )
+        present_static_profile_fields = (
+            DECK_PROFILE_STATIC_OBSERVATION_KEYS.intersection(cpu_obs)
+        )
+        if present_static_profile_fields and (
+            present_static_profile_fields
+            != DECK_PROFILE_STATIC_OBSERVATION_KEYS
+        ):
+            raise RuntimeError(
+                "PPO deck profile contains only part of the static fields"
+            )
+        rebuild_static_profile_fields = (
+            not present_static_profile_fields
+            and "deck_profile_remaining_count" in cpu_obs
+        )
         device_deck_metadata = None
-        if rebuild_static_deck_fields:
-            if "deck_mask" not in cpu_obs:
-                raise RuntimeError("compressed PPO deck observation is missing deck_mask")
+        device_profile_lookup = None
+        profile_references = None
+        if rebuild_static_deck_fields or rebuild_static_profile_fields:
             if self.deck_profile_catalog is None:
                 raise RuntimeError("compressed PPO rollout has no deck profile catalog")
             if "deck_profile_index" not in self.merged_memory:
                 raise RuntimeError("compressed PPO rollout has no deck profile index")
-
             profile_references = self.merged_memory['deck_profile_index'][:total_steps]
             self.deck_profile_catalog.validate_references(profile_references)
+
+        if rebuild_static_deck_fields:
+            if "deck_mask" not in cpu_obs:
+                raise RuntimeError("compressed PPO deck observation is missing deck_mask")
             deck_metadata = self.deck_profile_catalog.build_metadata_lookup(
                 self.net_config['vocab_size']
             )
@@ -1301,6 +1330,12 @@ class PPOTrainer:
                 key: value.to(self.device)
                 for key, value in deck_metadata.items()
                 if key != 'known'
+            }
+        if rebuild_static_profile_fields:
+            profile_lookup = self.deck_profile_catalog.build_profile_lookup()
+            device_profile_lookup = {
+                key: value.to(self.device)
+                for key, value in profile_lookup.items()
             }
 
         # 全局优势归一化，稳定训练方向
@@ -1343,12 +1378,28 @@ class PPOTrainer:
                 dtype=torch.long,
                 device=self.device,
             )
+        if rebuild_static_profile_fields:
+            for key, value in device_profile_lookup.items():
+                shape = (self.mini_batch_size, *value.shape[1:])
+                dtype = torch.bool if value.dtype == torch.bool else torch.long
+                gpu_mb_obs[key] = torch.zeros(
+                    shape,
+                    dtype=dtype,
+                    device=self.device,
+                )
         
         # 其他零散张量也预分配
         gpu_actions = torch.zeros(self.mini_batch_size, dtype=torch.long, device=self.device)
         gpu_old_log_probs = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
         gpu_returns = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
         gpu_advs = torch.zeros(self.mini_batch_size, dtype=torch.float32, device=self.device)
+        gpu_deck_profile_indices = None
+        if rebuild_static_profile_fields:
+            gpu_deck_profile_indices = torch.zeros(
+                self.mini_batch_size,
+                dtype=torch.long,
+                device=self.device,
+            )
 
         for _ in range(EPOCHS):
             indices = torch.randperm(batch_size)
@@ -1371,6 +1422,17 @@ class PPOTrainer:
                         device_deck_metadata,
                     )
                     for key, value in rebuilt_deck_fields.items():
+                        gpu_mb_obs[key].copy_(value)
+                if rebuild_static_profile_fields:
+                    gpu_deck_profile_indices.copy_(
+                        profile_references[mb_idx],
+                        non_blocking=self.transfer_non_blocking,
+                    )
+                    rebuilt_profile_fields = reconstruct_deck_profile_observations(
+                        gpu_deck_profile_indices,
+                        device_profile_lookup,
+                    )
+                    for key, value in rebuilt_profile_fields.items():
                         gpu_mb_obs[key].copy_(value)
 
                 gpu_actions.copy_(cpu_actions[mb_idx], non_blocking=self.transfer_non_blocking)

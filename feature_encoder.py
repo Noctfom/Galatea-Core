@@ -2,9 +2,16 @@
 #  Galatea Feature Encoder（V4 精确卡片身份已启用）
 # ==================================================================================
 
+from collections import Counter
+
 import torch
 import numpy as np
 from card_vocab import get_default_card_vocabulary
+from deck_protocol import (
+    MAX_DECK_PROFILE_ENTRIES,
+    DeckProfile,
+    DeckSection,
+)
 from data_types import (
     ACTION_CONTEXT_DIM,
     ACTION_OPERATION_COUNT,
@@ -53,6 +60,7 @@ class GalateaEncoder:
         self.vocab_size = self.card_vocabulary.capacity
         self.global_dim = GLOBAL_FEATURE_DIM
         self.card_feat_dim = 7
+        self._deck_profile_cache = {}
         # spawn Worker 只加载轻量效果槽目录，不复制模型侧静态语义大表
         register_static_semantic_runtime_catalog(
             card_vocabulary=self.card_vocabulary,
@@ -61,6 +69,107 @@ class GalateaEncoder:
     def _encode_card_code(self, code):
         """把真实卡片代码映射为无碰撞的固定词表索引"""
         return self.card_vocabulary.encode(code)
+
+    @staticmethod
+    def _read_deck_card_metadata(code):
+        """读取卡组卡片的稳定种族、属性和字段标签，异常时安全归零"""
+        try:
+            from card_reader import card_db
+
+            stats = card_db.get_full_stats(code)
+            race = int(stats[1]) % 30
+            attribute = int(stats[2]) % 10
+            raw_setcodes = (
+                stats[10]
+                if isinstance(stats[10], (list, tuple))
+                else [stats[10]]
+            )
+            setcodes = [
+                int(value) % 4096
+                for value in (list(raw_setcodes) + [0] * 4)[:4]
+            ]
+            return race, attribute, setcodes
+        except Exception:
+            return 0, 0, [0, 0, 0, 0]
+
+    def _encode_deck_profile(self, snapshot, player_id):
+        """编码稳定初始画像及与画像条目对齐的逐步剩余数量"""
+        if player_id == 0:
+            initial_main = snapshot.p0_initial_deck_codes
+            initial_extra = snapshot.p0_initial_extra_codes
+            remaining_main = snapshot.p0_deck_codes
+            remaining_extra = snapshot.p0_extra_codes
+        else:
+            initial_main = snapshot.p1_initial_deck_codes
+            initial_extra = snapshot.p1_initial_extra_codes
+            remaining_main = snapshot.p1_deck_codes
+            remaining_extra = snapshot.p1_extra_codes
+
+        cache_key = (tuple(initial_main), tuple(initial_extra))
+        cached = self._deck_profile_cache.get(cache_key)
+        if cached is None:
+            profile = DeckProfile(
+                main=tuple(initial_main),
+                extra=tuple(initial_extra),
+            )
+            entries = profile.entries()
+            if len(entries) > MAX_DECK_PROFILE_ENTRIES:
+                raise ValueError(
+                    f"deck profile has {len(entries)} unique entries; "
+                    f"maximum is {MAX_DECK_PROFILE_ENTRIES}"
+                )
+
+            card_idx = np.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=np.int64)
+            race = np.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=np.int64)
+            attribute = np.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=np.int64)
+            setcodes = np.zeros(
+                (MAX_DECK_PROFILE_ENTRIES, 4),
+                dtype=np.int64,
+            )
+            section = np.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=np.uint8)
+            initial_count = np.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=np.uint8)
+            mask = np.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=np.bool_)
+            entry_keys = []
+            for index, entry in enumerate(entries):
+                card_idx[index] = self._encode_card_code(entry.code)
+                race[index], attribute[index], setcodes[index] = (
+                    self._read_deck_card_metadata(entry.code)
+                )
+                section[index] = int(entry.section)
+                initial_count[index] = min(int(entry.copies), 255)
+                mask[index] = True
+                entry_keys.append((entry.section, int(entry.code)))
+            cached = {
+                "deck_profile_card_idx": card_idx,
+                "deck_profile_race": race,
+                "deck_profile_attr": attribute,
+                "deck_profile_setcodes": setcodes,
+                "deck_profile_section": section,
+                "deck_profile_initial_count": initial_count,
+                "deck_profile_mask": mask,
+                "entry_keys": tuple(entry_keys),
+            }
+            self._deck_profile_cache[cache_key] = cached
+
+        main_counts = Counter(int(code) for code in remaining_main)
+        extra_counts = Counter(int(code) for code in remaining_extra)
+        remaining_count = np.zeros(
+            MAX_DECK_PROFILE_ENTRIES,
+            dtype=np.uint8,
+        )
+        for index, (section, code) in enumerate(cached["entry_keys"]):
+            counter = main_counts if section == DeckSection.MAIN else extra_counts
+            remaining_count[index] = min(int(counter.get(code, 0)), 255)
+
+        result = {
+            key: torch.from_numpy(value).unsqueeze(0)
+            for key, value in cached.items()
+            if key != "entry_keys"
+        }
+        result["deck_profile_remaining_count"] = torch.from_numpy(
+            remaining_count
+        ).unsqueeze(0)
+        return result
 
     @staticmethod
     def _encode_effect_slot(effect_slot):
@@ -726,16 +835,10 @@ class GalateaEncoder:
         deck_setcodes = np.zeros((MAX_DECK_CARDS, 4), dtype=np.int64)
         deck_masks = np.zeros(MAX_DECK_CARDS, dtype=np.bool_)
 
-        from card_reader import card_db
         for i, code in enumerate(my_deck[:MAX_DECK_CARDS]):
-            try:
-                stats = card_db.get_full_stats(code)
-                deck_race[i] = stats[1] % 30
-                deck_attr[i] = stats[2] % 10
-                raw_dsc = stats[10] if isinstance(stats[10], (list, tuple)) else [stats[10]]
-                deck_setcodes[i] = [(s % 4096) for s in (list(raw_dsc) + [0]*4)[:4]]
-            except Exception:
-                pass
+            deck_race[i], deck_attr[i], deck_setcodes[i] = (
+                self._read_deck_card_metadata(code)
+            )
                 
             deck_idx[i] = self._encode_card_code(code)
             deck_masks[i] = True
@@ -877,6 +980,7 @@ class GalateaEncoder:
             'h_effect_slot': torch.from_numpy(h_effect_slots).unsqueeze(0),
         }
         
+        base_dict.update(self._encode_deck_profile(snapshot, player_id))
         base_dict.update(act_dict)
         return base_dict
 

@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.10.1 (Phase 4 batch 2) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.10.2 (Phase 4 complete) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -99,6 +99,15 @@ for element before each PPO mini-batch. Existing network, ONNX, and policy numer
 unchanged. Private catalog format version 1 applies only to temporary Worker transport and does
 not claim that Phase 7's public canonical-trajectory format has landed.
 
+Version 3.10.2 connects a 128-entry stable profile to the model. Every entry carries an exact
+token, Main/Extra section, initial and per-step remaining counts, and token-static attributes.
+Stable fields are reconstructed from the catalog; only remaining counts enter each sample. An
+eight-latent `DeckEncoder` cross-attends to the unordered set and emits an invariant style, fixed
+latents, and equivariant per-card representations. Card semantics use a masked mean of all valid
+Lua code vectors rather than printed text. `deck_style` enters the shared policy/value intent;
+Side remains excluded from BO1 and layered FiLM remains Phase 5. The legacy dynamic deck sequence
+stays as a fallback for cards inserted during play. Private catalog format advances to version 2.
+
 ## 4. Target network
 
 ### 4.1 Reusable Deck Encoder
@@ -154,10 +163,10 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 1 (3.9.0 / schema revision 7): compile one table aligned to exact tokens and Lua effect slots, share it across Encoder/network consumers, and carry a prefix-compatible semantic hash through PTH, ONNX, artifacts, and deployment packages. Legacy network inputs remain as a lossless bridge.
   - [x] Review batch 2 (3.9.1 / schema revision 8): perform model-side lookup from card/effect-slot identities and remove repeated structured-semantic matrices from Encoder/shared memory/PPO trajectories. Compact and legacy-expanded full forwards match with zero elementwise error; net storage drops by 152,996 bytes per step, or about 4.67 GiB for one 32,768-step trajectory pool.
   - [x] Review batch 3 (3.9.2 / schema revision 8): materialize and validate independent static-semantic runtime assets; restore effect-slot catalog registration in spawn Workers; keep compact ONNX inputs while freezing static tables into external data; bump GKG to format 4 and require the vocabulary plus compiled runtime pair cross-machine while source semantics remain optional maintenance assets. The default suite passes 207 of 208 tests with one gated skip; explicit real-Core and external ONNX Runtime smoke gates pass.
-- [ ] **Phase 4: deck protocol/encoder**—profile deduplication, labels, reusable encoder.
+- [x] **Phase 4: deck protocol/encoder**—profile deduplication, labels, reusable encoder.
   - [x] Review batch 1 (3.10.0 / schema revision 8): add full `DeckSpec` and Side-free `DeckProfile`; parse and independently validate `.ydk` Side sections; separate stable initial images from dynamic remaining cards; reserve `MatchContext`/`DuelSummary` outside `DuelState` without exposing them to the current policy. The default suite passes 211 of 212 tests with one real-Core gate skipped; the explicit real-Core duel passes with zero query parse errors.
   - [x] Review batch 2 (3.10.1 / schema revision 8): Workers register stable Side-free profiles once per duel and store an `int32 deck_profile_index` per sample; dynamic `deck_idx/deck_mask` remain exact while three token-static fields are reconstructed losslessly before each PPO mini-batch. Net storage falls by 3,596 bytes per step, about 112.4 MiB for each 32,768-step trajectory. The default suite passes 217 of 218 tests with one gated skip; the explicit real-Core gate passes.
-  - [ ] Review batch 3: Main/Extra and initial/remaining-count labels, reusable permutation-invariant Deck Encoder, and network integration.
+  - [x] Review batch 3 (3.10.2 / schema revision 9): the 128-entry image explicitly carries Main/Extra and initial/remaining counts; an eight-latent Deck Encoder exposes an invariant style plus reusable per-card representations, and style conditions the shared policy/value intent. Side stays isolated and the dynamic sequence remains as an in-duel insertion fallback. 512/8/6 microbenchmarks measured about +2.42% for single-sample CPU and +14.03% for batch-6 CUDA BF16; BF16 forward/backward passed and 1,582,592 parameters were added. Of 225 default tests, 224 pass with one gated skip, while ONNX Runtime and the explicit real-Core loop pass.
 - [ ] **Phase 5: layered FiLM/history**—separate modulation and 16 compact events.
 - [ ] **Phase 6: auxiliary heads/planning**—verifiable tasks, future summaries, `plan_latent`.
 - [ ] **Phase 7: PPO/canonical trajectories**—GAE/KL controls and Link/YRP inputs.

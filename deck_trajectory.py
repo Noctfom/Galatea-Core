@@ -5,20 +5,35 @@ from typing import Dict, Mapping
 
 import torch
 
-from deck_protocol import DeckProfile
+from deck_protocol import MAX_DECK_PROFILE_ENTRIES, DeckProfile
 
 
-DECK_TRAJECTORY_FORMAT_VERSION = 1
-MAX_DECK_PROFILE_ENTRIES = 128
-DECK_STATIC_OBSERVATION_KEYS = frozenset({
+DECK_TRAJECTORY_FORMAT_VERSION = 2
+LEGACY_DECK_STATIC_OBSERVATION_KEYS = frozenset({
     "deck_race",
     "deck_attr",
     "deck_setcodes",
 })
+DECK_PROFILE_STATIC_OBSERVATION_KEYS = frozenset({
+    "deck_profile_card_idx",
+    "deck_profile_race",
+    "deck_profile_attr",
+    "deck_profile_setcodes",
+    "deck_profile_section",
+    "deck_profile_initial_count",
+    "deck_profile_mask",
+})
+DECK_STATIC_OBSERVATION_KEYS = (
+    LEGACY_DECK_STATIC_OBSERVATION_KEYS
+    | DECK_PROFILE_STATIC_OBSERVATION_KEYS
+)
 
 _PROFILE_TENSOR_KEYS = (
     "profile_hash",
     "profile_card_idx",
+    "profile_race",
+    "profile_attr",
+    "profile_setcodes",
     "profile_section",
     "profile_initial_count",
     "profile_mask",
@@ -32,7 +47,7 @@ _METADATA_TENSOR_KEYS = (
 
 
 def is_deck_static_observation(key: str) -> bool:
-    """判断某个旧网络输入是否可由卡片 token 的静态元数据重建"""
+    """判断观测字段是否能由当前轮次的卡组画像目录无损重建"""
     return key in DECK_STATIC_OBSERVATION_KEYS
 
 
@@ -80,12 +95,38 @@ class DeckProfileRegistry:
                 f"maximum is {MAX_DECK_PROFILE_ENTRIES}"
             )
         card_idx = torch.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=torch.long)
+        race = torch.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=torch.long)
+        attribute = torch.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=torch.long)
+        setcodes = torch.zeros(
+            (MAX_DECK_PROFILE_ENTRIES, 4),
+            dtype=torch.long,
+        )
         section = torch.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=torch.uint8)
         initial_count = torch.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=torch.uint8)
         mask = torch.zeros(MAX_DECK_PROFILE_ENTRIES, dtype=torch.bool)
         for index, entry in enumerate(entries):
             token = int(card_vocabulary.encode(entry.code))
             card_idx[index] = token
+            try:
+                from card_reader import card_db
+
+                stats = card_db.get_full_stats(entry.code)
+                race[index] = int(stats[1]) % 30
+                attribute[index] = int(stats[2]) % 10
+                raw_setcodes = (
+                    stats[10]
+                    if isinstance(stats[10], (list, tuple))
+                    else [stats[10]]
+                )
+                setcodes[index] = torch.tensor(
+                    [
+                        int(value) % 4096
+                        for value in (list(raw_setcodes) + [0] * 4)[:4]
+                    ],
+                    dtype=torch.long,
+                )
+            except Exception:
+                pass
             section[index] = int(entry.section)
             initial_count[index] = min(int(entry.copies), 255)
             mask[index] = True
@@ -96,6 +137,9 @@ class DeckProfileRegistry:
             {
                 "profile_hash": _profile_hash_tensor(profile_id),
                 "profile_card_idx": card_idx,
+                "profile_race": race,
+                "profile_attr": attribute,
+                "profile_setcodes": setcodes,
                 "profile_section": section,
                 "profile_initial_count": initial_count,
                 "profile_mask": mask,
@@ -207,6 +251,9 @@ def validate_deck_profile_bundle(bundle: Mapping[str, torch.Tensor]) -> None:
         raise ValueError("deck profile hash table has an invalid shape")
     expected_profile_shapes = {
         "profile_card_idx": (profile_count, MAX_DECK_PROFILE_ENTRIES),
+        "profile_race": (profile_count, MAX_DECK_PROFILE_ENTRIES),
+        "profile_attr": (profile_count, MAX_DECK_PROFILE_ENTRIES),
+        "profile_setcodes": (profile_count, MAX_DECK_PROFILE_ENTRIES, 4),
         "profile_section": (profile_count, MAX_DECK_PROFILE_ENTRIES),
         "profile_initial_count": (profile_count, MAX_DECK_PROFILE_ENTRIES),
         "profile_mask": (profile_count, MAX_DECK_PROFILE_ENTRIES),
@@ -315,6 +362,27 @@ class DeckProfileCatalog:
             lookup["known"][token] = True
         return lookup
 
+    def build_profile_lookup(self) -> dict:
+        """构造按 Trainer 全局画像索引排列的稳定卡组字段表"""
+        if not self._profiles:
+            raise ValueError("cannot build an empty deck profile lookup")
+        key_mapping = {
+            "profile_card_idx": "deck_profile_card_idx",
+            "profile_race": "deck_profile_race",
+            "profile_attr": "deck_profile_attr",
+            "profile_setcodes": "deck_profile_setcodes",
+            "profile_section": "deck_profile_section",
+            "profile_initial_count": "deck_profile_initial_count",
+            "profile_mask": "deck_profile_mask",
+        }
+        return {
+            output_key: torch.stack(
+                [row[source_key] for row in self._profiles],
+                dim=0,
+            )
+            for source_key, output_key in key_mapping.items()
+        }
+
 
 def reconstruct_deck_static_observations(
     deck_idx: torch.Tensor,
@@ -324,5 +392,17 @@ def reconstruct_deck_static_observations(
     indices = deck_idx.long()
     return {
         key: metadata_lookup[key][indices]
-        for key in DECK_STATIC_OBSERVATION_KEYS
+        for key in LEGACY_DECK_STATIC_OBSERVATION_KEYS
+    }
+
+
+def reconstruct_deck_profile_observations(
+    deck_profile_index: torch.Tensor,
+    profile_lookup: Mapping[str, torch.Tensor],
+) -> dict:
+    """按样本画像索引重建一局内不变的主卡组/额外卡组字段"""
+    indices = deck_profile_index.long()
+    return {
+        key: profile_lookup[key][indices]
+        for key in DECK_PROFILE_STATIC_OBSERVATION_KEYS
     }

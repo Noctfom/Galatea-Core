@@ -30,6 +30,7 @@ from protocol_schema import (
     MODEL_PROTOCOL_VERSION,
     apply_current_protocol_metadata,
 )
+from deck_encoder import DeckEncoder
 from semantic_lookup import get_static_semantic_lookup
 
 class RunningMeanStd(nn.Module):
@@ -382,6 +383,10 @@ class GalateaNet(nn.Module):
             condition_dim=GLOBAL_FEATURE_DIM + 16,
             d_model=self.d_model,
         )
+        self.deck_encoder = DeckEncoder(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+        )
         
         # 2. 实例化定制的堆叠主干 (利用 config 字典解包)
         self.transformer = GalateaTransformerStack(
@@ -622,6 +627,58 @@ class GalateaNet(nn.Module):
         ).ne(0)
         return expanded.flatten(start_dim=-2).to(torch.float32)
 
+    def summarize_deck_code_semantics(self, card_ids):
+        """汇聚卡片全部有效 Lua 代码向量，避免无物理查询时的重型槽注意力"""
+        safe_card_ids = card_ids.long().clamp(
+            0,
+            self.semantic_code_index_table.shape[0] - 1,
+        )
+        code_indices = self.semantic_code_index_table[safe_card_ids].long()
+        effect_mask = self.semantic_effect_mask_table[safe_card_ids]
+        flat_indices = code_indices.reshape(-1, code_indices.shape[-1])
+        flat_weights = effect_mask.reshape(
+            -1,
+            effect_mask.shape[-1],
+        ).to(self.code_dict.dtype)
+        code_summary = F.embedding_bag(
+            flat_indices,
+            self.code_dict,
+            mode='sum',
+            per_sample_weights=flat_weights,
+        )
+        code_summary = code_summary / flat_weights.sum(
+            dim=-1,
+            keepdim=True,
+        ).clamp(min=1.0)
+        semantic_summary = self.sem_fusion_proj(
+            self.code_vec_proj(code_summary)
+        ).reshape(*card_ids.shape, self.d_model)
+        return semantic_summary.masked_fill(
+            ~effect_mask.any(dim=-1).unsqueeze(-1),
+            0.0,
+        )
+
+    def encode_deck_profile(self, batch_dict, *, return_per_card=True):
+        """独立编码稳定卡组画像，供单局策略与未来组卡上层复用"""
+        card_idx = batch_dict['deck_profile_card_idx'].long()
+        card_features = (
+            self.card_embed(card_idx)
+            + self.race_embed(batch_dict['deck_profile_race'].long())
+            + self.attr_embed(batch_dict['deck_profile_attr'].long())
+            + self.setcode_embed(
+                batch_dict['deck_profile_setcodes'].long()
+            ).sum(dim=-2)
+            + self.summarize_deck_code_semantics(card_idx)
+        )
+        return self.deck_encoder(
+            card_features,
+            batch_dict['deck_profile_section'],
+            batch_dict['deck_profile_initial_count'],
+            batch_dict['deck_profile_remaining_count'],
+            batch_dict['deck_profile_mask'],
+            return_per_card=return_per_card,
+        )
+
     def forward(self, batch_dict):
         # --- 全局状态调制器 ---
         phase_context = self.phase_context_embed(
@@ -773,6 +830,13 @@ class GalateaNet(nn.Module):
             deck_pooled = (x_deck_sum / d_count).unsqueeze(1) 
         else:
             deck_pooled = 0
+
+        # 稳定初始画像显式携带主/额外分区和投入/剩余数量；Side 不由 BO1 Encoder 发出
+        deck_style, _, _ = self.encode_deck_profile(
+            batch_dict,
+            return_per_card=False,
+        )
+        deck_style = deck_style.unsqueeze(1)
             
         # 连锁雷达：嗅探正在发动的效果！
         if 'c_card_idx' in batch_dict:
@@ -837,7 +901,14 @@ class GalateaNet(nn.Module):
             history_pooled = 0
 
         # 大一统评分底蕴：加入历史记忆
-        v_input = g_embed + pooled + deck_pooled + chain_pooled + history_pooled
+        v_input = (
+            g_embed
+            + pooled
+            + deck_pooled
+            + deck_style
+            + chain_pooled
+            + history_pooled
+        )
         v_input = self.v_norm(v_input)
         value = self.value_head(v_input.squeeze(1)) 
 
