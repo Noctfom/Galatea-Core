@@ -41,7 +41,12 @@ from managed_processes import (
     process_matches_project,
     purge_managed_processes,
 )
-from training_validation import resolve_training_target, validate_model_prefix
+from training_validation import (
+    resolve_training_target,
+    validate_model_prefix,
+    validate_training_config,
+)
+from ppo_control import DEFAULT_GAE_LAMBDA, DEFAULT_PPO_EPOCHS, DEFAULT_TARGET_KL
 from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL
 from semantic_assets import (
     DEFAULT_SEMANTIC_REPOSITORY_URL,
@@ -174,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.12.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.13.0"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -208,7 +213,8 @@ if "jump_to_update" not in st.session_state:
 
 CACHE_KEYS = {
     't_steps': 5000, 't_batch': 4096, 't_mini': 256, 't_workers': 6, 't_timeout': 300,
-    't_gamma': 0.998, 't_lr': 0.0001, 't_entropy': 0.03, 't_gae': 0.95, 't_clip': 0.2,
+    't_gamma': 0.998, 't_lr': 0.0001, 't_entropy': 0.03, 't_gae': DEFAULT_GAE_LAMBDA, 't_clip': 0.2,
+    't_ppo_epochs': DEFAULT_PPO_EPOCHS, 't_target_kl': DEFAULT_TARGET_KL,
     't_device': 'auto', 't_d_model': 256, 't_n_heads': 4, 't_n_layers': 2,
     't_model_prefix': DEFAULT_MODEL_PREFIX,
     'sp_games': 100, 'sp_freq': 50
@@ -216,6 +222,9 @@ CACHE_KEYS = {
 
 if 'ui_cache' not in st.session_state:
     st.session_state.ui_cache = CACHE_KEYS.copy()
+else:
+    for cache_key, default_value in CACHE_KEYS.items():
+        st.session_state.ui_cache.setdefault(cache_key, default_value)
 
 def cache_val(key):
     st.session_state.ui_cache[key] = st.session_state[f"widget_{key}"]
@@ -908,7 +917,23 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 t_gae = st.number_input(_("GAE Lambda", "GAE Lambda"), 
                                         value=float(st.session_state.ui_cache['t_gae']), format="%.2f", step=0.01, 
                                         key="widget_t_gae", on_change=cache_val, args=('t_gae',),
-                                        help=_("广义优势估计参数。用于平衡预测的偏差和方差。", "Generalized Advantage Estimation parameter."))
+                                        help=_("V4 默认 0.98，可与 0.95/0.99 做固定卡组基准对照；较高值延长信用分配，也可能增加方差。", "V4 defaults to 0.98. Compare 0.95/0.99 on a fixed benchmark; higher values extend credit assignment but can increase variance."))
+                t_ppo_epochs = st.number_input(
+                    _("PPO 更新上限 (Epochs)", "PPO Epoch Limit"),
+                    value=int(st.session_state.ui_cache['t_ppo_epochs']),
+                    min_value=1, max_value=4, step=1,
+                    key="widget_t_ppo_epochs", on_change=cache_val,
+                    args=('t_ppo_epochs',),
+                    help=_("每批经验最多重复更新 4 次，达到目标 KL 时可提前停止。", "At most four passes per rollout; target KL can stop updates earlier."),
+                )
+                t_target_kl = st.number_input(
+                    _("目标 KL (0 关闭)", "Target KL (0 disables)"),
+                    value=float(st.session_state.ui_cache['t_target_kl']),
+                    min_value=0.0, step=0.005, format="%.3f",
+                    key="widget_t_target_kl", on_change=cache_val,
+                    args=('t_target_kl',),
+                    help=_("默认 0.02；近似 KL 超过目标的 1.5 倍时停止本轮策略、价值与辅助共享更新。", "Default 0.02; approximate KL above 1.5 times target stops policy, value, and shared auxiliary updates for the current rollout."),
+                )
         
         # --- 高级开关 ---
         st.write(_("⚡ 高级开关", "⚡ Advanced Toggles"))
@@ -938,6 +963,23 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             else:
                 launch_error = None
                 try:
+                    validate_training_config(
+                        {
+                            'd_model': int(t_d_model),
+                            'n_heads': int(t_n_heads),
+                            'n_layers': int(t_n_layers),
+                            'vocab_size': 20000,
+                        },
+                        update_timesteps=int(t_batch),
+                        mini_batch_size=int(t_mini),
+                        num_workers=int(t_workers),
+                        training_device=t_device,
+                        worker_timeout=float(t_timeout),
+                        gamma=float(t_gamma), learning_rate=float(t_lr),
+                        entropy=float(t_entropy), gae_lambda=float(t_gae),
+                        clip_eps=float(t_clip), ppo_epochs=int(t_ppo_epochs),
+                        target_kl=float(t_target_kl),
+                    )
                     if t_device == "cuda" and not torch.cuda.is_available():
                         raise RuntimeError("当前 PyTorch 环境无法使用 CUDA，请选择 auto 或 cpu")
                     validate_model_prefix(t_model_prefix)
@@ -996,7 +1038,9 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     "--lr", str(t_lr),
                     "--entropy", str(t_entropy),
                     "--gae_lambda", str(t_gae),
-                    "--clip_eps", str(t_clip)
+                    "--clip_eps", str(t_clip),
+                    "--ppo-epochs", str(t_ppo_epochs),
+                    "--target-kl", str(t_target_kl),
                 ]
                 if t_resume != "None": cmd.extend(["--resume", t_resume])
                 if c_nocomp: cmd.append("--no_compile")

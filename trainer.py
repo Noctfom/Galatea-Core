@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import json
+import math
 import os
 import time
 import datetime
@@ -33,6 +34,19 @@ from auxiliary_heads import (
     AUXILIARY_PROBE_STEPS,
     AUXILIARY_RAMP_STEPS,
     compute_structured_auxiliary_loss,
+)
+from goal_planner import (
+    PLANNING_LOSS_COEF,
+    build_pair_preserving_indices,
+    compute_goal_planning_loss,
+)
+from ppo_control import (
+    DEFAULT_GAE_LAMBDA,
+    DEFAULT_PPO_EPOCHS,
+    DEFAULT_TARGET_KL,
+    TARGET_KL_STOP_MULTIPLIER,
+    PPOUpdateAudit,
+    policy_shift_statistics,
 )
 from galatea_env import GalateaEnv
 from worker import worker_process
@@ -126,9 +140,9 @@ else:
 # === 超参数配置 ===
 LR = 1e-4               # Learning Rate: 步长，决定学得有多快（太快容易震荡）
 GAMMA = 0.998            # Discount Factor: 远视眼程度，0.998表示很看重未来收益
-GAE_LAMBDA = 0.95       # GAE参数: 平衡方差和偏差的关键
+GAE_LAMBDA = DEFAULT_GAE_LAMBDA  # GAE 参数：V4 默认 0.98，可显式做对照
 UPDATE_TIMESTEPS = 2048 # Batch Size: 攒多少经验升一级
-EPOCHS = 4              # PPO Update Epochs:同一批数据反复榨取几次
+EPOCHS = DEFAULT_PPO_EPOCHS  # PPO 每批最多更新四个 epoch
 MINIBATCH_SIZE = 128    # Mini-batch: 梯度下降时的切片大小
 CLIP_EPS = 0.2          # PPO Clip: 限制更新幅度，防止学“飘”了
 ENTROPY_COEF = 0.03     # 熵正则化: 鼓励探索，防止过早收敛到局部最优
@@ -151,22 +165,60 @@ def get_auxiliary_backbone_scale(train_step):
 
 def split_auxiliary_parameter_groups(network):
     """把辅助头与 PPO 主干参数分开，避免两类梯度共享裁剪额度"""
-    base_network = getattr(network, '_orig_mod', network)
-    auxiliary_module = getattr(base_network, 'auxiliary_heads', None)
-    auxiliary_parameters = (
-        list(auxiliary_module.parameters())
-        if auxiliary_module is not None
-        else []
+    base_parameters, planning_parameters, auxiliary_parameters = (
+        split_training_parameter_groups(network)
     )
+    return base_parameters + planning_parameters, auxiliary_parameters
+
+
+def split_training_parameter_groups(network):
+    """拆分既有 PPO 主干、目标规划器和纯训练解码器参数"""
+    base_network = getattr(network, '_orig_mod', network)
+    auxiliary_modules = []
+    auxiliary_head = getattr(base_network, 'auxiliary_heads', None)
+    if auxiliary_head is not None:
+        auxiliary_modules.append(auxiliary_head)
+    goal_planner = getattr(base_network, 'goal_planner', None)
+    if goal_planner is not None:
+        auxiliary_modules.append(goal_planner.target_decoder)
+    auxiliary_parameters = [
+        parameter
+        for module in auxiliary_modules
+        for parameter in module.parameters()
+    ]
     auxiliary_parameter_ids = {
         id(parameter) for parameter in auxiliary_parameters
+    }
+    planning_parameters = []
+    if goal_planner is not None:
+        planning_parameters.extend(
+            parameter
+            for parameter in goal_planner.parameters()
+            if id(parameter) not in auxiliary_parameter_ids
+        )
+        for name in (
+            'plan_policy_proj',
+            'plan_value_proj',
+        ):
+            planning_parameters.extend(
+                getattr(base_network, name).parameters()
+            )
+        planning_parameters.extend([
+            base_network.plan_policy_gate,
+            base_network.plan_value_gate,
+        ])
+    planning_parameter_ids = {
+        id(parameter) for parameter in planning_parameters
     }
     base_parameters = [
         parameter
         for parameter in network.parameters()
-        if id(parameter) not in auxiliary_parameter_ids
+        if (
+            id(parameter) not in auxiliary_parameter_ids
+            and id(parameter) not in planning_parameter_ids
+        )
     ]
-    return base_parameters, auxiliary_parameters
+    return base_parameters, planning_parameters, auxiliary_parameters
 
 
 def get_windows_commit_status():
@@ -330,7 +382,7 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=0.95, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -356,6 +408,8 @@ class PPOTrainer:
         self.entropy = entropy
         self.gae_lambda = gae_lambda
         self.clip_eps = clip_eps
+        self.ppo_epochs = ppo_epochs
+        self.target_kl = target_kl
         self.standard_core = standard_core
 
         resume_checkpoint = None
@@ -413,6 +467,8 @@ class PPOTrainer:
             entropy=self.entropy,
             gae_lambda=self.gae_lambda,
             clip_eps=self.clip_eps,
+            ppo_epochs=self.ppo_epochs,
+            target_kl=self.target_kl,
         )
         os.makedirs(save_dir, exist_ok=True)
         prefix_conflicts = find_prefix_identity_conflicts(
@@ -503,8 +559,9 @@ class PPOTrainer:
 
         (
             self.base_parameters,
+            self.planning_parameters,
             self.auxiliary_parameters,
-        ) = split_auxiliary_parameter_groups(self.agent.net)
+        ) = split_training_parameter_groups(self.agent.net)
         self.optimizer = optim.Adam(self.agent.net.parameters(), lr=self.lr)
         # 只有 CUDA FP16 需要梯度缩放；CPU 与 CUDA BF16 均保持关闭
         self.scaler = torch.amp.GradScaler(
@@ -547,6 +604,29 @@ class PPOTrainer:
         # log_dir 可以按时间戳命名，方便区分不同次训练
         time_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self.writer = SummaryWriter(log_dir=f"./runs/{self.model_prefix}_{time_str}")
+        self.writer.add_text(
+            'Configuration/PPO',
+            json.dumps({
+                'gamma': self.gamma,
+                'gae_lambda': self.gae_lambda,
+                'requested_learning_rate': self.lr,
+                'optimizer_learning_rates': [
+                    group['lr'] for group in self.optimizer.param_groups
+                ],
+                'entropy': self.entropy,
+                'clip_eps': self.clip_eps,
+                'ppo_epochs': self.ppo_epochs,
+                'target_kl': self.target_kl,
+                'kl_stop_multiplier': TARGET_KL_STOP_MULTIPLIER,
+                'mini_batch_size': self.mini_batch_size,
+            }, indent=2),
+            self.train_step,
+        )
+        print(
+            f"⚙️ [PPO] Gamma={self.gamma} | GAE Lambda={self.gae_lambda} | "
+            f"Epochs≤{self.ppo_epochs} | Target KL={self.target_kl} "
+            f"(停止阈值 {self.target_kl * TARGET_KL_STOP_MULTIPLIER:g}，0 表示关闭)"
+        )
         self.run_id = time_str
         os.environ['GALATEA_RUN_ID'] = self.run_id
         print(f"📊 TensorBoard 日志将保存至: ./runs/{self.model_prefix}_{time_str}")
@@ -1372,11 +1452,18 @@ class PPOTrainer:
             else None
         )
         base_parameters = getattr(self, 'base_parameters', None)
+        planning_parameters = getattr(self, 'planning_parameters', None)
         auxiliary_parameters = getattr(self, 'auxiliary_parameters', None)
-        if base_parameters is None or auxiliary_parameters is None:
-            base_parameters, auxiliary_parameters = (
-                split_auxiliary_parameter_groups(self.agent.net)
-            )
+        if (
+            base_parameters is None
+            or planning_parameters is None
+            or auxiliary_parameters is None
+        ):
+            (
+                base_parameters,
+                planning_parameters,
+                auxiliary_parameters,
+            ) = split_training_parameter_groups(self.agent.net)
 
         present_static_deck_fields = (
             LEGACY_DECK_STATIC_OBSERVATION_KEYS.intersection(cpu_obs)
@@ -1467,6 +1554,10 @@ class PPOTrainer:
                 cpu_advantages = (cpu_advantages - adv_mean) / (adv_std + 1e-8)
         
         batch_size = cpu_actions.shape[0]
+        if use_auxiliary_heads and self.mini_batch_size % 2:
+            raise RuntimeError(
+                "goal planning consistency requires an even mini_batch_size"
+            )
 
         gpu_mb_obs = {}
         for k, v in cpu_obs.items():
@@ -1526,8 +1617,22 @@ class PPOTrainer:
                 device=self.device,
             )
 
-        for _ in range(EPOCHS):
-            indices = torch.randperm(batch_size)
+        update_audit = PPOUpdateAudit(
+            batch_size,
+            self.mini_batch_size,
+            getattr(self, 'ppo_epochs', DEFAULT_PPO_EPOCHS),
+            getattr(self, 'target_kl', DEFAULT_TARGET_KL),
+        )
+        self.last_ppo_update_audit = update_audit
+        for _ in range(update_audit.requested_epochs):
+            update_audit.epochs_started += 1
+            indices = (
+                build_pair_preserving_indices(
+                    cpu_auxiliary['plan_pair_role'][:batch_size]
+                )
+                if use_auxiliary_heads
+                else torch.randperm(batch_size)
+            )
             for start in range(0, batch_size, self.mini_batch_size):
                 end = start + self.mini_batch_size
                 if end > batch_size:
@@ -1574,8 +1679,14 @@ class PPOTrainer:
 
                 # --- 网络前向传播与反向传播 (完全保持原样) ---
                 with training_autocast(self.device, self.amp_dtype):
-                    auxiliary_backbone_scale = get_auxiliary_backbone_scale(
+                    auxiliary_backbone_scale_value = get_auxiliary_backbone_scale(
                         self.train_step
+                    )
+                    auxiliary_backbone_scale = torch.full(
+                        (),
+                        auxiliary_backbone_scale_value,
+                        dtype=torch.float32,
+                        device=self.device,
                     )
                     if use_auxiliary_heads:
                         logits, values, v_input, auxiliary_predictions = (
@@ -1618,14 +1729,51 @@ class PPOTrainer:
                                 gpu_auxiliary,
                             )
                         )
-                        loss = base_loss + AUXILIARY_LOSS_COEF * auxiliary_loss
+                        (
+                            planning_loss,
+                            planning_components,
+                            planning_metrics,
+                        ) = compute_goal_planning_loss(
+                            auxiliary_predictions['plan_latent'],
+                            auxiliary_predictions['goal_predictions'],
+                            gpu_auxiliary,
+                        )
+                        loss = (
+                            base_loss
+                            + AUXILIARY_LOSS_COEF * auxiliary_loss
+                            + PLANNING_LOSS_COEF * planning_loss
+                        )
                     else:
                         auxiliary_loss = base_loss.detach() * 0.0
                         auxiliary_components = {}
                         auxiliary_metrics = {}
+                        planning_loss = base_loss.detach() * 0.0
+                        planning_components = {}
+                        planning_metrics = {}
                         loss = base_loss
 
-                if torch.isnan(loss) or torch.isinf(loss):
+                approximate_kl, clip_fraction = policy_shift_statistics(
+                    new_log_probs,
+                    gpu_old_log_probs,
+                    self.clip_eps,
+                )
+                # 一次小标量回传同时完成有限性与 KL 检查，不增加模型前向
+                loss_value, kl_value, clip_value = torch.stack((
+                    loss.detach().float(),
+                    approximate_kl,
+                    clip_fraction,
+                )).cpu().tolist()
+                if update_audit.observe(kl_value, clip_value):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    print(
+                        "🛑 [PPO] 本轮策略更新提前停止: "
+                        f"Approx KL={kl_value:.5f} | "
+                        f"阈值={update_audit.target_kl * TARGET_KL_STOP_MULTIPLIER:.5f} | "
+                        f"已更新 {update_audit.optimizer_updates} 个小批次"
+                    )
+                    break
+                if not math.isfinite(loss_value):
+                    update_audit.nonfinite_batches += 1
                     self.optimizer.zero_grad(set_to_none=True)
                     continue
 
@@ -1633,13 +1781,7 @@ class PPOTrainer:
                 if should_log_diagnostics:
                     # 诊断量只在原有日志频率上计算，不参与损失和反向传播
                     with torch.no_grad():
-                        log_ratio = new_log_probs - gpu_old_log_probs
-                        approx_kl = ((ratio - 1.0) - log_ratio).mean()
-                        clip_fraction = (
-                            (torch.abs(ratio - 1.0) > self.clip_eps)
-                            .float()
-                            .mean()
-                        )
+                        approx_kl = approximate_kl
                         return_variance = torch.var(gpu_returns, unbiased=False)
                         if return_variance > 1e-8:
                             explained_variance = 1.0 - (
@@ -1648,12 +1790,15 @@ class PPOTrainer:
                             )
                         else:
                             explained_variance = torch.zeros_like(return_variance)
-                self.train_step += 1
-
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
                 gradient_norm = nn.utils.clip_grad_norm_(base_parameters, 0.5)
+                planning_gradient_norm = (
+                    nn.utils.clip_grad_norm_(planning_parameters, 1.0)
+                    if planning_parameters
+                    else torch.zeros((), device=loss.device)
+                )
                 auxiliary_gradient_norm = (
                     nn.utils.clip_grad_norm_(auxiliary_parameters, 1.0)
                     if auxiliary_parameters
@@ -1684,7 +1829,7 @@ class PPOTrainer:
                         'Explained_Variance',
                         'Gradient_Norm',
                     )
-                    log_step = self.train_step - 1
+                    log_step = self.train_step
                     for metric_name, metric_value in zip(
                         diagnostic_names,
                         diagnostic_values,
@@ -1702,7 +1847,7 @@ class PPOTrainer:
                         )
                         self.writer.add_scalar(
                             'Auxiliary_Train/Backbone_Scale',
-                            auxiliary_backbone_scale,
+                            auxiliary_backbone_scale_value,
                             log_step,
                         )
                         self.writer.add_scalar(
@@ -1724,12 +1869,84 @@ class PPOTrainer:
                                 float(metric_value.detach().float().cpu()),
                                 log_step,
                             )
+                        self.writer.add_scalar(
+                            'Planning/Total_Loss',
+                            float(planning_loss.detach().float().cpu()),
+                            log_step,
+                        )
+                        self.writer.add_scalar(
+                            'Planning/Gradient_Norm',
+                            float(
+                                torch.as_tensor(planning_gradient_norm)
+                                .detach()
+                                .float()
+                                .cpu()
+                            ),
+                            log_step,
+                        )
+                        planning_scalars = {
+                            **planning_components,
+                            **planning_metrics,
+                            'Policy_Gate_RMS': torch.tanh(
+                                base_network.plan_policy_gate
+                            ).float().square().mean().sqrt(),
+                            'Value_Gate_RMS': torch.tanh(
+                                base_network.plan_value_gate
+                            ).float().square().mean().sqrt(),
+                        }
+                        for metric_name, metric_value in planning_scalars.items():
+                            self.writer.add_scalar(
+                                f'Planning/{metric_name}',
+                                float(metric_value.detach().float().cpu()),
+                                log_step,
+                            )
+                        if log_step % 200 == 0:
+                            self.writer.add_histogram(
+                                'Planning_Histograms/Plan_Latent',
+                                auxiliary_predictions['plan_latent']
+                                .detach()
+                                .float()
+                                .cpu(),
+                                log_step,
+                            )
+                            self.writer.add_histogram(
+                                'Planning_Histograms/Policy_Gate',
+                                torch.tanh(base_network.plan_policy_gate)
+                                .detach()
+                                .float()
+                                .cpu(),
+                                log_step,
+                            )
+                            self.writer.add_histogram(
+                                'Planning_Histograms/Value_Gate',
+                                torch.tanh(base_network.plan_value_gate)
+                                .detach()
+                                .float()
+                                .cpu(),
+                                log_step,
+                            )
+                scale_before_update = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                if self.scaler.get_scale() >= scale_before_update:
+                    self.train_step += 1
+                    update_audit.record_update(self.mini_batch_size)
+                else:
+                    update_audit.nonfinite_batches += 1
 
                 del logits, values, v_input, surr1, surr2, ratio, entropy, loss, policy_loss, value_loss, entropy_loss, base_loss
                 if use_auxiliary_heads:
-                    del auxiliary_predictions, auxiliary_loss
+                    del auxiliary_predictions, auxiliary_loss, planning_loss
+            if update_audit.kl_stopped:
+                break
+            update_audit.epochs_completed += 1
+
+        for name, value in update_audit.scalars().items():
+            self.writer.add_scalar(
+                f'PPO_Update/{name}',
+                value,
+                getattr(self, 'iteration', 0),
+            )
 
     def run_training_loop(
         self,
@@ -1815,7 +2032,9 @@ class PPOTrainer:
                     'lr': self.lr,
                     'entropy': self.entropy,
                     'gae_lambda': self.gae_lambda,
-                    'clip_eps': self.clip_eps
+                    'clip_eps': self.clip_eps,
+                    'ppo_epochs': self.ppo_epochs,
+                    'target_kl': self.target_kl,
                 }
                 torch.save(checkpoint, path)
 

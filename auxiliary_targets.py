@@ -13,7 +13,10 @@ from event_history import (
 )
 
 
-AUXILIARY_TARGET_FORMAT_VERSION = 2
+AUXILIARY_TARGET_FORMAT_VERSION = 3
+PLAN_PAIR_ROLE_NONE = 0
+PLAN_PAIR_ROLE_FIRST = 1
+PLAN_PAIR_ROLE_SECOND = 2
 
 
 class AuxiliaryHorizon(IntEnum):
@@ -35,6 +38,7 @@ _CHAIN_MESSAGE_TYPES = frozenset({70, 71, 72, 73, 74, 75, 76})
 AUXILIARY_TARGET_SPECS = {
     "valid": ((AUXILIARY_HORIZON_COUNT,), torch.bool),
     "actor": ((), torch.uint8),
+    "plan_pair_role": ((), torch.uint8),
     "lp_delta": (
         (AUXILIARY_HORIZON_COUNT, AUXILIARY_LP_DIM),
         torch.int32,
@@ -193,6 +197,29 @@ def _terminal_outcome_for_player(winner, player_id):
     return 0
 
 
+def _assign_plan_consistency_pairs(targets, sequence_ids, event_indices, events):
+    """为同一回合且同一阶段的相邻训练决策生成不重叠一致性对"""
+    row = 0
+    while row + 1 < len(sequence_ids):
+        first_index = event_indices.get(sequence_ids[row])
+        second_index = event_indices.get(sequence_ids[row + 1])
+        if first_index is None or second_index is None:
+            row += 1
+            continue
+        first = events[first_index]
+        second = events[second_index]
+        if (
+            int(first.actor) == int(second.actor)
+            and int(first.turn_count) == int(second.turn_count)
+            and int(first.phase_id) == int(second.phase_id)
+        ):
+            targets["plan_pair_role"][row] = PLAN_PAIR_ROLE_FIRST
+            targets["plan_pair_role"][row + 1] = PLAN_PAIR_ROLE_SECOND
+            row += 2
+        else:
+            row += 1
+
+
 def build_auxiliary_targets(
     step_sequence_ids,
     completed_events,
@@ -221,6 +248,12 @@ def build_auxiliary_targets(
 
     targets = allocate_auxiliary_target_columns(len(sequence_ids))
     targets["actor"].fill_(int(player_id))
+    _assign_plan_consistency_pairs(
+        targets,
+        sequence_ids,
+        event_indices,
+        events,
+    )
     lp_prefix, zone_prefix = _build_delta_prefixes(events)
     chain_ends, turn_ends, terminals = _build_boundary_indices(events)
     max_completed_sequence = previous_sequence

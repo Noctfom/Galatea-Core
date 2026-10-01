@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.12.1 (Phase 6 batch 2) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.13.0 (Phase 7 batch 1) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | Not independently versioned | 1 | When the canonical trajectory recorder lands |
@@ -135,7 +135,11 @@ Store 16 state transitions between model decisions, including actor, turn/phase,
 
 ### 4.4 Auxiliary heads and planning
 
-State-, action-, and deck-level auxiliary heads require verifiable labels and missing-label masks. Initial auxiliary gradients target roughly 10%–20% of main-task gradients; unreliable targets remain detached probes.
+State-, action-, and deck-level auxiliary heads require verifiable labels and missing-label masks.
+The current implementation uses 0.1 auxiliary loss, 0.05 planning loss, and at most a 0.2 shared
+gradient multiplier. This does not bound auxiliary norms to 20% of PPO norms; shared gradients
+can conflict. Fixed Arena benchmarks and module gradients must validate the choice; unreliable
+targets remain detached probes.
 
 Future summaries cover next decision, chain end, turn end, and terminal state. A Goal Planner emits `plan_latent` for `policy(action | state, deck_style, plan_latent)`. The first implementation recomputes it at each decision and applies within-turn/phase consistency loss before considering persistent Options or search.
 
@@ -149,6 +153,19 @@ Future summaries cover next decision, chain end, turn end, and terminal state. A
 - Split data by whole duel, deck, and player.
 
 Canonical trajectories record decks/Side Deck, seed, messages, responses, roles, result, Core/script/CDB/semantic/vocabulary hashes, source, and quality.
+
+Later canonical work reserves optional `evaluation` records outside policy inputs and labels.
+Each decision can carry perspective, model identity, state-only versus chosen-action prediction
+kind, three-class terminal probabilities, remaining-event estimate, policy mode/temperature, and
+calibration version. Predictions use only pre-action visible observations; actual terminal and
+length are recorded separately after completion. Full tensors, graphs, and per-step 128-D latents
+are not stored by default. Standard ONNX stays logits/value; diagnostics require full PTH or a
+separate diagnostic export, not a change to the normal deployment contract.
+
+Outcome curves should use the planner's state-only terminal prediction. `P(win)+0.5×P(draw)` is
+separately labeled expected score, not pure win probability. PPO value predicts discounted/shaped
+return and cannot be converted directly into win probability. Calibration uses whole-duel held-out
+validation with NLL/Brier/ECE; limited replay snapshots cannot guarantee exact old V4 reconstruction.
 
 ## 6. Deck-building and BO3 interfaces
 
@@ -178,10 +195,15 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 1 (3.11.0 / schema revision 10): low-rank global/deck branches generate separate γ/β for every layer's attention and FFN. A zero deck gate, ±0.5 bound, and persisted 10% per-duel mask provide gradual integration with PPO-consistent conditions. Net cost is 315,008 parameters and one byte per step; isolated overhead is about +0.42% on CPU and +2.91% for batch-6 CUDA BF16, with forward/backward, ONNX Runtime, and the explicit real-Core loop passing. Of 229 default tests, 228 pass and one gate is skipped.
   - [x] Review batch 2 (3.11.1 / schema revision 10): add independent `TRANSITION_EVENT_FORMAT_VERSION=1` and aggregate the latest 16 events from a successfully submitted action to the next decision, Retry, or terminal boundary. Events carry actor, turn/phase, prompt/action semantics, source/targets/effect slot/summon method, public Core message labels, LP/zone/chain changes, and cancel/decline/finish/Retry/negation outcomes. Raw fields carry per-player visibility masks: fully private internal selections disappear from the opponent view while public consequences remain. Network inputs, shared memory, PPO, ONNX, rewards, and schema revision are unchanged. The default suite passes 234 tests with one gated skip, and the explicit real-Core loop passes.
   - [x] Review batch 3 (3.11.2 / schema revision 11): encode the latest 16 events into 19 fixed-shape compact fields after player visibility masking. Sources use exact card-by-Lua-effect-slot semantics; up to five targets use card identity and all-code summaries before within-event pooling and chronological position/depthwise-convolution/attention mixing. A per-channel zero-initialized gate preserves bitwise initial policy/value output while learning from the first update; shared memory, Worker/PPO trajectories, and ONNX are fully connected. Cost is 1,440 bytes/step (about 45.0 MiB at 32,768 steps) and 589,056 parameters for 512/8/6. Isolated overhead is about +2.72% on CPU and +10.65% for batch-6 CUDA BF16; BF16 forward/backward, ONNX Runtime, and the explicit real-Core loop pass. Of 239 default tests, 238 pass and one gate is skipped.
-- [ ] **Phase 6: auxiliary heads/planning**—verifiable tasks, future summaries, `plan_latent`.
+- [x] **Phase 6: auxiliary heads/planning**—verifiable tasks, future summaries, `plan_latent`.
   - [x] Review batch 1 (3.12.0 / schema revision 11): add independent `AUXILIARY_TARGET_FORMAT_VERSION=1` and, at duel commit, align training steps with the complete finalized-event stream by action sequence ID. It generates posterior targets for next decision, chain end, turn end, and genuine Core terminal. Aborted duels still roll back atomically; truncations and unfinished final actions stay missing. Player-relative targets carry validity masks, LP/both-player eight-zone deltas, event counts, immediate result/message/boundary/summon/chain data, and terminal information. Storage is fixed at 187 bytes/step (about 5.84 MiB for 32,768 steps). Targets currently feed only `Auxiliary_Targets/*` audits—not observations, the network, PPO loss, rewards, or ONNX—so Model Protocol 4, Checkpoint Format 3, and schema revision 11 remain unchanged. The project suite passes 244 tests with one gated skip, and the explicit real-Core loop passes.
   - [x] Review batch 2 (3.12.1 / schema revision 12): `AUXILIARY_TARGET_FORMAT_VERSION=2` adds the actor seat and sends the shared state plus actually selected option into an independent 256-wide auxiliary MLP. It supervises immediate result/message/boundary/resource outcomes, chain-end/turn-end/terminal resources, terminal outcome, and remaining length. Seven masked tasks enter PPO with coefficient 0.1. The first 100 updates train heads only, then 900 updates linearly open shared gradients to at most 0.2; PPO-base and head gradients are clipped separately at 0.5/1.0. Predictions never feed policy/value, while central inference and standard ONNX neither execute nor carry the heads. Targets use 188 bytes/step (about 5.875 MiB for 32,768 steps), and 512/8/6 adds 356,709 parameters. Local batch-128 CUDA BF16 eager forward/backward measured about +1.09% time and +2.86 MiB peak allocated memory. The project suite passes 250 tests with one gated skip, and the explicit real-Core loop passes.
+  - [x] Review batch 3 (3.12.2 / schema revision 13): add a 128-dimensional `plan_latent` recomputed at every decision from shared state, stable deck style, and global/phase context. Chain-end/turn-end/terminal public resources, genuine terminal outcome, remaining length, and low-weight adjacent same-turn/same-phase consistency self-supervise it. Planning enters at 0.05; separate zero-initialized per-channel policy/value gates and ±0.5 bounded residuals integrate the latent gradually. There are no persistent options, hand-authored tactics, action scripts, MCTS, reward shaping, or legality changes. Standard ONNX retains the inference planner while pruning its target decoder and old auxiliary heads; outputs remain logits/value. Targets use 189 bytes/step (about 5.90625 MiB at 32,768 steps). A 512/8/6 model adds 426,620 parameters for 52,995,987 total. Local batch-128 CUDA BF16 eager forward/backward measured about +1.1%–1.3% and +3.79 MiB peak allocated memory; bitwise zero-gate equivalence, gate gradients, pair sampling, and ONNX pruning pass.
 - [ ] **Phase 7: PPO/canonical trajectories**—GAE/KL controls and Link/YRP inputs.
+  - [x] Review batch 1 (3.13.0 / schema revision 13 unchanged): unify default GAE lambda=0.98, configurable 1–4 PPO epochs, and target KL=0.02. Before backward, 1.5×target stops all remaining joint updates for the rollout; nonfinite shifts always stop, while 0 disables the finite threshold. CLI/WebUI share validation, audits retain only mini-batch scalars, and fixed batches/tails remain unchanged. `PPO_Update/*` and `Configuration/PPO` distinguish actual updates, complete traversals, and current launch controls without changing rewards, network, observations, or ONNX.
+    - Evidence: 265 regression tests pass with one real-Core gate skipped; explicitly enabling three Core loops passes with zero query parse errors and response fallbacks. Real CUDA GradScaler skips do not advance counters; first-batch KL stops freeze all auxiliary/planning parameters; ONNX parity/pruning remain passing. Isolated check cost stays at the small-batch-scalar level; long-training strength comparisons for this batch are still pending.
+  - [ ] Review batch 2: one canonical Core trajectory with deterministic message/response mapping, optional per-decision prediction records, and replay curves; never present batch aggregates as single-duel win probabilities.
+  - [ ] Review batch 3: Link/YRP inputs and quality gates split by complete duel/deck/player; imitation only consumes deterministic replays with reliable legal-candidate mapping.
 - [ ] **Phase 8: V4 scratch-training validation**—short, medium, and long gates.
 - [ ] **Phase 9: deck-building/BO3 layer**—framework becomes 4.0.0 after completion.
 

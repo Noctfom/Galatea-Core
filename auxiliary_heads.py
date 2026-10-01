@@ -43,6 +43,9 @@ AUXILIARY_COMPONENT_WEIGHTS = {
 
 def scale_auxiliary_backbone_gradient(value, scale):
     """保持前向值不变，仅缩放辅助任务返回共享主干的梯度"""
+    if torch.is_tensor(scale):
+        scale = scale.to(device=value.device, dtype=value.dtype)
+        return value.detach() + scale * (value - value.detach())
     scale = float(scale)
     if not 0.0 <= scale <= 1.0:
         raise ValueError(f"auxiliary backbone scale must be in [0, 1], got {scale}")

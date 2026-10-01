@@ -14,6 +14,7 @@ from checkpoint_utils import load_training_checkpoint
 from semantic_assets import DEFAULT_SEMANTIC_REPOSITORY_URL
 from training_lock import TrainerAlreadyRunningError, TrainerProcessLock
 from training_validation import resolve_training_target
+from ppo_control import DEFAULT_GAE_LAMBDA, DEFAULT_PPO_EPOCHS, DEFAULT_TARGET_KL
 from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL
 
 # [必须] Windows多进程入口保护
@@ -179,6 +180,8 @@ def run_training_command(args, parser):
             entropy=args.entropy,
             gae_lambda=args.gae_lambda,
             clip_eps=args.clip_eps,
+            ppo_epochs=args.ppo_epochs,
+            target_kl=args.target_kl,
             use_onnx=args.use_onnx,
             standard_core=args.standard_core,
             model_prefix=args.model_prefix,
@@ -268,8 +271,10 @@ def main():
     train_parser.add_argument('--gamma', type=float, default=0.998, help='目光长远度 (推荐0.998)')
     train_parser.add_argument('--lr', type=float, default=1e-4, help='学习率 (大脑神经元重塑速度)')
     train_parser.add_argument('--entropy', type=float, default=0.03, help='探索欲/好奇心系数')
-    train_parser.add_argument('--gae_lambda', type=float, default=0.95, help='经验平滑度')
+    train_parser.add_argument('--gae_lambda', type=float, default=DEFAULT_GAE_LAMBDA, help='GAE Lambda，V4 默认 0.98，可对照 0.95/0.99')
     train_parser.add_argument('--clip_eps', type=float, default=0.2, help='单次顿悟的上限')
+    train_parser.add_argument('--ppo-epochs', type=int, default=DEFAULT_PPO_EPOCHS, choices=range(1, 5), help='每轮 PPO 更新次数上限（1～4）')
+    train_parser.add_argument('--target-kl', type=float, default=DEFAULT_TARGET_KL, help='目标 KL；超过 1.5 倍目标停止本轮共享更新，0 关闭')
 
     # ==========================================
     

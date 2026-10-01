@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.12.1**.
+> This document applies to **Galatea-Core v3.13.0**.
 
 ---
 
@@ -266,6 +266,37 @@ Go to **📉 Training Manifold**, click **🚀 Start TensorBoard** to view:
 | `Auxiliary_Train/Backbone_Scale` | Zero for 100 updates, then linearly rises to 0.2 over 900 updates |
 | `Auxiliary_Train/Boundary_Accuracy` | Should rise after coverage stabilizes; interpret with `Auxiliary_Targets/coverage_next` |
 | `Auxiliary_Train/Terminal_Accuracy` | Counts genuine Core-terminal labels only, never timeout/truncation as truth |
+| `Planning/Total_Loss` | Compare smoothed trends only within one version and interpret with components plus target coverage |
+| `Planning/Latent_Active_Dimension_Fraction` | Should not remain near zero; a low value may indicate latent collapse |
+| `Planning/Pair_Cosine` | Adjacent same-turn/same-phase goals should become steadier, but need not approach 1 |
+| `Planning/Policy_Gate_RMS` / `Value_Gate_RMS` | Should open gradually from zero; persistent zero means no decision effect, while rapid saturation needs review |
+| `Planning/Gradient_Norm` | Should stay finite without persistent spikes; interpret separately from `Train/Gradient_Norm` |
+
+`Planning_Histograms/Plan_Latent`, `Policy_Gate`, and `Value_Gate` record distributions every 200
+updates to reveal collapse, concentration in a few channels, or premature gate saturation. These are
+training diagnostics, not directly nameable “attack/defense/combo” explanations, and they do not
+automatically create natural-language plans in Holographic Replay.
+
+### PPO Update Controls (3.13.0)
+
+Since 3.13.0, advanced training settings expose GAE lambda (default 0.98), PPO epoch limit (4),
+and target KL (0.02; 0 disables the finite threshold). CLI equivalent:
+
+```bash
+python main.py train --gae_lambda 0.98 --ppo-epochs 4 --target-kl 0.02 --no_compile
+```
+
+TensorBoard `PPO_Update/Effective_Epochs` is updated samples divided by valid rollout samples;
+`Epochs_Completed` counts complete traversals and `KL_Early_Stop` flags stopping. Different values
+are not inherently errors. `Approx_KL_P95` / `Clip_Fraction_P95` summarize mini-batch means, not
+individual-action distributions. Current controls appear under the text tab `Configuration/PPO`.
+Repeated first-mini-batch stops require checking sampling/update modes and old log-probabilities
+before relaxing thresholds.
+
+Replays do not yet record auxiliary predictions. Future per-decision outcome curves require
+state-only predictions plus perspective, model identity, sampling mode, and probability calibration.
+Remaining length currently means between-decision Core events, not turns. Standard ONNX still
+prunes training-only prediction heads and cannot already output these curves.
 
 ### Meta Dashboard
 

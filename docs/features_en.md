@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.12.1**.
+> This document applies to **Galatea-Core v3.13.0**.
 
 ---
 
@@ -70,7 +70,7 @@
 | `Train/Approx_KL` | Approximate old/new policy divergence | Small and stable; avoid persistent spikes |
 | `Train/Clip_Fraction` | Fraction of samples clipped by PPO | Moderate; avoid staying near 0 or 1 |
 | `Train/Explained_Variance` | How much return variance the value network explains | Rise from 0 toward 1; persistent negatives need investigation |
-| `Train/Gradient_Norm` | Total gradient norm before clipping | Finite and without sustained abnormal spikes |
+| `Train/Gradient_Norm` | Pre-clipping joint gradient norm on PPO-base parameters, excluding separate planning/prediction groups | Finite and without sustained abnormal spikes |
 | `Rollout/Average_Reward` | Mean reward of sampled games | Prefer smoothed trends within the same opponent category |
 | `League_Overall/WinRate_Total` | Win rate over the mixed league pool | Read alongside Rule/Self/Hist splits to avoid opponent-mixture bias |
 | `Performance/Rollout_Steps_Per_Second` | Valid rollout samples collected per second | Stable or increasing |
@@ -145,7 +145,9 @@ Configure and launch AI training tasks.
 - v3.11.1 adds the latest 16 between-decision state-transition events with strict submitted-action and next-decision/Retry/terminal boundaries, public outcomes, and field-level player visibility masks. They are snapshot/audit-only for now and do not change the network, PPO, ONNX, rewards, or schema revision
 - v3.11.2 compacts the 16 masked events into fixed tensors and an independent ordered encoder. Sources use exact Lua effect-slot semantics, targets use card/code semantics, a zero-initialized gate preserves initial policy behavior, and the same contract spans shared memory, PPO, and ONNX
 - v3.12.0 adds an independent four-horizon training-posterior contract aligned by action sequence ID: next decision, chain end, turn end, and genuine terminal. Missing masks prevent truncated or unfinished outcomes from becoming fake zeros; only coverage and result distributions are currently audited under `Auxiliary_Targets/*`, with no network, PPO-loss, or ONNX consumption
-- v3.12.1 connects training-only structured heads during PPO updates. They predict immediate action outcomes, multi-horizon public-resource changes, and genuine terminals, using 100 probe-only updates, a 900-update linear ramp, and at most 20% shared gradient. Predictions never feed action logits/value, and central inference plus standard ONNX add no computation
+- v3.12.1 connects training-only structured heads during PPO updates. They predict immediate action outcomes, multi-horizon public-resource changes, and genuine terminals, using 100 probe-only updates, a 900-update linear ramp, and at most a 0.2 gradient multiplier—not a 20% bound on PPO gradient norms. Predictions never feed action logits/value, and central inference plus standard ONNX add no computation
+- v3.12.2 adds a 128-dimensional goal-planning latent recomputed at every decision from shared state, stable deck style, and global context. Genuine future-resource/terminal posteriors self-supervise it, while separate zero-initialized policy/value gates integrate it without discrete saved plans, tree search, reward changes, or legality changes
+- v3.13.0 unifies GAE lambda=0.98, PPO epoch limits, and target KL; pre-backward guards protect all joint updates, and new audits report actual updates plus mini-batch-mean quantiles without changing network/observations
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
@@ -459,8 +461,10 @@ python main.py train [options]
 | `--gamma` | Discount factor | 0.998 |
 | `--lr` | Learning rate | 1e-4 |
 | `--entropy` | Entropy regularization coefficient | 0.03 |
-| `--gae_lambda` | GAE smoothing coefficient | 0.95 |
+| `--gae_lambda` | GAE smoothing coefficient | 0.98 |
 | `--clip_eps` | PPO clipping threshold | 0.2 |
+| `--ppo-epochs` | PPO epoch limit, range 1–4 | 4 |
+| `--target-kl` | Approximate-KL target; 0 disables the finite threshold | 0.02 |
 
 `--target-iteration` and `--additional-iterations` are mutually exclusive. Resume requires one
 of them explicitly; new training defaults to 1,000 additional iterations when both are omitted.
@@ -680,8 +684,15 @@ These parameters can be adjusted in WebUI or CLI for fine-grained PPO algorithm 
 | Discount Factor | `--gamma` | Future reward weighting | 0.998 | Higher = more emphasis on long-term, good for long games |
 | Learning Rate | `--lr` | Neural plasticity speed | 1e-4 | Too high = unstable, too low = slow convergence |
 | Exploration Coef | `--entropy` | Curiosity/exploration strength | 0.03 | Encourages trying new actions and stays at the configured value during training |
-| GAE Lambda | `--gae_lambda` | Generalized Advantage Estimation λ | 0.95 | Balances bias-variance tradeoff, generally don't change |
+| GAE Lambda | `--gae_lambda` | Generalized Advantage Estimation λ | 0.98 | Extends credit assignment; compare 0.95/0.99 on fixed benchmarks |
 | PPO Clip Epsilon | `--clip_eps` | Policy update clipping threshold | 0.2 | Limits single update magnitude, prevents overshooting |
+| Epoch Limit | `--ppo-epochs` | Maximum epochs per rollout | 4 | Range 1–4; KL may stop earlier |
+| Target KL | `--target-kl` | Stop all joint updates above 1.5×target | 0.02 | 0 disables the finite threshold; nonfinite shifts always stop |
+
+TensorBoard `PPO_Update/*` reports actual updates and early stopping by collection iteration;
+the text tab `Configuration/PPO` stores launch settings. Audits keep small-batch scalars only,
+without larger per-step trajectories or another network pass. Per-duel outcome/length curves are
+not yet recorded in replay; training-batch accuracy is not the win probability of one position.
 
 ---
 

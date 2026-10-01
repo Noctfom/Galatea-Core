@@ -19,6 +19,14 @@ from auxiliary_heads import (
     AUXILIARY_TERMINAL_OUTCOME_CLASS_COUNT,
 )
 from auxiliary_targets import AUXILIARY_TARGET_FORMAT_VERSION
+from goal_planner import (
+    PLAN_CONSISTENCY_WEIGHT,
+    PLAN_HIDDEN_DIM,
+    PLAN_LATENT_DIM,
+    PLAN_MAX_AMPLITUDE,
+    PLANNING_COMPONENT_WEIGHTS,
+    PLANNING_LOSS_COEF,
+)
 from card_vocab import (
     CARD_VOCAB_FORMAT_VERSION,
     CARD_VOCAB_RESERVED_TOKENS,
@@ -62,7 +70,7 @@ from semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 12
+PROTOCOL_SCHEMA_REVISION = 13
 
 
 def _schema_descriptor(card_vocabulary):
@@ -402,6 +410,29 @@ def _schema_descriptor(card_vocabulary):
                 "ramp_updates": AUXILIARY_RAMP_STEPS,
                 "maximum_scale": AUXILIARY_BACKBONE_SCALE_MAX,
             },
+        },
+        "goal_planner": {
+            "inputs": ["shared_state", "deck_style", "global_context"],
+            "latent_dim": PLAN_LATENT_DIM,
+            "hidden_dim": PLAN_HIDDEN_DIM,
+            "recompute": "every_decision",
+            "policy_value_fusion": "separate_zero_initialized_bounded_gates",
+            "maximum_residual_amplitude": PLAN_MAX_AMPLITUDE,
+            "future_horizons": [
+                item.name.lower() for item in AUXILIARY_FUTURE_HORIZONS
+            ],
+            "planning_loss_coefficient": PLANNING_LOSS_COEF,
+            "component_weights": PLANNING_COMPONENT_WEIGHTS,
+            "same_turn_phase_consistency_weight": PLAN_CONSISTENCY_WEIGHT,
+            "consistency_pairing": (
+                "adjacent_same_actor_turn_phase_nonoverlapping"
+            ),
+            "ppo_shuffle": "two_sample_units_even_minibatch",
+            "backbone_gradient": "shared_auxiliary_probe_ramp",
+            "persistent_option": False,
+            "tree_search": False,
+            "standard_onnx_internal": True,
+            "standard_onnx_output": False,
         },
         "inherited_protocol": "galatea_model_protocol_v3",
     }

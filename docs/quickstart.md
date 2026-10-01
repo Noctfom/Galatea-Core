@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置，预计耗时 **5-10 分钟**。
 
-> 文档适用于 **Galatea-Core v3.12.1**。
+> 文档适用于 **Galatea-Core v3.13.0**。
 
 ---
 
@@ -252,6 +252,34 @@ Galatea-Core 的训练参数分为三个层级，理解这个分类有助于你�
 | `Auxiliary_Train/Backbone_Scale` | 前 100 次更新为 0，随后 900 次线性升至 0.2 |
 | `Auxiliary_Train/Boundary_Accuracy` | 在覆盖率稳定时逐渐上升；需结合 `Auxiliary_Targets/coverage_next` 解读 |
 | `Auxiliary_Train/Terminal_Accuracy` | 只统计真实 Core 终局标签，不把超时/截断当答案 |
+| `Planning/Total_Loss` | 只比较同版本平滑趋势；需结合各分项和标签覆盖率判断 |
+| `Planning/Latent_Active_Dimension_Fraction` | 不应长期逼近 0；过低可能表示规划表示坍塌 |
+| `Planning/Pair_Cosine` | 同回合同阶段相邻目标应逐步稳定，但不要求趋近 1 |
+| `Planning/Policy_Gate_RMS` / `Value_Gate_RMS` | 从 0 逐步开启；持续为 0 表示规划尚未影响决策，快速饱和则需复核 |
+| `Planning/Gradient_Norm` | 应保持有限且无持续尖峰；与 `Train/Gradient_Norm` 分开解读 |
+
+`Planning_Histograms/Plan_Latent`、`Policy_Gate` 和 `Value_Gate` 每 200 次更新记录一次分布，
+用于观察表示坍塌、门是否只集中在少数通道或是否过早饱和。这些曲线和直方图是训练诊断，
+不是可直接命名的“进攻/防守/某套 combo”解释，也不会在全息回放中自动生成自然语言计划。
+
+### PPO 更新控制（3.13.0）
+
+3.13.0 在训练高级参数区提供 GAE lambda（默认 0.98）、PPO epoch 上限（默认 4）和
+目标 KL（默认 0.02，0 关闭有限阈值）。CLI 等价：
+
+```bash
+python main.py train --gae_lambda 0.98 --ppo-epochs 4 --target-kl 0.02 --no_compile
+```
+
+TensorBoard 的 `PPO_Update/Effective_Epochs` 表示实际更新样本数÷本轮有效样本数，
+`Epochs_Completed` 是完整完成的遍历数，`KL_Early_Stop` 是停止标志；两者不同不代表异常。
+`Approx_KL_P95` / `Clip_Fraction_P95` 统计小批均值而非逐动作分布。当前配置保存在文本页
+`Configuration/PPO`。若经常第一小批就停止，应先核查采样/更新模式和 old log-prob，
+不应直接把阈值无限放宽。
+
+回放暂未记录辅助预测。未来逐步胜负曲线需单独保存纯状态预测和玩家视角、模型身份、
+采样模式等元数据，并进行概率校准；剩余长度目前预测 Core 决策间事件数，不是回合数。
+标准 ONNX 仍裁掉训练预测头，不能假设现有 ONNX 已能输出这类曲线。
 
 ### 卡组生态大盘
 

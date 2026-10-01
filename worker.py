@@ -35,6 +35,7 @@ from data_types import ActionOperation, DECK_FILM_DROPOUT
 import deck_utils
 import rule_bot
 from rollout_cursor import RolloutCursor
+from ppo_control import DEFAULT_GAE_LAMBDA
 from deck_trajectory import (
     DeckProfileRegistry,
     is_deck_static_observation,
@@ -63,7 +64,7 @@ DECISION_MSGS = frozenset(MODEL_ACTION_MSGS) | {132}
 
 # GAE 参数 (和 Trainer 保持一致)
 GAMMA = 0.998
-GAE_LAMBDA = 0.95
+GAE_LAMBDA = DEFAULT_GAE_LAMBDA
 MAX_EPISODE_STEPS = 1500
 LONG_GAME_TURN_THRESHOLD = 40
 SINGLE_TURN_DECISION_THRESHOLD = 300

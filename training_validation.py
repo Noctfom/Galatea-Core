@@ -5,6 +5,7 @@ import re
 from numbers import Integral, Real
 
 from protocol_schema import apply_current_protocol_metadata
+from ppo_control import DEFAULT_PPO_EPOCHS, DEFAULT_TARGET_KL, MAX_PPO_EPOCHS
 
 MODEL_PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -34,6 +35,8 @@ def validate_training_config(
     entropy,
     gae_lambda,
     clip_eps,
+    ppo_epochs=DEFAULT_PPO_EPOCHS,
+    target_kl=DEFAULT_TARGET_KL,
 ):
     """统一拒绝会导致模型构建或 PPO 训练失效的非法配置"""
     if not isinstance(net_config, dict):
@@ -52,6 +55,11 @@ def validate_training_config(
     _require_positive_integer("update_timesteps", update_timesteps)
     _require_positive_integer("mini_batch_size", mini_batch_size)
     _require_positive_integer("num_workers", num_workers)
+    _require_positive_integer("ppo_epochs", ppo_epochs)
+    if ppo_epochs > MAX_PPO_EPOCHS:
+        raise ValueError(f"ppo_epochs must not exceed {MAX_PPO_EPOCHS}")
+    if mini_batch_size % 2:
+        raise ValueError("mini_batch_size must be even for planning consistency pairs")
     if mini_batch_size > update_timesteps:
         raise ValueError("mini_batch_size must not exceed update_timesteps")
 
@@ -68,6 +76,7 @@ def validate_training_config(
         ("entropy", entropy),
         ("gae_lambda", gae_lambda),
         ("clip_eps", clip_eps),
+        ("target_kl", target_kl),
     ):
         _require_finite_number(name, value)
 
@@ -81,6 +90,8 @@ def validate_training_config(
         raise ValueError("gae_lambda must be in the interval [0, 1]")
     if not 0 < clip_eps <= 1:
         raise ValueError("clip_eps must be in the interval (0, 1]")
+    if target_kl < 0:
+        raise ValueError("target_kl must be non-negative; 0 disables KL early stopping")
 
 
 def validate_max_iterations(max_iterations):

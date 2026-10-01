@@ -33,6 +33,7 @@ from protocol_schema import (
 from deck_encoder import DeckEncoder
 from event_encoder import EventHistoryEncoder
 from auxiliary_heads import StructuredAuxiliaryHeads
+from goal_planner import GoalPlanner, PLAN_LATENT_DIM, PLAN_MAX_AMPLITUDE
 from semantic_lookup import get_static_semantic_lookup
 
 
@@ -541,6 +542,23 @@ class GalateaNet(nn.Module):
 
         # 训练专用预测头最后初始化，避免改变既有策略/价值参数的随机初始化顺序
         self.auxiliary_heads = StructuredAuxiliaryHeads(self.d_model)
+        # 目标规划器通过零门控分别进入策略与价值，初始化时保持既有输出不变
+        self.goal_planner = GoalPlanner(
+            self.d_model,
+            GLOBAL_FEATURE_DIM + self.phase_context_embed.embedding_dim,
+        )
+        self.plan_policy_proj = nn.Linear(
+            PLAN_LATENT_DIM,
+            self.d_model,
+            bias=False,
+        )
+        self.plan_value_proj = nn.Linear(
+            PLAN_LATENT_DIM,
+            self.d_model,
+            bias=False,
+        )
+        self.plan_policy_gate = nn.Parameter(torch.zeros(1, self.d_model))
+        self.plan_value_gate = nn.Parameter(torch.zeros(1, self.d_model))
 
     def process_semantics(
         self,
@@ -962,7 +980,7 @@ class GalateaNet(nn.Module):
             deck_pooled = 0
 
         # 稳定画像已参与分层 FiLM，此处保留策略/价值头的直接信息通道
-        deck_style = deck_style.unsqueeze(1)
+        deck_style_token = deck_style.unsqueeze(1)
             
         # 连锁雷达：嗅探正在发动的效果！
         if 'c_card_idx' in batch_dict:
@@ -1039,14 +1057,32 @@ class GalateaNet(nn.Module):
             g_embed
             + pooled
             + deck_pooled
-            + deck_style
+            + deck_style_token
             + chain_pooled
             + history_pooled
             + event_pooled
         )
         v_input = self.v_norm(v_input)
         state_repr = v_input.squeeze(1)
-        value = self.value_head(state_repr)
+        plan_latent = self.goal_planner(
+            state_repr,
+            deck_style,
+            film_context,
+            auxiliary_backbone_scale,
+        )
+        plan_policy_delta = PLAN_MAX_AMPLITUDE * torch.tanh(
+            self.plan_policy_proj(plan_latent)
+        )
+        plan_value_delta = PLAN_MAX_AMPLITUDE * torch.tanh(
+            self.plan_value_proj(plan_latent)
+        )
+        policy_state_repr = state_repr + (
+            torch.tanh(self.plan_policy_gate) * plan_policy_delta
+        )
+        value_state_repr = state_repr + (
+            torch.tanh(self.plan_value_gate) * plan_value_delta
+        )
+        value = self.value_head(value_state_repr)
 
         # === Action Head (因果决策) ===
         act_card_idx = batch_dict['act_card_idx'] # 新形状: [B, 120, 5]
@@ -1164,7 +1200,7 @@ class GalateaNet(nn.Module):
 
         # 终极双塔匹配机制 (Dual-Tower Matching)
         # 1. 意图塔 (Intent)：全局底蕴决定了ai想干什么
-        intent_vec = self.intent_proj(state_repr.unsqueeze(1))
+        intent_vec = self.intent_proj(policy_state_repr.unsqueeze(1))
         intent_vec = intent_vec.expand(-1, act_mask.shape[1], -1) 
         
         # 2. 选项塔 (Option)：把目标卡片、类型、隐藏语义全部融合
@@ -1207,6 +1243,10 @@ class GalateaNet(nn.Module):
             state_repr,
             selected_option,
             auxiliary_backbone_scale,
+        )
+        auxiliary_predictions["plan_latent"] = plan_latent
+        auxiliary_predictions["goal_predictions"] = (
+            self.goal_planner.target_decoder(plan_latent)
         )
         return logits, value, state_repr, auxiliary_predictions
     
