@@ -2,7 +2,11 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.13.0**.
+> This document applies to **Galatea-Core v3.13.1**.
+
+3.13.1's optional [canonical trajectories and state-evaluation replay](core_trajectories_en.md)
+reuse existing Core parsing, observations and state decoders without changing training, network
+structure, protocol inputs or standard ONNX outputs.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 

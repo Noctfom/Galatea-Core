@@ -152,6 +152,16 @@ class TransitionEventRecorder:
         self._pending = None
         self._next_sequence_id = 0
 
+    @property
+    def next_sequence_id(self):
+        """读取下一次动作转移编号，不保留额外历史"""
+        return self._next_sequence_id
+
+    @property
+    def completed_event_count(self):
+        """读取本局已完成的转移数量，供终局后验对照使用"""
+        return self._next_sequence_id - int(self._pending is not None)
+
     def begin(
         self,
         *,

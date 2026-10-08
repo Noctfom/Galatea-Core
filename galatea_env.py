@@ -9,6 +9,7 @@ import sqlite3
 import time
 import random
 import sys
+import weakref
 
 from core_query import PUBLIC_CARD_QUERY_FLAGS, parse_legacy_card_query
 from selection_protocol import build_core_response_buffer
@@ -25,6 +26,12 @@ LOCATION_EXTRA = 0x40
 # 全局纯内存卡片数据库缓存
 _GLOBAL_CARD_CACHE = {}
 _GLOBAL_CACHE_INIT = False
+_CALLBACK_ENV_REF = None
+
+
+def get_callback_environment():
+    """读取最近注册回调的环境，供诊断重放结束后恢复原绑定"""
+    return _CALLBACK_ENV_REF() if _CALLBACK_ENV_REF is not None else None
 
 
 def _copy_ctypes_bytes(buffer, length):
@@ -113,11 +120,16 @@ class GalateaEnv:
         self.msg_buf = (ctypes.c_byte * 65536)()
         self.query_buf = (ctypes.c_byte * 8192)()
         
-        # 注册回调
+        self.install_callbacks()
+
+    def install_callbacks(self):
+        """注册公开 Core 回调并以弱引用记录绑定，不保留额外环境"""
+        global _CALLBACK_ENV_REF
         self.lib.set_script_reader(self.cb_script_reader)
         self.lib.set_card_reader(self.cb_card_reader)
         if hasattr(self.lib, 'set_message_handler'):
             self.lib.set_message_handler(self.cb_msg_handler)
+        _CALLBACK_ENV_REF = weakref.ref(self)
 
     def _setup_lib(self):
         # API 签名映射
@@ -322,6 +334,7 @@ class GalateaEnv:
         self.lib.set_player_info(self.pduel, 1, 8000, 5, 1)
         
         def inject_deck(player_id, deck_obj):
+            """按原有随机顺序注入卡组，并保留轻量复现元数据"""
             # 主卡组加载
             main_cards = deck_obj.main[:]
             # 修复2：录像模式下不能在 Python 层洗牌
@@ -337,6 +350,15 @@ class GalateaEnv:
             for code in extra_cards:
                 self.lib.new_card(self.pduel, code, player_id, player_id, LOCATION_EXTRA, 0, 0)
 
+            self.last_reset_metadata['players'][str(player_id)] = {
+                'main': list(main_cards), 'extra': list(extra_cards),
+            }
+
+        # 仅复制实际顺序，不额外消耗随机数或改变 Core 启动参数
+        self.last_reset_metadata = {
+            'seed': int(duel_seed) & 0xFFFFFFFF, 'players': {},
+            'lp': 8000, 'start_hand': 5, 'draw_count': 1, 'duel_flags': 0,
+        }
         inject_deck(0, deck0)
         inject_deck(1, deck1)
         

@@ -813,6 +813,7 @@ class GalateaNet(nn.Module):
         batch_dict,
         auxiliary_actions=None,
         auxiliary_backbone_scale=0.0,
+        return_evaluation=False,
     ):
         # --- 全局状态调制器 ---
         phase_context = self.phase_context_embed(
@@ -1232,6 +1233,11 @@ class GalateaNet(nn.Module):
         logits = logits.masked_fill(~act_mask, -65000.0)
 
         if auxiliary_actions is None:
+            # 录像诊断只读取既有状态解码器，不改变策略、价值及常规返回契约
+            if return_evaluation:
+                return logits, value, state_repr, (
+                    self.goal_planner.target_decoder.evaluate_terminal(plan_latent)
+                )
             return logits, value, state_repr
 
         selected_option = torch.gather(

@@ -4,6 +4,22 @@
 
 ---
 
+## [v3.13.1] - 2026-10-02
+
+### 🎞️ V4 Phase 7 batch 2: canonical trajectories and state-evaluation replay
+
+- **One semantic path**: `core_trajectory.py` reuses MessageParser/DuelState/the existing response packer; records raw Core chunks, consumed messages, query timing, raw macro pools, responses and observation digests without macro resampling or full tensors
+- **Determinism and identity**: preserve Core seed, actual Python-shuffled injection order and original stable builds, plus UUID/internal iteration/checkpoint digest and public Core/CDB/loaded Lua/card-cache/vocabulary/semantic/protocol identities. New read-only `trajectory-check` and `--replay` verify records and restore callbacks/dialect afterward. Explicitly distinguish byte-exact output from same-card consecutive client-hint-removal reordering: diagnostic observation reproduction never grants the latter behavior-cloning eligibility
+- **Bounded quality gates**: UUID gzip streams, 64 MiB uncompressed per-duel cap, bounded JSON readers; real terminals, no quality flags, unique response mappings and complete observation checks are necessary for behavior-cloning eligibility. Retry, ambiguous rule macros, unconsumed bytes and truncation never fabricate labels; checksums are not authentication
+- **Optional state curves**: synchronized CLI/WebUI switches only affect logged games. Decode existing state terminal/length heads without new weights or changed selection. Replay JSON format 3 remains backward viewable, adding independent win/remaining-event curves, draw probabilities and separate actual-terminal references. Probabilities are uncalibrated; events are not turns and PPO value is not win probability
+- **Storage**: Storage & Logs manages `.core.jsonl.gz`; Side is upper-layer metadata only, never single-duel input
+- **Evidence and follow-up**: 276 regression tests pass with two explicit Core gates skipped by default; both pass when enabled, with three games in the original gate. The new gate covers two recording-switch comparisons/replays with swapped seats, plus ordinary shuffled injection and rule-opponent observations. New/old replay curve blocks pass actual Streamlit widget tests. CPU and 512/8/6 CUDA policy/value outputs are bitwise identical without extra RNG; the diagnostic branch did not increase forward peak allocated memory in the short CUDA check. Existing partial Type 16 parsing retains per-chunk coverage metadata/quality flags and is excluded from automatic imitation eligibility for a dedicated public-dialect audit next batch
+- **Version boundaries**: framework 3.13.1; Model Protocol 4 / Checkpoint Format 3 / schema revision 13 unchanged; independent Trajectory Schema 1, Evaluation Format 1 and Replay Format 3. Training/rewards/shared-memory/standard ONNX remain unchanged; Link/YRP adapters and imitation optimization are not implemented in this batch
+
+See [Canonical trajectories and state-evaluation replay](core_trajectories_en.md).
+
+---
+
 ## [v3.13.0] - 2026-10-01
 
 ### 🛡️ V4 Phase 7 batch 1: PPO update boundaries and GAE comparisons

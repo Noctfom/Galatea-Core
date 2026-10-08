@@ -2,7 +2,7 @@
 
 > Zero to first AI training in **5-10 minutes**.
 
-> This document applies to **Galatea-Core v3.13.0**.
+> This document applies to **Galatea-Core v3.13.1**.
 
 ---
 
@@ -336,6 +336,7 @@ Imported models appear in `./models/`. Jump to [Arena Testing](#arena-model-test
 
 ## Next Steps
 
+- 🎞️ Use [Canonical Core trajectories and state-evaluation replay](core_trajectories_en.md): enable Arena recording options, expand evaluation curves in replay, or run read-only `trajectory-check --replay`
 - 📚 Read [Feature Guide](features.md) for detailed module usage
 - 🔧 Read [Architecture](architecture.md) for framework internals
 - 🧬 Read [Special Handling](special_handling.md) for unique features

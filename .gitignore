@@ -16,6 +16,7 @@ ai_thoughts/
 arena_benchmarks/
 replays/
 replay_data/
+replays/core_trajectories/
 system_logs/
 web_data/
 crash_report.txts

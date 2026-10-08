@@ -10,7 +10,7 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 - [x] Complete structured auxiliary heads and a continuous goal-planning latent from verifiable immediate, multi-horizon future, and terminal posteriors; do not use hand-authored tactics or present attention/latent dimensions as explanations
 - [ ] Display calibrated auxiliary predictions and counterfactual evaluations in Holographic Replay while clearly separating prediction, observed event, and explanatory inference
 - [x] Phase 7 batch 1 (3.13.0): unified GAE comparisons, PPO epoch/target-KL controls, and actual-update audits without network or reward changes
-- [ ] Phase 7 batch 2: one canonical trajectory and optional per-decision predictions; implement state-evaluation curves before separately validating counterfactual search
+- [x] Phase 7 batch 2 (3.13.1): canonical raw Core trajectories, deterministic observation-digest replay, and optional independent state-evaluation curves; retain quality gates and separately validate counterfactual search
 - [ ] Phase 7 batch 3: Link/YRP input, deterministic replay, and whole-duel held-out quality gates before behavior cloning
 
 ## Separable Deck-Construction Cognition

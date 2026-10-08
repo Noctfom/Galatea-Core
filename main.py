@@ -210,7 +210,8 @@ def main():
     }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
     
-    setup_global_logger(prefix=log_prefix)
+    if cmd_name != 'trajectory-check':
+        setup_global_logger(prefix=log_prefix)
     
     parser = argparse.ArgumentParser(description="Galatea AI 主控程序")
     subparsers = parser.add_subparsers(dest='command', help='可用指令')
@@ -293,6 +294,9 @@ def main():
     duel_parser.add_argument('--device', type=str, default='cpu', help='推理设备')
     duel_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
     duel_parser.add_argument('--thought_freq', type=int, default=0, help='每隔几局保存一次AI心声 (0为不保存)')
+    duel_parser.add_argument('--record-trajectory', action='store_true', help='仅录像局额外保存原始 Core 规范轨迹')
+    duel_parser.add_argument('--record-evaluations', action='store_true', help='仅录像局保存未经校准的状态终局预测')
+    duel_parser.add_argument('--trajectory-root', default='./replays/core_trajectories', help='规范轨迹保存目录')
     duel_parser.add_argument(
         '--policy-mode', '--policy_mode',
         choices=('greedy', 'training', 'deployment'),
@@ -384,7 +388,13 @@ def main():
     vocab_parser.add_argument('--cdb', type=str, default='cards.cdb', help='本地 cards.cdb 或自制卡数据库路径')
     vocab_parser.add_argument('--output', type=str, default='card_vocab.json', help='目标词表路径')
 
+    trajectory_parser = subparsers.add_parser('trajectory-check', help='只读检查规范轨迹格式/摘要，或在相同公开 Core 下重放验证')
+    trajectory_parser.add_argument('path', help='*.core.jsonl.gz 文件')
+    trajectory_parser.add_argument('--replay', action='store_true', help='额外验证 Core 原始输出、响应映射和观测摘要')
+
     args = parser.parse_args()
+    if args.command == 'duel' and (args.record_trajectory or args.record_evaluations) and args.thought_freq <= 0:
+        parser.error('轨迹/预测记录需要 --thought_freq 大于 0；仅选定的录像局进行额外记录')
 
 
 
@@ -428,6 +438,9 @@ def main():
         # 竞技场控制参数与模型架构分离，模型结构由各自检查点决定。
         config = {
             'thought_freq': args.thought_freq,
+            'record_trajectory': args.record_trajectory,
+            'record_evaluations': args.record_evaluations,
+            'trajectory_root': args.trajectory_root,
         }
 
         arena = ModelArena(
@@ -534,6 +547,16 @@ def main():
                     cdb_url=args.cdb_url,
                     card_vocab_url=args.card_vocab_url,
                 )
+
+    elif args.command == 'trajectory-check':
+        import json
+        from core_trajectory import inspect_core_trajectory, replay_core_trajectory
+        try:
+            report = (replay_core_trajectory(args.path) if args.replay
+                      else inspect_core_trajectory(args.path))
+        except Exception as error:
+            parser.exit(1, f'规范轨迹检查失败: {error}\n')
+        print(json.dumps(report, ensure_ascii=False, indent=2))
 
     elif args.command == 'vocab':
         print("⚠️ 本地词表追加会形成模型协议身份；请备份并向所有训练/部署机器分发同一 card_vocab.json。")

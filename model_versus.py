@@ -24,6 +24,11 @@ from feature_encoder import MAX_CARDS
 from checkpoint_utils import MODEL_PROTOCOL_VERSION
 import deck_utils
 from thought_logger import AIThoughtLogger, REPLAY_EVENT_MSGS
+from core_trajectory import (
+    CoreTrajectoryInterpreter, CoreTrajectoryWriter,
+    DEFAULT_TRAJECTORY_ROOT, runtime_asset_identity, file_sha256, framework_version,
+)
+from decision_evaluation import serialize_state_evaluation
 from protocol_v3_audit import (
     configure_protocol_v3_audit,
     flush_protocol_v3_audit,
@@ -241,6 +246,11 @@ class ModelArena:
         # 2. 竞技场控制参数与模型架构分离；网络结构始终以检查点内置配置为准。
         self.arena_config = dict(config or {})
         self.thought_freq = self.arena_config.get('thought_freq', 0)
+        self.record_trajectory = bool(self.arena_config.get('record_trajectory', False))
+        self.record_evaluations = bool(self.arena_config.get('record_evaluations', False))
+        self.trajectory_root = self.arena_config.get('trajectory_root', DEFAULT_TRAJECTORY_ROOT)
+        self._trajectory_writer = None
+        self._trajectory_assets = None
         
         # 4. 初始化记录器
         p0_name = os.path.basename(model_p0_path) if model_p0_path else "P0_AI"
@@ -291,6 +301,14 @@ class ModelArena:
             print(f"🤖 [Opponent] 使用 RuleBot (内置规则脚本)")
 
         self.env = GalateaEnv()
+        if self.record_trajectory or self.record_evaluations:
+            # 权重摘要每个竞技场实例仅计算一次，不重复读取每局检查点
+            for bot, path in ((self.p0_bot, model_p0_path), (self.p1_bot, model_p1_path)):
+                if bot is not None:
+                    try:
+                        bot.model_metadata['checkpoint_sha256'] = file_sha256(path)
+                    except OSError as error:
+                        print(f'⚠️ 检查点诊断摘要不可用：{error}')
 
     def _inference_metadata(self):
         """生成终端、基准结果与 WebUI 共用的竞技场策略元数据"""
@@ -340,6 +358,19 @@ class ModelArena:
         }
 
     def run_duel(
+        self, game_idx=1, deck_pair=None, duel_seed=None, swap_model_seats=False,
+    ):
+        """保持对局返回契约，并在中断时关闭可选流式记录器"""
+        self._trajectory_writer = None
+        try:
+            return self._run_duel(game_idx, deck_pair, duel_seed, swap_model_seats)
+        finally:
+            writer = self._trajectory_writer
+            if writer is not None:
+                writer.finish()
+                self._trajectory_writer = None
+
+    def _run_duel(
         self,
         game_idx=1,
         deck_pair=None,
@@ -371,6 +402,11 @@ class ModelArena:
                 "fallback_count": int(fallback_count),
                 "steps": int(steps),
             })
+            writer = self._trajectory_writer
+            if writer is not None:
+                writer.finish(winner=engine_winner, reason=reason,
+                              core_terminal=engine_winner in (0, 1, 2) and reason >= 0)
+                self.last_duel_metadata['trajectory_path'] = writer.path
             return int(winner), int(reason), int(fallback_count)
 
         try:
@@ -415,7 +451,38 @@ class ModelArena:
                 p0_name=d1_pick.deck_name,
                 p1_name=d2_pick.deck_name,
             )
-            msg_queue = MessageParser.parse(raw_data)
+            interpreter = CoreTrajectoryInterpreter(brain)
+            if self.logger.is_active and getattr(self, 'record_trajectory', False):
+                try:
+                    import gamestate
+                    if self._trajectory_assets is None:
+                        self._trajectory_assets = runtime_asset_identity(self.env)
+                    header = {
+                        'source': 'arena', 'visibility': 'omniscient_local_core',
+                        'framework_version': framework_version(), 'assets': self._trajectory_assets,
+                        'ghost_byte': gamestate.CORE_HAS_GHOST_BYTE,
+                        'reset': self.env.last_reset_metadata,
+                        'decks': {str(p): {'main': list(deck.main), 'extra': list(deck.extra),
+                                          'side': list(getattr(deck, 'side', []))}
+                                  for p, deck in enumerate((d1, d2))},
+                        'models': {str(p): dict(getattr(bot, 'model_metadata', {}))
+                                   if bot is not None else {'kind': 'rule'}
+                                   for p, bot in enumerate(physical_bots)},
+                        'policy': self._inference_metadata(),
+                        'swap_model_seats': bool(swap_model_seats),
+                    }
+                    self._trajectory_writer = CoreTrajectoryWriter(header, self.trajectory_root)
+                    interpreter.writer = self._trajectory_writer
+                except Exception as error:
+                    print(f'⚠️ 规范轨迹不可用，正常对局继续：{error}')
+            self.logger.set_recording_metadata({
+                **self._inference_metadata(),
+                'models': {str(p): dict(getattr(bot, 'model_metadata', {}))
+                           if bot is not None else {'kind': 'rule'}
+                           for p, bot in enumerate(physical_bots)},
+                'trajectory_path': self._trajectory_writer.path if self._trajectory_writer else None,
+            })
+            msg_queue = interpreter.parse_chunk(raw_data)
         except Exception as error:
             print(f"\n❌ [Arena] 对局初始化失败: {error}")
             traceback.print_exc()
@@ -459,12 +526,23 @@ class ModelArena:
             self.last_duel_metadata["policy_seed"] = policy_seed
 
         steps = 0
+        if self.logger.is_active:
+            self.logger.recording_metadata.update({
+                'policy_seed': self.last_duel_metadata.get('policy_seed'),
+                'macro_seed': int(duel_seed) if duel_seed is not None else game_idx,
+            })
+        if interpreter.writer:
+            interpreter.writer.write('runtime', policy={
+                **self._inference_metadata(),
+                'policy_seed': self.last_duel_metadata.get('policy_seed'),
+                'macro_seed': int(duel_seed) if duel_seed is not None else game_idx,
+            })
         # 增加步数上限到 5000，防止慢速卡组被误判
         while steps < 5000: 
             if not msg_queue:
                 raw_data = self.env.step()
                 if not raw_data: break
-                msg_queue = MessageParser.parse(raw_data)
+                msg_queue = interpreter.parse_chunk(raw_data)
                 # 只要新来的数据包不是以 RETRY (1) 开头，说明上一回合的动作必定被引擎接受了！
                 if msg_queue and msg_queue[0][0] != 1:
                     consecutive_retries = 0
@@ -474,11 +552,11 @@ class ModelArena:
             
             msg = msg_queue.pop(0)
             msg_type = msg[0]
-            brain.update(msg_type, msg[1:])
+            interpreter.apply_message(msg)
 
             # 回放 V2 同时记录 Core 状态事件，避免只看到模型决策而看不到移动与结算。
             if self.logger.is_active and msg_type in REPLAY_EVENT_MSGS:
-                event_snapshot = brain.get_snapshot()
+                event_snapshot = interpreter.snapshot()
                 self.logger.log_core_event(
                     turn=brain.turn,
                     phase_id=brain.phase,
@@ -518,13 +596,15 @@ class ModelArena:
                     print(f"   -> 原始封包 MSG 字节内容: {msg}")
                     # 如果有记录器，保留它以供事后尸检
                     if self.logger.is_active:
-                        path = self.logger.save(winner, game_idx)
+                        path = self.logger.save(winner, game_idx, core_terminal=True,
+                            terminal_event_count=brain.transition_recorder.completed_event_count)
                         print(f"   -> 尸检报告已保存至: {path}")
 
                 # [新增] 比赛结束，保存这局的日记
                 elif self.logger.is_active:
                     # 将 reason_str 透传给记录器
-                    saved_path = self.logger.save(winner, game_idx, reason_str)
+                    saved_path = self.logger.save(winner, game_idx, reason_str, core_terminal=True,
+                        terminal_event_count=brain.transition_recorder.completed_event_count)
                     print(f"\n🧠 [AI 读心] 第 {game_idx} 局的心声已保存至 {saved_path}")
                 logical_winner = (
                     1 - winner if swap_model_seats and winner in (0, 1)
@@ -577,12 +657,16 @@ class ModelArena:
             # --- 决策 ---
             if msg_type in DECISION_MSGS:
                 player_to_act = msg[1] if len(msg) > 1 else 0
+                response_snapshot = None
+                response_observation = None
+                response_index = None
+                evaluation = None
                 active_bot = physical_bots[player_to_act]
                 model_should_act = active_bot is not None and msg_type in AI_MANAGED_MSGS
 
                 if model_should_act:
                     try:
-                        snap = brain.get_snapshot(self.env)
+                        snap = interpreter.snapshot(self.env)
                         player = snap.global_data.to_play
 
                         if msg_type in MACRO_ACTION_MSGS:
@@ -615,7 +699,7 @@ class ModelArena:
 
                             brain.current_valid_actions = current_macro_pool
                             # Map raw macro locations to entity indices exactly as training does.
-                            snap = brain.get_snapshot(self.env)
+                            snap = interpreter.snapshot(self.env)
 
                         if not snap.valid_actions:
                             raise RuntimeError(f"model received no valid actions for message {msg_type}")
@@ -634,7 +718,17 @@ class ModelArena:
                         }
 
                         with torch.no_grad():
-                            logits, _, _ = active_bot.net(infer_dict)
+                            evaluate = self.logger.is_active and getattr(self, 'record_evaluations', False)
+                            if evaluate:
+                                try:
+                                    output = active_bot.net(infer_dict, return_evaluation=True)
+                                except Exception as error:
+                                    print(f'⚠️ 状态诊断不可用，改用原有推理路径：{error}')
+                                    evaluate = False
+                                    output = active_bot.net(infer_dict)
+                            else:
+                                output = active_bot.net(infer_dict)
+                            logits = output[0]
                             valid_count = min(
                                 len(snap.valid_actions), logits.shape[-1]
                             )
@@ -682,6 +776,16 @@ class ModelArena:
                             )
 
                         if self.logger.is_active:
+                            if evaluate:
+                                try:
+                                    evaluation = serialize_state_evaluation(
+                                        output[3], output[1], player=player_to_act,
+                                        sequence_id=brain.transition_recorder.next_sequence_id,
+                                        model_metadata=getattr(active_bot, 'model_metadata', {}),
+                                        policy_metadata=self._inference_metadata(),
+                                    )
+                                except Exception as error:
+                                    print(f'⚠️ 状态预测记录跳过：{error}')
                             probs = F.softmax(logits.squeeze(0), dim=-1)
                             self.logger.log_decision(
                                 turn=brain.turn,
@@ -692,9 +796,12 @@ class ModelArena:
                                 player_id=player_to_act,
                                 msg_type=msg_type,
                                 agent_name=physical_names[player_to_act],
+                                evaluation=evaluation,
                             )
 
                         chosen = snap.valid_actions[sel_idx]
+                        response_snapshot, response_observation = snap, tensor_dict
+                        response_index = sel_idx
                         last_decision_index = sel_idx
                         resp = active_bot._pack_response(
                             chosen,
@@ -737,7 +844,7 @@ class ModelArena:
                     )
                     last_decision_value = resp
                     if self.logger.is_active:
-                        rule_snapshot = brain.get_snapshot(self.env)
+                        rule_snapshot = interpreter.snapshot(self.env)
                         rule_chosen_index = find_matching_action_index(
                             rule_snapshot,
                             resp,
@@ -755,7 +862,24 @@ class ModelArena:
                             agent_name=physical_names[player_to_act],
                             chosen_index=rule_chosen_index,
                         )
+                        response_snapshot = rule_snapshot
+                        response_index = rule_chosen_index
+                        if interpreter.writer and not interpreter.writer.stopped:
+                            # 仅录像轨迹需要规则局的观测摘要，不改规则决策流程
+                            try:
+                                response_observation = self.p0_bot.encoder.encode(
+                                    rule_snapshot, player_id=player_to_act)
+                            except Exception as error:
+                                interpreter.writer.flag(f'rule_observation_failed: {error}')
 
+                if interpreter.writer and response_snapshot is not None:
+                    interpreter.record_response(
+                        response_snapshot, resp, msg_type, msg[1:], player_to_act,
+                        chosen_index=response_index, observation=response_observation,
+                        evaluation=evaluation, source='model' if model_should_act else 'rule',
+                    )
+                    if msg_queue:
+                        interpreter.writer.flag('messages_discarded_after_response')
                 self.env.send_action(resp)
                 brain.begin_transition_event(
                     player_to_act,

@@ -77,6 +77,14 @@ class GoalTargetDecoder(nn.Module):
             "terminal_remaining": self.terminal_remaining_head(hidden).squeeze(-1),
         }
 
+    def evaluate_terminal(self, plan_latent):
+        """仅解码当前状态的终局预测，供可选录像诊断使用"""
+        hidden = self.trunk(plan_latent)
+        return {
+            "terminal_outcome_logits": self.terminal_outcome_head(hidden),
+            "terminal_remaining": self.terminal_remaining_head(hidden).squeeze(-1),
+        }
+
 
 class GoalPlanner(nn.Module):
     """每个决策点重新生成目标隐变量，并保留独立监督解码器"""

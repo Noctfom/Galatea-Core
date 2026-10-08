@@ -10,7 +10,7 @@ from data_types import ActionOperation, SummonMethod
 from game_constants import LocationInfo, Phases, Zone
 
 
-REPLAY_FORMAT_VERSION = 2
+REPLAY_FORMAT_VERSION = 3
 REPLAY_EVENT_MSGS = frozenset({
     5, 40, 41, 50, 53, 54, 60, 61, 62, 63, 64, 65,
     70, 71, 72, 73, 74, 75, 76, 83, 90, 91, 92, 93, 94,
@@ -576,6 +576,7 @@ class AIThoughtLogger:
         self._state_ids = {}
         self.decklists = {}
         self.is_active = False
+        self.recording_metadata = {}
 
     def start_recording(self):
         """开始一局新录像并清空上一局缓存。"""
@@ -584,6 +585,11 @@ class AIThoughtLogger:
         self._state_ids = {}
         self.decklists = {}
         self.is_active = True
+        self.recording_metadata = {}
+
+    def set_recording_metadata(self, metadata):
+        """添加轻量策略/轨迹身份，不混入模型观测"""
+        self.recording_metadata = dict(metadata)
 
     def set_decklists(
         self,
@@ -650,6 +656,7 @@ class AIThoughtLogger:
         msg_type=None,
         agent_name=None,
         source="model",
+        evaluation=None,
     ):
         """记录任意一方的完整候选、选择结果和动作协议 V2 语义。"""
         if not self.is_active:
@@ -668,7 +675,7 @@ class AIThoughtLogger:
                 )
                 options.append(option)
             options.sort(key=lambda option: option["confidence"], reverse=True)
-            self.thoughts.append({
+            frame = {
                 "frame_type": "decision",
                 "turn": int(turn),
                 "phase": Phases.get_str(phase_id),
@@ -679,7 +686,10 @@ class AIThoughtLogger:
                 "msg_type": int(msg_type) if msg_type is not None else None,
                 "state_id": self._register_state(snapshot),
                 "options": options,
-            })
+            }
+            if evaluation is not None:
+                frame['evaluation'] = evaluation
+            self.thoughts.append(frame)
         except Exception as error:
             print(f"\n[Logger Error] 决策记录失败: {error}")
 
@@ -755,7 +765,8 @@ class AIThoughtLogger:
         except Exception as error:
             print(f"\n[Logger Error] Core 事件记录失败: {error}")
 
-    def save(self, winner_id, game_idx, win_reason="正常结束"):
+    def save(self, winner_id, game_idx, win_reason="正常结束", *,
+             core_terminal=False, terminal_event_count=None):
         """保存完整录像；没有有效帧时不创建空文件。"""
         if not self.is_active:
             return None
@@ -765,6 +776,20 @@ class AIThoughtLogger:
         os.makedirs("./ai_thoughts", exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = f"./ai_thoughts/Game{game_idx}_{timestamp}_P{winner_id}Win.json"
+        # 真实 MSG_WIN 才补后验答案；截断、失败和异常局不冒充终局标签
+        if core_terminal and winner_id in (0, 1, 2) and terminal_event_count is not None:
+            for frame in self.thoughts:
+                evaluation = frame.get('evaluation')
+                if evaluation is None:
+                    continue
+                sequence = evaluation.get('sequence_id')
+                if type(sequence) is int and 0 <= sequence < terminal_event_count:
+                    frame['evaluation_actual'] = {
+                        'outcome': (0 if winner_id == 2 else
+                                    1 if winner_id == evaluation['perspective'] else -1),
+                        'remaining_events': terminal_event_count - sequence,
+                        'length_unit': 'transition_events',
+                    }
         replay = {
             "replay_format_version": REPLAY_FORMAT_VERSION,
             "model_name": self.player_name,
@@ -775,6 +800,8 @@ class AIThoughtLogger:
             "decklists": self.decklists,
             "states": self.states,
             "frames": self.thoughts,
+            "recording_metadata": self.recording_metadata,
+            "core_terminal": bool(core_terminal),
         }
         with open(filepath, "w", encoding="utf-8") as file:
             json.dump(replay, file, ensure_ascii=False, separators=(",", ":"))

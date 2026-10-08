@@ -54,6 +54,13 @@ class AiBot:
             self.net = GalateaNet(saved_config).to(self.device)
             self.net.load_state_dict(checkpoint['model_state_dict'], strict=True)
             self.net.eval()
+            # 仅保留轻量身份，不额外保留检查点权重或优化器
+            self.model_metadata = {
+                key: checkpoint.get(key)
+                for key in ('model_id', 'model_prefix', 'iteration', 'train_step',
+                            'checkpoint_format_version', 'model_protocol_version')
+            }
+            self.model_metadata['net_config'] = dict(saved_config)
             print(f"✅ 网络已自动重构并加载权重。")
             return True
 

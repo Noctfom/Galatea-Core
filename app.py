@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.13.0"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.13.1"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1200,6 +1200,18 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         max_chars=64,
                     )
             d_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False)
+            d_record_trajectory = st.checkbox(
+                _("记录规范 Core 轨迹（仅录像局）", "Record canonical Core trajectories (logged games only)"),
+                value=False,
+                help=_("保存原始消息/响应、注入顺序和资产身份；逐行压缩，上限 64 MiB 未压缩数据。",
+                       "Save raw messages/responses, injection order and asset identities; streamed gzip, 64 MiB uncompressed limit."),
+            )
+            d_record_evaluations = st.checkbox(
+                _("记录状态预测曲线（仅录像局）", "Record state-evaluation curves (logged games only)"),
+                value=False,
+                help=_("仅解码已有状态辅助头，不影响动作选择。概率未经校准，长度单位为转移事件。",
+                       "Decode existing state heads without affecting action selection. Probabilities are uncalibrated; lengths count transition events."),
+            )
             d_protocol_audit = st.checkbox(
                 _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
                 value=False,
@@ -1212,6 +1224,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             if st.form_submit_button("⚔️ " + _("在后台启动竞技场", "Start Arena Process"), use_container_width=True):
                 if is_running:
                     st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
+                elif (d_record_trajectory or d_record_evaluations) and d_freq <= 0:
+                    st.error(_("轨迹/预测记录需要读心频率大于 0。", "Trajectory/evaluation recording requires a positive thought-log frequency."))
                 elif d_arena_mode == "benchmark" and benchmark_plan_mode == "reuse" and not selected_benchmark_plan:
                     st.error(_("没有可复用的基准计划。", "No benchmark plan is available for reuse."))
                 elif benchmark_plan_mode == "new" and (
@@ -1247,6 +1261,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         ])
                     if d_std_core: cmd.append("--standard_core")
                     if d_protocol_audit: cmd.append("--protocol-audit")
+                    if d_record_trajectory: cmd.append("--record-trajectory")
+                    if d_record_evaluations: cmd.append("--record-evaluations")
                     p = launch_managed_task(cmd)
                     st.success(_(f"竞技场启动 (PID: {p.pid})！", f"Arena started (PID: {p.pid})!"))
 
@@ -2836,6 +2852,7 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         )
     with tab_thoughts:
         build_file_manager("./ai_thoughts", ".json", _("AI 读心记录", "AI Thought Records"), allow_view=True, allow_upload=False)
+        build_file_manager("./replays/core_trajectories", ".core.jsonl.gz", _("规范 Core 轨迹", "Canonical Core Trajectories"), allow_view=False, allow_upload=False)
     with tab_models:
         st.markdown("### 🧬 " + _("按模型 UUID 管理制品", "Artifacts grouped by model UUID"))
         st.caption(_(
@@ -3134,6 +3151,28 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             t_col6.toggle(_("📊 P1 置信度", "📊 P1 Confidence"), key="tgl_p1_confidence")
 
             step_data = replay_frames[st.session_state.replay_step]
+            with st.expander(_("📈 状态预测曲线（未经校准）", "📈 State-evaluation curves (uncalibrated)"), expanded=False):
+                from decision_evaluation import replay_evaluation_points
+                evaluation_points = replay_evaluation_points(replay_data)
+                st.caption(_(
+                    "P0/P1 各按自己的可见信息预测，不是互补曲线。胜率为未经校准的终局概率；剩余长度为动作转移事件数，不是回合数。仅模型决策有预测，规则方不伪造预测。",
+                    "Each side uses its own visible information; curves are not complements. Terminal probabilities are uncalibrated; length counts action transitions, not turns. Rule agents have no fabricated predictions.",
+                ))
+                if evaluation_points:
+                    evaluation_table = pd.DataFrame(evaluation_points)
+                    st.line_chart(evaluation_table, x='frame', y='win_probability', color='perspective', height=200)
+                    st.line_chart(evaluation_table, x='frame', y='remaining_events', color='perspective', height=160)
+                    current_evaluation = next((point for point in evaluation_points
+                                               if point['frame'] == st.session_state.replay_step + 1), None)
+                    if current_evaluation:
+                        e1, e2, e3 = st.columns(3)
+                        e1.metric(_("当前视角胜利概率", "Perspective win probability"), f"{current_evaluation['win_probability']:.1%}")
+                        e2.metric(_("平局概率", "Draw probability"), f"{current_evaluation['draw_probability']:.1%}")
+                        e3.metric(_("预计剩余转移事件", "Estimated remaining transitions"), f"{current_evaluation['remaining_events']:.1f}")
+                    if step_data.get('evaluation_actual'):
+                        st.caption(_("真实终局对照（与预测分开）：", "Actual terminal reference (separate from prediction): ") + str(step_data['evaluation_actual']))
+                else:
+                    st.caption(_("该录像没有状态预测。启动竞技场时可勾选对应记录选项；旧录像不反推预测。", "No state evaluations in this replay. Enable recording when starting Arena; old replays are not retroactively predicted."))
             state = get_replay_frame_state(replay_data, step_data)
             replay_decklists = get_replay_decklists(replay_data)
             api_lang = "sc" if lang == "🇨🇳 中文" else "en"

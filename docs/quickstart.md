@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置，预计耗时 **5-10 分钟**。
 
-> 文档适用于 **Galatea-Core v3.13.0**。
+> 文档适用于 **Galatea-Core v3.13.1**。
 
 ---
 
@@ -319,6 +319,7 @@ TensorBoard 的 `PPO_Update/Effective_Epochs` 表示实际更新样本数÷本�
 
 ## 下一步
 
+- 🎞️ 使用 [规范 Core 轨迹与状态预测回放](core_trajectories.md)：竞技场勾选记录选项，并在全息回放展开预测曲线；CLI 提供只读 `trajectory-check --replay`
 - 📚 阅读 [功能详解](features.md) 了解每个模块的详细用法
 - 🔧 阅读 [架构设计](architecture.md) 深入理解框架原理
 - 🧬 阅读 [特殊处理逻辑](special_handling.md) 了解框架独特特性
