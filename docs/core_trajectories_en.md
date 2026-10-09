@@ -1,4 +1,4 @@
-# 3.13.2: Canonical Core trajectories and AI prediction replay
+# Canonical Core trajectories, AI predictions and external ingestion
 
 3.13.1 completed Phase 7 batch 2; 3.13.2 stabilizes fixed Core decoding. Model Protocol **4**,
 Checkpoint Format **3**, schema revision **13**, network parameters/inputs, rewards and standard
@@ -125,3 +125,138 @@ execution while keeping memory bounded.
 Next: Link/YRP raw-input adapters, whole-duel/deck/player isolation and quality gates. Cognition additions
 for Type 120/160/165 and 35/37/38/162 await design approval; see the message audit. This batch does not
 revive the parked Replay Worker, add imitation optimization, or counterfactual search.
+
+## 3.13.5: External ingestion and isolated quality gates
+
+Phase7 batch3 implements the **Core-side** contract. The separate Link project must wire the SDK;
+live online end-to-end acceptance is not claimed. Model Protocol4 / Checkpoint3 / revision14 /
+static format1 / GKG4 are unchanged, as are the network, observations, rewards, PPO, standard ONNX,
+and normal `GalateaEnv.reset`. After confirming no live imports, the abandoned `replay_worker.py`
+and `yrp_parser.py` are removed; the new reader is `yrp_ingest.py` with the single Core interpreter.
+
+### CLI and WebUI
+
+```powershell
+.\python_env\python.exe main.py replay-ingest .\replays\example.yrp --source yrp --inspect
+.\python_env\python.exe main.py replay-ingest .\replays\example.yrp --source yrp --report .\replay_data\ingest_reports\example.json
+.\python_env\python.exe main.py replay-ingest .\replays\link_captures\example.link.jsonl.gz --source link --inspect
+.\python_env\python.exe main.py replay-ingest .\replays\link_captures\example.link.jsonl.gz --source link
+.\python_env\python.exe main.py dataset-build --directory .\replays --output .\replay_data\datasets\review_001.json --seed 20261009
+```
+
+WebUI: **Storage & Logs → Trajectory Ingress & Quality** has four numbered workflow sections,
+with headings and input/output explanations before controls. Question-mark help covers source,
+file, directory, split seed and actions.
+
+1. **Inspect & Convert Raw Replays**: choose YRP/YRP3D or raw Link captures. Read-only inspection
+   never calls Core or writes files. Managed conversion writes
+   `replays/imported_trajectories/*.core.jsonl.gz` and `replay_data/ingest_reports/*.json`, without
+   modifying the source or starting learning. Each source has separate file-selection state.
+2. **Audit & Split Canonical Trajectories**: recursively scans only `.core.jsonl.gz`, including
+   native Arena and converted diagnostic traces. Writes `replay_data/datasets/dataset_*.json`
+   without moving traces. The seed controls grouped splits, not duel/model randomness; targets
+   default to80%/10%/10%, but group isolation does not guarantee exact file-count proportions.
+3. **View Quality Audit Results**: shows candidate train/validation/test and quarantine counts
+   plus per-trace rejection reasons. Counts are files, not steps or already-trained samples.
+   Expandable help explains common codes and insufficient-independent-validation warnings.
+   Viewing a manifest does not re-audit; re-run after adding data or changing assets.
+4. **File Management by Category**: four separate collapsible areas for raw Link captures,
+   imported diagnostic traces, ingress reports and dataset manifests. Category, directory,
+   suffix and count precede controls, with category-specific deletion labels. Batch deletion/
+   clearing affects only matching files directly in that directory, never subdirectories or
+   related artifacts. Deleting a manifest keeps its referenced traces; native traces stay in
+   Thought Replays. No UI undo is available; download backups first.
+
+Progress appears in Control & Logs and `system_logs/ReplayIngest*` / `DatasetQuality*`; an existing
+managed task is not replaced. No automatic Core replay runs on page refresh and no external assets
+are downloaded. This UI patch remains3.13.5 without protocol/checkpoint/training changes. Outputs
+require new filenames. Conversion failures seal a diagnostic prefix and return CLI status2;
+format/asset refusal returns1. Successful diagnosis does not authorize training.
+
+### YRP boundaries
+
+`yrp_ingest.py` handles32-byte YRP1,80-byte extended-header-v1 YRP2 and explicitly framed YRP3D with
+exactly one231 replay packet. No magic-byte scanning or ignored trailing garbage. Tag, single-script,
+unknown extensions and ambiguous multi-replay containers fail explicitly. Limits:16MiB input,
+8MiB decompressed data,64MiB LZMA dictionary,100,000 responses; actual sizes must match declarations.
+Nicknames are display-only and trailing UTF16 padding is not an identity.
+
+Reconstruction follows the public client's fixed profile: YRP1 uses the first `std::mt19937(seed)`
+output as the actual Core seed; YRP2 preserves all eight seed words through the bundled public
+`create_duel_v2`. Arrays are injected in stored order at position8, not the parked worker's reverse-
+order guess. References: [headers](https://github.com/Fluorohydride/ygopro/blob/master/gframe/replay.h),
+[StartDuel](https://github.com/Fluorohydride/ygopro/blob/master/gframe/replay_mode.cpp),
+[YRP3D framing](https://github.com/purerosefallen/ygopro-yrp3d-encode).
+The Core binary/source is untouched. Non-UNIFORM legacy files are inspectable, but conversion does
+not switch into legacy Core modes; future migrations require separate review.
+
+Original responses advance strictly: no skipped cancels, no guessing after Retry, and no inserting
+the expert answer into the candidate pool. Macro pools reuse the existing constructor with local
+fixed RNG/uniform priors and the existing120-action cap. Expert answers outside that pool remain
+replayable raw responses, not supervised labels. No policy model, fabricated PPO statistics or
+training optimizer is used. The conversion budget defaults to300s, configurable from1 to3600s.
+
+Reconstruction proves only consistency **under current assets**, not historical scene accuracy.
+Ordinary YRP lacks historical asset hashes and original full Core output; flags
+`historical_assets_unknown/original_core_output_unavailable` keep behavior-cloning eligibility false.
+
+### Link capture contract
+
+`LINK_CAPTURE_FORMAT_VERSION=1` lives in `trajectory_ingest.py`. The SDK records raw Core chunks and
+actually submitted responses, using physical seats0/1; it does not operate the policy.
+
+```python
+from trajectory_ingest import LinkCaptureWriter
+capture = LinkCaptureWriter(visibility='player_view', perspective=0,
+                           player_ids={'0': 'service:user_a', '1': None})
+capture.record_chunk(raw_core_chunk)  # Core bytes after removing network framing
+capture.record_response(actual_response, actor=0)
+capture.finish(winner=winner, reason=reason, core_terminal=real_msg_win_seen)
+```
+
+Full server/local-bridge captures use `visibility='full_core'`, plus `reset` (actual seed/seed_sequence,
+injection order, LP/hand/draw/rules/initial_position), stable `decks` for both seats and original
+`assets=runtime_asset_identity(env)` from the capture environment. Side metadata never enters the
+single-duel Encoder. Import cannot substitute local hashes for missing historical hashes. Full
+asset parity, byte-exact original output, response/actor/terminal alignment and independent replay
+are prerequisites; partial views stay diagnostic without invented hidden data.
+
+Stable anonymized `player_ids` include the source-service namespace, not nicknames or seats. YRP may
+receive `--p0-player-id/--p1-player-id`; Link import cannot overwrite captured identities. This does
+not modify automatic model UUIDs. Raw records can expose hidden cards, deck lists and linked identity:
+redact before sharing. Hashes detect corruption, not authentic sources, signatures or expert skill.
+Prefer isolated CLI processes for native replay rather than unreviewed captures in live inference.
+
+### Dataset gate and transitive isolation
+
+`DATASET_MANIFEST_VERSION=1` lives in `trajectory_dataset.py`; at most10,000 canonical files are
+inspected using frozen bounded copies. Corruption, recording truncation, missing real terminals,
+unverified origins, missing stable players, Retry, raw-output/observation divergence or unreliable
+candidate mapping cannot qualify. Known-bad sources are quarantined before unnecessary native replay.
+
+Complete-duel identity excludes recording UUID/display provenance; duplicate repackaging is removed.
+Deck identity includes Main/Extra/Side and exact card counts, not filenames or input order. Shared
+duels, exact decks or stable players form **transitive connected groups**, each assigned wholly to
+one split. Model UUIDs/rule bots also count as shared players. Defaults select validation/test groups
+at0.1 each, deterministically by seed; file counts are not guaranteed to match those fractions.
+Unknown player identities remain quarantined. One connected group cannot produce a genuinely
+independent holdout; warnings report insufficient groups/empty holdouts instead of splitting it.
+Similar deck archetypes are not automatically clustered—only exact compositions are isolated.
+
+Manifests contain relative paths, file/duel hashes, grouping, origin/assets/outcome and quality counts,
+not tensors or PPO data. A future learner must recheck file hashes/identities; editable JSON is not
+trusted training authorization. No imitation optimizer, counterfactual search, hindsight evaluation
+backfill or external Link client wiring is implemented. Ordinary training adds no per-step work or
+storage when these manual tools are unused.
+
+### Acceptance evidence
+
+Tests cover compression/plain data, zero/cancel bytes, framing/magic/truncation/multi-packet errors,
+seed sequences, unsupported modes, partial capture refusal, asset mismatches, transitive isolation,
+corrupt-file quarantine, duplicate removal and exclusive report creation. Synthetic real-Core full
+Link capture passes conversion/replay/gates; same-source YRP1/YRP2 reconstruction remains ineligible
+without historical evidence. All13 local YRP/YRP3D samples are inspectable;4 non-UNIFORM legacy samples
+are diagnostic-only. Existing YRP1/YRP2 samples consume1,137/809 responses through genuine terminals,
+with zero Retry and complete parsing;724/389 observation digests and413/420 automatic empty-chain
+responses pass independent replay. Macro mappings are incomplete, so neither becomes training data.
+Production long training and live online Link end-to-end acceptance are not claimed.

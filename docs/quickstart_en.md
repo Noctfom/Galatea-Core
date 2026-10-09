@@ -339,6 +339,7 @@ Imported models appear in `./models/`. Jump to [Arena Testing](#arena-model-test
 ## Next Steps
 
 - 🎞️ Use [Canonical Core trajectories and state-evaluation replay](core_trajectories_en.md): enable Arena recording options, expand evaluation curves in replay, or run read-only `trajectory-check --replay`
+- 🧪 3.13.5 external files: Storage & Logs → Trajectory Ingress & Quality. `replay-ingest` / `dataset-build` inspect, convert and split without starting training; readable YRP/partial Link data does not automatically qualify for learning
 - 📚 Read [Feature Guide](features.md) for detailed module usage
 - 🔧 Read [Architecture](architecture.md) for framework internals
 - 🧬 Read [Special Handling](special_handling.md) for unique features

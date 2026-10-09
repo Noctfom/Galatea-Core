@@ -15,7 +15,8 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 - [x] 3.13.3:120 visible feedback without penalties,160/165 reference lifetimes/code semantics,37/38 public position memory and162 strict rebuilding; [observations/cost](public_observations_en.md)
 - [ ] Type35 bulk region exchange remains deferred; unproven old semantic assets require trusted regeneration, not forced parent-vector matching
 - [x] 3.13.4 confirms missing/empty-source generation plus key-only reuse caused collapse; source provenance, content identity and complete chunking now support isolated rebuilds without network/input/coarse-classification changes. New assets have26,092 distinct vectors and27 explicitly incomplete slots; see [asset guide](code_semantics_en.md)
-- [ ] Phase 7 batch 3: Link/YRP input, deterministic replay, and whole-duel held-out quality gates before behavior cloning
+- [x] Phase7 batch3 (3.13.5): Core-side Link capture SDK, strict diagnostic YRP1/YRP2/YRP3D conversion, transitive whole-duel/exact-deck/stable-player isolation and quality manifests; no network/training changes or eligibility without evidence
+- [ ] External Link wiring/live acceptance, historical YRP evidence, related-deck-family splits, and an independent imitation learner after gates pass
 
 ## Separable Deck-Construction Cognition
 

@@ -11,7 +11,6 @@ import tempfile
 import uuid
 from dataclasses import fields
 from pathlib import Path
-from types import SimpleNamespace
 
 from data_types import GameAction
 from core_message_protocol import (
@@ -24,6 +23,62 @@ MAX_TRAJECTORY_BYTES = 64 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 100_000
 DEFAULT_TRAJECTORY_ROOT = './replays/core_trajectories'
+
+
+def validate_reset_metadata(reset):
+    """校验离线标准双人开局参数，拒绝 Tag、未知规则位和超界数量"""
+    if not isinstance(reset, dict):
+        raise ValueError('invalid Core reset metadata')
+    bounds = {'seed': (0, 2**32 - 1), 'lp': (1, 1_000_000),
+              'start_hand': (0, 60), 'draw_count': (0, 60), 'duel_flags': (0, 2**32 - 1)}
+    for key, (minimum, maximum) in bounds.items():
+        if type(reset.get(key)) is not int or not minimum <= reset[key] <= maximum:
+            raise ValueError(f'invalid Core reset {key}')
+    flags = reset['duel_flags']
+    if flags & 0xFFFF & ~0x1DF or flags >> 16 > 5:
+        raise ValueError('unsupported two-player Core duel flags')
+    position = reset.get('initial_position', 0)
+    if type(position) is not int or position not in (0, 8):
+        raise ValueError('unsupported initial card position')
+    seeds = reset.get('seed_sequence')
+    if seeds is not None and (not isinstance(seeds, list) or len(seeds) != 8
+                             or any(type(value) is not int or not 0 <= value < 2**32 for value in seeds)):
+        raise ValueError('invalid Core extended seed sequence')
+    players = reset.get('players')
+    if not isinstance(players, dict) or set(players) != {'0', '1'}:
+        raise ValueError('missing Core reset seats')
+    for deck in players.values():
+        if not isinstance(deck, dict):
+            raise ValueError('invalid Core reset deck')
+        for part in ('main', 'extra'):
+            codes = deck.get(part)
+            if (not isinstance(codes, list) or len(codes) > 256
+                    or any(type(code) is not int or not 0 < code < 2**32 for code in codes)):
+                raise ValueError('invalid Core reset cards')
+
+
+def reset_core_from_metadata(env, reset):
+    """仅供离线重放按确切注入顺序启动公开 Core，不修改正常训练 reset"""
+    validate_reset_metadata(reset)
+    env._close_duel()
+    seeds = reset.get('seed_sequence')
+    if seeds is None:
+        env.pduel = env.lib.create_duel(reset['seed'])
+    else:
+        if not hasattr(env.lib, 'create_duel_v2'):
+            raise ValueError('bundled Core does not export public create_duel_v2 for YRP2')
+        env.lib.create_duel_v2.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
+        env.lib.create_duel_v2.restype = ctypes.c_void_p
+        env.pduel = env.lib.create_duel_v2((ctypes.c_uint32 * 8)(*seeds))
+    if not env.pduel:
+        raise RuntimeError('Core could not create replay duel')
+    for player in (0, 1):
+        env.lib.set_player_info(env.pduel, player, reset['lp'], reset['start_hand'], reset['draw_count'])
+        for part, location in (('main', 1), ('extra', 64)):
+            for code in reset['players'][str(player)][part]:
+                env.lib.new_card(env.pduel, code, player, player, location, 0, reset.get('initial_position', 0))
+    env.lib.start_duel(env.pduel, reset['duel_flags'])
+    return env.step()
 
 
 def framework_version():
@@ -191,11 +246,13 @@ def observation_sha256(batch):
 class CoreTrajectoryWriter:
     """有容量上限的逐行压缩记录器；诊断失败不得终止对局"""
 
-    def __init__(self, header, root=DEFAULT_TRAJECTORY_ROOT, max_bytes=MAX_TRAJECTORY_BYTES):
+    def __init__(self, header, root=DEFAULT_TRAJECTORY_ROOT, max_bytes=MAX_TRAJECTORY_BYTES, *, file_kind='core'):
         """创建独立轨迹文件，摘要只校验损坏，不宣称来源认证"""
+        if file_kind not in ('core', 'link'):
+            raise ValueError('unsupported trajectory file kind')
         os.makedirs(root, exist_ok=True)
         self.trace_id = str(uuid.uuid4())
-        self.path = os.path.abspath(os.path.join(root, f'duel_{self.trace_id}.core.jsonl.gz'))
+        self.path = os.path.abspath(os.path.join(root, f'duel_{self.trace_id}.{file_kind}.jsonl.gz'))
         self._stream = gzip.open(self.path, 'xb', compresslevel=3)
         self._digest = hashlib.sha256()
         self._bytes = 0
@@ -355,12 +412,13 @@ def inspect_core_trajectory(path):
             if kind != 'header' or record.get('schema_version') != TRAJECTORY_SCHEMA_VERSION:
                 raise ValueError('unsupported trajectory schema')
             header = record
+            if not isinstance(record.get('source'), str) or not 1 <= len(record['source']) <= 64:
+                raise ValueError('invalid trajectory source')
+            if not isinstance(record.get('trace_id'), str) or len(record['trace_id']) != 36:
+                raise ValueError('invalid trajectory UUID')
             uuid.UUID(record['trace_id'])
             reset = record['reset']
-            if (type(reset['seed']) is not int or not 0 <= reset['seed'] < 2**32
-                    or (reset['lp'], reset['start_hand'], reset['draw_count'], reset['duel_flags'])
-                    != (8000, 5, 1, 0)):
-                raise ValueError('unsupported Core reset parameters')
+            validate_reset_metadata(reset)
             for decks in (record['decks'], reset['players']):
                 if set(decks) != {'0', '1'}:
                     raise ValueError('missing trajectory deck/seat')
@@ -475,9 +533,7 @@ def _replay_core_trajectory_source(source):
         env = GalateaEnv()
         if runtime_asset_identity(env) != header['assets']:
             raise ValueError('Core/script/CDB/vocabulary/semantic asset identity mismatch')
-        injections = header['reset']['players']
-        raw = env.reset(*(SimpleNamespace(**injections[str(p)]) for p in (0, 1)),
-                        seed=header['reset']['seed'])
+        raw = reset_core_from_metadata(env, header['reset'])
         decks = header['decks']
         brain = gamestate.DuelState(decks['0']['main'], decks['0']['extra'],
                                     decks['1']['main'], decks['1']['extra'])

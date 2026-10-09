@@ -206,10 +206,12 @@ def main():
         'parse': 'Parser',
         'update': 'Updater',
         'vocab': 'Vocabulary',
+        'replay-ingest': 'ReplayIngest',
+        'dataset-build': 'DatasetQuality',
     }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
     
-    if cmd_name not in {'trajectory-check', 'semantic-check'}:
+    if cmd_name not in {'trajectory-check', 'semantic-check'} and '--inspect' not in sys.argv:
         setup_global_logger(prefix=log_prefix)
     
     parser = argparse.ArgumentParser(description="Galatea AI 主控程序")
@@ -390,6 +392,23 @@ def main():
     trajectory_parser.add_argument('path', help='*.core.jsonl.gz 文件')
     trajectory_parser.add_argument('--replay', action='store_true', help='额外验证 Core 原始输出、响应映射和观测摘要')
 
+    ingest_parser = subparsers.add_parser('replay-ingest', help='检查或离线转换 YRP/Link 捕获；不启动学习')
+    ingest_parser.add_argument('path', help='YRP/YRP3D 或 *.link.jsonl.gz 文件')
+    ingest_parser.add_argument('--source', choices=('yrp', 'link'), required=True, help='明确指定来源，不按内容猜测')
+    ingest_parser.add_argument('--inspect', action='store_true', help='只检查文件格式，不调用原生 Core')
+    ingest_parser.add_argument('--output', default='./replays/imported_trajectories', help='诊断规范轨迹输出目录')
+    ingest_parser.add_argument('--report', default=None, help='可选的新建报告 JSON 路径，不覆盖已有文件')
+    ingest_parser.add_argument('--p0-player-id', default=None, help='YRP 来源命名空间内 P0 稳定匿名 ID，不是昵称')
+    ingest_parser.add_argument('--p1-player-id', default=None, help='YRP 来源命名空间内 P1 稳定匿名 ID，不是昵称')
+    ingest_parser.add_argument('--timeout', type=float, default=300, help='转换时间预算秒数，1～3600')
+
+    dataset_parser = subparsers.add_parser('dataset-build', help='严格审查规范轨迹并按整局/构筑/玩家隔离划分')
+    dataset_parser.add_argument('--directory', default='./replays/core_trajectories', help='递归扫描规范轨迹目录')
+    dataset_parser.add_argument('--output', required=True, help='新建数据集清单 JSON，不覆盖已有文件')
+    dataset_parser.add_argument('--seed', type=int, default=20261009, help='划分 uint32 种子')
+    dataset_parser.add_argument('--validation-fraction', type=float, default=0.1, help='独立连通组验证抽样比例')
+    dataset_parser.add_argument('--test-fraction', type=float, default=0.1, help='独立连通组测试抽样比例')
+
     args = parser.parse_args()
     if args.command == 'duel' and (args.record_trajectory or args.record_evaluations) and args.thought_freq <= 0:
         parser.error('轨迹/预测记录需要 --thought_freq 大于 0；仅选定的录像局进行额外记录')
@@ -564,6 +583,46 @@ def main():
         except Exception as error:
             parser.exit(1, f'规范轨迹检查失败: {error}\n')
         print(json.dumps(report, ensure_ascii=False, indent=2))
+
+    elif args.command == 'replay-ingest':
+        import json
+        import lzma
+        from pathlib import Path
+        from trajectory_ingest import import_link_capture, import_yrp, inspect_link_capture
+        from yrp_ingest import inspect_yrp
+        try:
+            if args.report and Path(args.report).exists():
+                raise FileExistsError('报告已存在，请选择新文件名')
+            if args.source == 'link' and (args.p0_player_id or args.p1_player_id):
+                raise ValueError('Link 玩家 ID 必须来自原捕获头部，不能在导入时覆写')
+            if args.inspect:
+                report = inspect_yrp(args.path) if args.source == 'yrp' else inspect_link_capture(args.path)
+            elif args.source == 'yrp':
+                report = import_yrp(args.path, args.output, timeout_seconds=args.timeout,
+                                    player_ids={'0': args.p0_player_id, '1': args.p1_player_id})
+            else:
+                report = import_link_capture(args.path, args.output, timeout_seconds=args.timeout)
+            if args.report:
+                target = Path(args.report)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, 'x', encoding='utf-8') as stream:
+                    json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            if report.get('conversion_error') or report.get('verification_error'):
+                parser.exit(2, '已保存诊断失败报告，该轨迹不得进入训练。\n')
+        except (ValueError, RuntimeError, OSError, KeyError, EOFError, RecursionError, lzma.LZMAError) as error:
+            parser.exit(1, f'录像入口拒绝: {error}\n')
+
+    elif args.command == 'dataset-build':
+        import json
+        from trajectory_dataset import build_trajectory_dataset
+        try:
+            report = build_trajectory_dataset(args.directory, args.output, seed=args.seed,
+                validation_fraction=args.validation_fraction, test_fraction=args.test_fraction)
+        except (ValueError, RuntimeError, OSError) as error:
+            parser.exit(1, f'数据门禁失败: {error}\n')
+        print(json.dumps({key: value for key, value in report.items() if key != 'entries'},
+                         ensure_ascii=False, indent=2))
 
     elif args.command == 'vocab':
         print("⚠️ 本地词表追加会形成模型协议身份；请备份并向所有训练/部署机器分发同一 card_vocab.json。")

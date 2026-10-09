@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.13.4"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.13.5"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -2770,10 +2770,11 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
     st.markdown(_("管理系统运行期间产生的所有日志、模型文件与 AI 心声记录。", 
                   "Manage all logs, models, and AI thoughts generated during system operation."))
     
-    tab_logs, tab_audit_logs, tab_thoughts, tab_models, tab_data, tab_tb = st.tabs([
+    tab_logs, tab_audit_logs, tab_thoughts, tab_ingress, tab_models, tab_data, tab_tb = st.tabs([
         _("📜 系统日志", "📜 System Logs"),
         _("🛡️ V3 审计报告", "🛡️ V3 Audit Reports"),
         _("🧠 读心记录", "🧠 Thought Replays"),
+        _("🧪 轨迹与数据门禁", "🧪 Trajectory Ingress & Quality"),
         _("🤖 模型仓库", "🤖 Model Storage"),
         _("📊 对局大盘数据", "📊 Match Data"),
         _("📉 TensorBoard 数据", "📉 TensorBoard Runs"),
@@ -2781,9 +2782,15 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
     
     # 🌟 定义一个通用的文件管理器模板函数，直接消灭重复代码
     def build_file_manager(folder_path, ext, title_str, allow_view=False, allow_upload=False):
+        """按目录和文件后缀展示分类管理，并明确导出与删除的作用范围"""
         os.makedirs(folder_path, exist_ok=True)
         files = sorted(glob.glob(os.path.join(folder_path, f"*{ext}")), key=os.path.getmtime, reverse=True)
         file_names = [os.path.basename(f) for f in files]
+        st.subheader(title_str)
+        st.caption(_(
+            f"目录：{folder_path} ｜ 文件类型：{ext} ｜ {len(files)} 个文件。只管理此目录下的此类文件，不递归删除，也不联动删除其他类别。",
+            f"Directory: {folder_path} | Type: {ext} | {len(files)} files. Only this category in this directory is managed; no recursive or cross-category deletion.",
+        ))
         
         # --- 导入/上传功能 ---
         if allow_upload:
@@ -2806,12 +2813,18 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
             return
 
         # --- 导出/查看功能 ---
-        sel_view = st.selectbox(_("🔍 选择文件操作 (查看/导出)", "🔍 Select file for View/Export"), file_names, key=f"view_{folder_path}")
+        sel_view = st.selectbox(
+            _("🔍 选择文件操作 (查看/导出)", "🔍 Select file for View/Export"), file_names,
+            key=f"view_{folder_path}",
+            help=_("选择只用于查看或下载，不会转换、审查、训练或删除文件",
+                   "Selection is for viewing/downloading only; it does not convert, audit, train or delete anything."),
+        )
         if sel_view:
             file_to_read = os.path.join(folder_path, sel_view)
             with open(file_to_read, "rb") as f: file_bytes = f.read()
             
-            st.download_button(_("⬇️ 导出 (下载) 此文件", "Export (Download) this file"), data=file_bytes, file_name=sel_view, use_container_width=True, key=f"dl_{folder_path}")
+            st.download_button(_("⬇️ 导出 (下载) 此文件", "Export (Download) this file"), data=file_bytes,
+                               file_name=sel_view, **get_stretch_width_args(st.download_button), key=f"dl_{folder_path}")
             
             if allow_view:
                 with st.expander(_("👀 预览文件尾部内容", "Preview File Content (Tail)")):
@@ -2828,9 +2841,13 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         # --- 批量删除功能 ---
         c_del, c_clr = st.columns([2, 1])
         with c_del:
-            st.markdown(f"**🗑️ {_('批量删除', 'Batch Delete')}**")
-            sel_del = st.multiselect(_("勾选要删除的文件", "Select files to delete"), file_names, key=f"del_{folder_path}")
-            if st.button(_("删除选中文件", "Delete Selected"), key=f"btn_del_{folder_path}"):
+            st.markdown(f"**🗑️ {_('批量删除：', 'Batch Delete: ')}{title_str}**")
+            sel_del = st.multiselect(
+                _("勾选要删除的文件", "Select files to delete"), file_names, key=f"del_{folder_path}",
+                help=_(f"仅删除 {folder_path} 中勾选的 {ext} 文件。删除不可在界面内撤销，请先下载备份。",
+                       f"Deletes only selected {ext} files in {folder_path}. There is no UI undo; download backups first."),
+            )
+            if st.button(_(f"删除选中的{title_str}", f"Delete selected {title_str}"), key=f"btn_del_{folder_path}"):
                 if sel_del:
                     for f in sel_del: os.remove(os.path.join(folder_path, f))
                     st.success(_("✅ 删除成功！", "✅ Deleted!"))
@@ -2841,11 +2858,12 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         # --- 安全清空功能 (双重确认锁) ---
         with c_clr:
             st.markdown(f"**🧨 {_('危险操作区', 'Danger Zone')}**")
-            with st.expander(_("一键清空...", "Clear All...")):
-                st.error(_(f"将彻底删除 `{folder_path}` 下所有文件！", f"Will completely delete all files in `{folder_path}`!"))
-                confirm = st.checkbox(_("我确认清空", "I confirm to clear"), key=f"chk_clr_{folder_path}")
+            with st.expander(_(f"清空{title_str}…", f"Clear {title_str}…")):
+                st.error(_(f"将删除 `{folder_path}` 下全部 {len(files)} 个 `{ext}` 文件；不会删除其他后缀或子目录中的文件。请先备份。",
+                           f"Deletes all {len(files)} `{ext}` files in `{folder_path}`, not other extensions or subdirectories. Back up first."))
+                confirm = st.checkbox(_(f"我确认清空{title_str}", f"I confirm clearing {title_str}"), key=f"chk_clr_{folder_path}")
                 # 只有勾选了确认框，删除按钮才会解锁 (disabled=not confirm)
-                if st.button(_("彻底清空所有文件", "Clear ALL Files"), type="primary", disabled=not confirm, key=f"btn_clr_{folder_path}"):
+                if st.button(_(f"清空全部{title_str}", f"Clear all {title_str}"), type="primary", disabled=not confirm, key=f"btn_clr_{folder_path}"):
                     for f in files: os.remove(f)
                     st.success(_("✅ 已全部清空！", "✅ Cleared all!"))
                     st.rerun()
@@ -2868,6 +2886,185 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
     with tab_thoughts:
         build_file_manager("./ai_thoughts", ".json", _("AI 读心记录", "AI Thought Records"), allow_view=True, allow_upload=False)
         build_file_manager("./replays/core_trajectories", ".core.jsonl.gz", _("规范 Core 轨迹", "Canonical Core Trajectories"), allow_view=False, allow_upload=False)
+    with tab_ingress:
+        st.info(_(
+            "只检查/转换与划分，不启动模仿训练。普通 YRP 缺历史资产和原始 Core 报文；单方 Link 捕获缺完整信息，均不能自动成为训练数据。",
+            "Inspection/conversion/splitting only: no imitation training. Ordinary YRP lacks historical assets/raw Core output; player-view Link captures are incomplete and cannot automatically become training data.",
+        ))
+        st.subheader(_("1. 原始录像检查与诊断转换", "1. Inspect & Convert Raw Replays"))
+        st.write(_(
+            "输入：本地 YRP/YRP3D 录像或 Link 原始捕获。只读检查仅展示格式信息；诊断转换尝试用当前 Core 与资产重建对局，生成规范诊断轨迹和入口报告，不修改原文件。",
+            "Input: local YRP/YRP3D replays or raw Link captures. Inspection displays format information only. Diagnostic conversion attempts reconstruction with current Core/assets and writes a canonical diagnostic trace plus an ingress report, without modifying the source.",
+        ))
+        st.caption(_(
+            "转换轨迹：replays/imported_trajectories/*.core.jsonl.gz；入口报告：replay_data/ingest_reports/*.json。转换成功不代表已获准用于学习。",
+            "Converted traces: replays/imported_trajectories/*.core.jsonl.gz; ingress reports: replay_data/ingest_reports/*.json. Successful conversion does not grant learning eligibility.",
+        ))
+        ingress_source = st.selectbox(
+            _("输入来源", "Input Source"), ('yrp', 'link'), key='ingress_source',
+            format_func=lambda source: _("YRP / YRP3D 游戏录像", "YRP / YRP3D Game Replay") if source == 'yrp'
+                else _("Link 原始捕获", "Link Raw Capture"),
+            help=_(
+                "YRP/YRP3D 在 replays 下递归查找；Link 在 replays/link_captures 中查找 .link.jsonl.gz。来源决定读取格式，不改变数据门禁标准。",
+                "YRP/YRP3D is found recursively under replays; Link reads .link.jsonl.gz from replays/link_captures. The source selects the reader, not a weaker quality gate.",
+            ),
+        )
+        ingress_files = sorted(glob.glob('./replays/**/*.yrp', recursive=True)
+                               + glob.glob('./replays/**/*.yrp3d', recursive=True)) if ingress_source == 'yrp' else sorted(
+                                   glob.glob('./replays/link_captures/*.link.jsonl.gz'))
+        ingress_path = st.selectbox(
+            _("选择要检查或转换的原始文件", "Select Raw File to Inspect or Convert"), ingress_files,
+            key=f'ingress_file_{ingress_source}',
+            help=_("每次只处理选中的一个原始文件。这里不选择已转换的 .core.jsonl.gz 轨迹；它们在第 2 区统一审查。",
+                   "Processes one selected source file at a time. Converted .core.jsonl.gz traces are audited together in section 2."),
+        )
+        if not ingress_files:
+            st.caption(_("此来源暂未找到文件，请将原始录像或捕获放入上述对应目录。",
+                         "No files found for this source. Place the replay/capture in the directory above."))
+        if st.button(_("只读格式检查", "Inspect Format (Read-only)"), disabled=not ingress_path,
+                     help=_("不调用 Core、不产生新文件、不启动后台任务；仅检查格式、元数据与支持边界。",
+                            "Checks format, metadata and support boundaries without Core, output files or background tasks."),
+                     **REPLAY_BUTTON_WIDTH):
+            try:
+                from trajectory_ingest import inspect_link_capture
+                from yrp_ingest import inspect_yrp
+                report = inspect_yrp(ingress_path) if ingress_source == 'yrp' else inspect_link_capture(ingress_path)
+                st.json(report)
+            except Exception as error:
+                st.error(str(error))
+        if st.button(_("启动离线诊断转换", "Start Offline Diagnostic Conversion"), disabled=not ingress_path,
+                     help=_("启动独立 CPU 任务，不加载策略模型。失败也可能留下诊断前缀及报告；单方捕获、缺历史证据或响应不匹配不会自动成为训练样本。",
+                            "Starts a separate CPU task without policy weights. Failures may leave a diagnostic prefix/report. Partial captures, missing evidence or unmatched responses do not become training samples automatically."),
+                     **REPLAY_BUTTON_WIDTH):
+            if is_process_alive(st.session_state.running_pid, st.session_state.running_process_create_time):
+                st.error(_("请等待或停止当前托管任务。", "Wait for or stop the current managed task."))
+            else:
+                import uuid
+                report_path = os.path.join('./replay_data/ingest_reports', f'ingest_{uuid.uuid4().hex}.json')
+                process = launch_managed_task([sys.executable, 'main.py', 'replay-ingest', ingress_path,
+                    '--source', ingress_source, '--report', report_path])
+                st.success(_(f"已启动 PID {process.pid}；报告: {report_path}。日志在启动与监控中枢查看。",
+                              f"Started PID {process.pid}; report: {report_path}. See Control & Logs for progress."))
+        st.divider()
+        st.subheader(_("2. 规范轨迹审查与隔离划分", "2. Audit & Split Canonical Trajectories"))
+        st.write(_(
+            "输入：指定目录内的 .core.jsonl.gz 规范轨迹，包括框架原生录制和第 1 区转换结果，不直接审查 YRP 或 Link 原始捕获。检查完整性、来源证据与重放一致性后，把合格轨迹划入训练/验证/测试清单，其余放入隔离区。",
+            "Input: .core.jsonl.gz canonical traces under the selected directory, including native recordings and section 1 conversion results, not raw YRP/Link files. Integrity, provenance and replay consistency determine train/validation/test eligibility; other entries are quarantined.",
+        ))
+        st.caption(_(
+            "输出：replay_data/datasets/dataset_*.json。只生成文件引用与审查结果，不搬动轨迹、不启动训练。",
+            "Output: replay_data/datasets/dataset_*.json, containing file references and audit results only. No trajectory is moved and no training starts.",
+        ))
+        dataset_root = st.text_input(
+            _("规范轨迹目录（递归扫描）", "Canonical Trajectory Directory (recursive)"), value='./replays',
+            help=_("递归扫描此目录中的 .core.jsonl.gz；默认 replays 同时覆盖原生轨迹和导入轨迹。其他后缀不会进入审查。",
+                   "Recursively scans .core.jsonl.gz only. The default replays directory covers native and imported traces; other extensions are excluded."),
+        )
+        dataset_seed = st.number_input(
+            _("隔离划分种子", "Split Seed"), min_value=0, max_value=2**32 - 1, value=20261009,
+            help=_("控制独立关联组分配到训练/验证/测试区的可复现随机划分，不影响对局重建或模型随机性。同一数据和种子得到相同划分；默认目标比例为 80%/10%/10%，按组划分不保证精确数量。",
+                   "Controls reproducible train/validation/test assignment of independent groups, not duel reconstruction or model randomness. Defaults target 80%/10%/10%; grouped counts need not match exact ratios."),
+        )
+        st.caption(_(
+            "共享同一整局、精确主/额外/备牌构筑或稳定玩家的所有轨迹同组；关联会传递。独立组不足时不强行生成验证集。重放为 CPU 离线操作，不载入策略模型。",
+            "Trajectories sharing a duel, exact Main/Extra/Side composition or stable player remain in one transitive group. Insufficient independent groups do not produce artificial holdouts. Replay runs offline on CPU without policy weights.",
+        ))
+        if st.button(_("审查并生成隔离数据清单", "Audit & Build Isolated Dataset Manifest"),
+                     help=_("启动 CPU 离线审查，可能重放规范轨迹。共享整局、构筑或玩家的轨迹保持同组，避免数据泄漏；会保留拒绝原因而不是强行放行。",
+                            "Starts an offline CPU audit which may replay canonical traces. Shared duel/deck/player groups stay together to avoid leakage; refusals remain explicit."),
+                     **REPLAY_BUTTON_WIDTH):
+            if is_process_alive(st.session_state.running_pid, st.session_state.running_process_create_time):
+                st.error(_("请等待或停止当前托管任务。", "Wait for or stop the current managed task."))
+            elif not os.path.isdir(dataset_root):
+                st.error(_("输入目录不存在。", "Input directory does not exist."))
+            else:
+                import uuid
+                output = os.path.join('./replay_data/datasets', f'dataset_{uuid.uuid4().hex}.json')
+                process = launch_managed_task([sys.executable, 'main.py', 'dataset-build', '--directory', dataset_root,
+                    '--output', output, '--seed', str(int(dataset_seed))])
+                st.success(_(f"已启动 PID {process.pid}；清单: {output}。", f"Started PID {process.pid}; manifest: {output}."))
+        st.divider()
+        st.subheader(_("3. 查看质量审查结果", "3. View Quality Audit Results"))
+        st.caption(_(
+            "选择第 2 区生成的数据质量清单。数量表示各区的轨迹文件数，不是决策步数或已参与训练的样本数；隔离文件仍保留在原目录。单文件转换细节可在第 4 区的入口诊断报告中查看。",
+            "Select a section 2 dataset manifest. Counts represent trajectory files, not decision steps or samples already used for training; quarantined files stay in their original locations. Individual conversion details are in section 4 ingress reports.",
+        ))
+        with st.expander(_("❓ 如何理解门禁与隔离原因", "❓ Understanding Eligibility & Quarantine")):
+            st.markdown(_(
+                "合格仅表示通过当前数据门禁，**不代表已经训练，也不评定棋力高低**。常见拒绝代码：\n\n"
+                "- `original_output_or_assets_unverified`：缺原始完整报文或历史资产证据；普通 YRP 通常属于这一类。\n"
+                "- `incomplete_visibility`：只捕获单方视角，不能补造隐藏信息。\n"
+                "- `stable_player_ids_missing`：缺稳定匿名玩家身份，无法保证玩家隔离。\n"
+                "- `truncated_recording` / `no_real_terminal`：记录截断，或没有 Core 真实终局。\n"
+                "- `trajectory_quality_flags` / `strict_replay_or_mapping_gate_failed` / `replay_failed`：轨迹质量、严格重放或合法动作映射未通过。\n"
+                "- `duplicate_duel`：同一整局重复封装，保留一个合格副本，其他副本隔离。\n"
+                "- `format_or_quality_failed` / `unsupported_origin`：格式损坏、字段不合规或来源不受支持。\n\n"
+                "关联组过少或验证/测试候选为空时，报告会警告：不能把同组数据硬拆后称为独立验证。",
+                "Eligibility means passing current data gates, **not that training has run or playing strength is high**. Common rejection codes:\n\n"
+                "- `original_output_or_assets_unverified`: no original complete messages or historical asset proof; ordinary YRP commonly falls here.\n"
+                "- `incomplete_visibility`: a player-only capture cannot supply hidden information.\n"
+                "- `stable_player_ids_missing`: stable anonymized identities are missing, so player isolation cannot be guaranteed.\n"
+                "- `truncated_recording` / `no_real_terminal`: truncated recording or no genuine Core terminal.\n"
+                "- `trajectory_quality_flags` / `strict_replay_or_mapping_gate_failed` / `replay_failed`: quality, strict replay or legal-action mapping failed.\n"
+                "- `duplicate_duel`: duplicate packaging of the same duel; one eligible copy is retained and others quarantined.\n"
+                "- `format_or_quality_failed` / `unsupported_origin`: corrupt format, invalid fields or unsupported source.\n\n"
+                "Too few independent groups or empty validation/test candidates produce a warning: splitting a shared group cannot establish independent validation.",
+            ))
+        manifests = sorted(glob.glob('./replay_data/datasets/*.json'))
+        selected_manifest = st.selectbox(
+            _("选择数据质量/划分清单", "Select Dataset Quality/Split Manifest"), manifests,
+            help=_("读取 replay_data/datasets 中已有的 JSON 清单，不重新扫描或重放；新增数据或资产变更后需要重新运行第 2 区审查。",
+                   "Reads an existing JSON manifest in replay_data/datasets without rescanning/replaying. Re-run section 2 after adding data or changing assets."),
+        )
+        if st.button(_("查看数据门禁报告", "View Quality Report"), disabled=not selected_manifest,
+                     help=_("只读显示所选清单的数量、分组与拒绝原因，不启动数据转换、审查或训练。",
+                            "Displays counts, groups and rejection reasons only; no conversion, audit or training starts."),
+                     **REPLAY_BUTTON_WIDTH):
+            try:
+                with open(selected_manifest, 'rb') as stream:
+                    raw = stream.read(64 * 1024 * 1024 + 1)
+                if len(raw) > 64 * 1024 * 1024:
+                    raise ValueError('manifest size limit exceeded')
+                report = json.loads(raw)
+                for column, split in zip(st.columns(4), ('train', 'validation', 'test', 'quarantine')):
+                    split_label = {'train': _("训练候选", "Training Candidates"),
+                                   'validation': _("验证候选", "Validation Candidates"),
+                                   'test': _("测试候选", "Test Candidates"),
+                                   'quarantine': _("隔离 / 不合格", "Quarantined / Rejected")}[split]
+                    column.metric(split_label, report['counts'][split])
+                for warning in report['warnings']:
+                    if warning.startswith('insufficient_disjoint_groups_or_empty_holdout'):
+                        st.warning(_("独立关联组不足或验证/测试区为空，当前清单不能作为独立验证的依据。",
+                                     "Too few independent groups or an empty holdout: this manifest cannot establish independent validation."))
+                    else:
+                        st.warning(warning)
+                st.dataframe([{'file': entry['path'], 'split': entry['split'], 'eligible': entry['eligible'],
+                               'reasons': '; '.join(entry['rejection_reasons']), 'group': entry.get('group_id', '')[:12]}
+                              for entry in report['entries']], hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+            except Exception as error:
+                st.error(str(error))
+        st.divider()
+        st.subheader(_("4. 分类文件管理（查看 / 下载 / 删除）", "4. File Management by Category"))
+        st.caption(_(
+            "展开对应类别后管理文件。删除只作用于该类别的目录和后缀，不会联动删除来源录像、其他报告或模型；删除清单也不会删除其中引用的轨迹。删除前请下载备份。",
+            "Expand a category to manage files. Deletion affects only its directory/extension, not source replays, other reports or models; deleting a manifest does not delete referenced traces. Download backups first.",
+        ))
+        with st.expander(_("📡 Link 原始捕获 · 转换的输入", "📡 Link Raw Captures · Conversion Input")):
+            st.caption(_("由 Link 采集 SDK 保存的原始报文与已提交响应，不等于已通过门禁的训练数据。",
+                         "Raw messages and submitted responses saved by the Link capture SDK, not quality-approved training data."))
+            build_file_manager('./replays/link_captures', '.link.jsonl.gz', _("Link 原始捕获", "Link Raw Captures"))
+        with st.expander(_("🎞️ 导入诊断轨迹 · 转换的输出 / 审查的输入", "🎞️ Imported Traces · Conversion Output / Audit Input")):
+            st.caption(_("由离线诊断转换生成，也可能是不完整的失败前缀；需经过第 2 区审查。原生竞技场轨迹在“读心记录”标签页管理。",
+                         "Offline conversion outputs may include incomplete failure prefixes and require section 2 audit. Native Arena traces are managed in Thought Replays."))
+            build_file_manager('./replays/imported_trajectories', '.core.jsonl.gz', _("导入诊断轨迹", "Imported Diagnostic Trajectories"))
+        with st.expander(_("📋 入口诊断报告 · 单个原始文件的转换结果", "📋 Ingress Reports · Single-File Conversion Results")):
+            st.caption(_("记录来源格式、转换成功/失败和原因、生成的轨迹及一致性验证结果；不是训练/验证/测试划分清单。",
+                         "Records source format, conversion success/failure, reasons, output trace and consistency checks, not train/validation/test splits."))
+            build_file_manager('./replay_data/ingest_reports', '.json', _("入口诊断报告", "Ingress Reports"), allow_view=True)
+        with st.expander(_("🗂️ 数据质量清单 · 批量审查与隔离划分结果", "🗂️ Dataset Manifests · Batch Audit & Split Results")):
+            st.caption(_("记录逐轨迹门禁结论、拒绝原因、关联组与划分；这里只保存文件引用，不包含轨迹本体或模型权重。",
+                         "Per-trace eligibility, rejection reasons, groups and splits; manifests contain file references, not trajectory contents or model weights."))
+            build_file_manager('./replay_data/datasets', '.json', _("数据质量清单", "Dataset Manifests"), allow_view=True)
     with tab_models:
         st.markdown("### 🧬 " + _("按模型 UUID 管理制品", "Artifacts grouped by model UUID"))
         st.caption(_(
