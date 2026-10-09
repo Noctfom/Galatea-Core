@@ -4,6 +4,25 @@
 
 ---
 
+## [v3.13.4] - 2026-10-09
+
+### 🧬 Code-source provenance and trusted incremental semantics
+
+- **Confirmed cause**: old27,647 vectors had530 distinct values and27,007 identical rows;26,942 lacked raw code and65 were empty. The cached encoder's empty-text output matched that group. Empty-source fallback plus key-only reuse perpetuated the defect; coarse hashes did not directly merge embeddings
+- **Source extraction**: token/block parsing covers registration-only effects, SetValue, Clone overrides and uniquely resolvable local/cross-card/utility/procedure callback closure without duplicated Operation. Actual literals remain intact; source/block/dependency identities and unresolved references are recorded. Lua is never executed and descriptions do not define effect order
+- **Independent coarse classification**: normalization rules are unchanged; only duplicate/stale registry members are cleaned. Full comparison with the prior committed parser found zero slot/category/requirement differences and2,156 classes. Cards without independent effects receive no artificial slots
+- **Content-aware reuse**: changed same-key code/dependencies regenerate; unmanifested legacy vectors fully rebuild, missing/empty sources cannot generate. Actual encoder weights/config/tokenizer and pinned revisions establish identity; temporary padding/truncation does not trigger rebuilds. Source-cleaned bundles may only reuse certified identical-source vectors
+- **Complete long-code coverage**:256-token windows/32-token overlap with role/block/part prefixes; new-token-weighted mean and L2 retain384-dimensional output. Bounded generation groups avoid retaining every expanded long input; no new network or per-step generator
+- **Maintenance/asset chain**: read-only CLI `semantic-check --directory` and WebUI Code Semantic Quality inspect source hashes, duplicates and coverage on request. Independent output directories are supported. New generation manifest format1 participates in sync/GKG/source import and compiled checks; modern missing/mismatched provenance fails, legacy boundaries remain supported
+- **Rebuild**:13,400 cards with independent effects,27,647 nonempty-source slots,26,092 distinct vectors, largest identical group657;25,748 multi-chunk slots and172,018 chunks.27 sources remain explicitly incomplete. An assets-only GKG of about87.32MiB passes extraction validation; original root assets are preserved and source commits do not automatically publish new assets
+- **Versions/cost**: framework3.13.4; Model Protocol4/Checkpoint3/revision14/static1/GKG4 unchanged. Network, inputs, rewards/PPO, legality and public Core remain unchanged. Offline first build and large-source startup checks increase; parameters/per-step storage/dictionary row count do not. Changed semantic hashes require fresh training, not migration or an untested strength claim
+- **Lossless size reduction**: compact JSON removes formatting whitespace, reducing the KB from about104.71MiB to73.70MiB; source/structured data and logical semantic identity remain unchanged
+- **Verification**:324 tests/50 subtests pass; four new-asset gates all pass separately. Coverage includes extraction/reuse/chunking/tampering/package/sync, network shapes, PPO updates, standard ONNX inputs/numerical parity and real-Core duel/raw-trajectory replay. Production-scale long training and manual browser visual acceptance are not claimed
+
+See [3.13.4 code-semantic asset guide](code_semantics_en.md). Next is Phase7 batch3: Link/YRP ingestion and canonical quality gates before imitation learning.
+
+---
+
 ## [v3.13.3] - 2026-10-09
 
 ### 🧩 Public hints and state-observation completion

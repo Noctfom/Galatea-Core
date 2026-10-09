@@ -24,6 +24,8 @@ deploy_packages/
 debug.log
 semantic_lookup_v1.npz
 semantic_lookup_v1.json
+# 独立重建与验证的语义资产不自动混入当前模型资产
+semantic_builds/
 tests/
 .galatea_train.lock
 .galatea_train.lock.owner.json

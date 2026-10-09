@@ -209,7 +209,7 @@ def main():
     }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
     
-    if cmd_name != 'trajectory-check':
+    if cmd_name not in {'trajectory-check', 'semantic-check'}:
         setup_global_logger(prefix=log_prefix)
     
     parser = argparse.ArgumentParser(description="Galatea AI 主控程序")
@@ -359,6 +359,8 @@ def main():
                               help='语义资产仓库 URL，也兼容旧式 knowledge_base.json Raw URL')
     parse_parser.add_argument('--local-update', action='store_true', help='解析本地 Lua 并自动接续结构语义与代码向量')
     parse_parser.add_argument('--embed', action='store_true', help=argparse.SUPPRESS)
+    semantic_check_parser = subparsers.add_parser('semantic-check', help='只读检查代码语义来源、生成清单和向量重复率')
+    semantic_check_parser.add_argument('--directory', default='.', help='语义资产所在目录')
 
     # --- 5. 更新同步模式 (Update) ---
     update_parser = subparsers.add_parser('update', help='更新本地代码、卡片数据库(CDB)与脚本库')
@@ -456,12 +458,18 @@ def main():
         )
         arena.run_tournament(n_games=args.num)
         
+    elif args.command == 'semantic-check':
+        from semantic_assets import audit_code_semantic_quality
+        import json
+        print(json.dumps(audit_code_semantic_quality(args.directory), ensure_ascii=False, indent=2))
+
     elif args.command == 'parse':
         print("🧠 启动语义资产管理模块...")
         from semantic_assets import (
             clear_local_semantic_assets,
             invalidate_static_semantic_assets,
             synchronize_remote_semantic_bundle,
+            audit_code_semantic_quality,
         )
         from semantic_lookup import ensure_static_semantic_assets
 
@@ -490,6 +498,7 @@ def main():
                 print("⚠️ 远程代码向量不完整，已仅安装结构语义；可启用 --local-update 重建向量。")
 
         if local_update:
+            print('⚠️ 代码语义内容更新会改变语义资产身份；已有模型须保留原资产，新资产用于新训练。')
             print("🔍 启动本地 Lua 语义接续更新...")
             from lua_parser import YGOProLuaParser
             semantic_parser = YGOProLuaParser(script_dir=args.script_dir)
@@ -515,12 +524,16 @@ def main():
         elif not args.sync and not args.clear:
             print("⚠️ 未选择任何操作；请使用 --sync 和/或 --local-update。")
         if semantic_ready:
-            lookup = ensure_static_semantic_assets(output_directory)
+            lookup = ensure_static_semantic_assets(output_directory, knowledge_base_filename=os.path.basename(output_path))
             print(
                 "📦 静态语义运行资产已生成: "
                 f"{lookup.card_vocabulary.card_count} 张卡 / "
                 f"{len(lookup.runtime_effect_bindings)} 个运行时效果绑定"
             )
+            quality = audit_code_semantic_quality(output_directory, knowledge_base_filename=os.path.basename(output_path))
+            print(f"🧪 代码语义质量：{quality['distinct_vectors']} 个不同向量 / {quality['effect_slots']} 槽")
+            for warning in quality['warnings']:
+                print(f'⚠️ {warning}')
         
     elif args.command == 'update':
         print("🌐 启动自动同步更新模块...")

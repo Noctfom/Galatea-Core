@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.13.3"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.13.4"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1633,10 +1633,13 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
     st.markdown(_("将 Lua 脚本降维提纯，生成供神经网络食用的高维特征字典。", 
                   "Compress Lua scripts into high-dimensional semantic features for neural networks."))
     
-    tab_exec, tab_hash, tab_card, tab_audit = st.tabs([
+    semantic_view_directory = st.text_input(_("语义资产目录（查看/构建目标）", "Semantic Asset Directory (View/Build Target)"), value=".")
+    st.warning(_("重新生成代码向量会改变语义资产身份。旧模型保留原资产；新资产应从零训练。建议先构建到独立目录再检查，不要覆盖正在使用的资产。", "Regenerated vectors change semantic identity. Keep original assets for existing models and train fresh with new assets. Build and inspect in a separate directory first."))
+    tab_exec, tab_hash, tab_card, tab_quality, tab_audit = st.tabs([
         _("⚙️ 执行中枢", "⚙️ Execution Hub"),
         _("🧬 特殊效果图鉴", "🧬 Custom Hash Explorer"),
         _("🔍 单卡语义解剖", "🔍 Card Semantic Viewer"),
+        _("📊 代码语义质量", "📊 Code Semantic Quality"),
         _("🧪 V3 观测审计", "🧪 V3 Observation Audit"),
     ])
     
@@ -1651,7 +1654,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
             p_sync = st.checkbox(_("🌐 仅同步远程语义资产 (--sync)", "Sync Remote Semantic Assets Only"), value=False,
                                  help=_("只下载知识库、Hash 映射、代码语义向量和索引；不会扫描本地 Lua，也不会生成向量。", "Only downloads the KB, Hash map, code-semantic matrix, and index; it does not scan local Lua or generate vectors."))
             p_local_update = st.checkbox(_("🧬 本地提取/接续语义 (--local-update)", "Extract/Continue Local Semantics"), value=False,
-                                         help=_("扫描本地 Lua，自动接续结构语义并为新增效果槽生成代码向量；资产不一致时安全全量重建。", "Scans local Lua, continues structured semantics, and embeds new effect slots; incompatible assets are safely rebuilt."))
+                                         help=_("按源码及依赖摘要接续；新增/改动代码重新生成，无生成清单的旧向量全量重建。长代码分块覆盖，不静默截断。", "Continues by source/dependency hashes; new or changed code is regenerated, unverified legacy vectors are fully rebuilt. Long code is chunked without silent truncation."))
             p_url = st.text_input(
                 _("远程基座仓库 URL", "Remote Base Repository URL"),
                 value=DEFAULT_SEMANTIC_REPOSITORY_URL,
@@ -1666,7 +1669,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                 if not p_sync and not p_local_update:
                     st.warning(_("请至少选择远程同步或本地提取/接续。", "Select remote sync and/or local extraction/continuation."))
                 else:
-                    cmd = [sys.executable, "main.py", "parse"]
+                    cmd = [sys.executable, "main.py", "parse", "--output", os.path.join(semantic_view_directory, "knowledge_base.json")]
                     if p_clear: cmd.append("--clear")
                     if p_sync:
                         cmd.append("--sync")
@@ -1694,7 +1697,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
     # --- 2. 特殊效果图鉴 ---
     with tab_hash:
         st.markdown("### " + _("共用底层逻辑探测仪", "Shared Logic Detector"))
-        hash_file = "hash_mapping_report.json"
+        hash_file = os.path.join(semantic_view_directory, "hash_mapping_report.json")
         if os.path.exists(hash_file):
             with open(hash_file, 'r', encoding='utf-8') as f:
                 hash_data = json.load(f)
@@ -1740,7 +1743,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
     # --- 3. 单卡语义解剖 ---
     with tab_card:
         st.markdown("### " + _("AI 视觉下的单卡解剖", "AI Vision Semantic Viewer"))
-        kb_file = "knowledge_base.json"
+        kb_file = os.path.join(semantic_view_directory, "knowledge_base.json")
         if os.path.exists(kb_file):
             with open(kb_file, 'r', encoding='utf-8') as f:
                 kb_data = json.load(f)
@@ -1757,6 +1760,24 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
         else:
             st.info(_("请先在 [执行中枢] 提取语义数据。", "Please run the parser in Execution Hub first."))
 
+    with tab_quality:
+        st.info(_("只读检查文件/来源摘要、编码器身份、分块覆盖和重复向量；只在点击按钮时执行，不参与训练。重复向量不自动等同于错误。", "Read-only file/source hashes, encoder identity, chunk coverage and repeated vectors. Runs only on request, outside training. Repeated vectors alone do not prove an error."))
+        if st.button(_("检查代码语义质量", "Inspect Code Semantic Quality"), key="code_semantic_quality", **REPLAY_BUTTON_WIDTH):
+            try:
+                from semantic_assets import audit_code_semantic_quality
+                quality = audit_code_semantic_quality(semantic_view_directory)
+                first, second, third = st.columns(3)
+                first.metric(_("效果槽", "Effect Slots"), quality['effect_slots'])
+                second.metric(_("不同向量", "Distinct Vectors"), quality['distinct_vectors'])
+                third.metric(_("最大相同向量组", "Largest Identical Group"), quality['largest_identical_group'])
+                if quality['generation_verified']:
+                    st.success(_("源码/向量生成清单一致。此检查不证明模型棋力或语义理解质量。", "Source/vector provenance is coherent. This does not certify playing strength or semantic understanding."))
+                for warning in quality['warnings']:
+                    st.warning(warning)
+                st.json(quality)
+            except (OSError, ValueError) as error:
+                st.error(_(f"代码语义校验失败：{error}", f"Code semantic validation failed: {error}"))
+
     # --- 4. Model Protocol V3 运行观测与效果槽映射审计 ---
     with tab_audit:
         st.markdown("### " + _("Model Protocol V3 观测审计", "Model Protocol V3 Observation Audit"))
@@ -1769,11 +1790,13 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
         with validation_col:
             if st.button(_("校验完整语义资产", "Validate Semantic Bundle"), key="validate_v3_semantics", **REPLAY_BUTTON_WIDTH):
                 try:
-                    validated = validate_semantic_bundle(PROJECT_ROOT)
+                    validated = validate_semantic_bundle(semantic_view_directory)
                     st.success(_(
                         f"语义资产一致：{validated['effect_slot_count']} 个效果槽、{validated['runtime_effect_binding_count']} 个运行时 Lua 绑定，向量维度 {validated['shape']}。",
                         f"Semantic bundle is coherent: {validated['effect_slot_count']} effect slots, {validated['runtime_effect_binding_count']} runtime Lua bindings, matrix shape {validated['shape']}.",
                     ))
+                    if validated.get('metadata') is None:
+                        st.warning(_("旧资产仅通过结构一致性检查，缺少生成清单；请查看“代码语义质量”，不要把文件可加载等同于代码语义有效。", "Legacy assets pass structural checks only, without generation provenance. Inspect Code Semantic Quality; loadability does not certify semantic validity."))
                 except (OSError, ValueError) as error:
                     st.error(_(f"语义资产校验失败：{error}", f"Semantic validation failed: {error}"))
         with refresh_col:
@@ -4078,7 +4101,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                         value=True,
                         help=(
                             "knowledge_base.json + code_embeddings.npy + "
-                            "code_embeddings_idx.json；用于继续生成语义，关闭后仍会自动携带运行表"
+                            "code_embeddings_idx.json + 新版 code_embeddings_meta.json；用于继续生成语义，关闭后仍会自动携带运行表"
                         ),
                     )
                 with c2: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
@@ -4121,6 +4144,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                         extra_files["hash_mapping_report.json"] = "hash_mapping_report.json"
                                     extra_files["code_embeddings.npy"] = "code_embeddings.npy"
                                     extra_files["code_embeddings_idx.json"] = "code_embeddings_idx.json"
+                                    if os.path.exists("code_embeddings_meta.json"):
+                                        extra_files["code_embeddings_meta.json"] = "code_embeddings_meta.json"
                                 if inc_staples: extra_files["meta_staples.json"] = "meta_staples.json"
                                 create_deployment_package(
                                     target_zip,
@@ -4275,7 +4300,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
 
                             root_file_groups = [
                                 (
-                                    "可接续语义源（知识库 + 代码向量 + 索引 + 可选 Hash 接续索引）",
+                                    "可接续语义源（知识库 + 向量 + 索引 + 新版生成清单 + 可选 Hash）",
                                     [
                                         filename
                                         for filename in (
@@ -4283,6 +4308,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                             "code_embeddings.npy",
                                             "code_embeddings_idx.json",
                                             "hash_mapping_report.json",
+                                            "code_embeddings_meta.json",
                                         )
                                         if filename in staged_files
                                     ],
@@ -4335,6 +4361,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                             "hash_mapping_report.json",
                                             "code_embeddings.npy",
                                             "code_embeddings_idx.json",
+                                            "code_embeddings_meta.json",
                                         }
                                         if (
                                             vocabulary_result["status"] == "local_newer"
@@ -4372,6 +4399,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                             finally:
                                                 if os.path.exists(temporary):
                                                     os.remove(temporary)
+                                        if "knowledge_base.json" in selected_root_files and "code_embeddings_meta.json" not in staged_files and os.path.isfile("code_embeddings_meta.json"):
+                                            os.remove("code_embeddings_meta.json")
                                         compiled_runtime_files = (
                                             "semantic_lookup_v1.npz",
                                             "semantic_lookup_v1.json",

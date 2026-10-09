@@ -702,11 +702,15 @@ def write_static_semantic_assets(
             temporary_table.unlink()
 
     source_records = {}
-    for filename in (
+    from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME
+    source_names = [
         knowledge_base_filename,
         CODE_EMBEDDINGS_FILENAME,
         CODE_EMBEDDINGS_INDEX_FILENAME,
-    ):
+    ]
+    if (source_root / CODE_EMBEDDINGS_META_FILENAME).is_file():
+        source_names.append(CODE_EMBEDDINGS_META_FILENAME)
+    for filename in source_names:
         source_path = source_root / filename
         stat = source_path.stat()
         source_records[filename] = {
@@ -786,12 +790,13 @@ def load_static_semantic_assets(
     if catalog.get("table_sha256") != _sha256_file(table_path):
         raise ValueError("static semantic table hash does not match its catalog")
     if verify_source_files:
+        from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME
         source_records = catalog.get("source_files")
         if not isinstance(source_records, dict):
             raise ValueError("static semantic source records are missing")
         source_names = set(source_records)
         if (
-            len(source_names) != 3
+            len(source_names - {CODE_EMBEDDINGS_META_FILENAME}) != 3
             or CODE_EMBEDDINGS_FILENAME not in source_names
             or CODE_EMBEDDINGS_INDEX_FILENAME not in source_names
             or any(

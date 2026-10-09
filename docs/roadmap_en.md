@@ -14,7 +14,7 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 - [x] Parsing stability (3.13.2): fixed bundled Core Type 16/31 layout, no ghost-byte toggle, Type 21 dispatch; no network/reward changes
 - [x] 3.13.3:120 visible feedback without penalties,160/165 reference lifetimes/code semantics,37/38 public position memory and162 strict rebuilding; [observations/cost](public_observations_en.md)
 - [ ] Type35 bulk region exchange remains deferred; unproven old semantic assets require trusted regeneration, not forced parent-vector matching
-- [ ] Prioritize local code-semantic quality: 27,007 of 27,647 vectors are identical. Verify code provenance, empty-code generation and incremental invalidation before deciding on trusted regeneration; never silently replace existing model assets
+- [x] 3.13.4 confirms missing/empty-source generation plus key-only reuse caused collapse; source provenance, content identity and complete chunking now support isolated rebuilds without network/input/coarse-classification changes. New assets have26,092 distinct vectors and27 explicitly incomplete slots; see [asset guide](code_semantics_en.md)
 - [ ] Phase 7 batch 3: Link/YRP input, deterministic replay, and whole-duel held-out quality gates before behavior cloning
 
 ## Separable Deck-Construction Cognition

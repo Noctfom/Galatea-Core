@@ -1,6 +1,7 @@
 # 本文件统一校验、同步和安装语义知识库及代码语义向量资产
 
 import json
+import hashlib
 import os
 import tempfile
 import urllib.parse
@@ -11,6 +12,7 @@ import numpy as np
 
 from effect_slot_binding import build_runtime_effect_binding_catalog
 from public_hint_semantics import build_public_hint_catalog
+from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME, read_code_metadata, source_identity
 
 
 KNOWLEDGE_BASE_FILENAME = "knowledge_base.json"
@@ -31,6 +33,7 @@ SEMANTIC_ASSET_FILENAMES = (
     KNOWLEDGE_BASE_FILENAME,
     HASH_MAPPING_FILENAME,
     *CODE_SEMANTIC_FILENAMES,
+    CODE_EMBEDDINGS_META_FILENAME,
 )
 DEFAULT_SEMANTIC_REPOSITORY_URL = "https://github.com/Noctfom/Galatea-Core.git"
 MAX_CODE_EMBEDDINGS_BYTES = 2 * 1024 * 1024 * 1024
@@ -97,6 +100,7 @@ def clear_local_semantic_assets(
         knowledge_base_filename,
         HASH_MAPPING_FILENAME,
         *CODE_SEMANTIC_FILENAMES,
+        CODE_EMBEDDINGS_META_FILENAME,
     }
     removed = []
     for filename in filenames:
@@ -199,6 +203,9 @@ def validate_code_semantic_assets(directory, *, required=False):
             raise ValueError("code_embeddings.npy must use float16 or float32")
         if shape[0] > 1_000_000 or shape[1] > 4096:
             raise ValueError("code_embeddings.npy shape exceeds semantic safety limits")
+        for start in range(0, shape[0], 4096):
+            if not np.isfinite(embeddings[start:start + 4096]).all():
+                raise ValueError('code embeddings contain nonfinite values')
     finally:
         mmap_handle = getattr(embeddings, "_mmap", None)
         if mmap_handle is not None:
@@ -220,12 +227,14 @@ def validate_code_semantic_assets(directory, *, required=False):
         raise ValueError("code embedding row count does not match its index")
     if sorted(values) != list(range(shape[0])):
         raise ValueError("code embedding index must map exactly onto every matrix row")
+    metadata = read_code_metadata(root, index, shape)
     return {
         "shape": shape,
         "dtype": dtype,
         "index": index,
         "embedding_path": embedding_path,
         "index_path": index_path,
+        "metadata": metadata,
     }
 
 
@@ -305,6 +314,18 @@ def validate_semantic_bundle(
             "knowledge base and code semantic index do not match: "
             + "; ".join(details)
         )
+    metadata = code_assets['metadata']
+    modern_source = any(card.get('code_source', {}).get('version') for card in knowledge_base.values())
+    if modern_source and metadata is None:
+        raise ValueError('new Lua sources require code_embeddings_meta.json; regenerate code vectors')
+    if metadata is not None:
+        for card_id, card in knowledge_base.items():
+            for effect in card.get('effects', []):
+                slot = int(effect.get('slot', 1)) - 1
+                if 0 <= slot < 8:
+                    identity = source_identity(effect)
+                    if metadata['rows'][f'{card_id}_{slot}']['encoding_sha256'] != identity['encoding_sha256']:
+                        raise ValueError(f'code semantic source changed without regeneration: {card_id}_{slot}')
     return {
         "knowledge_base": knowledge_base,
         "knowledge_base_path": knowledge_base_path,
@@ -313,6 +334,42 @@ def validate_semantic_bundle(
         "public_hint_binding_count": len(public_hint_bindings),
         **code_assets,
     }
+
+
+def audit_code_semantic_quality(directory, *, knowledge_base_filename=KNOWLEDGE_BASE_FILENAME):
+    """只读统计来源和重复向量质量，旧资产的结构一致不等于语义有效"""
+    bundle = validate_semantic_bundle(directory, knowledge_base_filename=knowledge_base_filename)
+    rows = bundle['shape'][0]
+    vectors = np.load(bundle['embedding_path'], mmap_mode='r', allow_pickle=False)
+    repeats = {}
+    try:
+        for vector in vectors:
+            digest = hashlib.sha256(vector.tobytes()).digest()
+            repeats[digest] = repeats.get(digest, 0) + 1
+    finally:
+        vectors._mmap.close()
+    effects = [effect for card in bundle['knowledge_base'].values() for effect in card.get('effects', []) if 1 <= int(effect.get('slot', 1)) <= 8]
+    missing = sum('raw_code' not in effect for effect in effects)
+    empty = sum('raw_code' in effect and not str(effect['raw_code']).strip() for effect in effects)
+    incomplete = sum(not effect.get('code_source', {}).get('complete', False) for effect in effects)
+    metadata = bundle['metadata']
+    warnings = []
+    if metadata is None:
+        warnings.append('legacy_unverified_generation: 文件一致，但没有可验证的代码生成清单')
+    if missing or empty:
+        warnings.append(f'missing_raw_source: {missing} 条缺源码、{empty} 条空源码；缺代码不能重新生成')
+    largest = max(repeats.values(), default=0)
+    if rows and largest / rows > 0.5:
+        warnings.append('dominant_identical_vectors: 超过一半槽位具有同一向量，请核实输入来源，不能仅凭重复认定错误')
+    if incomplete:
+        warnings.append(f'partial_source_closure: {incomplete} 条来源未证明完整；公开原生API不等同于缺失Lua依赖')
+    return {'directory': str(Path(directory).resolve()), 'shape': bundle['shape'], 'effect_slots': rows,
+            'generation_verified': metadata is not None, 'missing_raw_code': missing, 'empty_raw_code': empty,
+            'incomplete_sources': incomplete, 'distinct_vectors': len(repeats), 'largest_identical_group': largest,
+            'multi_chunk_effects': sum(record['chunks'] > 1 for record in metadata['rows'].values()) if metadata else None,
+            'total_chunks': sum(record['chunks'] for record in metadata['rows'].values()) if metadata else None,
+            'encoder': metadata['encoder'] if metadata else None, 'policy': metadata['policy'] if metadata else None,
+            'warnings': warnings}
 
 
 def _download_to_path(url, target_path):
@@ -415,6 +472,11 @@ def download_remote_semantic_bundle(remote_kb_url, target_directory):
                         downloaded[filename],
                         target_root / filename,
                     )
+                metadata_target = target_root / CODE_EMBEDDINGS_META_FILENAME
+                if CODE_EMBEDDINGS_META_FILENAME in downloaded:
+                    _replace_file_atomically(downloaded[CODE_EMBEDDINGS_META_FILENAME], metadata_target)
+                elif metadata_target.exists():
+                    metadata_target.unlink()
 
     return {
         "knowledge_base": knowledge_base,
@@ -454,7 +516,7 @@ def synchronize_remote_semantic_bundle(
 
     if not bundle["installed_code_semantics"]:
         # 远程结构语义变化后不能继续沿用旧向量，避免静默错位。
-        for filename in CODE_SEMANTIC_FILENAMES:
+        for filename in (*CODE_SEMANTIC_FILENAMES, CODE_EMBEDDINGS_META_FILENAME):
             path = target_root / filename
             if path.is_file() and not path.is_symlink():
                 path.unlink()

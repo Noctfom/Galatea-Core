@@ -38,6 +38,7 @@ from semantic_lookup import (
     load_static_semantic_assets,
     write_static_semantic_assets,
 )
+from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME
 
 
 ARTIFACT_MANIFEST_FORMAT_VERSION = 3
@@ -1379,6 +1380,10 @@ def create_deployment_package(
             requested_extras[KNOWLEDGE_BASE_FILENAME]
         ).resolve().parent
     source_semantic_root = semantic_root
+    # 新语义源自动携带生成清单，避免用户选择向量后漏掉内容身份
+    provenance_source = semantic_root / CODE_EMBEDDINGS_META_FILENAME
+    if KNOWLEDGE_BASE_FILENAME in requested_extras and provenance_source.is_file():
+        requested_extras.setdefault(CODE_EMBEDDINGS_META_FILENAME, str(provenance_source))
     # 部署包始终携带可直接运行的编译语义资产；源知识库仍是可选的维护组件
     if raw_vocabulary_source.resolve() == Path(CARD_VOCAB_FILENAME).resolve():
         ensure_static_semantic_assets(
@@ -1452,6 +1457,8 @@ def create_deployment_package(
         raise ValueError("code semantic vectors and their index must be packaged together")
     includes_knowledge_base = KNOWLEDGE_BASE_FILENAME in extras
     includes_complete_code_semantics = included_code_semantics == CODE_SEMANTIC_FILE_SET
+    if CODE_EMBEDDINGS_META_FILENAME in extras and not includes_complete_code_semantics:
+        raise ValueError('code semantic provenance requires the complete semantic source bundle')
     if includes_knowledge_base is not includes_complete_code_semantics:
         raise ValueError(
             "knowledge_base.json, code_embeddings.npy and "
@@ -1460,6 +1467,8 @@ def create_deployment_package(
     if included_code_semantics:
         source_semantic_root = extras[CODE_EMBEDDINGS_FILENAME].parent
         validated_semantics = validate_semantic_bundle(source_semantic_root)
+        if CODE_EMBEDDINGS_META_FILENAME in extras and extras[CODE_EMBEDDINGS_META_FILENAME].parent != source_semantic_root:
+            raise ValueError('code semantic provenance must come from the same directory')
         if (
             validated_semantics["embedding_path"]
             != extras[CODE_EMBEDDINGS_FILENAME]
@@ -1669,6 +1678,10 @@ def validate_deployment_package(stage_dir):
     if actual_code_semantics:
         validate_semantic_bundle(stage_root)
         expected_names.update(CODE_SEMANTIC_FILE_SET)
+    if CODE_EMBEDDINGS_META_FILENAME in actual_names:
+        if not has_complete_code_semantics:
+            raise ValueError('code semantic provenance requires the complete semantic source bundle')
+        expected_names.add(CODE_EMBEDDINGS_META_FILENAME)
     load_static_semantic_assets(
         stage_root,
         card_vocabulary=packaged_vocabulary,

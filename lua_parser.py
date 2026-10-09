@@ -13,6 +13,7 @@ from semantic_assets import (
 )
 from effect_slot_binding import apply_runtime_effect_bindings
 from public_hint_semantics import apply_public_hint_metadata
+from lua_semantic_source import LuaCodeSourceIndex
 
 
 def _stable_unique(values):
@@ -23,6 +24,13 @@ class YGOProLuaParser:
     def __init__(self, script_dir='./script'):
         self.script_dir = script_dir
         self.hash_registry = defaultdict(lambda: {"cards": [], "sample_code": ""})
+        self._code_source_index = None
+
+    def _get_code_source_index(self):
+        """按一次批处理缓存来源索引，不在训练/推理进程读取或执行Lua"""
+        if self._code_source_index is None:
+            self._code_source_index = LuaCodeSourceIndex(self.script_dir)
+        return self._code_source_index
 
     def _rebuild_hash_registry(self, knowledge_base):
         """从知识库中的自定义标签重建可供增量解析接续的 Hash 索引"""
@@ -104,7 +112,8 @@ class YGOProLuaParser:
         
         # 4. 登记到对照表
         card_label = f"{card_id}_E{slot_idx}"
-        self.hash_registry[tag_name]["cards"].append(card_label)
+        if card_label not in self.hash_registry[tag_name]["cards"]:
+            self.hash_registry[tag_name]["cards"].append(card_label)
         if not self.hash_registry[tag_name]["sample_code"]:
             # 存下被极致压缩后的机器码，方便你在 JSON 里查阅它为什么碰撞
             self.hash_registry[tag_name]["sample_code"] = clean_code 
@@ -277,12 +286,10 @@ class YGOProLuaParser:
                 effect_slot['requirements']['custom_numbers'] = []
                 effect_slot['requirements']['custom_hexes'] = []
             
-            raw_text = func_bodies_text + "\n" + op_code_block
-            effect_slot['raw_code'] = raw_text.strip()
-
             card_data["effects"].append(effect_slot)
             slot_idx += 1
             
+        self._get_code_source_index().augment(card_data, filepath, content)
         apply_runtime_effect_bindings(card_data, content, card_id)
         apply_public_hint_metadata(card_data, card_id)
         return card_data
@@ -292,6 +299,8 @@ class YGOProLuaParser:
         print(f"🚀 开始知识库构建任务...")
         knowledge_base = {}
         output_path = Path(output_file).resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._code_source_index = None
         mapping_file = output_path.with_name(HASH_MAPPING_FILENAME)
         
         # =======================================================
@@ -342,7 +351,7 @@ class YGOProLuaParser:
                 try:
                     with open(output_path, 'r', encoding='utf-8') as f:
                         knowledge_base = json.load(f)
-                    print(f"✅ 已加载本地 {len(knowledge_base)} 张卡片数据，将仅解析新脚本。")
+                    print(f"✅ 已加载本地 {len(knowledge_base)} 张卡片数据，将补齐缺来源及内容变化的脚本。")
                     
                     if os.path.exists(mapping_file):
                         with open(mapping_file, 'r', encoding='utf-8') as f:
@@ -367,6 +376,7 @@ class YGOProLuaParser:
         count = 0
         skip_count = 0
         binding_update_count = 0
+        reparsed_count = 0
         
         for filename in sorted(os.listdir(self.script_dir)):
             if filename.endswith('.lua'):
@@ -376,8 +386,8 @@ class YGOProLuaParser:
                 
                 filepath = os.path.join(self.script_dir, filename)
 
-                # 已有卡片只刷新运行时效果标识到代码语义槽的绑定
-                if card_id in knowledge_base:
+                # 只有来源版本和全部依赖未变化时才复用，旧卡缺代码也会补提取
+                if card_id in knowledge_base and self._get_code_source_index().is_current(knowledge_base[card_id], filepath):
                     if self._refresh_card_runtime_bindings(
                         filepath,
                         knowledge_base[card_id],
@@ -388,20 +398,37 @@ class YGOProLuaParser:
                     continue
 
                 res = self.parse_file(filepath)
-                if res and res['effects']:
-                    knowledge_base[card_id] = res
-                    count += 1
-                    if count % 1000 == 0:
-                        print(f"   ... 新增解析 {count} 张卡片")
+                if res is not None:
+                    if card_id in knowledge_base:
+                        reparsed_count += 1
+                    if res['effects']:
+                        knowledge_base[card_id] = res
+                        count += 1
+                        if count % 1000 == 0:
+                            print(f"   ... 新增解析 {count} 张卡片")
+                    else:
+                        knowledge_base.pop(card_id, None)
 
         # =======================================================
         # [新增] 核心价值结算：计算碰撞与合并数据
         # =======================================================
+        # 移除改动卡片已不再拥有的标签；保留原有粗分类算法及可读示例
+        current_mapping = defaultdict(lambda: {"cards": [], "sample_code": ""})
+        for card_id, card_data in knowledge_base.items():
+            for effect in card_data.get('effects', []):
+                for category in effect.get('categories', []):
+                    if str(category).startswith('CUSTOM_HASH_'):
+                        record = current_mapping[category]
+                        label = f"{card_id}_E{effect['slot']}"
+                        if label not in record['cards']:
+                            record['cards'].append(label)
+                        record['sample_code'] = self.hash_registry[category]['sample_code']
+        self.hash_registry = current_mapping
         new_hashes = set(self.hash_registry.keys()) - old_hashes
         new_hash_count = len(new_hashes)
         
         # 统计有多少个新增效果完美贴合到了老 Hash 里
-        merged_into_old_count = sum(len(self.hash_registry[k]["cards"]) - old_hash_card_counts[k] for k in old_hashes)
+        merged_into_old_count = sum(max(0, len(self.hash_registry[k]["cards"]) - old_hash_card_counts[k]) for k in old_hashes & self.hash_registry.keys())
         
         # 统计在这次前所未见的新 Hash 里，有多少次内部合并 (新卡A和新卡B代码不同，但被算法压成了同一个Hash)
         new_hash_total_cards = sum(len(self.hash_registry[k]["cards"]) for k in new_hashes)
@@ -414,7 +441,8 @@ class YGOProLuaParser:
         # 5. 覆写输出结果
         # =======================================================
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(knowledge_base, f, indent=2, ensure_ascii=False)
+            # 大源码库紧凑保存仅去排版空白，UI仍可格式化查看；不改数据或逻辑身份
+            json.dump(knowledge_base, f, ensure_ascii=False, separators=(',', ':'))
 
         with open(mapping_file, 'w', encoding='utf-8') as f:
             json.dump(self.hash_registry, f, indent=2, ensure_ascii=False)
@@ -426,7 +454,7 @@ class YGOProLuaParser:
         print("\n==============================================")
         print("🏁 语义知识库 (Semantic Knowledge Base) 构建完成！")
         print("==============================================")
-        print(f"📄 [卡片统计] 继承/跳过 {skip_count} 张，本次新增解析 {count} 张。")
+        print(f"📄 [卡片统计] 复用 {skip_count} 张，本次解析 {count} 张，其中来源补齐/变更 {reparsed_count} 张。")
         print(f"🔗 [效果绑定] 已刷新 {binding_update_count} 张既有卡的运行时标识映射。")
         print(f"📁 [卡片库总容量] 当前知识库共计 {len(knowledge_base)} 张卡片。")
         print("----------------------------------------------")
