@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.13.1**.
+> This document applies to **Galatea-Core v3.13.2**.
 
 ---
 
@@ -128,7 +128,7 @@ Configure and launch AI training tasks.
 - **Central Batched Inference**: Always enabled; all workers stay on CPU
 - **Disable Compile**: Recommended on Windows or when the compiler toolchain is incomplete
 - **Export ONNX**: Export synchronously at every 10-iteration checkpoint for historical opponents in workers
-- **Standard Core**: Enable for custom OCGCore builds without ghost bytes
+- **Fixed Core protocol**: use the bundled public Core layout; the ghost-byte/standard-Core toggle is removed. Future Core upgrades require separate protocol migration checks
 
 **Model Action Protocol**:
 - v3.7.0 completes Model Protocol V4 Phase 1: append-only `card_vocab.json` removes real-card collisions and supports exact-prefix compatibility; decision/turn/starting players are separate, while phase, zone, and position use categorical embeddings
@@ -149,6 +149,7 @@ Configure and launch AI training tasks.
 - v3.12.2 adds a 128-dimensional goal-planning latent recomputed at every decision from shared state, stable deck style, and global context. Genuine future-resource/terminal posteriors self-supervise it, while separate zero-initialized policy/value gates integrate it without discrete saved plans, tree search, reward changes, or legality changes
 - v3.13.0 unifies GAE lambda=0.98, PPO epoch limits, and target KL; pre-backward guards protect all joint updates, and new audits report actual updates plus mini-batch-mean quantiles without changing network/observations
 - v3.13.1 adds logged-game-only canonical Core trajectories, deterministic replay checks and state-evaluation curves; see [Trajectory and evaluation replay](core_trajectories_en.md)
+- v3.13.2 corrects Type 16/31 decoding and Type 21 dispatch, with curves labeled “AI predictions”; see the [message/cognition audit](core_message_audit_en.md)
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
@@ -457,7 +458,6 @@ python main.py train [options]
 | `--timeout` | Worker collection timeout; must be greater than 30 seconds | 300 |
 | `--use_onnx` | Export ONNX at checkpoints and accelerate historical opponents | - |
 | `--no_compile` | Disable compilation | - |
-| `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
 | `--protocol-audit` | Generate V3 protocol and effect-slot diagnostics | Off |
 | `--gamma` | Discount factor | 0.998 |
 | `--lr` | Learning rate | 1e-4 |
@@ -522,7 +522,6 @@ python main.py duel [options]
 | `--benchmark-seed` | uint32 selection seed for a new plan | 20260906 |
 | `--benchmark-name` | Name for a new benchmark | baseline |
 | `--benchmark-plan` | Reuse a plan JSON; its game count overrides `--num` | - |
-| `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
 
 Arena loads the architecture embedded in each P0/P1 checkpoint and does not allow external
 architecture overrides. Loop protection uses a complete state key covering the board, acting
@@ -584,7 +583,6 @@ python main.py play [options]
 |--------|-------------|---------|
 | `-n, --num` | Game count | 10 |
 | `--deck_dir` | Deck directory | `./decks` |
-| `--standard_core` | Disable ghost byte parsing (for custom cores) | - |
 
 ### Update Command
 

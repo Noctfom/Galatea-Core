@@ -16,6 +16,7 @@ import deck_utils
 import rule_bot
 from galatea_env import GalateaEnv
 from gamestate import DuelState, MessageParser
+from core_message_protocol import is_empty_chain_prompt
 from card_reader import card_db
 from game_constants import Zone, Phases, CardType, LocationInfo
 from data_types import GameSnapshot, CardEntity
@@ -122,6 +123,11 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
             
             brain_0.update(msg_type, msg_payload)
             brain_1.update(msg_type, msg_payload)
+
+            # 空连锁询问由引擎协议自动通过，不增加压测决策步数
+            if is_empty_chain_prompt(msg_type, msg_payload):
+                env.send_action(-1)
+                continue
             
             # 追踪操作者
             if msg_type in [10, 11, 16, 15]:

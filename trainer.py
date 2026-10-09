@@ -382,7 +382,7 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, standard_core=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -410,7 +410,6 @@ class PPOTrainer:
         self.clip_eps = clip_eps
         self.ppo_epochs = ppo_epochs
         self.target_kl = target_kl
-        self.standard_core = standard_core
 
         resume_checkpoint = None
         requested_model_prefix = (
@@ -988,7 +987,6 @@ class PPOTrainer:
                 self.worker_events,
                 self.use_onnx,
                 self.shared_logits,
-                self.standard_core,
                 self.shared_response_ids,
                 self.protocol_audit,
             ))

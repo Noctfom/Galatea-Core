@@ -2,9 +2,19 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.13.1**.
+> This document applies to **Galatea-Core v3.13.2**.
 
 ---
+
+## Fixed Core chain/confirmation protocol (3.13.2)
+
+Type 16 forced flags belong to individual candidates, not the header; cancellation is legal only
+when none are forced. Type 31's `skip_panel` controls display, not card disclosure or optional bytes.
+Model and RuleBot share strict decoding; malformed packets fail explicitly and training uses its
+existing invalid-episode rollback. Empty chain prompts automatically send `-1` without RNG, inference,
+PPO samples, decision steps or transition events. Trajectory Schema 2 records them separately from
+behavior-cloning labels. Type 21 now reaches full state-update dispatch.
+See the [message audit](core_message_audit_en.md) for layouts and unimplemented cognition work.
 
 ## 📋 Table of Contents
 

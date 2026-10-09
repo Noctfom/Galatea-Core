@@ -183,7 +183,6 @@ def run_training_command(args, parser):
             ppo_epochs=args.ppo_epochs,
             target_kl=args.target_kl,
             use_onnx=args.use_onnx,
-            standard_core=args.standard_core,
             model_prefix=args.model_prefix,
             preloaded_resume_checkpoint=resume_checkpoint,
             protocol_audit=args.protocol_audit,
@@ -261,7 +260,6 @@ def main():
     train_parser.add_argument('--no_compile', action='store_true', help='禁用 torch.compile (兼容性模式)')
 
     train_parser.add_argument('--use_onnx', action='store_true', help='在保存点同步导出 ONNX，并加速历史对手本地推理')
-    train_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
     train_parser.add_argument(
         '--protocol-audit',
         action='store_true',
@@ -283,7 +281,6 @@ def main():
     play_parser = subparsers.add_parser('play', help='运行自我博弈测试')
     play_parser.add_argument('-n', '--num', type=int, default=10, help='对局数量')
     play_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
-    play_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
 
 
     # --- 3. 竞技场模式 (Duel) ---
@@ -295,7 +292,7 @@ def main():
     duel_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
     duel_parser.add_argument('--thought_freq', type=int, default=0, help='每隔几局保存一次AI心声 (0为不保存)')
     duel_parser.add_argument('--record-trajectory', action='store_true', help='仅录像局额外保存原始 Core 规范轨迹')
-    duel_parser.add_argument('--record-evaluations', action='store_true', help='仅录像局保存未经校准的状态终局预测')
+    duel_parser.add_argument('--record-evaluations', action='store_true', help='仅录像局保存 AI 状态预测，反映模型判断而非实际胜率')
     duel_parser.add_argument('--trajectory-root', default='./replays/core_trajectories', help='规范轨迹保存目录')
     duel_parser.add_argument(
         '--policy-mode', '--policy_mode',
@@ -345,7 +342,6 @@ def main():
     duel_parser.add_argument("--d_model", type=int, default=256, help=argparse.SUPPRESS)
     duel_parser.add_argument("--n_heads", type=int, default=4, help=argparse.SUPPRESS)
     duel_parser.add_argument("--n_layers", type=int, default=2, help=argparse.SUPPRESS)
-    duel_parser.add_argument('--standard_core', action='store_true', help='使用自己编译的标准内核（无幽灵定界符）时请开启此项')
     duel_parser.add_argument(
         '--protocol-audit',
         action='store_true',
@@ -429,7 +425,6 @@ def main():
         manager = DuelManager(
             core_path,
             args.deck_dir,
-            standard_core=args.standard_core,
         )
         manager.run_tournament(args.num)
         
@@ -449,7 +444,6 @@ def main():
             device=args.device,
             deck_dir=args.deck_dir,
             config=config,
-            standard_core=args.standard_core,
             protocol_audit=args.protocol_audit,
             p0_deck_source=args.p0_deck_source,
             p1_deck_source=args.p1_deck_source,

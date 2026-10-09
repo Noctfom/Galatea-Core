@@ -14,9 +14,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from data_types import GameAction
+from core_message_protocol import (
+    CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt, parse_chain_prompt,
+)
 from selection_protocol import build_core_response_buffer
 
-TRAJECTORY_SCHEMA_VERSION = 1
+TRAJECTORY_SCHEMA_VERSION = 2
 MAX_TRAJECTORY_BYTES = 64 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 100_000
@@ -280,8 +283,6 @@ class CoreTrajectoryInterpreter:
             self.writer.write('message', hex=bytes(msg).hex())
             if msg[0] == 1:
                 self.writer.flag('core_retry')
-            if msg[0] == 1:
-                self.writer.flag('core_retry')
 
     def snapshot(self, env=None):
         """保留查询时点与查询前候选，避免重放事件历史错位"""
@@ -313,6 +314,14 @@ class CoreTrajectoryInterpreter:
         except Exception as error:
             self.writer.mapping_complete = False
             self.writer.flag(f'response_capture_failed: {error}')
+
+    def record_automatic_response(self, payload, actor):
+        """记录空连锁的实际 -1 应答，不生成模型观测或模仿学习标签"""
+        if self.writer and not self.writer.stopped:
+            self.writer.write(
+                'automatic_response', prompt_type=16, payload=bytes(payload).hex(),
+                actor=int(actor), response=encode_response(-1),
+            )
 
 
 def _iter_records(path):
@@ -361,8 +370,8 @@ def inspect_core_trajectory(path):
                         if (not isinstance(codes, list) or len(codes) > 256
                                 or any(type(x) is not int or not 0 < x < 2**32 for x in codes)):
                             raise ValueError('invalid trajectory deck')
-            if type(record['ghost_byte']) is not bool:
-                raise ValueError('invalid Core dialect')
+            if record.get('core_message_protocol') != CORE_MESSAGE_PROTOCOL:
+                raise ValueError('unsupported Core message protocol')
             for player in ('0', '1'):
                 for part in ('main', 'extra'):
                     if sorted(record['decks'][player][part]) != sorted(reset['players'][player][part]):
@@ -383,6 +392,15 @@ def inspect_core_trajectory(path):
             if type(record['query']) is not bool:
                 raise ValueError('invalid query marker')
             deserialize_actions(record['actions'])
+        elif kind == 'automatic_response':
+            payload = _decode_hex(record['payload'], 65536)
+            if (record.get('prompt_type') != 16
+                    or not is_empty_chain_prompt(16, payload)
+                    or type(record.get('actor')) is not int
+                    or record['actor'] not in (0, 1)
+                    or record['actor'] != parse_chain_prompt(payload)['player']
+                    or record['response'] != encode_response(-1)):
+                raise ValueError('invalid automatic Core response')
         elif kind == 'response':
             decode_response(record['response'])
             _decode_hex(record['payload'], 65536)
@@ -451,11 +469,9 @@ def _replay_core_trajectory_source(source):
     header, footer = result['header'], result['footer']
     if footer['truncated']:
         raise ValueError('truncated trajectory cannot be replay-verified')
-    old_ghost = gamestate.CORE_HAS_GHOST_BYTE
     old_callback_environment = get_callback_environment()
     env = None
     try:
-        gamestate.CORE_HAS_GHOST_BYTE = header['ghost_byte']
         env = GalateaEnv()
         if runtime_asset_identity(env) != header['assets']:
             raise ValueError('Core/script/CDB/vocabulary/semantic asset identity mismatch')
@@ -475,7 +491,7 @@ def _replay_core_trajectory_source(source):
         retry_seen = False
         raw_output_exact = True
         client_hint_reordered_chunks = 0
-        observations = responses = 0
+        observations = responses = automatic_responses = 0
         for record, _ in _iter_records(source):
             kind = record['kind']
             if kind == 'chunk':
@@ -516,6 +532,15 @@ def _replay_core_trajectory_source(source):
             elif kind == 'snapshot':
                 brain.current_valid_actions = deserialize_actions(record['actions'])
                 snapshot = interpreter.snapshot(env if record['query'] else None)
+            elif kind == 'automatic_response':
+                if (prompt is None or not is_empty_chain_prompt(prompt[0], prompt[1:])
+                        or prompt[1] != record['actor']
+                        or prompt[1:] != _decode_hex(record['payload'], 65536)
+                        or queue):
+                    raise ValueError('automatic response does not belong to empty prompt')
+                env.send_action(-1)
+                automatic_responses += 1
+                prompt = snapshot = None
             elif kind == 'response':
                 if (snapshot is None or prompt is None or prompt[0] != record['prompt_type']
                         or bytes(prompt[1:]) != _decode_hex(record['payload'], 65536)
@@ -549,6 +574,7 @@ def _replay_core_trajectory_source(source):
         if env.query_card_error_count:
             raise ValueError('Core query failed during replay')
         result.update(replay_verified=True, response_count=responses,
+                      automatic_response_count=automatic_responses,
                       observation_check_count=observations,
                       parse_coverage_complete=parse_coverage_complete,
                       retry_seen=retry_seen,
@@ -564,7 +590,6 @@ def _replay_core_trajectory_source(source):
                           and observations == responses and responses > 0))
         return result
     finally:
-        gamestate.CORE_HAS_GHOST_BYTE = old_ghost
         try:
             if env is not None:
                 try:

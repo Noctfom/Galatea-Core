@@ -10,6 +10,7 @@ import random
 import itertools
 from game_constants import LocationInfo
 from card_reader import card_db
+from core_message_protocol import CoreMessageProtocolError, parse_chain_prompt
 from selection_protocol import (
     CANCEL_RESPONSE,
     SELECTION_RESPONSE_MSGS,
@@ -243,36 +244,15 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
                 decision = -1 # 尝试取消
 
         elif msg_type == MSG_SELECT_CHAIN:
-            try:
-                # 1. 精确读取头部的 4 个字节
-                header_start = stream.read(4)
-                if len(header_start) < 4: raise Exception("Header incomplete")
-                
-                count = header_start[1]
-                forced = header_start[3] # 强制标志位
-                
-                # 2. 构造选项：无论是谁，只能从 0 到 count-1 里选
-                candidates = list(range(count))
-                
-                # 如果不是强制发动 (forced == 0)，才可以追加 Cancel (-1)
-                if forced == 0:
-                    candidates.append(-1)
-                    
-                # 3. 过滤掉已经被核心拒绝过的操作
-                valid_choices = [c for c in candidates if c not in ignore_actions]
-                
-                # 4. 安全决策
-                if valid_choices:
-                    decision = random.choice(valid_choices)
-                else:
-                    # 终极兜底：如果所有合法选项都被拒绝了，说明 C++ 陷入了必须发动的死角
-                    # 我们强行返回 0（发动第一个效果），绝不返回 -1
-                    decision = 0 
-                    
-            except Exception:
-                decision = 0
-            
-            return decision
+            prompt = parse_chain_prompt(payload)
+            candidates = list(range(len(prompt['candidates'])))
+            if not prompt['forced']:
+                candidates.append(-1)
+            valid_choices = [c for c in candidates if c not in ignore_actions]
+            if not prompt['candidates']:
+                return -1
+            # 黑名单耗尽也只退回 Core 合法集合，不伪造非法发动/取消
+            return random.choice(valid_choices or candidates)
 
         # ==================== 3. 宣言与竞猜 (新增与补全) ====================
         # 这类消息如果不处理，遇到《抹杀之指名者》等卡会直接卡死
@@ -615,6 +595,9 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
             resp_buf = bytearray([0] * count)
             decision = bytes(resp_buf)
             
+    except CoreMessageProtocolError:
+        # 固定 Core 解码失败必须交由上层回滚，不能伪造取消
+        raise
     except Exception as e:
         # 万一解析崩了，也要保证返回合法格式，避免 Bot 卡死
         print(f"[RuleBot] 解析出现错误 {msg_type}: {e}")

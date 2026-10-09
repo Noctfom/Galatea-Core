@@ -13,6 +13,14 @@ from game_constants import LocationInfo, Position, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
 from deck_protocol import DeckProfile
+from core_message_protocol import (
+    CoreMessageProtocolError,
+    is_empty_chain_prompt,
+    parse_chain_prompt,
+    parse_confirm_cards,
+    read_chain_prompt,
+    read_confirm_cards,
+)
 from data_types import (
     ActionOperation,
     CardEntity,
@@ -37,9 +45,6 @@ from event_history import (
 )
 
 _META_STAPLES = None
-
-# 内核协议开关：默认为 True (读取16/31幽灵字节)
-CORE_HAS_GHOST_BYTE = True
 
 # Idle Command 的六个列表顺序由 Core 协议固定，不从卡片类型反推操作
 _IDLE_COMMAND_OPERATIONS = (
@@ -157,6 +162,14 @@ class MessageParser:
     def calculate_dynamic_length(msg_type, stream):
         start_pos = stream.tell()
         length = 0
+
+        # 固定随包 Core 布局；两类报文共享严格解码，不能吞掉截断
+        if msg_type in (16, 31):
+            try:
+                (read_chain_prompt if msg_type == 16 else read_confirm_cards)(stream)
+                return stream.tell() - start_pos
+            finally:
+                stream.seek(start_pos)
         
         try:
             # 11: IDLECMD
@@ -193,18 +206,6 @@ class MessageParser:
                 b = stream.read(1); length += 1 # Count
                 count = struct.unpack('<B', b)[0]
                 stream.read(count * 8); length += count * 8
-
-            # 16: SELECT_CHAIN
-            elif msg_type == 16:
-                stream.read(1); length += 1 # P
-                b = stream.read(1); length += 1 # Count
-                count = struct.unpack('<B', b)[0]
-                stream.read(10); length += 10 # Spe, forced, hint1, hint2
-
-                # 内置 Core 在第二项起插入 1 字节定界符；标准内核没有该字节。
-                separator_count = max(0, count - 1) if CORE_HAS_GHOST_BYTE else 0
-                stream.read(count * 13 + separator_count)
-                length += count * 13 + separator_count
 
             # 18/24: PLACE / DISFIELD
             elif msg_type in [18, 24]:
@@ -254,16 +255,6 @@ class MessageParser:
             # 30/34/42: CONFIRM
             elif msg_type in [30, 34, 42]:
                 stream.read(1); length += 1 # P
-                b = stream.read(1); length += 1 # Count
-                count = struct.unpack('<B', b)[0]
-                stream.read(count * 7); length += count * 7
-
-            # 31: CONFIRM_CARDS
-            elif msg_type == 31:
-                stream.read(1); length += 1 # P
-                # [额外修复] 吞掉强制插入的未知幽灵字节
-                if CORE_HAS_GHOST_BYTE:
-                    stream.read(1); length += 1
                 b = stream.read(1); length += 1 # Count
                 count = struct.unpack('<B', b)[0]
                 stream.read(count * 7); length += count * 7
@@ -414,6 +405,10 @@ class MessageParser:
             if length == -1:
                 try:
                     length = MessageParser.calculate_dynamic_length(msg_type, stream)
+                except CoreMessageProtocolError as error:
+                    raise CoreMessageProtocolError(
+                        f'Core message {msg_type} at offset {start_pos}: {error}'
+                    ) from error
                 except Exception as e:
                     print(f"\n👻 [gamestate][Parser] 变长解析崩溃 (msg: {msg_type})! \n🔍 坠机前15个指令: {recent_msgs}")
                     break
@@ -663,10 +658,14 @@ class DuelState:
             stream = io.BytesIO(msg_payload)
             
             # --- 状态维护 ---
-            if msg_type in [30, 31, 42]:
+            if msg_type == 31:
+                confirmation = parse_confirm_cards(msg_payload)
+                self.recently_confirmed.extend(
+                    card['code'] & 0x7FFFFFFF for card in confirmation['cards']
+                )
+
+            elif msg_type in [30, 42]:
                 stream.read(1) # P
-                if msg_type == 31 and CORE_HAS_GHOST_BYTE:
-                    stream.read(1) #未知幽灵字节
                 count = struct.unpack('<B', stream.read(1))[0]
                 for _ in range(count):
                     code = struct.unpack('<I', stream.read(4))[0]
@@ -912,7 +911,9 @@ class DuelState:
                 self.transition_recorder.mark_boundary(TransitionBoundary.TERMINAL)
                 self.transition_recorder.finalize(self._transition_state_digest())
             elif msg_type in _DECISION_MESSAGES:
-                self.transition_recorder.mark_boundary(TransitionBoundary.NEXT_DECISION)
+                # 无候选询问只自动应答，不额外切分学习事件和折扣区间
+                if not is_empty_chain_prompt(msg_type, msg_payload):
+                    self.transition_recorder.mark_boundary(TransitionBoundary.NEXT_DECISION)
             else:
                 self.transition_recorder.observe_message(
                     msg_type,
@@ -922,7 +923,7 @@ class DuelState:
 
             # --- 动作空间解析 (Action Parsing) ---
             # 如果是交互消息，解析出 valid_actions
-            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
+            if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
                 self.active_player = struct.unpack('<B', msg_payload[0:1])[0]
                 if self.active_player not in (0, 1):
                     raise ValueError(
@@ -1054,20 +1055,16 @@ class DuelState:
 
             # 2. MSG_SELECT_CHAIN (16)
             elif msg_type == 16:
-                player = struct.unpack('<B', stream.read(1))[0]
-                count = struct.unpack('<B', stream.read(1))[0]
-                spe_count = struct.unpack('<B', stream.read(1))[0]
-                forced = struct.unpack('<B', stream.read(1))[0]
-                hint_timing = struct.unpack('<I', stream.read(4))[0]
-                opponent_hint_timing = struct.unpack('<I', stream.read(4))[0]
+                prompt = parse_chain_prompt(stream.read())
+                count = len(prompt['candidates'])
+                spe_count = prompt['special_count']
+                hint_timing = prompt['hint_timing']
+                opponent_hint_timing = prompt['opponent_hint_timing']
 
-                for i in range(count):
-                    if i > 0 and CORE_HAS_GHOST_BYTE:
-                        stream.read(1) # 内置 Core 的候选定界符
-                    effect_flag = struct.unpack('<B', stream.read(1))[0]
-                    code = struct.unpack('<I', stream.read(4))[0]
-                    loc_val = struct.unpack('<I', stream.read(4))[0]
-                    desc = struct.unpack('<I', stream.read(4))[0]
+                for i, candidate in enumerate(prompt['candidates']):
+                    code = candidate['code']
+                    loc_val = candidate['location']
+                    desc = candidate['desc']
                     
                     act = GameAction(
                         action_type=16,
@@ -1082,14 +1079,15 @@ class DuelState:
                         selection_count=count,
                         cancelable=False,
                         context_value=spe_count,
-                        prompt_flags=(effect_flag & 0xFF) | ((forced & 0xFF) << 8),
+                        prompt_flags=(candidate['effect_mode']
+                                      | (int(candidate['forced']) << 8)),
                         prompt_value=hint_timing,
                         prompt_value2=opponent_hint_timing,
                     )
                     self.current_valid_actions.append(act)
 
-                # 只有头部全局 forced 为 0 时，Core 才接受取消连锁。
-                if not forced:
+                # 随包 Core 仅在所有候选都非强制时接受 -1
+                if not prompt['forced']:
                     for action in self.current_valid_actions:
                         action.cancelable = True
                     self.current_valid_actions.append(GameAction(

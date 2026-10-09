@@ -19,6 +19,7 @@ from action_candidates import (
 )
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
+from core_message_protocol import CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt
 from ai_bot import AiBot
 from feature_encoder import MAX_CARDS
 from checkpoint_utils import MODEL_PROTOCOL_VERSION
@@ -192,7 +193,6 @@ class ModelArena:
         device='cpu',
         deck_dir="./decks",
         config=None,
-        standard_core=False,
         protocol_audit=False,
         p0_deck_source=deck_utils.ARENA_SOURCE_WEIGHTED,
         p1_deck_source=deck_utils.ARENA_SOURCE_SAME_RANGE,
@@ -206,7 +206,6 @@ class ModelArena:
     ):
         """初始化普通竞技场或固定赛程基准模式"""
         self.deck_dir = deck_dir
-        self.standard_core = standard_core
         self.model_p0_path = model_p0_path
         self.model_p1_path = model_p1_path
         self.p0_deck_source = deck_utils.parse_arena_deck_source(
@@ -229,13 +228,6 @@ class ModelArena:
         )
         self.last_duel_metadata = {}
         self.deck_catalog = deck_utils.discover_arena_deck_catalog(deck_dir)
-
-        import gamestate
-        if standard_core:
-            gamestate.CORE_HAS_GHOST_BYTE = False
-            print("🔧 [Arena] 协议自适应：已关闭幽灵定界符 (Standard Core Mode)")
-        else:
-            gamestate.CORE_HAS_GHOST_BYTE = True
 
         # 1. 先处理设备
         if device == 'auto' or device is None:
@@ -454,13 +446,12 @@ class ModelArena:
             interpreter = CoreTrajectoryInterpreter(brain)
             if self.logger.is_active and getattr(self, 'record_trajectory', False):
                 try:
-                    import gamestate
                     if self._trajectory_assets is None:
                         self._trajectory_assets = runtime_asset_identity(self.env)
                     header = {
                         'source': 'arena', 'visibility': 'omniscient_local_core',
                         'framework_version': framework_version(), 'assets': self._trajectory_assets,
-                        'ghost_byte': gamestate.CORE_HAS_GHOST_BYTE,
+                        'core_message_protocol': CORE_MESSAGE_PROTOCOL,
                         'reset': self.env.last_reset_metadata,
                         'decks': {str(p): {'main': list(deck.main), 'extra': list(deck.extra),
                                           'side': list(getattr(deck, 'side', []))}
@@ -553,6 +544,12 @@ class ModelArena:
             msg = msg_queue.pop(0)
             msg_type = msg[0]
             interpreter.apply_message(msg)
+
+            # 自动应答完整留痕，但不采样、不消耗决策预算、不分割学习事件
+            if is_empty_chain_prompt(msg_type, msg[1:]):
+                self.env.send_action(-1)
+                interpreter.record_automatic_response(msg[1:], msg[1])
+                continue
 
             # 回放 V2 同时记录 Core 状态事件，避免只看到模型决策而看不到移动与结算。
             if self.logger.is_active and msg_type in REPLAY_EVENT_MSGS:

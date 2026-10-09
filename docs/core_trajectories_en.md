@@ -1,9 +1,10 @@
-# 3.13.1: Canonical Core trajectories and state-evaluation replay
+# 3.13.2: Canonical Core trajectories and AI prediction replay
 
-Phase 7 batch 2 preserves Model Protocol **4**, Checkpoint Format **3**, schema revision **13**,
-all network parameters/inputs, rewards, and the standard ONNX contract. Independent
-`TRAJECTORY_SCHEMA_VERSION=1` lives in `core_trajectory.py`. Holographic JSON advances to
-format 3; formats 1/2 remain viewable.
+3.13.1 completed Phase 7 batch 2; 3.13.2 stabilizes fixed Core decoding. Model Protocol **4**,
+Checkpoint Format **3**, schema revision **13**, network parameters/inputs, rewards and standard
+ONNX remain unchanged. Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
+fixed message-protocol identity and automatic empty-chain responses. Raw Schema 1 traces are no
+longer accepted as current traces. Holographic JSON remains format 3; formats 1/2 remain viewable.
 
 ## Enabling recording
 
@@ -14,7 +15,7 @@ They can be used independently; training Workers and PPO storage are unchanged.
 .\python_env\python.exe main.py duel --p0 .\models\galatea_iter_100.pth --thought_freq 5 --record-trajectory --record-evaluations
 ```
 
-WebUI Arena offers “Record canonical Core trajectories” and “Record state-evaluation curves”.
+WebUI Arena offers “Record canonical Core trajectories” and “Record AI prediction curves”.
 The replay expander displays independent perspective win/remaining-event curves, the current
 decision's draw probability, and available actual-terminal references. Rule agents have no
 fabricated predictions; old recordings are not retroactively evaluated.
@@ -32,10 +33,13 @@ consider information boundaries before sharing. **Side never enters the single-d
 - Source, physical seats/swapping, original builds, Core seed/reset parameters and **actual injection
   order**; Core/CDB/loaded card-cache/loaded Lua SHA-256, V4 vocabulary/semantic/protocol identities;
   model UUID, internal iteration/configuration and a checkpoint digest read once at Arena initialization.
+  `core_message_protocol` identifies the bundled fixed layout; no ghost-byte toggle is recorded or applied.
 - Raw Core chunks, actually consumed messages, snapshot/query timing and raw candidate pools.
   Generated macro pools and raw coordinates are retained rather than resampled; full tensors are not saved.
 - Actual signed integer or ordered byte responses, actor/prompt, all matching candidates, selected index,
   actual CPU Encoder digest, and optional evaluation. Runtime metadata retains policy/macro RNG seeds.
+- Empty Type 16 `automatic_response` records save the actual `-1`, prompt and actor without a model
+  observation, action, transition event or behavior-cloning label. Replay reports `automatic_response_count` separately.
 - Stream checksum and terminal/prefix outcome, recording/parse/Retry/mapping quality flags.
 
 Ordinary Arena shuffles decks in Python as well as using Core RNG, so the seed alone is insufficient.
@@ -61,7 +65,7 @@ A bounded temporary-file copy freezes input against post-validation path replace
 is validated before Core execution; runtime assets must match before deck injection.
 Replay follows recorded chunks/messages/pools/query markers/responses and compares every raw Core chunk,
 response mapping, and available Encoder digest. Mismatching assets are rejected, not substituted with new
-scripts. Existing same-process callback bindings and parsing dialect are restored afterward.
+scripts. Existing same-process callback bindings are restored afterward; the parsing layout is fixed.
 
 | Result | Meaning |
 | --- | --- |
@@ -82,11 +86,10 @@ later response/observation. Report `raw_output_exact=false` and `client_hint_reo
 Cross-card ordering, hint additions, values/actions, nonconsecutive events and incomplete parsing remain
 strict. This is not a claim that arbitrary old Core builds support byte-exact replay.
 
-Real smoke testing found that the **existing** parser leaves some Type 16 chunks partially/unconsumed.
-The complete raw chunk is retained with `unparsed_core_bytes`; raw replay can still match, but behavior-
-cloning eligibility is false. This batch deliberately preserves parsing/decision behavior; audit the public
-Core message dialect separately in the next batch rather than claiming complete parser coverage.
-Per-chunk `parsed_bytes/message_count/parse_complete` also localize coverage gaps.
+3.13.2 fixes the empty Type 16 coverage failure discovered in 3.13.1: forced flags are per candidate,
+not in the header. Type 31's extra byte is `skip_panel`. See the [fixed message audit](core_message_audit_en.md).
+Per-chunk `parsed_bytes/message_count/parse_complete` remain; other unconsumed bytes still set
+`unparsed_core_bytes` and prohibit cloning. These fixes do not imply complete cognition of every message.
 
 ## Evaluation semantics
 
@@ -94,7 +97,8 @@ Per-chunk `parsed_bytes/message_count/parse_complete` also localize coverage gap
   auxiliary head or future-resource branch. No new weights, policy/value modifications, prediction-driven
   selection, tree search, or MCTS.
 - Save loss/draw/win probabilities, physical perspective, UUID/iteration/checkpoint digest, policy mode/
-  temperature, and `calibration.status=uncalibrated`, using only that side's pre-action encoded observation.
+  temperature and existing internal calibration provenance, using only that side's pre-action encoded
+  observation. UI labels say “AI predictions”; internal `uncalibrated` metadata is not a warning title.
 - Independent views/models need not produce complementary curves. `P(win)` differs from expected score
   `P(win)+0.5×P(draw)`. PPO value estimates discounted returns, not win probability.
 - Recorded policy mode/temperature are provenance, **not decoder inputs**. Predictions learn the training
@@ -105,8 +109,8 @@ Per-chunk `parsed_bytes/message_count/parse_complete` also localize coverage gap
   cap at one million events with an explicit clipped flag, without affecting policy/training.
 - Only real `MSG_WIN` adds separate `evaluation_actual` outcomes and remaining transition counts,
   including the current action. Predictions stay immutable; aborted/truncated games get no fabricated labels.
-- Whole-duel held-out validation and calibration are required before treating these as accurate Go-AI-style
-  win-rate curves. Standard ONNX still returns only logits/value; prediction recordings require full PTH.
+- Curves reflect the model's assessment, not actual win rates or a sole measure of playing strength.
+  Standard ONNX still returns only logits/value; prediction recordings require full PTH.
 
 ## Cost and next batch
 
@@ -116,5 +120,6 @@ logged games; checkpoint hashes are read once and asset hashes at first capture.
 but PPO/shared-memory/training pools do not grow. Checks may scan gzip multiple times to validate before
 execution while keeping memory bounded.
 
-Next: Link/YRP raw-input adapters, public-dialect audits, whole-duel/deck/player isolation and quality
-gates. This batch does not revive the parked Replay Worker, add imitation optimization, or counterfactual search.
+Next: Link/YRP raw-input adapters, whole-duel/deck/player isolation and quality gates. Cognition additions
+for Type 120/160/165 and 35/37/38/162 await design approval; see the message audit. This batch does not
+revive the parked Replay Worker, add imitation optimization, or counterfactual search.

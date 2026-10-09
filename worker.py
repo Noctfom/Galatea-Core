@@ -18,6 +18,7 @@ import psutil
 
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
+from core_message_protocol import is_empty_chain_prompt
 from ai_bot import AiBot
 from action_candidates import (
     MACRO_ACTION_MSGS,
@@ -309,7 +310,6 @@ def worker_process(
     worker_events=None,
     use_onnx=False,
     shared_logits=None,
-    standard_core=False,
     shared_response_ids=None,
     protocol_audit=False,
 ):
@@ -327,13 +327,6 @@ def worker_process(
             source=f"worker_{worker_id}",
             run_label=f"iter_{iteration}",
         )
-
-    import gamestate
-    if standard_core:
-        gamestate.CORE_HAS_GHOST_BYTE = False
-        print(f"🔧 [Worker {worker_id}] 协议自适应：已关闭幽灵定界符 (Standard Core Mode)")
-    else:
-        gamestate.CORE_HAS_GHOST_BYTE = True
 
     # =========================================================================
     #  [防卡死] 禁用 Windows 崩溃弹窗
@@ -701,6 +694,12 @@ def worker_process(
                     episode_aborted = True
                     episode_abort_reason = f"game state update failed: {e}"
                     break
+
+                # 空连锁询问没有模型选择，不计入 PPO、决策预算或转移事件
+                if is_empty_chain_prompt(msg_type, msg[1:]):
+                    env.send_action(-1)
+                    last_act_time = time.time()
+                    continue
                 
                 # 增加读取 reason
                 if msg_type == 5: # Win

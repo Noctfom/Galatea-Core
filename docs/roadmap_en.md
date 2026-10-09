@@ -8,9 +8,11 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 
 - [x] Bind complete runtime `desc` values to code-semantic slots through Lua Effect object identity; never infer slots from description low bits, and safely fall back for dynamic or ambiguous scripts
 - [x] Complete structured auxiliary heads and a continuous goal-planning latent from verifiable immediate, multi-horizon future, and terminal posteriors; do not use hand-authored tactics or present attention/latent dimensions as explanations
-- [ ] Display calibrated auxiliary predictions and counterfactual evaluations in Holographic Replay while clearly separating prediction, observed event, and explanatory inference
+- [x] Display AI terminal/length predictions in Holographic Replay, separately from actual outcomes; counterfactual evaluation awaits independent validation
 - [x] Phase 7 batch 1 (3.13.0): unified GAE comparisons, PPO epoch/target-KL controls, and actual-update audits without network or reward changes
 - [x] Phase 7 batch 2 (3.13.1): canonical raw Core trajectories, deterministic observation-digest replay, and optional independent state-evaluation curves; retain quality gates and separately validate counterfactual search
+- [x] Parsing stability (3.13.2): fixed bundled Core Type 16/31 layout, no ghost-byte toggle, Type 21 dispatch; no network/reward changes
+- [ ] Review Type 120 event feedback, 160/165 public hints and 35/37/38/162 state recovery before implementation ([functions and gaps](core_message_audit_en.md))
 - [ ] Phase 7 batch 3: Link/YRP input, deterministic replay, and whole-duel held-out quality gates before behavior cloning
 
 ## Separable Deck-Construction Cognition

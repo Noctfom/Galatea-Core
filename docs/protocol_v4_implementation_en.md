@@ -6,10 +6,10 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.13.1 (Phase 7 batch 2) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.13.2 (Phase 7 parsing stability batch) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
-| Trajectory Schema | 1 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |
+| Trajectory Schema | 2 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |
 
 These versions are independent. Once Model Protocol 4 is enabled, it remains fixed throughout V4 development. Field inventories, tensor shapes, and `protocol_schema_hash` prevent intermediate artifacts from being mixed.
 
@@ -203,6 +203,7 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Review batch 1 (3.13.0 / schema revision 13 unchanged): unify default GAE lambda=0.98, configurable 1–4 PPO epochs, and target KL=0.02. Before backward, 1.5×target stops all remaining joint updates for the rollout; nonfinite shifts always stop, while 0 disables the finite threshold. CLI/WebUI share validation, audits retain only mini-batch scalars, and fixed batches/tails remain unchanged. `PPO_Update/*` and `Configuration/PPO` distinguish actual updates, complete traversals, and current launch controls without changing rewards, network, observations, or ONNX.
     - Evidence: 265 regression tests pass with one real-Core gate skipped; explicitly enabling three Core loops passes with zero query parse errors and response fallbacks. Real CUDA GradScaler skips do not advance counters; first-batch KL stops freeze all auxiliary/planning parameters; ONNX parity/pruning remain passing. Isolated check cost stays at the small-batch-scalar level; long-training strength comparisons for this batch are still pending.
   - [x] Review batch 2 (3.13.1): `core_trajectory.py` reuses the existing MessageParser/DuelState, preserving actual injection order, raw chunks/consumed messages/responses, query timing, raw macro pools, observation digests, and asset identities. Bounded gzip streaming and read-only deterministic replay are available. Logged Arena games optionally decode existing state heads and display independent perspective curves; actual terminal references remain separate. Schema revision 13 / Model Protocol 4 / Checkpoint Format 3 remain unchanged. Unconsumed bytes, Retry, ambiguous mappings, and truncation cannot automatically enter behavior cloning; Link/YRP/dataset splits remain the next batch. See [Trajectories and evaluation replay](core_trajectories_en.md).
+  - [x] Parsing stability batch (3.13.2): fix bundled public Core Type 16 per-candidate forced flags/empty chains, Type 31 skip_panel and Type 21 dispatch; remove the ghost-byte switch. Independent raw Trajectory Schema 2; network/model/checkpoint versions unchanged. UI labels say “AI predictions”. Other cognition additions await review; see the [fixed message audit](core_message_audit_en.md).
   - [ ] Review batch 3: Link/YRP inputs and quality gates split by complete duel/deck/player; imitation only consumes deterministic replays with reliable legal-candidate mapping.
 - [ ] **Phase 8: V4 scratch-training validation**—short, medium, and long gates.
 - [ ] **Phase 9: deck-building/BO3 layer**—framework becomes 4.0.0 after completion.

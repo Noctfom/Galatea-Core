@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.13.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.13.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -946,8 +946,6 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         c_onnx = st.checkbox(_("同时导出 ONNX 静态模型 (--use_onnx)", "Export ONNX Model (--use_onnx)"), value=True, 
                              help=_("开启后会在保存 Checkpoint 时同步导出优化后的 .onnx 文件，大幅加速老模型对打和自决斗时的 CPU 推理速度。", 
                                    "Export .onnx graphs synchronously to accelerate CPU inference during arena duels."))
-        c_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False,
-                                 help=_("如果使用自编译的无幽灵字节内核(Standard Core)，请勾选此项以防止解析错位。", "Check this if using a custom core without ghost bytes at 16/31 messages."))
         c_protocol_audit = st.checkbox(
             _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
             value=False,
@@ -1045,7 +1043,6 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if t_resume != "None": cmd.extend(["--resume", t_resume])
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
-                if c_std_core: cmd.append("--standard_core")
                 if c_protocol_audit: cmd.append("--protocol-audit")
                 p = launch_managed_task(cmd)
                 st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
@@ -1199,7 +1196,6 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         value="baseline",
                         max_chars=64,
                     )
-            d_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False)
             d_record_trajectory = st.checkbox(
                 _("记录规范 Core 轨迹（仅录像局）", "Record canonical Core trajectories (logged games only)"),
                 value=False,
@@ -1207,10 +1203,10 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                        "Save raw messages/responses, injection order and asset identities; streamed gzip, 64 MiB uncompressed limit."),
             )
             d_record_evaluations = st.checkbox(
-                _("记录状态预测曲线（仅录像局）", "Record state-evaluation curves (logged games only)"),
+                _("记录 AI 预测曲线（仅录像局）", "Record AI prediction curves (logged games only)"),
                 value=False,
-                help=_("仅解码已有状态辅助头，不影响动作选择。概率未经校准，长度单位为转移事件。",
-                       "Decode existing state heads without affecting action selection. Probabilities are uncalibrated; lengths count transition events."),
+                help=_("反映模型对当前局面的判断，不代表实际胜率；不影响动作选择。长度单位为转移事件。",
+                       "Shows the model's assessment, not an actual win rate; does not change action selection. Length counts transition events."),
             )
             d_protocol_audit = st.checkbox(
                 _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
@@ -1259,7 +1255,6 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                             "--benchmark-seed", str(d_benchmark_seed),
                             "--benchmark-name", d_benchmark_name,
                         ])
-                    if d_std_core: cmd.append("--standard_core")
                     if d_protocol_audit: cmd.append("--protocol-audit")
                     if d_record_trajectory: cmd.append("--record-trajectory")
                     if d_record_evaluations: cmd.append("--record-evaluations")
@@ -1331,15 +1326,12 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         with c_run:
             with st.form("selfcheck_form"):
                 sc_num = st.number_input(_("极端压测局数", "Number of Games"), min_value=1, value=50, step=10)
-                sc_std_core = st.checkbox(_("关闭幽灵字节解析 (--standard_core)", "Disable Ghost Byte"), value=False)
 
                 if st.form_submit_button("🚀 " + _("启动 RuleBot 压测", "Start Self-Check"), type="primary", use_container_width=True):
                     if is_running:
                         st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
                     else:
                         cmd = [sys.executable, "main.py", "play", "-n", str(sc_num)]
-                        if sc_std_core:
-                            cmd.append("--standard_core")
                         p = launch_managed_task(cmd)
                         st.success(_(f"自检压测启动 (PID: {p.pid})！", f"Self-Check started (PID: {p.pid})!"))
                         time.sleep(0.5)
@@ -3151,12 +3143,12 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             t_col6.toggle(_("📊 P1 置信度", "📊 P1 Confidence"), key="tgl_p1_confidence")
 
             step_data = replay_frames[st.session_state.replay_step]
-            with st.expander(_("📈 状态预测曲线（未经校准）", "📈 State-evaluation curves (uncalibrated)"), expanded=False):
+            with st.expander(_("📈 AI 预测曲线", "📈 AI prediction curves"), expanded=False):
                 from decision_evaluation import replay_evaluation_points
                 evaluation_points = replay_evaluation_points(replay_data)
                 st.caption(_(
-                    "P0/P1 各按自己的可见信息预测，不是互补曲线。胜率为未经校准的终局概率；剩余长度为动作转移事件数，不是回合数。仅模型决策有预测，规则方不伪造预测。",
-                    "Each side uses its own visible information; curves are not complements. Terminal probabilities are uncalibrated; length counts action transitions, not turns. Rule agents have no fabricated predictions.",
+                    "曲线反映 AI 对当前局面的判断，不代表实际胜率。P0/P1 各按自己的可见信息预测，不是互补曲线；剩余长度为动作转移事件数，不是回合数。仅模型决策有预测。",
+                    "Curves show the AI's current assessment, not an actual win rate. Each side uses its own visible information; curves are not complements. Length counts action transitions, not turns. Only model decisions have predictions.",
                 ))
                 if evaluation_points:
                     evaluation_table = pd.DataFrame(evaluation_points)
@@ -3166,8 +3158,8 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                                                if point['frame'] == st.session_state.replay_step + 1), None)
                     if current_evaluation:
                         e1, e2, e3 = st.columns(3)
-                        e1.metric(_("当前视角胜利概率", "Perspective win probability"), f"{current_evaluation['win_probability']:.1%}")
-                        e2.metric(_("平局概率", "Draw probability"), f"{current_evaluation['draw_probability']:.1%}")
+                        e1.metric(_("AI 预测胜利概率", "AI-predicted win probability"), f"{current_evaluation['win_probability']:.1%}")
+                        e2.metric(_("AI 预测平局概率", "AI-predicted draw probability"), f"{current_evaluation['draw_probability']:.1%}")
                         e3.metric(_("预计剩余转移事件", "Estimated remaining transitions"), f"{current_evaluation['remaining_events']:.1f}")
                     if step_data.get('evaluation_actual'):
                         st.caption(_("真实终局对照（与预测分开）：", "Actual terminal reference (separate from prediction): ") + str(step_data['evaluation_actual']))

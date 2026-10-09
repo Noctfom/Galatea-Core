@@ -4,6 +4,22 @@
 
 ---
 
+## [v3.13.2] - 2026-10-08
+
+### 🛠️ Fixed Core parsing stability and AI prediction labels
+
+- **Type 16 root cause**: shared `core_message_protocol.py` decodes the bundled public Core's 11-byte header and 14-byte entries. Forced flags are per candidate, not header fields; supposed separators were subsequent effect modes. Correct timings, forced/mode fields and legal Cancel; empty chain prompts are no longer discarded
+- **No invented learning actions**: Worker/Arena/RuleBot self-check automatically send `-1` for empty chains without RNG, central inference, PPO samples, decision steps or transition events. Truncated/invalid fields fail explicitly and training retains invalid-episode rollback. RuleBot no longer guesses another layout or falls back to illegal cancellation during forced chains
+- **Type 31 and entry-point consistency**: the extra confirmation byte is explicitly `skip_panel`; preserve card/position decoding. Remove CLI `--standard_core`, three WebUI controls and all internal ghost-byte flags/arguments. Only the bundled layout is supported, with no public Core modifications. Connect Type 21 sorting to full `DuelState.update()` dispatch
+- **Trajectory boundary**: independent Trajectory Schema 1 becomes 2 with fixed `core_message_protocol` identity and separate validated/replayed `automatic_response` records, never behavior-cloning action labels. Raw Schema 1 traces are rejected. Model Protocol 4 / Checkpoint Format 3 / network schema revision 13 / holographic JSON 3 / standard ONNX remain unchanged
+- **AI predictions**: UI/CLI label model assessments as AI predictions, not actual win rates; no “uncalibrated” warning titles or changed probabilities, weights or targets
+- **Audit follow-up**: bilingual documentation explains full functionality, cognition gaps and proposals for missed timing 120, card/player hints 160/165, bulk swap 35, reversal/top 37/38 and snapshot 162. These additions are not implemented. CLIENT_HINT does not cover every ongoing effect; it cannot guarantee tracking Maxx “C” or Droll
+- **Verification**: 284 regression tests and 50 subtests pass; two native Core gates skip by default and both pass explicitly, including three model duels, recording-toggle/seat-swap comparisons, raw responses and observation replay. A real small CPU configuration completes one training iteration with 468 samples, single Worker, forced Rule game returning to self, central inference and PPO update. No production-scale long-run validation or overall speedup is claimed. Networks/rewards/PPO algorithms are unchanged; corrected candidate/features can appropriately change previously faulty decisions
+
+See the [fixed Core message/cognition audit](core_message_audit_en.md) and [trajectory/AI prediction replay](core_trajectories_en.md).
+
+---
+
 ## [v3.13.1] - 2026-10-02
 
 ### 🎞️ V4 Phase 7 batch 2: canonical trajectories and state-evaluation replay
