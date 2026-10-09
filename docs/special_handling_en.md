@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.13.2**.
+> This document applies to **Galatea-Core v3.13.3**.
 
 ---
 
@@ -14,7 +14,7 @@ Model and RuleBot share strict decoding; malformed packets fail explicitly and t
 existing invalid-episode rollback. Empty chain prompts automatically send `-1` without RNG, inference,
 PPO samples, decision steps or transition events. Trajectory Schema 2 records them separately from
 behavior-cloning labels. Type 21 now reaches full state-update dispatch.
-See the [message audit](core_message_audit_en.md) for layouts and unimplemented cognition work.
+See the [message audit](core_message_audit_en.md) for layouts/deferred boundaries and [3.13.3 public observations](public_observations_en.md) for hint/deck-position/snapshot support, not a universal active-effect tracker.
 
 ## 📋 Table of Contents
 

@@ -1,4 +1,4 @@
-"""按随包公开旧式 Core 的固定布局解码连锁询问与卡片确认消息"""
+"""按随包公开旧式 Core 的固定布局解码连锁询问、卡片确认和场面快照"""
 
 import io
 import struct
@@ -87,3 +87,45 @@ def parse_confirm_cards(payload):
 def is_empty_chain_prompt(msg_type, payload):
     """识别已校验的空连锁询问，避免为唯一自动响应调用模型"""
     return msg_type == 16 and len(payload) == 11 and payload[1] == 0
+
+
+def read_reload_field(stream):
+    """按随包 Core 固定7/8槽读取162，不按规则号猜测怪兽区长度"""
+    rule = _read_exact(stream, 1, 'Type 162 rule')[0]
+    players = []
+    for player in (0, 1):
+        lp = struct.unpack('<I', _read_exact(stream, 4, 'Type 162 LP'))[0]
+        zones = []
+        for capacity, width in ((7, 2), (8, 1)):
+            cards = []
+            for sequence in range(capacity):
+                occupied = _read_exact(stream, 1, 'Type 162 occupied')[0]
+                if occupied not in (0, 1):
+                    raise CoreMessageProtocolError('Type 162 invalid occupied flag')
+                if occupied:
+                    values = _read_exact(stream, width, 'Type 162 card')
+                    cards.append((sequence, values[0], values[1] if width == 2 else 0))
+            zones.append(tuple(cards))
+        counts = tuple(_read_exact(stream, 6, 'Type 162 zone counts'))
+        if counts[5] > counts[4]:
+            raise CoreMessageProtocolError('Type 162 face-up Extra count is invalid')
+        players.append({'lp': lp, 'monsters': zones[0], 'spells': zones[1], 'counts': counts})
+    count = _read_exact(stream, 1, 'Type 162 chain count')[0]
+    chains = []
+    for index in range(count):
+        code, raw, controller, location, sequence, desc = struct.unpack(
+            '<IIBBBI', _read_exact(stream, 15, 'Type 162 chain')
+        )
+        if controller not in (0, 1):
+            raise CoreMessageProtocolError('Type 162 invalid chain player')
+        chains.append((code, raw, controller, location, sequence, desc))
+    return {'rule': rule, 'players': tuple(players), 'chains': tuple(chains)}
+
+
+def parse_reload_field(payload):
+    """完整验证快照后再交给状态层，拒绝截断或多余字节"""
+    stream = io.BytesIO(bytes(payload))
+    result = read_reload_field(stream)
+    if stream.read(1):
+        raise CoreMessageProtocolError('Type 162 has unexpected trailing bytes')
+    return result

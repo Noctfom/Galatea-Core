@@ -20,6 +20,8 @@ from core_message_protocol import (
     parse_confirm_cards,
     read_chain_prompt,
     read_confirm_cards,
+    read_reload_field,
+    parse_reload_field,
 )
 from data_types import (
     ActionOperation,
@@ -37,6 +39,7 @@ from protocol_v3_audit import (
     record_protocol_message,
 )
 from effect_slot_binding import resolve_runtime_effect_slot
+from public_observation import PublicObservationState, location_key
 from event_history import (
     TransitionEventRecorder,
     TransitionStateDigest,
@@ -79,12 +82,13 @@ _DECISION_MESSAGES = {
 _STATE_APPLIED_MESSAGES = {
     30, 31, 40, 41, 42, 50, 53, 56, 70, 74, 90, 91, 92, 93, 94, 95,
     96, 97, 100, 101, 102,
+    32, 33, 36, 37, 38, 39, 55, 120, 160, 162, 165,
 }
 _QUERY_RECONCILED_MESSAGES = {
-    34, 36, 54, 55, 60, 61, 62, 63, 64, 65, 71, 72, 73, 75, 76,
+    34, 54, 60, 61, 62, 63, 64, 65, 71, 72, 73, 75, 76,
     81, 83, 110, 111, 112, 113, 114,
 }
-_KNOWN_OBSERVATION_GAPS = {35, 38, 120, 160, 161, 162, 165}
+_KNOWN_OBSERVATION_GAPS = {35, 161}
 
 
 def _protocol_coverage_category(msg_type):
@@ -164,9 +168,9 @@ class MessageParser:
         length = 0
 
         # 固定随包 Core 布局；两类报文共享严格解码，不能吞掉截断
-        if msg_type in (16, 31):
+        if msg_type in (16, 31, 162):
             try:
-                (read_chain_prompt if msg_type == 16 else read_confirm_cards)(stream)
+                {16: read_chain_prompt, 31: read_confirm_cards, 162: read_reload_field}[msg_type](stream)
                 return stream.tell() - start_pos
             finally:
                 stream.seek(start_pos)
@@ -294,26 +298,6 @@ class MessageParser:
                 stream.read(4); length += 4 # Deck top
                 stream.read(hand_len * 4); length += hand_len * 4
                 stream.read(extra_len * 4); length += extra_len * 4
-
-            # 162: RELOAD_FIELD
-            elif msg_type == 162:
-                b = stream.read(1); length += 1
-                rule = struct.unpack('<B', b)[0]
-                mzone_size = 7 if rule >= 4 else 5
-                for _ in range(2):
-                    stream.read(4); length += 4 
-                    for _ in range(mzone_size):
-                        b = stream.read(1); length += 1
-                        if struct.unpack('<B', b)[0] != 0:
-                            stream.read(2); length += 2 
-                    for _ in range(8):
-                        b = stream.read(1); length += 1
-                        if struct.unpack('<B', b)[0] != 0:
-                            stream.read(1); length += 1 
-                    stream.read(6); length += 6 
-                b = stream.read(1); length += 1
-                chain_size = struct.unpack('<B', b)[0]
-                stream.read(chain_size * 15); length += chain_size * 15
 
             # 163/164: STRING MESSAGES
             elif msg_type in [163, 164]:
@@ -481,6 +465,12 @@ class DuelState:
         self.history_stack = []
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
+        self._initial_deck_counts = (
+            len(p0_main) if p0_main is not None else None,
+            len(p1_main) if p1_main is not None else None,
+        )
+        self.public_observation = PublicObservationState(self._initial_deck_counts)
+        self._reload_counts = {}
         self.audit_enabled = bool(audit_enabled)
         self.transition_recorder = TransitionEventRecorder(
             retain_completed_events=retain_completed_transitions
@@ -514,6 +504,44 @@ class DuelState:
         self.p1_deck = self.p1_initial_deck.copy()
         self.p1_extra = self.p1_initial_extra.copy()
 
+        self.public_observation = PublicObservationState(self._initial_deck_counts)
+        self._reload_counts = {}
+
+    def _restore_public_snapshot(self, restored):
+        """原子恢复162可证明的状态，其未包含的身份/提示/历史保持未知"""
+        new_field = {0: defaultdict(dict), 1: defaultdict(dict)}
+        counts = {}
+        for player, data in enumerate(restored['players']):
+            for zone, cards in ((Zone.MZONE, data['monsters']), (Zone.SZONE, data['spells'])):
+                for sequence, position, overlays in cards:
+                    new_field[player][zone][sequence] = {
+                        'code': 0, 'pos': position, 'owner': player,
+                        'overlays': [0] * overlays,
+                    }
+            counts[player] = dict(zip(
+                (Zone.DECK, Zone.HAND, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA),
+                data['counts'][:5],
+            ))
+        chains = []
+        for index, (code, raw, player, zone, sequence, desc) in enumerate(restored['chains'], 1):
+            hc, hl, hs, hp = LocationInfo.decode(raw)
+            slot = resolve_runtime_effect_slot(code, desc)
+            chains.append({'code': code, 'hc': hc, 'hl': hl, 'hs': hs, 'hp': hp,
+                           'c': player, 'l': zone, 's': sequence, 'desc': desc,
+                           'effect_slot': slot if slot is not None else -1, 'ct': index})
+        # 快照边界不能把旧事件和不可验证的新实例串成一条因果历史
+        self.transition_recorder.invalidate_context(self._transition_state_digest())
+        self.field_map, self.chain_stack, self._reload_counts = new_field, chains, counts
+        self.my_lp, self.op_lp = (data['lp'] for data in restored['players'])
+        self.history_stack = []
+        self.known_hand_codes = {0: [], 1: []}
+        self.recently_confirmed = []
+        self.p0_deck, self.p1_deck, self.p0_extra, self.p1_extra = [], [], [], []
+        self.public_observation = PublicObservationState((counts[0][Zone.DECK], counts[1][Zone.DECK]))
+        self.public_observation.complete = False
+        self.public_observation.reversal_known = False
+        self.public_observation.remaining_composition_known = False
+
     def _get_field_entry(self, raw_location):
         """按 Core 位置值查找当前镜像中的卡片条目"""
         controller, location, sequence, _ = LocationInfo.decode(raw_location)
@@ -527,9 +555,11 @@ class DuelState:
         for player in (0, 1):
             for zone in TRANSITION_ZONE_ORDER:
                 if zone == Zone.DECK:
-                    value = len(self.p0_deck if player == 0 else self.p1_deck)
+                    value = self.public_observation.deck_counts[player]
+                    if value is None:
+                        value = len(self.p0_deck if player == 0 else self.p1_deck)
                 elif zone == Zone.EXTRA:
-                    value = len(self.p0_extra if player == 0 else self.p1_extra)
+                    value = self._reload_counts.get(player, {}).get(zone, len(self.p0_extra if player == 0 else self.p1_extra))
                 elif zone == Zone.OVERLAY:
                     value = sum(
                         len(card.get('overlay_codes', card.get('overlays', [])))
@@ -537,7 +567,7 @@ class DuelState:
                         for card in cards.values()
                     )
                 else:
-                    value = len(self.field_map[player].get(zone, {}))
+                    value = self._reload_counts.get(player, {}).get(zone, len(self.field_map[player].get(zone, {})))
                 counts.append(int(value))
         return TransitionStateDigest(
             lp_p0=int(self.my_lp),
@@ -663,20 +693,55 @@ class DuelState:
                 self.recently_confirmed.extend(
                     card['code'] & 0x7FFFFFFF for card in confirmation['cards']
                 )
+                for card in confirmation['cards']:
+                    if card['location'] == Zone.DECK:
+                        self.public_observation.set_deck_card(card['controller'], card['sequence'], card['code'])
 
             elif msg_type in [30, 42]:
                 stream.read(1) # P
                 count = struct.unpack('<B', stream.read(1))[0]
                 for _ in range(count):
                     code = struct.unpack('<I', stream.read(4))[0]
-                    stream.read(3) # c, l, s
+                    c, l, s = struct.unpack('<BBB', stream.read(3))
                     self.recently_confirmed.append(code & 0x7FFFFFFF)
+                    if l == Zone.DECK:
+                        self.public_observation.set_deck_card(c, s, code)
+
+            elif msg_type == 32:
+                player = msg_payload[0]
+                self.public_observation.deck_cards[player].clear()
+                self.public_observation.shuffle_hints(player, Zone.DECK)
+            elif msg_type in (33, 39):
+                self.public_observation.shuffle_hints(msg_payload[0], Zone.HAND if msg_type == 33 else Zone.EXTRA,
+                                                     descriptions_reemitted=msg_type == 33)
+            elif msg_type == 36:
+                count = msg_payload[1]
+                positions = struct.unpack('<' + 'I' * (2 * count), msg_payload[2:])
+                self.public_observation.shuffle_set_hints(positions[:count], positions[count:])
+            elif msg_type == 37:
+                self.public_observation.reverse_decks()
+            elif msg_type == 38:
+                self.public_observation.deck_top(*struct.unpack('<BBI', msg_payload))
+            elif msg_type == 160:
+                raw, kind, value = struct.unpack('<IBI', msg_payload)
+                self.public_observation.card_hint(raw, kind, value, self.turn)
+            elif msg_type == 165:
+                player, kind, desc = struct.unpack('<BBI', msg_payload)
+                self.public_observation.player_hint(player, kind, desc, self.turn)
+            elif msg_type == 120:
+                # 只验证并交给事件历史；不增加人工奖励或伪造效果槽
+                struct.unpack('<II', msg_payload)
+            elif msg_type == 162:
+                self._restore_public_snapshot(parse_reload_field(msg_payload))
 
             elif msg_type == 50: # MSG_MOVE (完美兼容超量素材)
                 code, old_raw, new_raw, reason = struct.unpack('<IIII', stream.read(16))
                 old_c, old_l, old_s, old_pos = LocationInfo.decode(old_raw)
                 new_c, new_l, new_s, new_pos = LocationInfo.decode(new_raw)
                 pure_code = code & 0x7FFFFFFF
+
+                known_deck_card = self.public_observation.deck_cards[old_c].get(old_s) if old_c in (0, 1) and old_l == Zone.DECK else None
+                self.public_observation.move_hints(old_raw, new_raw)
 
                 # ========================================================
                 # 状态记忆池：只进不出（除非明牌被打出）
@@ -687,6 +752,15 @@ class DuelState:
                 elif pure_code in self.recently_confirmed:
                     is_public_move = True
                     self.recently_confirmed.remove(pure_code)
+                if known_deck_card is not None and known_deck_card.code == pure_code:
+                    is_public_move = True
+                if new_l == Zone.GRAVE or (new_l in (Zone.MZONE, Zone.SZONE, Zone.REMOVED, Zone.EXTRA) and new_pos & 0x5):
+                    is_public_move = True
+                self.public_observation.move_deck_card(old_raw, new_raw, pure_code, is_public_move)
+                if self._reload_counts:
+                    for player, zone, delta in ((old_c, old_l, -1), (new_c, new_l, 1)):
+                        if player in self._reload_counts and zone in self._reload_counts[player]:
+                            self._reload_counts[player][zone] = max(0, self._reload_counts[player][zone] + delta)
 
                 # 进池：明牌入库 (比如检索)
                 if new_l == Zone.HAND and new_c in [0, 1] and is_public_move and pure_code != 0:
@@ -750,6 +824,10 @@ class DuelState:
                 if not (prev & 0x1 or prev & 0x4) and (new_pos & 0x1 or new_pos & 0x4):
                     if pure_code in self.known_hand_codes[c]:
                         self.known_hand_codes[c].remove(pure_code)
+
+            elif msg_type == 55: # SWAP：两张实例同时交换，不串行覆盖提示
+                _, first, _, second = struct.unpack('<IIII', msg_payload)
+                self.public_observation.remap_hints({location_key(first): location_key(second), location_key(second): location_key(first)})
 
             elif msg_type == 56: # FIELD_DISABLED
                 self.disabled_field_mask = struct.unpack('<I', stream.read(4))[0]
@@ -820,9 +898,17 @@ class DuelState:
                 #  [录像修复 B] 记录抽卡到手牌！
                 p = struct.unpack('<B', stream.read(1))[0]
                 count = struct.unpack('<B', stream.read(1))[0]
-                for _ in range(count):
+                hand_start = self._reload_counts.get(p, {}).get(Zone.HAND, len(self.field_map[p][Zone.HAND]))
+                known_draws = self.public_observation.draw(p, count, hand_start)
+                if self._reload_counts:
+                    self._reload_counts[p][Zone.DECK] = max(0, self._reload_counts[p][Zone.DECK] - count)
+                    self._reload_counts[p][Zone.HAND] += count
+                for draw_index in range(count):
                     raw_code = struct.unpack('<I', stream.read(4))[0]
                     code = raw_code & 0x7FFFFFFF
+                    previous = known_draws[draw_index] if draw_index < len(known_draws) else None
+                    if (previous is not None and previous.code == code) or raw_code & 0x80000000:
+                        self.known_hand_codes[p].append(code)
                     seq = 0
                     while seq in self.field_map[p][Zone.HAND]: seq += 1
                     self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p, 'counters': 0, 'overlays': [], 'is_equipped': False}
@@ -1852,7 +1938,14 @@ class DuelState:
         if self.transition_recorder.has_pending_boundary:
             self.transition_recorder.finalize(self._transition_state_digest())
 
-        def count_zone(p, loc): return len(self.field_map[p].get(loc, {}))
+        def count_zone(p, loc):
+            """优先采用快照重建后的公开数量，缺失时读取实体镜像"""
+            return self._reload_counts.get(p, {}).get(loc, len(self.field_map[p].get(loc, {})))
+
+        def count_deck(p, fallback):
+            """按消息维护公开张数，隐藏卡密缺失时也不依赖剩余身份列表"""
+            count = self.public_observation.deck_counts[p]
+            return fallback if count is None else count
         
         global_feat = GlobalFeature(
             turn_count=self.turn, phase_id=self.phase, to_play=self.active_player,
@@ -1860,13 +1953,15 @@ class DuelState:
             my_hand_len=count_zone(0, Zone.HAND), op_hand_len=count_zone(1, Zone.HAND),
             
             # --- 修复：使用真实的列表长度，而不是通过 field_map 统计 ---
-            my_deck_len=len(self.p0_deck), op_deck_len=len(self.p1_deck),
+            my_deck_len=count_deck(0, len(self.p0_deck)),
+            op_deck_len=count_deck(1, len(self.p1_deck)),
             
             my_grave_len=count_zone(0, Zone.GRAVE), op_grave_len=count_zone(1, Zone.GRAVE),
             my_removed_len=count_zone(0, Zone.REMOVED), op_removed_len=count_zone(1, Zone.REMOVED),
             
             # --- 修复：额外卡组同理 ---
-            my_extra_len=len(self.p0_extra), op_extra_len=len(self.p1_extra),
+            my_extra_len=count_zone(0, Zone.EXTRA) if self._reload_counts else len(self.p0_extra),
+            op_extra_len=count_zone(1, Zone.EXTRA) if self._reload_counts else len(self.p1_extra),
             decision_player=self.decision_player,
             turn_player=self.turn_player,
             starting_player=self.starting_player,
@@ -2061,6 +2156,7 @@ class DuelState:
         snap.transition_history = self.transition_recorder.snapshot()
         validate_transition_history(snap.transition_history)
         snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
+        snap.public_hints, snap.known_deck_cards, snap.public_state_flags = self.public_observation.snapshot()
         return snap
     
     def sync_active_field(self, env):
@@ -2108,3 +2204,5 @@ class DuelState:
                     reconciled_zone[sequence] = merged
 
                 self.field_map[player][zone] = reconciled_zone
+                if self._reload_counts and queried_count is not None:
+                    self._reload_counts[player][zone] = queried_count

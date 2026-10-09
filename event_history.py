@@ -17,7 +17,8 @@ from data_types import (
 from game_constants import Zone
 
 
-TRANSITION_EVENT_FORMAT_VERSION = 1
+TRANSITION_EVENT_FORMAT_VERSION = 2
+MAX_PUBLIC_NOTIFICATIONS = 8
 MAX_RECORDED_MESSAGE_TYPES = 32
 ALL_PLAYERS_VISIBILITY_MASK = 0b11
 TRANSITION_MESSAGE_GROUP_NAMES = (
@@ -31,6 +32,7 @@ TRANSITION_MESSAGE_GROUP_NAMES = (
     "life_points",
     "counter",
     "battle",
+    "public_notifications",
 )
 TRANSITION_MESSAGE_GROUP_COUNT = len(TRANSITION_MESSAGE_GROUP_NAMES)
 TRANSITION_ZONE_ORDER = (
@@ -74,6 +76,7 @@ _PUBLIC_EVENT_MESSAGES = {
     70, 71, 72, 73, 74, 75, 76,
     83, 90, 91, 92, 93, 94, 95, 96, 97,
     100, 101, 102, 110, 111, 112, 113, 114,
+    120, 160, 165,
 }
 _TRANSITION_MESSAGE_GROUPS = (
     {40, 41},
@@ -86,6 +89,7 @@ _TRANSITION_MESSAGE_GROUPS = (
     {91, 92, 94, 100},
     {101, 102},
     {110, 111, 112, 113, 114},
+    {120, 160, 165},
 )
 
 
@@ -124,6 +128,8 @@ class _PendingTransition:
     message_count: int
     max_chain_depth: int
     boundary: Optional[int] = None
+    public_notifications: list = None
+    processing_chain: int = 0
 
 
 class TransitionEventRecorder:
@@ -246,6 +252,7 @@ class TransitionEventRecorder:
             message_types=[],
             message_count=0,
             max_chain_depth=int(start_digest.chain_depth),
+            public_notifications=[],
         )
         self._next_sequence_id += 1
         return sequence_id
@@ -269,6 +276,25 @@ class TransitionEventRecorder:
             pending.max_chain_depth,
             int(current_chain_depth),
         )
+        if msg_type == 72 and payload:
+            pending.processing_chain = int(payload[0])
+        elif msg_type == 74:
+            pending.processing_chain = 0
+        if msg_type in (120, 160, 165):
+            code, raw, subtype, value = 0, -1, 0, 0
+            if msg_type == 120:
+                raw = int.from_bytes(payload[:4], 'little')
+                code = int.from_bytes(payload[4:8], 'little') & 0x7FFFFFFF
+                pending.result_flags |= int(TransitionResultFlag.MISSED_TIMING)
+            elif msg_type == 160:
+                raw = int.from_bytes(payload[:4], 'little')
+                subtype, value = payload[4], int.from_bytes(payload[5:9], 'little')
+            else:
+                raw, subtype, value = payload[0], payload[1], int.from_bytes(payload[2:6], 'little')
+            if len(pending.public_notifications) < MAX_PUBLIC_NOTIFICATIONS:
+                pending.public_notifications.append((msg_type, code, raw, pending.processing_chain, pending.message_count, subtype, value))
+            else:
+                pending.result_flags |= int(TransitionResultFlag.MESSAGE_OVERFLOW)
         if msg_type == 75:
             pending.result_flags |= int(TransitionResultFlag.CHAIN_NEGATED)
         elif msg_type == 76:
@@ -354,6 +380,7 @@ class TransitionEventRecorder:
                 pending.max_chain_depth,
                 int(end_digest.chain_depth),
             ),
+            public_notifications=tuple(pending.public_notifications),
         )
         if self._completed_events is not None:
             self._completed_events.append(event)
@@ -366,6 +393,13 @@ class TransitionEventRecorder:
     def snapshot(self):
         """返回按时间从旧到新排列的不可变事件副本"""
         return list(self._history)
+
+    def invalidate_context(self, digest):
+        """场面重载时终结旧转移并清空近期上下文，不复用已分配事件编号"""
+        if self._pending is not None:
+            self.mark_boundary(TransitionBoundary.RETRY)
+            self.finalize(digest)
+        self._history.clear()
 
     def completed_snapshot(self):
         """返回本局完整事件引用，供局末构建训练后验标签"""
@@ -439,6 +473,15 @@ def validate_transition_history(events: Iterable[StateTransitionEvent]):
             raise ValueError("transition message label capacity is invalid")
         if event.message_count < len(event.message_types):
             raise ValueError("transition message count is inconsistent")
+        if len(event.public_notifications) > MAX_PUBLIC_NOTIFICATIONS:
+            raise ValueError("public notification capacity is invalid")
+        previous_offset = 0
+        for notification in event.public_notifications:
+            if len(notification) != 7 or notification[0] not in (120, 160, 165):
+                raise ValueError("invalid public notification")
+            if not previous_offset < notification[4] <= event.message_count:
+                raise ValueError("public notification order is invalid")
+            previous_offset = notification[4]
     return True
 
 
@@ -462,6 +505,8 @@ def get_transition_event_protocol_descriptor():
         "target_slots": ACTION_TARGET_SLOTS,
         "message_type_slots": MAX_RECORDED_MESSAGE_TYPES,
         "message_groups": TRANSITION_MESSAGE_GROUP_NAMES,
+        "public_notification_slots": MAX_PUBLIC_NOTIFICATIONS,
+        "public_notification_order": "message_offset_with_last_processing_chain_context_not_cause",
         "order": "oldest_to_newest",
         "visibility": "field_level_player_bitmask",
         "network_consumed": True,

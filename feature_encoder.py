@@ -51,6 +51,8 @@ from event_history import (
 )
 from game_constants import LocationInfo, Position, Zone
 from semantic_lookup import register_static_semantic_runtime_catalog
+from public_observation import PUBLIC_INPUT_SPECS, MAX_PUBLIC_HINTS, DECK_POSITION_CAPACITY
+from public_hint_semantics import resolve_public_hint
 
 # --- 配置参数 ---
 MAX_CARDS = 120
@@ -299,6 +301,18 @@ class GalateaEncoder:
         )
 
     @staticmethod
+    def _encode_public_location(raw_location, player_id):
+        """公开通知保留完整8位序号；素材层序不能误当普通表示类别"""
+        if raw_location is None or int(raw_location) < 0:
+            return 0, 0, 0, 0
+        controller, zone, sequence, position = LocationInfo.decode(int(raw_location))
+        role = 1 if controller == player_id else 2 if controller in (0, 1) else 0
+        if zone == 0:
+            return role, 0, 0, 0
+        encoded_position = position if zone & Zone.OVERLAY else GalateaEncoder._encode_position_category(position)
+        return role, GalateaEncoder._encode_zone_category(zone), sequence, encoded_position
+
+    @staticmethod
     def _pack_transition_bits(value, width):
         """把事件位图按小端顺序压缩为固定宽度字节"""
         value = max(int(value), 0)
@@ -306,6 +320,11 @@ class GalateaEncoder:
 
     def _encode_transition_history(self, snapshot, player_id):
         """按观察者可见性编码最近的决策间状态转移历史"""
+        notifications = {
+            name: np.zeros(shape, dtype=dtype)
+            for name, (shape, dtype) in PUBLIC_INPUT_SPECS.items()
+            if name.startswith('event_public_')
+        }
         event_mask = np.zeros(
             TRANSITION_EVENT_HISTORY_SIZE,
             dtype=np.bool_,
@@ -392,6 +411,15 @@ class GalateaEncoder:
             player_id,
         )
         for index, event in enumerate(events):
+            for slot, (kind, code, raw, chain, offset, subtype, value) in enumerate(event.public_notifications):
+                notifications['event_public_mask'][index, slot] = True
+                notifications['event_public_kind'][index, slot] = kind
+                notifications['event_public_code'][index, slot] = self._encode_card_code(code) if code else 0
+                notifications['event_public_location'][index, slot] = self._encode_public_location(raw, player_id)
+                notifications['event_public_chain'][index, slot] = min(chain, 255)
+                notifications['event_public_offset'][index, slot] = offset
+                notifications['event_public_subtype'][index, slot] = subtype
+                notifications['event_public_value'][index, slot] = [(value >> (8 * byte)) & 255 for byte in range(4)]
             event_mask[index] = True
             if event.source_code:
                 event_card_idx[index] = self._encode_card_code(
@@ -489,6 +517,7 @@ class GalateaEncoder:
             "event_chain": event_chain,
             "event_counts": event_counts,
         }
+        arrays.update(notifications)
         return {
             name: torch.from_numpy(value).unsqueeze(0)
             for name, value in arrays.items()
@@ -807,6 +836,55 @@ class GalateaEncoder:
             'act_position': torch.tensor(act_positions, dtype=torch.uint8).unsqueeze(0),
         }
 
+    def _encode_public_observation(self, snapshot, player_id):
+        """编码当前提示与公开位置；身份、参数和提示生命周期保持分离"""
+        arrays = {
+            name: np.zeros(shape, dtype=dtype)
+            for name, (shape, dtype) in PUBLIC_INPUT_SPECS.items()
+            if not name.startswith('event_public_')
+        }
+        hints = [hint for hint in snapshot.public_hints if hint.visibility & (1 << player_id)]
+        if len(hints) > MAX_PUBLIC_HINTS:
+            raise ValueError(f'公开提示 {len(hints)} 超过观测容量 {MAX_PUBLIC_HINTS}，拒绝静默丢弃；请提升协议容量')
+        hosts = {(entity.owner, entity.location, entity.sequence): index for index, entity in enumerate(snapshot.entities[:MAX_CARDS])}
+        for index, hint in enumerate(hints):
+            arrays['hint_mask'][index] = True
+            arrays['hint_kind'][index] = hint.kind
+            arrays['hint_role'][index] = 1 if hint.player == player_id else 2
+            arrays['hint_host'][index] = MAX_CARDS
+            arrays['hint_location'][index] = self._encode_public_location(hint.location, player_id)
+            if hint.location >= 0:
+                c, l, s, _ = LocationInfo.decode(hint.location)
+                if not l & Zone.OVERLAY:
+                    arrays['hint_host'][index] = hosts.get((c, l, s), MAX_CARDS)
+            arrays['hint_value_bytes'][index] = [(hint.value >> (8 * byte)) & 255 for byte in range(4)]
+            if hint.kind == 2:
+                arrays['hint_card_idx'][index] = self._encode_card_code(hint.value & 0x7FFFFFFF)
+            if hint.kind in (6, 8):
+                card, slot, binding = resolve_public_hint(hint.value)
+                arrays['hint_semantic_card_idx'][index] = self._encode_card_code(card) if card else 0
+                arrays['hint_semantic_slot'][index] = slot + 1 if slot >= 0 else 0
+                arrays['hint_binding'][index] = binding
+            if not 0 < hint.count <= 0x7FFFFFFF:
+                raise ValueError('public hint reference count exceeds storage capacity')
+            arrays['hint_count'][index] = hint.count
+            arrays['hint_age'][index] = min(max(snapshot.global_data.turn_count - hint.turn, 0), 65504)
+        counts = (snapshot.global_data.my_deck_len, snapshot.global_data.op_deck_len)
+        for card in snapshot.known_deck_cards:
+            if not card.visibility & (1 << player_id):
+                continue
+            offset = counts[card.player] - 1 - card.sequence
+            if not 0 <= offset < DECK_POSITION_CAPACITY:
+                raise ValueError('known deck position disagrees with current public count')
+            role = 0 if card.player == player_id else 1
+            arrays['known_deck_idx'][role, offset] = self._encode_card_code(card.code)
+            arrays['known_deck_flags'][role, offset] = 1 | (int(card.faceup) << 1)
+        flags = list(snapshot.public_state_flags)
+        if player_id == 1:
+            flags[3], flags[4] = flags[4], flags[3]
+        arrays['public_state_flags'][:] = flags
+        return {name: torch.from_numpy(value).unsqueeze(0) for name, value in arrays.items()}
+
     def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:
         g = snapshot.global_data
         global_vec = self._encode_global_vector(g, player_id)
@@ -887,6 +965,8 @@ class GalateaEncoder:
             card_zones[i] = self._encode_zone_category(e.location)
             card_positions[i] = self._encode_position_category(e.position)
             is_visible = self._is_entity_visible_to_player(e, player_id)
+            if e.location == Zone.GRAVE and snapshot.public_state_flags[3 + player_id]:
+                is_visible = False
             has_public_state = is_visible
             is_tracked_by_memory = False
             visible_code = e.code
@@ -1213,6 +1293,7 @@ class GalateaEncoder:
 
         base_dict.update(self._encode_deck_profile(snapshot, player_id))
         base_dict.update(self._encode_transition_history(snapshot, player_id))
+        base_dict.update(self._encode_public_observation(snapshot, player_id))
         base_dict.update(act_dict)
         return base_dict
 

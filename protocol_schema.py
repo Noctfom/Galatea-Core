@@ -63,6 +63,7 @@ from data_types import (
     SummonMethod,
 )
 from event_history import get_transition_event_protocol_descriptor
+from public_observation import public_observation_descriptor
 from semantic_lookup import (
     STATIC_SEMANTIC_LOOKUP_FORMAT_VERSION,
     get_static_semantic_lookup,
@@ -70,7 +71,7 @@ from semantic_lookup import (
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 13
+PROTOCOL_SCHEMA_REVISION = 14
 
 
 def _schema_descriptor(card_vocabulary):
@@ -78,6 +79,7 @@ def _schema_descriptor(card_vocabulary):
     return {
         "model_protocol_version": MODEL_PROTOCOL_VERSION,
         "schema_revision": PROTOCOL_SCHEMA_REVISION,
+        "public_observation": public_observation_descriptor(),
         "card_identity": {
             "mapping": "append_only_exact_v1",
             "vocabulary_format_version": CARD_VOCAB_FORMAT_VERSION,
@@ -97,6 +99,10 @@ def _schema_descriptor(card_vocabulary):
                 "act_target_code",
                 "event_card_idx",
                 "event_target_card_idx",
+                "hint_card_idx",
+                "hint_semantic_card_idx",
+                "known_deck_idx",
+                "event_public_code",
             ],
         },
         "global_state": {

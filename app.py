@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.13.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.13.3"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -3568,6 +3568,30 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
 
                 chain_list = state.get("chain", [])
                 hist_list = state.get("history", [])
+
+                public_hints = state.get("public_hints", [])
+                known_deck_cards = state.get("known_deck_cards", [])
+                public_flags = state.get("public_state_flags", [])
+                if public_hints or known_deck_cards or (public_flags and not public_flags[0]):
+                    with st.expander(_("公开提示与已知卡组位置", "Public hints and known deck positions")):
+                        st.caption(_("提示是 Core 通知事实，不代表效果必然生效；不会按猜测的期限清理。", "Hints are Core notifications, not guarantees of active effects; no guessed expiry is used."))
+                        if public_flags and not public_flags[0]:
+                            st.warning(_("提示状态不完整：发生过快照重建或无法追踪的实例重排。", "Hint state is incomplete after reload or an untrackable instance shuffle."))
+                        if public_hints:
+                            st.dataframe([{
+                                "Player": f"P{hint['player']}", "Kind": hint['kind'],
+                                "Location": hint['location'], "Value / Desc": hint['value'],
+                                "References": hint['count'], "Since turn": hint['turn'],
+                                "Lua source": card_db_ui.get_card_name(hint['semantic_source']) if hint.get('semantic_source') else "?",
+                                "Slot (1-based)": hint.get('semantic_slot', -1) + 1 if hint.get('semantic_slot', -1) >= 0 else "?",
+                                "Binding": {0: "unknown", 1: "exact", 2: "parent context"}.get(hint.get('semantic_binding', 0), "unknown"),
+                            } for hint in public_hints], hide_index=True, width="stretch")
+                        if known_deck_cards:
+                            st.dataframe([{
+                                "Player": f"P{card['player']}",
+                                "Top offset": state.get(f"p{card['player']}_deck_len", 0) - 1 - card['sequence'],
+                                "Card": card_db_ui.get_card_name(card['code']), "Face-up": card['faceup'],
+                            } for card in known_deck_cards], hide_index=True, width="stretch")
                 
                 if chain_list or hist_list:
                     st.subheader("📜 " + _("场面态势与连锁", "Board History & Chain"))

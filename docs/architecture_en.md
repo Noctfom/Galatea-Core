@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.13.2**.
+> This document applies to **Galatea-Core v3.13.3**.
 
 3.13.1's optional [canonical trajectories and state-evaluation replay](core_trajectories_en.md)
 reuse existing Core parsing, observations and state decoders without changing training, network
@@ -11,6 +11,8 @@ structure, protocol inputs or standard ONNX outputs.
 3.13.2's [fixed Core message audit](core_message_audit_en.md) corrects Type 16/31 decoding and
 Type 21 dispatch across model, RuleBot, Worker and replay paths. Networks/rewards are unchanged;
 empty-chain automatic responses are not model actions.
+
+3.13.3 adds [bounded public observations](public_observations_en.md), reusing code semantics without expanding the120-card backbone. Model Protocol4 / Checkpoint Format3 remain unchanged, schema revision14; storage, ONNX inputs, assets and replay change together without reward/PPO changes.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 

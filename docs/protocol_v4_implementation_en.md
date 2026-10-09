@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.13.2 (Phase 7 parsing stability batch) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.13.3 (public observations, schema revision14) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | 2 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |
@@ -206,6 +206,7 @@ V4 Core exposes independent `DeckSpec`, `MatchContext`, `DuelSummary`, Deck Enco
   - [x] Parsing stability batch (3.13.2): fix bundled public Core Type 16 per-candidate forced flags/empty chains, Type 31 skip_panel and Type 21 dispatch; remove the ghost-byte switch. Independent raw Trajectory Schema 2; network/model/checkpoint versions unchanged. UI labels say “AI predictions”. Other cognition additions await review; see the [fixed message audit](core_message_audit_en.md).
   - [ ] Review batch 3: Link/YRP inputs and quality gates split by complete duel/deck/player; imitation only consumes deterministic replays with reliable legal-candidate mapping.
 - [ ] **Phase 8: V4 scratch-training validation**—short, medium, and long gates.
+  - [x] Public cognition completion (3.13.3 / revision14):120 ordered notifications without rewards,160/165 reference lifetimes and exact/parent code semantics,37/38 legal position memory,162 fixed7/8-slot rebuilding. Shared training/ONNX/GKG/replay inputs, no120-card backbone expansion; unproven old sources remain unknown and Type35 is deferred. See [Public observations](public_observations_en.md).
 - [ ] **Phase 9: deck-building/BO3 layer**—framework becomes 4.0.0 after completion.
 
 Each phase requires static audit, unit tests, real-Core smoke, numerical/performance checks, and bilingual docs.

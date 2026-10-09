@@ -9,6 +9,10 @@ Independent raw Trajectory Schema 2; holographic JSON remains format 3.
 
 ## Implemented: 16, 31, 21
 
+### 3.13.3 implementation status
+
+Types120,160/165,37/38 and162 now have shared state/input/network/training/ONNX/replay support; see [lifetimes and cost](public_observations_en.md). Model Protocol4 / Checkpoint3 remain unchanged, revision14. Type35 stays deferred and Tag161 is unsupported. Hints are not universal active-effect tracking; old assets without code/source metadata remain unknown. The following current-gap/proposal/unchanged-network statements describe the historical3.13.2 audit, not incomplete3.13.3 implementation.
+
 Type 16 SELECT_CHAIN, little-endian payload:
 
 ```

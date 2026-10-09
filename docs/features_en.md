@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.13.2**.
+> This document applies to **Galatea-Core v3.13.3**.
 
 ---
 
@@ -150,6 +150,7 @@ Configure and launch AI training tasks.
 - v3.13.0 unifies GAE lambda=0.98, PPO epoch limits, and target KL; pre-backward guards protect all joint updates, and new audits report actual updates plus mini-batch-mean quantiles without changing network/observations
 - v3.13.1 adds logged-game-only canonical Core trajectories, deterministic replay checks and state-evaluation curves; see [Trajectory and evaluation replay](core_trajectories_en.md)
 - v3.13.2 corrects Type 16/31 decoding and Type 21 dispatch, with curves labeled “AI predictions”; see the [message/cognition audit](core_message_audit_en.md)
+- v3.13.3 adds missed-timing events, public hints, known deck positions and fixed snapshot rebuilding; Core-driven lifetimes, exact/parent/unknown semantics and shared training/ONNX/replay inputs; see [Public observations](public_observations_en.md)
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow

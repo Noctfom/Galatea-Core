@@ -87,6 +87,7 @@ from checkpoint_utils import (
     validate_training_checkpoint,
 )
 from protocol_schema import apply_current_protocol_metadata, get_current_protocol_metadata
+from public_observation import PUBLIC_INPUT_SPECS
 from deck_trajectory import (
     DECK_PROFILE_STATIC_OBSERVATION_KEYS,
     LEGACY_DECK_STATIC_OBSERVATION_KEYS,
@@ -741,6 +742,10 @@ class PPOTrainer:
             'act_sequence': ((120,), torch.uint8),
             'act_position': ((120,), torch.uint8),
         }
+        input_specs.update({
+            name: (shape, getattr(torch, dtype))
+            for name, (shape, dtype) in PUBLIC_INPUT_SPECS.items()
+        })
         self.input_specs = input_specs
 
         print("🧠 [Shared Memory] 正在开辟高带宽零拷贝多进程超导通道...")

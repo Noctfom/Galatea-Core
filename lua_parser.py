@@ -12,6 +12,7 @@ from semantic_assets import (
     invalidate_static_semantic_assets,
 )
 from effect_slot_binding import apply_runtime_effect_bindings
+from public_hint_semantics import apply_public_hint_metadata
 
 
 def _stable_unique(values):
@@ -44,7 +45,9 @@ class YGOProLuaParser:
                 lua_source = stream.read()
         except OSError:
             return False
-        return apply_runtime_effect_bindings(card_data, lua_source, card_id)
+        binding_changed = apply_runtime_effect_bindings(card_data, lua_source, card_id)
+        hint_changed = apply_public_hint_metadata(card_data, card_id)
+        return binding_changed or hint_changed
 
     def _hash_code_block(self, code_block, card_id, slot_idx):
         """将特殊的代码块转化为统一的 Hash 标签，使用深度词法规范化榨干冗余变种"""
@@ -281,6 +284,7 @@ class YGOProLuaParser:
             slot_idx += 1
             
         apply_runtime_effect_bindings(card_data, content, card_id)
+        apply_public_hint_metadata(card_data, card_id)
         return card_data
 
     def run_batch(self, output_file='knowledge_base.json', clear_existing=False, remote_url=None):

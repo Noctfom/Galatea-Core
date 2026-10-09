@@ -4,17 +4,19 @@ import datetime
 import json
 import os
 import struct
+from dataclasses import asdict
 
 from card_reader import card_db
 from data_types import ActionOperation, SummonMethod
 from game_constants import LocationInfo, Phases, Zone
+from public_hint_semantics import resolve_public_hint
 
 
 REPLAY_FORMAT_VERSION = 3
 REPLAY_EVENT_MSGS = frozenset({
-    5, 40, 41, 50, 53, 54, 60, 61, 62, 63, 64, 65,
+    5, 37, 38, 40, 41, 50, 53, 54, 60, 61, 62, 63, 64, 65,
     70, 71, 72, 73, 74, 75, 76, 83, 90, 91, 92, 93, 94,
-    96, 97, 100, 101, 102, 110, 111, 112, 113, 114,
+    96, 97, 100, 101, 102, 110, 111, 112, 113, 114, 120, 160, 162, 165,
 })
 
 _ZONE_NAMES = {
@@ -155,6 +157,14 @@ def _serialize_card(entity):
     }
 
 
+def _serialize_public_hint(hint):
+    """冻结本次提示的语义绑定级别，旧录像不依赖未来变化的本地目录"""
+    record = asdict(hint)
+    source, slot, binding = resolve_public_hint(hint.value) if hint.kind in (6, 8) else (0, -1, 0)
+    record.update(semantic_source=source, semantic_slot=slot, semantic_binding=binding)
+    return record
+
+
 def _serialize_snapshot(snapshot):
     """把完整快照整理为回放棋盘能够直接消费的状态。"""
     zones = {
@@ -177,10 +187,10 @@ def _serialize_snapshot(snapshot):
         "to_play": int(getattr(global_data, "to_play", 0)),
         "p0_lp": int(getattr(global_data, "my_lp", 8000)),
         "p1_lp": int(getattr(global_data, "op_lp", 8000)),
-        "p0_deck_len": len(getattr(snapshot, "p0_deck_codes", [])),
-        "p1_deck_len": len(getattr(snapshot, "p1_deck_codes", [])),
-        "p0_extra_len": len(getattr(snapshot, "p0_extra_codes", [])),
-        "p1_extra_len": len(getattr(snapshot, "p1_extra_codes", [])),
+        "p0_deck_len": int(global_data.my_deck_len),
+        "p1_deck_len": int(global_data.op_deck_len),
+        "p0_extra_len": int(global_data.my_extra_len),
+        "p1_extra_len": int(global_data.op_extra_len),
         "p0_hand": zones[(0, Zone.HAND)],
         "p0_mzone": zones[(0, Zone.MZONE)],
         "p0_szone": zones[(0, Zone.SZONE)],
@@ -195,6 +205,9 @@ def _serialize_snapshot(snapshot):
         "p1_removed": zones[(1, Zone.REMOVED)],
         "chain": list(getattr(snapshot, "chain_stack", [])),
         "history": list(getattr(snapshot, "history_stack", [])),
+        "public_hints": [_serialize_public_hint(hint) for hint in getattr(snapshot, "public_hints", ())],
+        "known_deck_cards": [asdict(card) for card in getattr(snapshot, "known_deck_cards", ())],
+        "public_state_flags": list(getattr(snapshot, "public_state_flags", ())),
     }
 
 
@@ -383,7 +396,32 @@ def _build_core_event(snapshot, msg_type, payload):
         "movements": [],
     }
 
-    if msg_type == 5 and len(payload) >= 2:
+    if msg_type == 120:
+        raw, code = struct.unpack('<II', payload)
+        event.update(kind="missed_timing", label=f"{_card_name(code)} 错过可发动时点（不追加扣分）",
+                     actor=_reference_from_raw(snapshot, raw, code), source_code=code, location=raw)
+    elif msg_type in (160, 165):
+        if msg_type == 160:
+            raw, hint_kind, value = struct.unpack('<IBI', payload)
+            reference = _reference_from_raw(snapshot, raw)
+            player = reference['owner']
+            owner = _card_name(reference.get('code', 0))
+        else:
+            player, hint_kind, value = struct.unpack('<BBI', payload)
+            raw, reference, owner = -1, None, f"P{player}"
+        hint_names = {1: "回合计数", 2: "卡片宣言", 3: "种族宣言", 4: "属性宣言", 5: "数字提示", 6: "说明 ADD", 7: "说明 REMOVE"}
+        shown = _card_name(value) if hint_kind == 2 else str(value)
+        event.update(kind="public_hint", label=f"{owner}：{hint_names.get(hint_kind, hint_kind)} {shown}",
+                     actor=reference, player=player, location=raw, hint_kind=hint_kind, hint_value=value)
+    elif msg_type == 37:
+        event.update(kind="deck_reverse", label="双方卡组顺序反转（仅保留合法已知位置）")
+    elif msg_type == 38:
+        player, offset, code = struct.unpack('<BBI', payload)
+        event.update(kind="deck_top", label=f"P{player} 卡顶偏移 {offset}：{_card_name(code)}",
+                     player=player, offset=offset, code=_pure_code(code), faceup=bool(code & 0x80000000))
+    elif msg_type == 162:
+        event.update(kind="state_reload", label="Core 场面快照重建；未提供的提示和身份保持未知")
+    elif msg_type == 5 and len(payload) >= 2:
         winner, reason = struct.unpack("<BB", payload[:2])
         event.update(kind="win", label=f"P{winner} 获胜", player=winner, reason=reason)
     elif msg_type == 40 and payload:

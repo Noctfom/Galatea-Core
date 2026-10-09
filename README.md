@@ -7,7 +7,7 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.13.2](https://img.shields.io/badge/Release-v3.13.2-brightgreen.svg)](docs/changelog.md)
+[![Release: v3.13.3](https://img.shields.io/badge/Release-v3.13.3-brightgreen.svg)](docs/changelog.md)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -18,6 +18,8 @@
 ---
 
 ## ✨ 特性亮点
+
+3.13.3 补齐公开提示、错过时点与已知卡顶观测，复用 Lua 代码语义；详见 [公开认知补全](docs/public_observations.md)。模型协议仍为 V4，但结构修订升至 14，旧开发模型不混用。
 
 - 🧠 **通用 AI 模型** - 不依赖特定卡组，自动解析 Lua 脚本学习卡片效果
 - 🎮 **完整 WebUI** - 一站式训练、测试、管理控制台

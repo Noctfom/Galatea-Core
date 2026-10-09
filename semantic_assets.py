@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from effect_slot_binding import build_runtime_effect_binding_catalog
+from public_hint_semantics import build_public_hint_catalog
 
 
 KNOWLEDGE_BASE_FILENAME = "knowledge_base.json"
@@ -286,6 +287,7 @@ def validate_semantic_bundle(
     expected_keys = build_expected_code_semantic_keys(knowledge_base)
     # 运行时效果标识必须与 Lua 语义槽保持一对一，禁止歧义资产进入训练
     runtime_effect_bindings = build_runtime_effect_binding_catalog(knowledge_base)
+    public_hint_bindings = build_public_hint_catalog(knowledge_base)
     actual_keys = set(code_assets["index"])
     missing_keys = sorted(expected_keys.difference(actual_keys))
     stale_keys = sorted(actual_keys.difference(expected_keys))
@@ -308,6 +310,7 @@ def validate_semantic_bundle(
         "knowledge_base_path": knowledge_base_path,
         "effect_slot_count": len(expected_keys),
         "runtime_effect_binding_count": len(runtime_effect_bindings),
+        "public_hint_binding_count": len(public_hint_bindings),
         **code_assets,
     }
 

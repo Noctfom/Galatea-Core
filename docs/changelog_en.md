@@ -4,6 +4,25 @@
 
 ---
 
+## [v3.13.3] - 2026-10-09
+
+### 🧩 Public hints and state-observation completion
+
+- **Type120**: independent ordered missed-timing notifications enter16-step event history/replay, with code/location/message order/last processing-chain context and an auxiliary result output. No action-source overwrite, invented slot/cause/target or manual penalty
+- **Type160/165 lifetimes**: latest scalar hints and reference-counted instance/player descriptions remain separate. Known movement, control swaps, continuous-zone/material reindexing and hand-shuffle re-emission preserve correct mappings; untrackable shuffles/unmatched removes mark incompleteness. No invented expiry at turn/history boundaries; CARD_QUESTION viewing restrictions apply to the receiving player, without replacing actual stats
+- **Existing Lua semantics**: a small catalog distinguishes exact slot, explicit parent-code context and unknown, preserving full desc identity and projecting only one code row. Lua extraction retains`public_hint_parent_desc_ids`; existing semantic sync/GKG paths carry it and catalog identity participates in hashes. Many old local entries lack raw/source metadata, including current Magic Eye examples: raw identities remain learnable, but no current-script-to-old-vector forced binding or unsolicited asset rewriting occurs
+- **Types37/38**: both-player reversal and legally known positions/code/face-up flags;38 offsets use logical size when consumed, including before DRAW. Drawing/moving/shuffling maintain or invalidate order without revealing hidden draws; full8-bit public coordinates are retained
+- **Type162**: strict shared fixed7/8-slot decoder, atomic LP/count/occupancy/position/overlay/chain rebuild followed by public queries. Missing identities/hints/order remain unknown, old context is invalidated and stable construction is preserved. Type35 bulk Grave/Deck exchange remains deferred; Tag161 is not added
+- **Shared paths/replay**:23 compact inputs span Encoder/shared memory/Worker/PPO/central inference/ONNX history opponents; standard outputs remain logits/value. Holographic JSON records public hints/known positions/frozen semantic bindings, with WebUI tables and new event labels; old JSON remains readable
+- **Lightweight model/cost**: at most128-dimensional pooling and zero-initialized bounded residuals preserve the120-card backbone, stable DeckProfile, Side isolation, legality, rewards and PPO/GAE. Adds8,710bytes/step (272.19MiB at32,768),665,986 parameters for512/8/6; local CPU forward+2.2%, CUDA batch6 forward+7.5%, batch128 BF16 forward/backward+4.2% and ~250.69MiB additional peak allocation. These are not whole-run guarantees
+- **Versions**: framework3.13.3; Model Protocol4/Checkpoint3 unchanged, schema revision14 rejects older development artifacts. Event2/public observation1/hint catalog extension1 are separate. Raw Trajectory2/holographic3 unchanged; external Link adapters must adopt new observation identity
+- **Validation**: 303 full tests and 50 subtests pass with real-Core gates enabled, covering real snapshots/hint references, 3 model duels and raw response/observation replay, new ONNX inputs/numerical agreement, finite gradients/initial bitwise equivalence, visibility and lifetimes. A CPU32/4/1 single-Worker centralized-inference/PPO run completes 1 iteration with 438 samples. No production-scale long-run or manual browser visual acceptance is claimed
+- **Additional asset risk**: a read-only audit found that 27,007 of 27,647 local code vectors are identical. Verify generation provenance, missing code and incremental reuse before concluding why. Source vectors are not overwritten; prioritize investigation before V4 long training
+
+See [Public observations](public_observations_en.md) and the [message audit status](core_message_audit_en.md).
+
+---
+
 ## [v3.13.2] - 2026-10-08
 
 ### 🛠️ Fixed Core parsing stability and AI prediction labels

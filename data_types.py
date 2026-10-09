@@ -127,6 +127,7 @@ class TransitionResultFlag(IntFlag):
     TERMINAL = 1 << 7
     STATE_CHANGED = 1 << 8
     MESSAGE_OVERFLOW = 1 << 9
+    MISSED_TIMING = 1 << 10
 
 # ==========================================
 #  Galatea AI 数据协议定义 (Schema V2.0)
@@ -294,6 +295,8 @@ class StateTransitionEvent:
     chain_depth_before: int
     chain_depth_after: int
     max_chain_depth: int
+    # 有序公开通知独立于原动作来源；每项为类型、卡密、位置、链序、消息序、参数
+    public_notifications: tuple = ()
 
 @dataclass
 class GameSnapshot:
@@ -321,3 +324,6 @@ class GameSnapshot:
     history_stack: List[dict] = field(default_factory=list)
     # 3.11.2 事件协议历史，按视角脱敏后进入模型
     transition_history: List[StateTransitionEvent] = field(default_factory=list)
+    public_hints: tuple = ()
+    known_deck_cards: tuple = ()
+    public_state_flags: tuple = (True, True, False, False, False, True)

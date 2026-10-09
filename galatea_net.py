@@ -32,6 +32,7 @@ from protocol_schema import (
 )
 from deck_encoder import DeckEncoder
 from event_encoder import EventHistoryEncoder
+from public_context_encoder import PublicContextEncoder
 from auxiliary_heads import StructuredAuxiliaryHeads
 from goal_planner import GoalPlanner, PLAN_LATENT_DIM, PLAN_MAX_AMPLITUDE
 from semantic_lookup import get_static_semantic_lookup
@@ -497,6 +498,7 @@ class GalateaNet(nn.Module):
         self.chain_context_pool = OrderedContextPool(self.d_model, 12)
         self.history_context_pool = OrderedContextPool(self.d_model, 8)
         self.event_history_encoder = EventHistoryEncoder(self.d_model)
+        self.public_context_encoder = PublicContextEncoder(self.d_model)
         # 零门控保证新历史分支初始时不改变既有策略，并允许训练逐步启用
         self.event_history_gate = nn.Parameter(
             torch.zeros(1, self.d_model)
@@ -786,11 +788,30 @@ class GalateaNet(nn.Module):
             self.card_embed(target_card_ids)
             + self.summarize_deck_code_semantics(target_card_ids)
         )
+        if 'event_public_code' in batch_dict:
+            notification_cards = F.embedding(
+                batch_dict['event_public_code'].long(),
+                self.card_embed.weight[:, :self.public_context_encoder.width],
+            )
+            source_semantic = source_semantic + self.public_context_encoder.encode_notifications(batch_dict, notification_cards)
         return self.event_history_encoder(
             batch_dict,
             source_semantic,
             target_semantic,
         )
+
+    def encode_public_context(self, batch):
+        """直接选择已知单槽代码行，避免为每条提示重复计算8槽注意力"""
+        width = self.public_context_encoder.width
+        cards = F.embedding(batch['hint_card_idx'].long(), self.card_embed.weight[:, :width])
+        slots = batch['hint_semantic_slot'].long()
+        card_ids = batch['hint_semantic_card_idx'].long()
+        code_rows = self.semantic_code_index_table[card_ids, (slots - 1).clamp(min=0)]
+        known = slots.gt(0) & self.semantic_effect_mask_table[card_ids, (slots - 1).clamp(min=0)]
+        codes = self.code_vec_proj(F.embedding(code_rows.long(), self.code_dict))[..., :width]
+        codes = codes * known.unsqueeze(-1)
+        decks = F.embedding(batch['known_deck_idx'].long(), self.card_embed.weight[:, :width])
+        return self.public_context_encoder(batch, cards, codes, decks)
 
     def build_layered_film(
         self,
@@ -892,6 +913,11 @@ class GalateaNet(nn.Module):
             + x_race + x_attr + x_setcode + x_reason + x_status
             + x_owner + x_counter + x_sem + x_zone + x_position
         )
+        public_context = 0
+        if 'hint_mask' in batch_dict:
+            host_context, public_state_context = self.encode_public_context(batch_dict)
+            x_base = x_base + host_context
+            public_context = public_state_context.unsqueeze(1)
         relation_idx = batch_dict['card_relation_idx'].long()
         relation_type = batch_dict['card_relation_type'].long()
         batch_size, card_count, relation_count = relation_idx.shape
@@ -1062,6 +1088,7 @@ class GalateaNet(nn.Module):
             + chain_pooled
             + history_pooled
             + event_pooled
+            + public_context
         )
         v_input = self.v_norm(v_input)
         state_repr = v_input.squeeze(1)

@@ -13,6 +13,11 @@ import numpy as np
 
 from card_vocab import FIRST_CARD_TOKEN_ID, get_default_card_vocabulary
 from effect_slot_binding import build_runtime_effect_binding_catalog
+from public_hint_semantics import (
+    PUBLIC_HINT_BINDING_FORMAT_VERSION, build_public_hint_catalog,
+    serialize_public_hint_catalog, deserialize_public_hint_catalog,
+    register_public_hint_catalog,
+)
 from semantic_assets import (
     CODE_EMBEDDINGS_FILENAME,
     CODE_EMBEDDINGS_INDEX_FILENAME,
@@ -197,7 +202,10 @@ def _read_compiled_catalog(directory, card_vocabulary):
     runtime_effect_bindings = _deserialize_runtime_bindings(
         payload.get("runtime_effect_bindings")
     )
-    return payload, semantic_card_slots, runtime_effect_bindings
+    if payload.get("public_hint_binding_format") != PUBLIC_HINT_BINDING_FORMAT_VERSION:
+        raise ValueError("static semantic public hint catalog needs recompilation")
+    hints = deserialize_public_hint_catalog(payload.get("public_hint_bindings"))
+    return payload, semantic_card_slots, runtime_effect_bindings, hints
 
 
 def _validate_static_npz_container(table_path, card_vocabulary):
@@ -244,9 +252,10 @@ def _validate_static_npz_container(table_path, card_vocabulary):
 _REGISTERED_CATALOGS = None
 
 
-def _register_lookup_catalogs(semantic_card_slots, runtime_effect_bindings):
+def _register_lookup_catalogs(semantic_card_slots, runtime_effect_bindings, public_hint_bindings):
     """登记小型效果槽目录，确保 spawn Worker 与主进程看到同一语义"""
     global _REGISTERED_CATALOGS
+    register_public_hint_catalog(public_hint_bindings)
     if (
         _REGISTERED_CATALOGS is not None
         and _REGISTERED_CATALOGS[0] is semantic_card_slots
@@ -285,6 +294,7 @@ class StaticSemanticLookup:
         code_dictionary,
         semantic_card_slots,
         runtime_effect_bindings,
+        public_hint_bindings=None,
     ):
         self.card_vocabulary = card_vocabulary
         self.category_to_index = dict(category_to_index)
@@ -301,6 +311,7 @@ class StaticSemanticLookup:
         self.code_dictionary = code_dictionary
         self.semantic_card_slots = semantic_card_slots
         self.runtime_effect_bindings = runtime_effect_bindings
+        self.public_hint_bindings = public_hint_bindings or {}
         self._prefix_hashes = {}
 
     @property
@@ -374,6 +385,11 @@ class StaticSemanticLookup:
             "requirement_labels": requirement_labels,
             "effect_slots": SEMANTIC_EFFECT_SLOTS,
             "code_dimension": int(self.code_dictionary.shape[1]),
+            "public_hint_binding_format": PUBLIC_HINT_BINDING_FORMAT_VERSION,
+            "public_hint_bindings": serialize_public_hint_catalog({
+                desc: record for desc, record in self.public_hint_bindings.items()
+                if record[0] in prefix_vocabulary.cards
+            }),
         }
         digest = hashlib.sha256(
             json.dumps(
@@ -612,6 +628,7 @@ def build_static_semantic_lookup(
         runtime_effect_bindings=build_runtime_effect_binding_catalog(
             knowledge_base
         ),
+        public_hint_bindings=build_public_hint_catalog(knowledge_base),
     )
 
 
@@ -724,6 +741,8 @@ def write_static_semantic_assets(
             compiled.runtime_effect_bindings
         ),
         "source_files": source_records,
+        "public_hint_binding_format": PUBLIC_HINT_BINDING_FORMAT_VERSION,
+        "public_hint_bindings": serialize_public_hint_catalog(compiled.public_hint_bindings),
     }
     temporary_catalog = None
     try:
@@ -760,7 +779,7 @@ def load_static_semantic_assets(
     vocabulary = card_vocabulary or get_default_card_vocabulary()
     root = Path(directory).resolve()
     table_path, _ = _compiled_asset_paths(root)
-    catalog, semantic_card_slots, runtime_effect_bindings = _read_compiled_catalog(
+    catalog, semantic_card_slots, runtime_effect_bindings, public_hint_bindings = _read_compiled_catalog(
         root,
         vocabulary,
     )
@@ -932,6 +951,7 @@ def load_static_semantic_assets(
         code_dictionary=code_dictionary,
         semantic_card_slots=semantic_card_slots,
         runtime_effect_bindings=runtime_effect_bindings,
+        public_hint_bindings=public_hint_bindings,
     )
     if catalog.get("semantic_lookup_card_count") != vocabulary.card_count:
         raise ValueError("static semantic lookup card count mismatch")
@@ -948,7 +968,7 @@ def load_static_semantic_assets(
     else:
         # 表文件摘要已验证，正常启动直接复用编译时逻辑身份，避免重复扫描向量
         lookup._prefix_hashes[vocabulary.card_count] = logical_hash
-    _register_lookup_catalogs(semantic_card_slots, runtime_effect_bindings)
+    _register_lookup_catalogs(semantic_card_slots, runtime_effect_bindings, public_hint_bindings)
     return lookup
 
 
@@ -998,6 +1018,7 @@ def ensure_static_semantic_assets(
     _register_lookup_catalogs(
         lookup.semantic_card_slots,
         lookup.runtime_effect_bindings,
+        lookup.public_hint_bindings,
     )
     return lookup
 
@@ -1025,7 +1046,7 @@ def register_static_semantic_runtime_catalog(
     cached = _RUNTIME_CATALOG_CACHE.get(cache_key)
     if cached is None:
         try:
-            _, card_slots, runtime_bindings = _read_compiled_catalog(
+            _, card_slots, runtime_bindings, hint_bindings = _read_compiled_catalog(
                 root,
                 vocabulary,
             )
@@ -1037,12 +1058,12 @@ def register_static_semantic_runtime_catalog(
             zipfile.BadZipFile,
         ):
             ensure_static_semantic_assets(root, card_vocabulary=vocabulary)
-            _, card_slots, runtime_bindings = _read_compiled_catalog(
+            _, card_slots, runtime_bindings, hint_bindings = _read_compiled_catalog(
                 root,
                 vocabulary,
             )
         _RUNTIME_CATALOG_CACHE.clear()
-        cached = (card_slots, runtime_bindings)
+        cached = (card_slots, runtime_bindings, hint_bindings)
         _RUNTIME_CATALOG_CACHE[cache_key] = cached
     _register_lookup_catalogs(*cached)
     return {
@@ -1090,6 +1111,7 @@ def get_static_semantic_lookup(
         _register_lookup_catalogs(
             lookup.semantic_card_slots,
             lookup.runtime_effect_bindings,
+            lookup.public_hint_bindings,
         )
         return lookup
 

@@ -8,6 +8,8 @@ longer accepted as current traces. Holographic JSON remains format 3; formats 1/
 
 ## Enabling recording
 
+3.13.3 adds public observations and schema revision14. Trajectory2/replay3 remain unchanged, but older-schema raw traces cannot share new observation checks. See [Public observations](public_observations_en.md). The opening unchanged-network/input statement applies only to3.13.2.
+
 Both options default to off and affect only games selected by a positive `--thought_freq`.
 They can be used independently; training Workers and PPO storage are unchanged.
 
