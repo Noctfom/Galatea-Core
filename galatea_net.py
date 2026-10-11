@@ -42,6 +42,40 @@ FILM_SUBLAYER_COUNT = 2
 FILM_PARAMETER_COUNT = 2
 FILM_MAX_AMPLITUDE = 0.5
 
+
+def sum_embedding_vectors(embedding, indices):
+    """直接求和引用向量，保留重复项、padding 数值及原有权重梯度。"""
+    # CPU/ONNX 保留原算子；特殊 Embedding 配置也不改变原有行为。
+    if (
+        not indices.is_cuda
+        or torch.onnx.is_in_onnx_export()
+        or embedding.max_norm is not None
+        or embedding.scale_grad_by_freq
+        or embedding.sparse
+        or indices.numel() == 0
+    ):
+        return embedding(indices).sum(dim=-2)
+
+    flat_indices = indices.reshape(-1, indices.shape[-1])
+    summed = F.embedding_bag(
+        flat_indices,
+        embedding.weight,
+        mode='sum',
+        padding_idx=embedding.padding_idx,
+    )
+    if embedding.padding_idx is not None:
+        # Embedding 的 padding 行参与前向但不参与梯度；不能直接丢掉非零 padding。
+        padding_count = flat_indices.eq(embedding.padding_idx).sum(
+            dim=-1,
+            keepdim=True,
+        ).to(summed.dtype)
+        summed.addcmul_(
+            padding_count,
+            embedding.weight[embedding.padding_idx].detach().unsqueeze(0),
+        )
+    return summed.reshape(*indices.shape[:-1], embedding.embedding_dim)
+
+
 class RunningMeanStd(nn.Module):
     # 动态记录输入的均值和方差，用于 RND 归一化
     def __init__(self, shape=()):
@@ -577,7 +611,7 @@ class GalateaNet(nn.Module):
         return_slots=False,
     ):
         """聚合 Lua 代码语义；按需同时返回保留槽身份的效果向量"""
-        cat_v = self.sem_cat_embed(sem_cat.long()).sum(dim=-2)
+        cat_v = sum_embedding_vectors(self.sem_cat_embed, sem_cat.long())
         
         # 残差融合代码语义
         sem_code_vec = F.embedding(sem_code_idx.long(), self.code_dict)
@@ -599,16 +633,16 @@ class GalateaNet(nn.Module):
             req_multi_hot = sem_req.to(torch.float32)
             
         req_v = self.sem_req_proj(req_multi_hot)
-        sc_v = self.sem_setcode_embed(sem_sc.long()).sum(dim=-2)
+        sc_v = sum_embedding_vectors(self.sem_setcode_embed, sem_sc.long())
         num_v = self.sem_num_proj(sem_num.to(torch.float32))
         
         sem_base = cat_v + req_v + sc_v + num_v 
         sem_base_512 = self.sem_fusion_proj(sem_base) 
         
         safe_sem_ref = torch.clamp(sem_ref.long(), 0, self.vocab_size - 1)
-        ref_v = self.card_embed(safe_sem_ref).sum(dim=-2)
-        race_v = self.race_embed(sem_race.long()).sum(dim=-2)
-        attr_v = self.attr_embed(sem_attr.long()).sum(dim=-2)
+        ref_v = sum_embedding_vectors(self.card_embed, safe_sem_ref)
+        race_v = sum_embedding_vectors(self.race_embed, sem_race.long())
+        attr_v = sum_embedding_vectors(self.attr_embed, sem_attr.long())
         
         slot_positions = torch.arange(
             sem_base_512.shape[2],

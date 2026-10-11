@@ -1,5 +1,7 @@
 # 3.13.3: Public hints, timing feedback and known deck positions
 
+> Usage guidance applies to v3.14.0; dated repair and measurement evidence below remains historical.
+
 This batch connects Types120,160/165,37/38 and162 to the shared state/observation path. It does not modify public Core, rewards, decision-request counts, MCTS or a universal active-effect tracker.
 
 ## Versions and usage
@@ -29,9 +31,9 @@ Host, affected player, declared card, semantic source and parameter remain separ
 
 ## Model and cost
 
-Lua parsing now persists `public_hint_parent_desc_ids` while raw code is available; cleaned remote assets can retain these small IDs without raw_code. Only613 local effects currently retain raw_code, so many old entries—including the current Magic Eye/Gravekeeper's Inscription entries—have no provable parent binding. Their full identities still enter learning. Completing these sources requires trusted full semantic extraction/generation, not slot-only refresh or silently matching current scripts to old vectors. Existing knowledge/vector assets are not rewritten by this batch.
+Lua parsing preserves `public_hint_parent_desc_ids` while source is available; cleaned bundles may retain those IDs with matched vectors. The3.13.3 audit's legacy library retained source in only613 effects, so unproven hints remained unknown.3.13.4 implemented trusted provenance extraction/vector rebuilding, and continuation maintains hint origins. Actual bindings follow the installed assets: legacy counts are not the current asset state, and effect names cannot justify attaching current scripts to old vectors.
 
-An additional read-only audit found that the current `code_embeddings.npy` contains 27,647 rows of 384 dimensions but only 530 byte-distinct vectors; 27,007 rows are identical. Within that group, 26,942 effect records no longer retain raw_code and 65 still do. This is a priority semantic-quality risk, not proof of the original generation cause or a regression introduced here. The existing generator reads an empty string when code is absent and incremental generation reuses existing keys, which may be related. A follow-up should verify provenance, empty-code vectors and incremental invalidation before deciding on trusted regeneration. This batch does not overwrite those source vectors or claim complete local code semantics.
+The legacy vector collapse was confirmed in3.13.4 as missing/empty-source generation plus key-only reuse, not coarse hashes. The trusted rebuild produced26,092 distinct vectors for27,647 slots, with27 explicitly incomplete static origins. These are dated rebuild evidence, not fixed quality requirements; inspect current assets through Code Semantic Quality or `semantic-check`. See [provenance repairs and activation](code_semantics_en.md).
 
 The common23-field specification stores IDs/categories/parameters, not expanded vectors:128 current hints,256 positions per deck, and8 ordered notifications per event across16 events. Public coordinates retain full8-bit sequence/material indices. Hint overflow rejects incomplete observations; event-notification overflow keeps the first8 and sets MESSAGE_OVERFLOW.
 

@@ -4,6 +4,28 @@
 
 ---
 
+## [v3.14.0] - 2026-10-11
+
+### 🧭 Full V4 main-framework deployment and CUDA semantic aggregation
+
+- **Deployment milestone**: consolidates V4 development across 3.7–3.13 and enters full main-framework deployment/training validation. Exact vocabulary, visible state/actions, static Lua semantics, Main/Extra profiles, Deck Encoder, layered FiLM, ordered events, structured auxiliary heads, goal planning and PPO update guards are connected. This release does not redesign the network again; deck-building/BO3, imitation optimization and MCTS remain future work.
+
+- **Large temporary allocations**: CUDA categories/setcodes/card references/races/attributes use direct sums over the original shared weights instead of expanding the reference axis. For512 samples/75cards, measured forward peak increment changes2.9297 →0.6123GiB; output remains FP32.
+- **Learning contract preserved**: no means, deduplication, slot removal or frozen weights. Repetition counts, nonzero padding forward/zero padding gradients, original reference clamping and masks remain intact. CPU/ONNX/nondefault Embedding configurations retain the original operator. Inputs, parameters, asset identity and PPO/GAE/auxiliary/planning objectives do not change; compatible V4 checkpoints still resume.
+- **Capacity boundaries**: complete512/8/6 PPO repeats three updates each at128/256 without live-memory accumulation. Whole-network allocated peaks are about0.9% higher, not reduced by the isolated-operator ratio; post-update reserved memory is about0.9–1.0GiB lower. Eliminating this allocation does not guarantee32GiB/batch512 capacity. No automatic batch reduction, gradient accumulation or semantic recomputation; cloud long-run acceptance is not claimed.
+- **Memory-optimization acceptance**:33 targeted tests pass; the full suite with real-Core gates enabled passes375 tests and50 subtests, with4 independent rebuilt-asset gates not enabled. Coverage includes512/8/6 BF16 outputs/all307 parameter gradients, real CUDA PPO, padding/repeats/AMP/input and protocol identity, ONNX and raw-trajectory replay. Dynamo eager full-graph capture passes; Linux Inductor is not accepted. Compilation/whitespace checks pass. Bilingual architecture documents record measurement scope and limits; tests retain their existing ignored-directory convention.
+- **Bilingual documentation audit**: preserves the user's revised Chinese wording and aligns English. Updates applicability, V4 stage status, network/layered-FiLM diagrams, prediction replay, categorized trajectory management, semantic continuation/provenance and deployment instructions. README separates release and model-protocol badges while retaining concise navigation and consistent icons. Removes stale claims that predictions are not recorded and that the old broken semantic library is the current asset state; preserves historical evidence and rare-message limitations.
+- **Training/environment guidance**: documents pre-backward KL checks, retention of completed updates, stopping the remaining joint updates and normal collection on the next iteration; adds effective-epoch examples and TensorBoard metrics. Installation examples use `python -m streamlit` and explain Python/PyTorch support, the Linux helper's fixed cu121 path and large V4 batch capacity. Learning settings and installation behavior are not changed.
+- **Cloud feedback scope**: the user reports temporary short-run stability with the same 32 GiB cloud configuration after the patch. This is not long-run capacity or playing-strength acceptance; peak/cross-iteration monitoring and fixed Arena benchmarks remain required.
+- **Independent TensorBoard reference and cloud analysis**: documents axes, frequencies, denominators, source/design links for all 80 fixed scalars, 3 planning distributions and configuration text, excluding individual deck curves. Reads the supplied events through 79 collections/78 PPO phases and compares win rates, rewards, future prediction, KL and actual collection budgets. Explains possible semantic-asset, observation, auxiliary/planning and GAE contributions without equating training progress with generalization acceptance. Records duplicate timeout counting, unweighted Worker means and incomplete abort-counter coverage; documentation only, no training changes.
+- **Release recheck**:50 tests and7 subtests pass across document links/heading anchors, release/protocol versions, PPO/KL, semantic aggregation and portable packaging; syntax and whitespace checks pass. Existing user edits are preserved, with no learning-setting, network or environment-installation behavior changes.
+- **Versions**: framework, WebUI, README and portable-package version source move to3.14.0. Model Protocol4/Checkpoint3/revision14/static1/GKG4/raw trajectory2/holographic replay3 remain unchanged. Compatible V4 checkpoints resume with matching vocabulary/semantic identities; V3 is not migrated.
+
+See [CUDA semantic allocation boundaries](architecture_en.md#direct-cuda-semantic-aggregation-2026-10-10).
+For metrics and run interpretation, see the [TensorBoard Metric Reference](tensorboard_metrics_en.md).
+
+---
+
 ## [v3.13.5] - 2026-10-09
 
 ### 🎞️ External trajectory ingress and isolated quality gates
@@ -20,7 +42,7 @@
 - **Regression evidence**: full suite334 tests and50 subtests pass; four pre-existing new-semantic-asset gates remain default-skipped. After adding corrupt/duplicate-file and real Streamlit render checks,25 ingestion/canonical-trajectory tests pass again. Portable collection includes all new modules; compilation/whitespace checks pass. Tests retain the repository's existing ignored-tests development convention
 - **UI patch checks**: seven real Streamlit interaction tests pass across Chinese/English, covering sections/help, source switching, reports, background commands and busy-task guards. Actual batch deletion/clearing in test-owned directories preserves other categories, suffixes and subdirectories.29 ingestion/canonical-trajectory tests pass, including real-Core conversion/replay. Portable collection retains new ingress modules and excludes retired ones; compilation/whitespace checks pass. Manual browser visual acceptance is not claimed
 
-See [ingress, Link contract and isolation](core_trajectories_en.md#3135external-ingestion-and-isolated-quality-gates). No imitation optimizer, YRP prediction backfill or counterfactual search; live external Link end-to-end and production long training are not claimed.
+See [ingress, Link contract and isolation](core_trajectories_en.md#3135-external-ingestion-and-isolated-quality-gates). No imitation optimizer, YRP prediction backfill or counterfactual search; live external Link end-to-end and production long training are not claimed.
 
 ---
 

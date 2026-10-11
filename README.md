@@ -7,8 +7,9 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.13.5](https://img.shields.io/badge/Release-v3.13.5-brightgreen.svg)](docs/changelog.md)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Release: v3.14.0](https://img.shields.io/badge/Release-v3.14.0-brightgreen.svg)](docs/changelog.md)
+[![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/protocol_v4_implementation.md)
+[![Python: 3.11 recommended](https://img.shields.io/badge/Python-3.11_recommended-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
 [English](README_EN.md) | 简体中文
@@ -19,19 +20,14 @@
 
 ## ✨ 特性亮点
 
-3.13.3 补齐公开提示、错过时点与已知卡顶观测，复用 Lua 代码语义；详见 [公开认知补全](docs/public_observations.md)。模型协议仍为 V4，但结构修订升至 14，旧开发模型不混用。
-
-3.13.4 修复代码语义来源与内容感知接续，支持长代码分块、生成清单及 WebUI/CLI 质量检查；网络/输入和粗哈希分类不变。新资产需新训练，详见 [代码语义重建与启用](docs/code_semantics.md)。
-
-3.13.5 完成 Core 侧 Link 采集 SDK、YRP1/YRP2/YRP3D 诊断转换和整局/构筑/玩家隔离门禁；不启动模仿学习、不修改网络或训练协议。入口在“存储与日志仓库 → 轨迹与数据门禁”，分为检查/转换、审查/划分、结果查看、分类文件管理四区，并附帮助提示；详见 [外部轨迹与数据质量](docs/core_trajectories.md#3135外部数据入口与隔离门禁)。
 
 - 🧠 **通用 AI 模型** - 不依赖特定卡组，自动解析 Lua 脚本学习卡片效果
 - 🎮 **完整 WebUI** - 一站式训练、测试、管理控制台
 - 📦 **一键包支持** - 内置 Python 环境，双击即可启动
 - 🔥 **高效训练** - 固定中央批量推理 + CPU/CUDA 双模式 + 联盟训练机制
 - 🔐 **模型身份管理** - 动态文件前缀、自动 UUID、内置轮次与完整 ONNX 制品组
-- 🆔 **V4 身份、状态与动作语义** - 权威只追加卡片词表、玩家状态解耦，以及有 Core 证据的操作族与召唤分类
-- 🧩 **动作协议 V2** - 顺序多选、宏动作组合、响应语义与约束特征统一进入策略网络
+- 🆔 **V4 身份、状态** - 权威只追加卡片词表、玩家状态解耦，以及有 Core 证据的操作族与召唤分类
+- 🧩 **动作协议** - 顺序多选、宏动作组合、响应语义与约束特征统一进入策略网络
 - 👁️ **决策可视化** - 全息回放系统，深入理解 AI 思考过程
 
 ---
@@ -73,10 +69,9 @@ Lua 脚本和卡组，不包含本机模型、日志、回放、缓存及 Git �
 
 若 ZIP 达到 GitHub Release 的 2 GiB 单文件上限，构建器会自动生成约 1900 MiB 的
 `.part001`、`.part002` 等分卷、SHA256 清单和 `Merge_Galatea_Core_Vx.x.x.bat`。
-发布时上传全部分卷、清单与合并脚本，不上传超限的原始 ZIP；用户下载到同一目录后
-双击合并脚本，即可得到并自动校验原始 ZIP。`--allow-cpu-only` 只跳过 CUDA 发布探针，
-不会删除当前 `python_env` 中的 CUDA 运行库，也不会因此缩小包体。已有 ZIP 可执行
-`python_env\python.exe build_portable_package.py --split-existing <ZIP路径>` 直接分卷。
+发布时上传全部分卷、清单与合并脚本；用户下载到同一目录后双击合并脚本，即可得到并自动校验原始 ZIP。
+
+`--allow-cpu-only` 只放宽 CUDA 发布检查，不会裁剪现有环境或减小包体。已有 ZIP 可用 `python_env\python.exe build_portable_package.py --split-existing <ZIP路径>` 直接分卷。
 
 #### 手动安装（开发者）
 
@@ -92,9 +87,10 @@ pip install -r requirements.txt
 
 # 准备资源文件
 python main.py update --data
+python main.py parse --sync
 
 # 启动 WebUI
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 ### Linux 用户
@@ -104,7 +100,7 @@ streamlit run app.py
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# 一键环境安装 + 启动（自动检测 GPU/CUDA、创建虚拟环境）
+# 现有辅助脚本（GPU 安装路径仍固定 cu121，见下方说明）
 chmod +x setup.sh
 ./setup.sh               # 安装依赖 & 启动 WebUI
 ./setup.sh --train       # 安装依赖 & 启动 CLI 训练
@@ -113,11 +109,15 @@ chmod +x setup.sh
 # 或手动安装
 python3 -m venv venv
 source venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+# 示例：与当前 Windows 包一致；须先确认显卡与驱动支持该构建
+pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
 python main.py update --data
-streamlit run app.py
+python main.py parse --sync
+python -m streamlit run app.py
 ```
+
+`setup.sh` 尚不按显卡架构选择 PyTorch 构建。已有云端环境或新显卡请优先手动安装匹配的 PyTorch，再安装 `requirements.txt`；不要让脚本覆盖已验证的环境。安装选项见 [PyTorch 官方指南](https://pytorch.org/get-started/locally/)。Windows 内置环境不用于 Linux，随包 Core 的公开 ABI 也不能用任意新版二进制直接替换。
 
 📖 **详细教程**: [快速上手指南](docs/quickstart.md)
 
@@ -131,11 +131,11 @@ streamlit run app.py
 | 📉 **训练流形图** | 内嵌 TensorBoard |
 | ⚔️ **启动与监控中枢** | 一键训练/竞技场 |
 | 🗃️ **资产与卡组管理** | 卡组上传、泛用卡池、权重调度、在线抓取 |
-| 🔄 **资源同步中枢** | 自动更新卡库 |
-| 🧠 **语义知识库引擎** | Lua 脚本解析 |
-| 📁 **存储与日志仓库** | 处理项目各类文件 |
-| 👁️ **全息读心回放** | AI 决策可视化 |
-| 📦 **模型部署与打包** | 导入导出模型包 |
+| 🔄 **资源同步中枢** | 卡库、脚本与精确词表同步；本地/自制卡只追加词表 |
+| 🧠 **语义知识库引擎** | Lua 语义同步/接续、代码向量质量与观测审计 |
+| 📁 **存储与日志仓库** | 分类管理日志、模型、规范轨迹与数据质量报告 |
+| 👁️ **全息读心回放** | 双方决策、公开事件与可选 AI 预测曲线 |
+| 📦 **模型部署与打包** | 按 UUID/轮次打包模型、词表与编译语义资产 |
 
 ---
 
@@ -143,12 +143,11 @@ streamlit run app.py
 
 | 文档 | 说明 |
 |------|------|
-| [🚀 快速上手](docs/quickstart.md) | 5 分钟完成安装和首次训练 |
+| [🚀 快速上手](docs/quickstart.md) | 安装、资产准备和首次训练 |
 | [📚 功能详解](docs/features.md) | WebUI 和命令行完整指南 |
 | [🔧 架构设计](docs/architecture.md) | 技术原理和核心算法 |
+| [📊 TensorBoard 指标手册](docs/tensorboard_metrics.md) | 全部固定图表的口径、源码跳转与 V4 云端训练分析 |
 | [🧬 特殊处理逻辑](docs/special_handling.md) | 框架独特特性的实现细节 |
-| [🗺️ 后续路线](docs/roadmap.md) | 主框架认知与组卡模块 TODO |
-| [🧭 V4 实施规格](docs/protocol_v4_implementation.md) | V4 开发边界、阶段与验收门槛 |
 | [📝 更新日志](docs/changelog.md) | 版本更新历史 |
 
 ---
@@ -185,11 +184,13 @@ python main.py parse --local-update --script_dir ./script
 
 | 组件 | 最低配置 | 推荐配置 |
 |------|----------|----------|
-| Python | 3.9+ | 3.11 |
+| Python | 当前 PyTorch 2.9.1 构建要求 3.10+ | 3.11（本地验证环境） |
 | GPU | 可选（支持纯 CPU 训练） | RTX 3060 12GB+ |
 | RAM | 16GB | 32GB+ |
 | 硬盘 | 10GB | SSD |
 | Linux | GLIBC ≥ 2.35（Ubuntu 22.04+） | — |
+
+以上用于环境入门，不保证完整 V4 的 `512/8/6 + mini_batch=512` 可用。显存主要取决于网络与 PPO 切片；先用小配置冒烟，逐步增加切片并观察 PPO 峰值。3.14.0 的 CUDA 语义聚合消除了大块临时展开，但不是整网显存同比下降或自动减批量，详见 [实测边界](docs/architecture.md#cuda-语义直接聚合2026-10-10)。
 
 ---
 

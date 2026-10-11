@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> This document records agreed directions only. Items below are not part of the current stable training protocol yet.
+> Applies to v3.14.0. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -17,6 +17,12 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 - [x] 3.13.4 confirms missing/empty-source generation plus key-only reuse caused collapse; source provenance, content identity and complete chunking now support isolated rebuilds without network/input/coarse-classification changes. New assets have26,092 distinct vectors and27 explicitly incomplete slots; see [asset guide](code_semantics_en.md)
 - [x] Phase7 batch3 (3.13.5): Core-side Link capture SDK, strict diagnostic YRP1/YRP2/YRP3D conversion, transitive whole-duel/exact-deck/stable-player isolation and quality manifests; no network/training changes or eligibility without evidence
 - [ ] External Link wiring/live acceptance, historical YRP evidence, related-deck-family splits, and an independent imitation learner after gates pass
+
+## V4 deployment and training validation
+
+- [x] 3.14.0: full V4 main-framework deployment, direct CUDA semantic aggregation and bilingual documentation audit; Model Protocol4/Checkpoint3/revision14 unchanged
+- [ ] Complete50-iteration trends,100–200-iteration medium runs and long-term fixed Arena comparisons; temporary short-run stability is not acceptance
+- [ ] Select compatible PyTorch by Python/GPU/driver in the Linux helper without overwriting existing cloud environments; use documented manual installation meanwhile
 
 ## Separable Deck-Construction Cognition
 

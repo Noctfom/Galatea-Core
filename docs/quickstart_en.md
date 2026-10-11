@@ -1,8 +1,8 @@
 # 🚀 Quick Start Guide
 
-> Zero to first AI training in **5-10 minutes**.
+> Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.13.4**.
+> This document applies to **Galatea-Core v3.14.0**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -54,15 +54,7 @@ without recompressing it.
 
 ### Linux Users
 
-Use the repository setup script to create the environment and launch the desired mode:
-
-```bash
-cd Galatea-Core
-chmod +x setup.sh
-./setup.sh               # Install dependencies and launch WebUI
-./setup.sh --train       # Install dependencies and launch CLI training
-./setup.sh --duel        # Install dependencies and launch Arena
-```
+See [README_EN.md](../README_EN.md#linux-users). On an existing cloud environment or newer GPU, manually install a compatible PyTorch build before `requirements.txt`. The GPU source in `setup.sh` is still fixed to cu121 and does not support every architecture automatically. The Windows portable runtime cannot be copied to Linux.
 
 ---
 
@@ -101,7 +93,7 @@ Starting in 3.9.2, remote/local semantic updates pre-generate `semantic_lookup_v
 
 Training and Arena create reports only when **V3 Observation Audit (`--protocol-audit`)** is enabled; RuleBot self-check keeps it enabled by default. Inspect reports under **Semantic Knowledge Engine → V3 Observation Audit** or as raw JSON under `system_logs/protocol_v3_audit/`. Before the first real training run, use **Validate Semantic Bundle**.
 
-Starting in 3.8.2, the audit page also reports `known_observation_gap`. Normal BO1 should usually keep it at zero. If Types 35/38/120/160/161/162/165 appear, retain the report for protocol review rather than patching a private local Core.
+The audit page/directory retain their historical “V3” names; the current model protocol remains V4. `known_observation_gap` records known gaps. Types37/38,120,160/165 and162 were completed in3.13.3, so their normal occurrence alone is not a current error. Type35 bulk exchange and Type161 Tag still have support limits; retain gap reports rather than patching a private Core.
 
 ---
 
@@ -251,6 +243,8 @@ After training starts, view real-time logs at the bottom of **⚔️ Launch & Mo
 
 ### TensorBoard Curves
 
+See the [TensorBoard Metric Reference](tensorboard_metrics_en.md) for every fixed chart's axes, aggregation and example analysis.
+
 Go to **📉 Training Manifold**, click **🚀 Start TensorBoard** to view:
 
 | Key Metric | Ideal Trend |
@@ -295,10 +289,19 @@ individual-action distributions. Current controls appear under the text tab `Con
 Repeated first-mini-batch stops require checking sampling/update modes and old log-probabilities
 before relaxing thresholds.
 
-Replays do not yet record auxiliary predictions. Future per-decision outcome curves require
-state-only predictions plus perspective, model identity, sampling mode, and probability calibration.
-Remaining length currently means between-decision Core events, not turns. Standard ONNX still
-prunes training-only prediction heads and cannot already output these curves.
+KL stopping ends only the **remaining updates of this rollout**, not training, and does not undo
+completed optimizer steps. Default target0.02 gives an actual `1.5×0.02=0.03` threshold checked
+before the triggering mini-batch's backward pass. Policy/value/auxiliary/planning updates stop
+together; the next iteration collects with the updated policy. Occasional stops are not errors
+or evidence of convergence. With31,648 valid samples and512-sized batches, an epoch has61 full
+mini-batches;165 completed updates equal about2.67 effective sample reuses, not “no learning”.
+See [KL interpretation and metrics](architecture_en.md#interpreting-kl-early-stopping).
+
+Enable “Record AI prediction curves” and a positive thought-log frequency in Arena to view both
+players' state predictions in Holographic Replay. Manual calibration is not required to view them,
+but they express AI understanding, not actual win rates. Remaining length means both players'
+decision-transition events, not turns. This diagnostic requires full PTH; standard ONNX still
+outputs only logits/value. See [trajectories and curves](core_trajectories_en.md).
 
 ### Meta Dashboard
 

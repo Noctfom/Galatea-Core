@@ -1,5 +1,7 @@
 # 3.13.4: Code-source provenance and content-aware semantic rebuilds
 
+> Usage guidance applies to v3.14.0; dated repair and measurement evidence below remains historical.
+
 ## Scope
 
 This repairs offline semantic assets only. Duel-network architecture, input fields/shapes, rewards, PPO/GAE, legality, Core and Link contracts are unchanged. Model Protocol **4**, Checkpoint Format **3**, schema revision **14**, static semantic format **1**, and GKG format **4** remain unchanged. Code-generation manifest format **1** lives independently in `code_semantic_provenance.py`; extraction version lives in `lua_semantic_source.py`.
@@ -33,7 +35,15 @@ Provenance is an integrity record, not a signature or proof of semantic understa
 
 `semantic-check` is read-only: no Lua scan, download, embedding generation or log-file creation. WebUI: **Semantic KB Engine → Code Semantic Quality**. Checks run only on request; execution, hash browsing and card browsing share the selected asset directory. Selecting it does not activate training assets, which remain project-root assets.
 
-The rebuilt assets are staged under `semantic_builds/v3.13.4/`; original root sources/vectors are preserved. The assets-only `Galatea_Semantics_3.13.4.gkg` is about87.32MiB and also copied into `deploy_packages/` for direct WebUI selection. Extract/stage it in the deployment manager and import complete source/runtime groups to activate them. Preserve original assets, stop training/duels, and restart after import. Do not replace assets in a running process.
+During the initial 3.13.4 acceptance run, rebuilt assets were staged under `semantic_builds/v3.13.4/`
+without replacing the then-current root assets; that `Galatea_Semantics_3.13.4.gkg` was about
+87.32 MiB. This historical record does not mean every clone or portable bundle contains that
+staging directory, nor that root assets are still the old library. Active assets are those in
+the project root, checked with `semantic-check`; selecting another inspection directory does not activate it.
+
+To activate a separate build or received GKG, use the deployment manager's extraction/staging
+page to import matching complete source and compiled-runtime groups. Back up originals, stop
+training/duels and restart after import. Do not replace assets in a running process.
 
 **New vectors change `semantic_lookup_hash`, not network protocol.** Existing identity validation rejects old checkpoints with new semantics. No migration is provided: fresh V4 training uses rebuilt assets; old models keep their original assets/separate packages. The staging directory is gitignored; source commits do not publish rebuilt assets automatically. Publish the GKG or complete semantic source bundle separately.
 
@@ -52,8 +62,11 @@ Local rebuild: 13,400 cards with independent effects, 27,647 slots, no missing/e
 
 Chunking increases **offline initial generation** cost. Source/provenance also enlarge packages and startup checks. Lossless compact JSON reduces the KB from about104.71MiB to73.70MiB by removing formatting whitespace, without data/semantic-identity changes. Dictionary row count, model parameters and per-step rollout storage are unchanged; the generator never runs per decision. Compiled-only deployment omits large source files. A no-change rerun reused all13,400 cards and27,647 vectors without loading the encoder; reuse with an already-loaded encoder also passes. Playing-strength/learning-efficiency gains need fresh-training comparisons.
 
-## Verification and next batch
+## Historical verification and remaining work
 
 Full-script comparison against the previous committed parser found no slot/category/requirement changes;2,156 coarse classes remain. The full suite passes324 tests and50 subtests, with four rebuilt-asset gates skipped by default and all four passing separately. Tests cover extraction, closures/Clone/literals, changed same-key code, encoder identity, complete chunk coverage, missing-source rejection, cleaned bundles, tampering, GKG and sync. Independent rebuilt-asset integration checks network shapes, PPO updates, ONNX agreement and real-Core duel/raw-trajectory replay. No production-scale long training or manual browser visual acceptance is claimed.
 
-Resume Phase7 batch3: Link/YRP ingestion, whole-duel/deck/player partitions, consistent asset/Core identities and candidate mapping, then imitation learning only from deterministically replayable data. No replay training or deck-building network is introduced here.
+Core-side Phase 7 batch 3 ingestion and isolation gates arrived in 3.13.5; see
+[canonical traces and external ingestion](core_trajectories_en.md). v3.14.0 enters full V4
+main-framework deployment and long-training validation. Replay imitation and the deck-building
+upper layer remain future work; passing inspection never starts training automatically.

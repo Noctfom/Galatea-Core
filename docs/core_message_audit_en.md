@@ -1,5 +1,8 @@
 # 3.13.2: Fixed Core messages and cognition gaps
 
+> This page preserves the 3.13.2 audit. For v3.14.0, read it alongside the 3.13.3 implementation status below.
+> Current Model Protocol 4 / Checkpoint Format 3 / schema revision 14; historical gaps are not necessarily still open.
+
 Splitting a message, maintaining its state and exposing it to the model are separate layers.
 Raw trajectory capture does not make every captured field a training input.
 

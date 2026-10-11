@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.13.4**.
+> This document applies to **Galatea-Core v3.14.0**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -17,7 +17,7 @@
   - [Semantic Knowledge Engine](#semantic-knowledge-engine)
   - [Storage & Logs](#storage--logs)
   - [Holographic Replay](#holographic-replay)
-  - [Model Deployment & Packaging](#model-deployment--packaging)
+  - [Model Deployment & Packaging](#-model-deployment--packaging)
 - [CLI Mode](#cli-mode)
 - [Model Deployment Tool](#model-deployment-tool)
 - [Parameter Reference](#parameter-reference)
@@ -59,19 +59,21 @@
 
 **Overview**: Embedded TensorBoard for real-time training metric monitoring.
 
+See the [TensorBoard Metric Reference](tensorboard_metrics_en.md) for complete axes, frequencies, source/design links and measured-run interpretation. The table below is a quick reference, not the full aggregation specification.
+
 #### Key Metrics
 
 | Metric | Meaning | Ideal Trend |
 |--------|---------|-------------|
-| `Train/Total_Loss` | Combined PPO policy, value, and entropy objective | Need not decrease monotonically; watch for non-finite values and persistent discontinuities |
+| `Train/Total_Loss` | Combined policy, value, entropy and weighted auxiliary/planning objectives | Need not decrease monotonically; watch for non-finite values and persistent discontinuities |
 | `Train/Policy_Loss` | Clipped policy objective | May oscillate around zero and is not a standalone playing-strength metric |
-| `Train/Value_Loss` | Error between value estimates and returns | Narrowing over the long term, with substantial short-term noise allowed |
+| `Train/Value_Loss` | Smooth L1 between values and GAE lambda-returns | Read alongside target distributions and explained variance; need not narrow monotonically |
 | `Train/Entropy` | Policy exploration uncertainty | May decrease slowly, but should not collapse toward zero too early |
 | `Train/Approx_KL` | Approximate old/new policy divergence | Small and stable; avoid persistent spikes |
-| `Train/Clip_Fraction` | Fraction of samples clipped by PPO | Moderate; avoid staying near 0 or 1 |
+| `Train/Clip_Fraction` | Fraction of probability ratios outside the clip interval | Not the exact fraction of gradients clipped; interpret alongside KL |
 | `Train/Explained_Variance` | How much return variance the value network explains | Rise from 0 toward 1; persistent negatives need investigation |
 | `Train/Gradient_Norm` | Pre-clipping joint gradient norm on PPO-base parameters, excluding separate planning/prediction groups | Finite and without sustained abnormal spikes |
-| `Rollout/Average_Reward` | Mean reward of sampled games | Prefer smoothed trends within the same opponent category |
+| `Rollout/Average_Reward` | Equal-weight mean of nonzero Worker episode-reward means | Not a game-weighted mean; inspect win rates and opponent composition |
 | `League_Overall/WinRate_Total` | Win rate over the mixed league pool | Read alongside Rule/Self/Hist splits to avoid opponent-mixture bias |
 | `Performance/Rollout_Steps_Per_Second` | Valid rollout samples collected per second | Stable or increasing |
 | `Performance/Collection_Seconds` | Collection duration for the iteration | Stable at comparable batch and opponent composition |
@@ -152,6 +154,7 @@ Configure and launch AI training tasks.
 - v3.13.2 corrects Type 16/31 decoding and Type 21 dispatch, with curves labeled “AI predictions”; see the [message/cognition audit](core_message_audit_en.md)
 - v3.13.3 adds missed-timing events, public hints, known deck positions and fixed snapshot rebuilding; Core-driven lifetimes, exact/parent/unknown semantics and shared training/ONNX/replay inputs; see [Public observations](public_observations_en.md)
 - v3.13.4 repairs code-source/incremental generation with provenance, long-code chunking and read-only quality checks; coarse hashes and network/inputs remain unchanged, new assets use fresh training. See [trusted semantic builds](code_semantics_en.md)
+- v3.13.5 completes Core/Link/YRP ingress and isolated gates without imitation training; v3.14.0 consolidates full V4 deployment and direct CUDA semantic sums without protocol/weight/objective changes. See [ingress](core_trajectories_en.md) and [VRAM boundaries](architecture_en.md#direct-cuda-semantic-aggregation-2026-10-10)
 - v3.5.0 introduced action semantics V2; v3.6.0 uses Model Protocol V3, binds effect-slot identity, and adds genuinely order-sensitive aggregation for the active chain and recent activation history. Checkpoints, network weights, ONNX graphs, and artifact manifests all record and validate it
 - v3.6.2 uses each Lua `Effect.CreateEffect(c)` object as identity and binds the complete runtime `desc` to its existing code-semantic slot. Action candidates can consume that exact effect vector, while chain/history context and used-this-turn bits share the same mapping. Stringid generates a Core identifier but is no longer interpreted as a slot ordinal
 - Action inputs include operation kind, actual response, selection constraints, target code/location/material values, and a stable semantic signature. Type 26 is decided step by step through Core's native Select/Unselect flow
@@ -270,6 +273,7 @@ Create cross-pool mixing recipes, allowing decks from different physical pools t
 
 #### Advanced Options
 
+- **CDB file / vocabulary repository or file source**: independently configurable; one model lineage requires one append-only vocabulary, and divergent token assignments cannot be merged
 - **Script Repo Source**: Specify custom script repository URL
 - **Force Overwrite**: Override local modifications
 
@@ -287,8 +291,8 @@ Scan all Lua scripts in `script/` directory to extract semantic information.
 
 **Options**:
 - **Physical Clear**: Delete the local KB, Hash map, and code-semantic vectors before a full rebuild
-- **Remote Sync**: Only pull structured knowledge, the Hash map, code-semantic vectors, and their index; do not scan local Lua
-- **Local Extraction/Continuation**: Scan local scripts, append only new effect slots when the `.npy` pair is coherent, and rebuild fully if its index or dimension is incompatible
+- **Remote Sync**: download structured knowledge, Hash mappings, code vectors/index and modern provenance; do not scan local Lua
+- **Local Extraction/Continuation**: validate source, dependencies, encoder and chunking policy; reuse unchanged slots, regenerate changed same-key content and rebuild legacy vectors without provenance on the first update. Sync and local updates work independently or as sync-then-continuation
 - **Model-side static table**: Startup compiles the complete bundle into a shared exact-card-token/Lua-effect-slot cache. Existing-card semantic changes alter model identity and block accidental loading, while pure card appends preserve old prefixes
 
 #### 🧬 Custom Hash Explorer
@@ -326,6 +330,7 @@ Enter card code to view AI-perspective semantic features.
 | System Logs | `./system_logs/` | `.log` |
 | V3 Audit Reports | `./system_logs/protocol_v3_audit/` | `.json` |
 | Thought Records | `./ai_thoughts/` | `.json` |
+| Trajectory Ingress & Quality | Categorized directories under `./replays/` | `.link.jsonl.gz`, `.core.jsonl.gz`, ingress reports/dataset manifests `.json` |
 | Model Storage | `./models/` | `.pth`, `.onnx`, `.onnx.data`, `.artifacts.json` |
 | Match Data | `./web_data/` | `.csv` |
 | TensorBoard | `./runs/` | Binary |
@@ -349,13 +354,15 @@ an iteration removes its PTH, ONNX, external data, and artifact manifest togethe
 The WebUI warns about the same prefix with different UUIDs, or one UUID with multiple prefixes.
 Resume and overwrite authorization always use the embedded UUID rather than trusting filenames alone.
 
+Trajectory Ingress & Quality has four sections: raw inspection/conversion, canonical audit/splits, results and categorized file management. Captures, canonical trajectories, ingress reports and dataset manifests have separate headings and scopes. Delete/clear affects only matching files of the displayed category, not nested directories, and never starts training. See [workflow and quality boundaries](core_trajectories_en.md#3135-external-ingestion-and-isolated-quality-gates).
+
 ![Storage & Logs](图片/存储与日志仓库.png)
 
 ---
 
 ### Holographic Replay
 
-**Overview**: Replay Format V2 presents both players' decisions, Core resolution events, and action-protocol semantics as one synchronized timeline.
+**Overview**: Holographic Replay Format 3 presents both players' decisions, Core resolution events and V4 action semantics as one synchronized timeline. Older formats 1/2 remain viewable without fabricating missing information.
 
 #### Interface Components
 
@@ -397,6 +404,8 @@ Resume and overwrite authorization always use the embedded UUID rather than trus
 
 Full deck lists are post-game audit metadata only. They are never exposed to the Arena model and do not change training observations.
 
+Enable “Record AI prediction curves” in Arena to show both models' independent win/loss/draw probabilities and remaining-transition estimates in logged games, separately from actual outcomes. These reflect AI understanding, not actual win rates; PPO value is not a win probability. Full PTH is required, while standard ONNX still returns logits/value. See [interpretation and cost](core_trajectories_en.md#evaluation-semantics).
+
 ![Holographic Replay](图片/全息回放.png)
 
 ---
@@ -413,7 +422,7 @@ Package models as .gkg format:
 - Referenced `.onnx.data` files are included automatically
 - When both PTH and ONNX are selected, their embedded iteration sets must match
 - Always include the compiled `semantic_lookup_v1.npz` + `semantic_lookup_v1.json` runtime assets and exact vocabulary, allowing PTH construction and cross-machine ONNX identity validation
-- Optionally include semantic sources for continued generation (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, plus `hash_mapping_report.json` when present) and the staple pool (`meta_staples.json`)
+- Optionally include semantic sources for continuation (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, modern `code_embeddings_meta.json` and `hash_mapping_report.json` when present) and the staple pool (`meta_staples.json`)
 - The three semantic source files cannot be imported or exported separately; the manifest cross-checks source files, compiled tables, vocabulary, and the model's logical semantic identity
 - Always generate and validate `manifest.json`
 - Custom package name support
@@ -637,10 +646,10 @@ python deploy_tool.py
 Package trained models into `.gkg` deployment packages containing:
 - Model files from one `model_id` pool (`.pth`/`.onnx`/`.onnx.data`)
 - Required V4 exact card vocabulary (`card_vocab.json`)
-- Knowledge base (`knowledge_base.json`)
-- Hash continuation index (`hash_mapping_report.json`)
-- Code-semantic matrix and index (`code_embeddings.npy`, `code_embeddings_idx.json`)
-- Staple pool (`meta_staples.json`)
+
+- Compiled runtime tables (`semantic_lookup_v1.npz`, `semantic_lookup_v1.json`, required)
+- Optional complete semantic sources: KB, vectors/index, modern provenance and Hash continuation index when present
+- Optional staple pool (`meta_staples.json`)
 - Manifest file (`manifest.json`)
 
 #### 2. Unpack & Import
@@ -692,8 +701,9 @@ These parameters can be adjusted in WebUI or CLI for fine-grained PPO algorithm 
 
 TensorBoard `PPO_Update/*` reports actual updates and early stopping by collection iteration;
 the text tab `Configuration/PPO` stores launch settings. Audits keep small-batch scalars only,
-without larger per-step trajectories or another network pass. Per-duel outcome/length curves are
-not yet recorded in replay; training-batch accuracy is not the win probability of one position.
+without larger per-step trajectories or another network pass. Arena optionally records per-duel AI
+prediction curves; training-batch accuracy is not the win probability of one position. Standard
+ONNX does not output diagnostic curves.
 
 ---
 

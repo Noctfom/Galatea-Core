@@ -2,13 +2,14 @@
 
 <img src="docs/图片/logo.png" alt="Galatea Logo" width="50%">
 
-# 🌟 Galatea-Core
+# Galatea-Core
 
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.13.5](https://img.shields.io/badge/Release-v3.13.5-brightgreen.svg)](docs/changelog_en.md)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Release: v3.14.0](https://img.shields.io/badge/Release-v3.14.0-brightgreen.svg)](docs/changelog_en.md)
+[![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/protocol_v4_implementation_en.md)
+[![Python: 3.11 recommended](https://img.shields.io/badge/Python-3.11_recommended-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
 English | [简体中文](README.md)
@@ -19,19 +20,13 @@ English | [简体中文](README.md)
 
 ## ✨ Key Features
 
-3.13.5 adds a Core-side Link capture SDK, diagnostic YRP1/YRP2/YRP3D conversion, and whole-duel/deck/player-isolated dataset gates. It does not enable imitation training or change the network/protocol. WebUI: Storage & Logs → Trajectory Ingress & Quality, with four sections for inspection/conversion, audit/splits, results and categorized file management, plus help tooltips. See [external trajectory ingestion](docs/core_trajectories_en.md#3135external-ingestion-and-isolated-quality-gates).
-
-3.13.3 adds public hints, missed-timing events and known deck positions using existing Lua code semantics. See [Public observations](docs/public_observations_en.md). Model Protocol remains V4, but schema revision 14 rejects older development models.
-
-3.13.4 repairs code-source provenance and content-aware incremental generation, adds long-code chunking and WebUI/CLI quality checks, and leaves network/inputs and coarse hash classification unchanged. Fresh assets require fresh training; see [rebuild and activation](docs/code_semantics_en.md).
-
 - 🧠 **Universal AI Model** - Deck-agnostic, automatically parses Lua scripts to learn card effects
 - 🎮 **Complete WebUI** - All-in-one training, testing, and management console
 - 📦 **One-Click Package** - Built-in Python environment, just double-click to start
 - 🔥 **Efficient Training** - Always-on central batching + CPU/CUDA modes + league training
 - 🔐 **Model Identity Management** - Dynamic prefixes, automatic UUIDs, embedded iterations, and complete ONNX artifact bundles
-- 🆔 **V4 Identity, State & Action Semantics** - Authoritative append-only card IDs, separated player state, and Core-evidenced operation/summon categories
-- 🧩 **Action Protocol V2** - Sequential selection, macro combinations, response semantics, and constraints are visible to the policy network
+- 🆔 **V4 Identity & State** - Authoritative append-only card IDs, separated player state, and Core-evidenced operation/summon categories
+- 🧩 **Action Protocol** - Sequential selection, macro combinations, response semantics, and constraints are visible to the policy network
 - 👁️ **Decision Visualization** - Holographic replay system to understand AI thinking process
 
 ---
@@ -96,9 +91,10 @@ pip install -r requirements.txt
 
 # Prepare resource files
 python main.py update --data
+python main.py parse --sync
 
 # Start WebUI
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 ### Linux Users
@@ -108,7 +104,7 @@ streamlit run app.py
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# One-click setup + launch (auto-detects GPU/CUDA, creates virtual environment)
+# Existing helper (GPU installation still selects cu121; see the note below)
 chmod +x setup.sh
 ./setup.sh               # Install deps & launch WebUI
 ./setup.sh --train       # Install deps & launch CLI training
@@ -117,11 +113,15 @@ chmod +x setup.sh
 # Or manual install
 python3 -m venv venv
 source venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+# Example matching the Windows bundle; first verify GPU/driver support for this build
+pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
 python main.py update --data
-streamlit run app.py
+python main.py parse --sync
+python -m streamlit run app.py
 ```
+
+`setup.sh` does not yet select PyTorch by GPU architecture. On an existing cloud environment or newer GPU, install a compatible PyTorch build manually, then install `requirements.txt`; avoid overwriting a validated environment with the helper. See the [official PyTorch installation guide](https://pytorch.org/get-started/locally/). The Windows runtime cannot be reused on Linux, and arbitrary newer Core binaries are not drop-in replacements for the bundled public ABI.
 
 📖 **Detailed Tutorial**: [Quick Start Guide](docs/quickstart_en.md)
 
@@ -135,11 +135,11 @@ streamlit run app.py
 | 📉 **Training Manifold** | Embedded TensorBoard |
 | ⚔️ **Launch & Monitor Hub** | One-click training/arena |
 | 🗃️ **Assets & Deck Management** | Deck upload, staple pool, weight scheduling, online fetching |
-| 🔄 **Resource Sync Hub** | Auto-update card database |
-| 🧠 **Semantic Knowledge Engine** | Lua script parsing |
-| 📁 **Storage & Log Repository** | Manage project files |
-| 📦 **Model Deploy & Packaging** | Import/Export model packages |
-| 👁️ **Holographic Replay** | AI decision visualization |
+| 🔄 **Resource Sync Hub** | Sync CDB, scripts and exact vocabulary; append local/custom card IDs |
+| 🧠 **Semantic Knowledge Engine** | Lua semantic sync/continuation, code-vector quality and observation audits |
+| 📁 **Storage & Log Repository** | Categorized logs, models, canonical trajectories and quality reports |
+| 👁️ **Holographic Replay** | Both players' decisions, public events and optional AI prediction curves |
+| 📦 **Model Deploy & Packaging** | Package models, vocabulary and compiled semantics by UUID/iteration |
 
 ---
 
@@ -147,12 +147,11 @@ streamlit run app.py
 
 | Document | Description |
 |----------|-------------|
-| [🚀 Quick Start](docs/quickstart_en.md) | Installation and first training in 5 minutes |
+| [🚀 Quick Start](docs/quickstart_en.md) | Installation, asset preparation and first training |
 | [📚 Feature Guide](docs/features_en.md) | Complete WebUI and CLI guide |
 | [🔧 Architecture](docs/architecture_en.md) | Technical principles and core algorithms |
+| [📊 TensorBoard Metric Reference](docs/tensorboard_metrics_en.md) | All fixed metrics, source links and V4 cloud-run analysis |
 | [🧬 Special Handling](docs/special_handling_en.md) | Implementation details of unique features |
-| [🗺️ Roadmap](docs/roadmap_en.md) | Main cognition and deck-construction TODOs |
-| [🧭 V4 Implementation Spec](docs/protocol_v4_implementation_en.md) | V4 boundaries, phases, and acceptance gates |
 | [📝 Changelog](docs/changelog_en.md) | Version history |
 
 ---
@@ -189,11 +188,13 @@ python main.py parse --local-update --script_dir ./script
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| Python | 3.9+ | 3.11 |
+| Python | Current PyTorch 2.9.1 requires 3.10+ | 3.11 (locally verified environment) |
 | GPU | Optional (CPU-only training is supported) | RTX 3060 12GB+ |
 | RAM | 16GB | 32GB+ |
 | Disk | 10GB | SSD |
 | Linux | GLIBC ≥ 2.35 (Ubuntu 22.04+) | — |
+
+These are entry-level environment requirements, not a guarantee for full V4 at `512/8/6 + mini_batch=512`. VRAM depends mainly on network size and PPO mini-batches: begin with a smoke configuration, then increase batches while measuring PPO peaks. The 3.14.0 CUDA semantic optimization removes a large temporary expansion; it does not proportionally shrink whole-network memory or automatically reduce batches. See [measurements and limits](docs/architecture_en.md#direct-cuda-semantic-aggregation-2026-10-10).
 
 ---
 

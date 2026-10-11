@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.13.4**。
+> 文档适用于 **Galatea-Core v3.14.0**。模型协议 V4、检查点格式 3；发布版本与协议版本独立。
 
 ---
 
@@ -17,7 +17,7 @@
   - [语义知识库引擎](#语义知识库引擎)
   - [存储与日志仓库](#存储与日志仓库)
   - [全息读心回放](#全息读心回放)
-  - [模型部署与打包](#模型部署与打包)
+  - [模型部署与打包](#-模型部署与打包)
 - [模型部署工具](#模型部署工具)
 - [参数详解](#参数详解)
 - [常见问题](#常见问题)
@@ -58,19 +58,21 @@
 
 **功能概述**：内嵌 TensorBoard，实时监控训练过程中的各项指标。
 
+完整纵轴含义、记录频率、源码/方案跳转和实测解读见 [TensorBoard 指标手册](tensorboard_metrics.md)。以下为速查，不代替完整口径。
+
 #### 主要指标
 
 | 指标 | 含义 | 理想趋势 |
 |------|------|----------|
-| `Train/Total_Loss` | PPO 策略、价值与熵项的组合量 | 不要求单调下降，主要排查非有限值与持续突变 |
+| `Train/Total_Loss` | PPO 策略、价值、熵与加权辅助/规划损失的组合量 | 不要求单调下降，主要排查非有限值与持续突变 |
 | `Train/Policy_Loss` | 截断后的策略目标 | 可围绕 0 波动，不单独作为棋力指标 |
-| `Train/Value_Loss` | 价值预测与回报的误差 | 长期趋势收窄，短期允许明显波动 |
+| `Train/Value_Loss` | 价值预测与 GAE lambda-return 的 Smooth L1 误差 | 结合目标分布与解释方差看，不保证单调收窄 |
 | `Train/Entropy` | 策略的探索不确定性 | 可缓慢下降，避免过早趋近 0 |
 | `Train/Approx_KL` | 新旧策略的近似 KL 偏移 | 保持较小，避免持续尖峰 |
-| `Train/Clip_Fraction` | 被 PPO 截断的样本比例 | 保持中低水平，不长期接近 0 或 1 |
+| `Train/Clip_Fraction` | 新旧动作概率比越过 clip 区间的样本比例 | 不等于精确的梯度截断比例，需结合 KL |
 | `Train/Explained_Variance` | 价值网络对回报波动的解释程度 | 由 0 向 1 提升，长期为负值需检查 |
 | `Train/Gradient_Norm` | 裁剪前 PPO 主干参数上的联合梯度范数，不含独立规划/预测组 | 有限且无持续异常尖峰 |
-| `Rollout/Average_Reward` | 采样局平均奖励 | 优先比较同对手分组的平滑趋势 |
+| `Rollout/Average_Reward` | 非零 Worker 单局奖励均值的等权再平均 | 非全体对局加权均值；结合胜率与对手构成 |
 | `League_Overall/WinRate_Total` | 联盟混合对手总胜率 | 结合 Rule/Self/Hist 分项观察，避免被采样比例误导 |
 | `Performance/Rollout_Steps_Per_Second` | 每秒采集的有效样本 | 稳定或提升 |
 | `Performance/Collection_Seconds` | 本轮数据采集耗时 | 相同规模和对手结构下稳定 |
@@ -151,6 +153,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 - v3.13.2 修正 Type 16/31 解码与 Type 21 分发，曲线统一称为“AI 预测”；详见 [报文功能与认知缺口审计](core_message_audit.md)
 - v3.13.3 补齐120错过时点、160/165公开提示、37/38已知卡组位置和162快照重建；提示生命周期由Core决定，精确槽位/父代码上下文/未知分别编码，训练/ONNX/回放一致；详见 [公开观测](public_observations.md)
 - v3.13.4 修复代码语义来源/接续，新增生成清单、长代码分块及只读质量页；粗哈希仍独立保留，网络/输入不变，新资产从零训练。详见 [可信语义构建](code_semantics.md)
+- v3.13.5 完成 Core/Link/YRP 数据入口和隔离门禁，不启动模仿学习；v3.14.0 汇总完整 V4 部署并优化 CUDA 语义直接求和，不改变协议、权重或训练目标。详见 [轨迹入口](core_trajectories.md) 与 [显存边界](architecture.md#cuda-语义直接聚合2026-10-10)
 - v3.5.0 引入动作语义 V2；v3.6.0 使用 Model Protocol V3，为效果槽绑定身份，并为当前连锁和最近发动历史加入真正顺序敏感的上下文聚合。检查点、网络权重、ONNX 与制品清单会共同记录并校验该版本
 - v3.6.2 以 Lua `Effect.CreateEffect(c)` 对象为身份，把完整运行时 `desc` 绑定到已有代码语义槽；候选动作可直接取得对应效果向量，连锁、历史和本回合已用标记使用同一映射。Stringid 只用于生成 Core 标识，不再被解释成槽序号
 - 动作编码包含操作类型、真实响应、选择约束、目标卡密/位置/素材数值以及稳定语义签名；Type 26 由模型按 Core 原生 Select/Unselect 流程逐步决策
@@ -269,6 +272,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 
 #### 高级选项
 
+- **CDB 文件源 / 词表仓库或文件源**：可独立指定；同一模型谱系的词表必须保持唯一且只追加，不能合并不同编号分叉
 - **脚本仓库源**：指定自定义的脚本仓库地址
 - **覆盖模式**：强制覆盖本地修改
 
@@ -286,8 +290,8 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 
 **选项**：
 - **物理清空**：删除本地知识库、Hash 映射和代码语义向量，重新全量解析
-- **远程同步**：仅从仓库同步结构化知识、Hash 映射、代码语义向量和索引，不扫描本地 Lua
-- **本地提取/接续**：扫描本地脚本；资产一致时只向现有 `.npy` 追加新效果槽，索引或维度不一致时自动全量重建
+- **远程同步**：仅同步结构化知识、Hash 映射、代码向量/索引及新版生成清单，不扫描本地 Lua
+- **本地提取/接续**：核对源码、依赖、编码器与分块策略；未变槽复用，同键内容变化重新生成，旧无清单向量首次更新重建。同步与本地更新可独立执行，亦可先同步再接续
 - **模型侧静态表**：启动时把完整资产编译为按精确卡片 token 与 Lua 效果槽索引的共享缓存；旧卡语义变化会改变模型身份并阻止误加载，只追加新卡保持旧前缀可验证
 
 #### 🧬 特殊效果图鉴
@@ -325,6 +329,7 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 | 系统日志 | `./system_logs/` | `.log` |
 | V3 审计报告 | `./system_logs/protocol_v3_audit/` | `.json` |
 | 读心记录 | `./ai_thoughts/` | `.json` |
+| 轨迹与数据门禁 | `./replays/` 下各分类目录 | `.link.jsonl.gz`、`.core.jsonl.gz`、入口报告/数据清单 `.json` |
 | 模型仓库 | `./models/` | `.pth`、`.onnx`、`.onnx.data`、`.artifacts.json` |
 | 对局数据 | `./web_data/` | `.csv` |
 | TensorBoard | `./runs/` | 二进制 |
@@ -347,13 +352,15 @@ ONNX、外置权重和制品清单。
 若目录中出现“同一前缀、不同 UUID”或“同一 UUID、多个前缀”，WebUI 会显示身份告警；
 恢复训练和覆盖写入始终以内置 UUID 为鉴权依据，而不是只相信文件名。
 
+“轨迹与数据门禁”按原始录像检查/转换、规范轨迹审查/划分、结果查看、分类文件管理四区组织；原始捕获、规范轨迹、入口报告、数据清单各有独立标题和管理范围。删除/清空只操作所示类别的匹配文件，不递归清理子目录，不启动训练。详见 [操作与质量边界](core_trajectories.md#3135外部数据入口与隔离门禁)。
+
 ![存储与日志仓库](图片/存储与日志仓库.png)
 
 ---
 
 ### 全息读心回放
 
-**功能概述**：以回放格式 V2 同步呈现双方决策、Core 结算事件和动作协议语义，用于检查模型的完整操作链。
+**功能概述**：以全息回放格式 3 同步呈现双方决策、Core 结算事件和 V4 动作语义，用于检查模型的完整操作链；仍可查看旧格式 1/2，但不会补造缺失信息。
 
 #### 界面组成
 
@@ -395,6 +402,8 @@ ONNX、外置权重和制品清单。
 
 双方完整卡组清单属于赛后审计元数据，不会泄露给竞技场中的模型，也不改变训练观测。
 
+竞技场开启“记录 AI 预测曲线”后，录像局还可展示双方独立的胜负/平局概率及剩余转移事件估计，并与真实终局分开对照。它反映 AI 对局面的理解，不是实际胜率；PPO value 也不是胜率。该功能使用完整 PTH，标准 ONNX 仍只输出 logits/value。详见 [预测与成本边界](core_trajectories.md#状态预测的解释边界)。
+
 ![全息回放](图片/全息回放.png)
 
 ---
@@ -411,7 +420,7 @@ ONNX、外置权重和制品清单。
 - ONNX 引用的 `.onnx.data` 会自动补齐，不能单独遗漏
 - 同时选择 PTH 与 ONNX 时，两种格式的内置轮次集合必须一致
 - 强制包含 `semantic_lookup_v1.npz` + `semantic_lookup_v1.json` 编译运行资产和精确词表；PTH 可直接建网，ONNX 可完成跨机器身份校验
-- 可选包含用于继续生成的语义源（`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`，存在时附带 `hash_mapping_report.json`）和泛用卡池 (`meta_staples.json`)
+- 可选包含用于继续生成的语义源（`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`，新版另含 `code_embeddings_meta.json`，存在时附带 `hash_mapping_report.json`）和泛用卡池 (`meta_staples.json`)
 - 语义源三件套不可拆分导入或导出；清单会交叉校验源文件、编译表、词表与模型内逻辑语义身份
 - 强制生成并校验清单文件 (`manifest.json`)
 - 支持自定义包名
@@ -627,10 +636,9 @@ python deploy_tool.py
 将训练好的模型打包成 `.gkg` 部署包，包含：
 - 同一 `model_id` 池内的模型文件 (`.pth`/`.onnx`/`.onnx.data`)
 - V4 精确卡片词表 (`card_vocab.json`，必选)
-- 知识库 (`knowledge_base.json`)
-- Hash 接续索引 (`hash_mapping_report.json`)
-- 代码语义向量与索引 (`code_embeddings.npy`、`code_embeddings_idx.json`)
-- 泛用卡池 (`meta_staples.json`)
+- 编译运行表 (`semantic_lookup_v1.npz`、`semantic_lookup_v1.json`，必选)
+- 可选整组语义源：知识库、代码向量/索引、新版生成清单；存在时附带 Hash 接续索引
+- 可选泛用卡池 (`meta_staples.json`)
 - 清单文件 (`manifest.json`)
 
 #### 2. 解包并导入系统
@@ -682,7 +690,7 @@ python deploy_tool.py
 
 TensorBoard 的 `PPO_Update/*` 按采集轮次展示实际更新和提前停止；`Configuration/PPO`
 在文本页保存本次配置。审计只保存小批标量，不扩大逐步轨迹或增加网络前向。
-辅助预测的单局胜负/长度曲线尚未写入回放，不能把训练批次准确率当作某一局的胜率。
+竞技场已支持可选的单局 AI 预测曲线；训练批次准确率不等于某一局的胜率，标准 ONNX 不输出诊断曲线。
 
 ---
 

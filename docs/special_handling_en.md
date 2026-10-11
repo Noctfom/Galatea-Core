@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.13.4**.
+> This document applies to **Galatea-Core v3.14.0**. The model protocol is V4; historical V3 audit names are retained.
 
 ---
 
@@ -20,7 +20,7 @@ See the [message audit](core_message_audit_en.md) for layouts/deferred boundarie
 
 - [Semantic Module (Semantic KB)](#semantic-module-semantic-kb)
 - [142 Announce Pool Wrapper Logic](#142-announce-pool-wrapper-logic)
-- [Multi-Select Chunk Wrapper Logic](#multi-select-chunk-wrapper-logic)
+- [Multi-Select and Sequential Selection Logic](#multi-select-and-sequential-selection-logic)
 - [Simple Hand Tracker Logic](#simple-hand-tracker-logic)
 - [Deck Weight Adjustment (Global Weights)](#deck-weight-adjustment-global-weights)
 - [Virtual Disguise Pool Module (Virtual Mix Pools)](#virtual-disguise-pool-module-virtual-mix-pools)
@@ -82,12 +82,14 @@ This means: if two cards have structurally similar effect code (only differing i
 ### WebUI Operation
 
 In **🧠 Semantic Knowledge Engine**:
-1. **🌐 Sync Remote Semantic Assets Only** downloads the complete four-file baseline without parsing local Lua
+1. **🌐 Sync Remote Semantic Assets Only** downloads the complete semantic source bundle, including modern provenance, without parsing local Lua
 2. **🧬 Extract/Continue Local Semantics** scans local scripts and incrementally maintains both structured semantics and code vectors
 3. Select both to sync first and then continue; clear without sync makes local update rebuild from scratch
 4. Click **Start Extracting Card Semantics** and wait for the selected operations
 
 Hash-cluster labels are derived deterministically from normalized code through MD5. v3.6.0 fixes a different source of nondeterminism: semantic fields were deduplicated through unordered sets before fixed-slot truncation. Since 3.7.0, remote sync and local extraction are explicit separate operations. If the remote Hash map is absent, continuation records are still reconstructed from existing `CUSTOM_HASH_*` tags in the KB.
+
+Since3.13.4, continuation verifies source/dependency/encoder identity rather than key presence alone: changed slots regenerate, unchanged slots reuse, and modern bundles contain `code_embeddings_meta.json`. Coarse hashes do not replace vectors or require every effect to have a distinct vector. See [trusted semantics and deployment](code_semantics_en.md).
 
 ### V3 Observation and Effect-Slot Audit
 

@@ -2,17 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.13.4**。
-
-3.13.1 的 [规范轨迹与状态预测回放](core_trajectories.md) 是可选诊断/数据接口，复用现有
-Core 解析、观测和状态解码器；不修改训练、网络结构、协议输入或标准 ONNX 输出。
-
-3.13.2 的 [固定 Core 报文审计](core_message_audit.md) 修正 Type 16/31 解码及 Type 21 分发，
-统一模型、RuleBot、Worker 与重放的语义路径；网络和奖励规则不变。空连锁自动应答不成为模型动作。
-
-3.13.3 的 [公开认知补全](public_observations.md) 新增有界动态提示/卡顶/通知分支，复用已有代码语义并保持120卡片主干。Model Protocol4 / Checkpoint Format3不变，结构修订14；训练存储、ONNX输入、资产与回放同步更新，奖励/PPO不变。
-
-3.13.4 仅修复 [离线代码语义流水线](code_semantics.md)：注册/回调来源、内容感知接续、完整分块和生成清单；网络、输入和粗分类算法不变。向量仍384维，生成器不进入每步推理；资产内容变化由既有语义哈希阻止旧模型混用。
+> 文档适用于 **Galatea-Core v3.14.0**：完整 V4 主框架部署。Model Protocol 4 / Checkpoint Format 3 / 结构修订 14 不变；训练参数、协议资产与学习目标不因本次显存优化改变。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -26,6 +16,7 @@ Core 解析、观测和状态解码器；不修改训练、网络结构、协议
 - [语义知识库](#语义知识库)
 - [PPO 训练框架](#ppo-训练框架)
 - [OCGCore 环境封装](#ocgcore-环境封装)
+- [性能优化技术](#性能优化技术)
 
 ---
 
@@ -33,51 +24,23 @@ Core 解析、观测和状态解码器；不修改训练、网络结构、协议
 
 Galatea-Core 采用模块化设计，由以下核心子系统构成：
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         应用层 (Application)                     │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │   WebUI     │    │  Trainer    │    │   Arena     │         │
-│  │  (app.py)   │    │(trainer.py) │    │(model_vs.py)│         │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘         │
-├─────────┴──────────────────┴──────────────────┴─────────────────┤
-│                         认知层 (Cognition)                       │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                    GalateaNet                            │   │
-│  │  ┌───────────┐  ┌───────────┐  ┌───────────┐            │   │
-│  │  │ Embedding │  │Transformer│  │  Policy   │            │   │
-│  │  │   Layer   │→ │  Encoder  │→ │   Head    │            │   │
-│  │  └───────────┘  └───────────┘  └───────────┘            │   │
-│  │                                 ┌───────────┐            │   │
-│  │                                 │  Value    │            │   │
-│  │                                 │   Head    │            │   │
-│  │                                 └───────────┘            │   │
+```text
+WebUI / CLI
+    ├─ Trainer → CPU Workers → 公开 Core（DLL / SO）
+    │                │ 解析 / 玩家视角快照 / V4 Encoder
+    │                └─ 共享观测槽 + ZMQ → CPU/CUDA 中央推理
+    │                   当前策略与 self 共用中央模型；hist 为本地 CPU 对手
+    ├─ Arena → 同一解析器 / Encoder / 响应包装器 → 模型决策
+    └─ 录像工具 → 原始 Core/Link/YRP → 诊断重放 / 质量门禁
 
-│  └─────────────────────────────────────────────────────────┘   │
-├─────────────────────────────────────────────────────────────────┤
-│                         感知层 (Perception)                      │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │  Feature    │    │  Semantic   │    │    Card     │         │
-│  │  Encoder    │    │     KB      │    │   Reader    │         │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘         │
-├─────────┴──────────────────┴──────────────────┴─────────────────┤
-│                         环境层 (Environment)                     │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                    GalateaEnv                            │   │
-│  │  ┌───────────┐  ┌───────────┐  ┌───────────┐            │   │
-│  │  │  Message  │  │   Duel    │  │   Action  │            │   │
-│  │  │  Parser   │  │   State   │  │  Handler  │            │   │
-│  │  └───────────┘  └───────────┘  └───────────┘            │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                              ↓                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                    OCGCore (DLL)                         │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+V4 观测 + 精确词表 + 编译语义表
+    ├─ 卡片主干 + Deck Encoder → 全局/卡组分层 FiLM → Transformer
+    └─ 连锁 / 最近发动 / 16步事件 / 公开提示 → 共享状态
+                         ↓
+                   目标规划 latent
+                         ↓
+                  策略头 + 价值头
+                         └─ PPO：辅助/规划后验监督 + KL 更新保护
 ```
 
 ### 核心文件说明
@@ -87,10 +50,18 @@ Galatea-Core 采用模块化设计，由以下核心子系统构成：
 | `galatea_net.py` | 认知层 | Transformer 神经网络定义 |
 | `feature_encoder.py` | 感知层 | 游戏状态特征编码 |
 | `semantic_kb.py` | 感知层 | 语义知识库查询 |
+| `semantic_lookup.py` | 资产层 | 精确 token 静态语义表的编译、加载与身份校验 |
+| `protocol_schema.py` | 协议层 | V4 字段、Model Protocol 与结构修订的统一定义 |
 | `galatea_env.py` | 环境层 | OCGCore 环境封装 |
 | `gamestate.py` | 环境层 | 游戏状态解析（核心！） |
 | `deck_protocol.py` | 协议层 | 完整构筑、单局卡组画像与 BO3 上层边界 |
-| `deck_trajectory.py` | 轨迹层 | Worker 卡组画像目录、索引重映射与旧网络字段无损重建 |
+| `deck_trajectory.py` | 轨迹层 | Worker 卡组画像目录、索引重映射与静态字段无损重建 |
+| `deck_encoder.py` | 认知层 | Main/Extra 无序集合编码、卡组风格与上层复用接口 |
+| `goal_planner.py` | 认知层 | 决策级规划隐变量、策略/价值门控与目标解码器 |
+| `auxiliary_heads.py` / `auxiliary_targets.py` | 学习层 | 训练专用预测头与真实结果后验标签 |
+| `ppo_control.py` | 学习层 | GAE/PPO 默认控制、KL 保护与实际更新审计 |
+| `core_trajectory.py` | 轨迹层 | 唯一 Core 解释器、规范记录与重放验证 |
+| `trajectory_ingest.py` / `trajectory_dataset.py` | 数据层 | 外部捕获入口、质量门禁与整组隔离划分 |
 | `trainer.py` | 应用层 | PPO 训练器 |
 | `worker.py` | 应用层 | 多进程数据采集 |
 | `model_versus.py` | 应用层 | 普通竞技、逻辑/物理座位映射，以及贪心/训练同分布/部署温度策略 |
@@ -104,62 +75,35 @@ Galatea-Core 采用模块化设计，由以下核心子系统构成：
 
 GalateaNet 是一个基于 Transformer Encoder 的策略-价值网络，v3.2.0 引入了 FiLM 全局调制与 SwiGLU 门控前馈：
 
-```python
-class GalateaNet(nn.Module):
-    def __init__(self, config):
-        # 1. 基础物理感知层
-        self.card_embed = nn.Embedding(vocab_size, d_model)      # 卡片 ID 嵌入
-        self.feat_proj = nn.Linear(66, d_model)                   # 数值特征投影
-        self.race_embed = nn.Embedding(30, d_model)               # 种族嵌入
-        self.attr_embed = nn.Embedding(10, d_model)               # 属性嵌入
-        self.setcode_embed = nn.Embedding(4096, d_model)          # 字段嵌入
-        
-        # 2. 语义解析皮层
-        self.sem_cat_embed = nn.Embedding(4000, d_sem)            # 效果类型嵌入
-        self.sem_req_proj = nn.Linear(128, d_sem)                 # 发动条件投影
-        self.effect_slot_embed = nn.Embedding(8, d_model)         # 效果槽身份
-        self.sem_fusion_proj = nn.Sequential(...)                 # 语义融合
-
-        # 3. FiLM 全局调制器
-        self.film_gen = FiLMGenerator(condition_dim=15, d_model=d_model)
-
-        # 4. Transformer Encoder (每层含 FiLM 调制 + SwiGLU 门控)
-        self.transformer = GalateaTransformerStack(d_model, n_heads, n_layers)
-
-        # 5. 顺序上下文编码
-        self.chain_context_pool = OrderedContextPool(d_model, 12) # 连锁先后关系
-        self.history_context_pool = OrderedContextPool(d_model, 8)# 最近发动先后关系
-        self.place_weights = buffer([1.0, 0.8, 0.6, 0.4, 0.2])   # 排序操作加权
-        
-        # 6. 输出头 (SwiGLU 门控)
-        self.policy_head = SwiGLU(d_model*2) → Linear(1)         # 策略头
-        self.value_head = SwiGLU(d_model) → Linear(1)            # 价值头
+```text
+输入：120个卡片槽 / 最多120个动作；17维全局量 + 阶段/玩家角色类别
+     稳定 Main/Extra 画像 + 动态剩余卡组；Side 不进入单局观测
+语义：精确 token → 静态 Lua 效果槽/384维代码向量 → 可训练投影/Slot Attention
+主干：卡片数值/类别/公开关系 → Transformer（分层 FiLM + SwiGLU）
+上下文：连锁12项、最近发动8项、决策转移16项、当前公开提示与已知卡顶
+卡组：8个学习型 latent → deck_style → FiLM / 共享状态 / 规划器
+输出：动作匹配策略头 + 价值头；128维 plan_latent 经独立有界门控接入
+训练专用：动作条件辅助头 + 规划目标解码器（标准 ONNX 不输出诊断预测）
 ```
 
-### FiLM 全局状态调制 (v3.2.0 新增)
+这是当前数据流示意，不是可直接运行的建网代码。字段清单及版本以
+`protocol_schema.py` 为准，具体张量路径见 `galatea_net.py`。
 
-FiLM (Feature-wise Linear Modulation) 根据当前游戏阶段/回合/LP 等全局信号，动态调整 Transformer 每层的推理倾向：
+### 分层 FiLM：全局时局与卡组风格
 
-```python
-class FiLMGenerator(nn.Module):
-    def __init__(self, condition_dim, d_model):
-        self.proj = nn.Linear(condition_dim, 2 * d_model)  # 输出 γ 和 β
-        nn.init.zeros_(self.proj.weight)  # 零初始化确保训练初期不干扰
+FiLM（逐特征线性调制）在 LayerNorm 之后对特征作 `x * (1 + γ) + β`。
+V4 使用两个独立低秩生成器：全局分支读取17维时局量和16维阶段嵌入，包含先后手、
+自身/对方回合、回合进度、LP 等；卡组分支读取学习得到的 `deck_style`。
+每层注意力和 FFN 分别取得 γ/β，不再全层共用一组参数。
 
-    def forward(self, condition):
-        out = self.proj(condition)
-        gamma, beta = out.chunk(2, dim=-1)  # 各取一半
-        return gamma.unsqueeze(1), beta.unsqueeze(1)
-
-# 在 Transformer Block 中的应用：
-x = x * (1.0 + gamma) + beta  # 先做 LayerNorm 再进行 FiLM 调制
-```
-
-**设计思想**：不同游戏阶段的决策逻辑截然不同（起手展开 vs 中盘拉扯 vs 斩杀计算），FiLM 让同一个网络能根据全局状态自动切换"思考模式"，无需增加额外的分支网络。
+两分支以 `0.5 * tanh(global_raw + tanh(deck_gate) * deck_raw)` 合并，总幅度限制在±0.5。
+卡组门零初始化，训练中按整局10%概率关闭并在 PPO 中复用同一掩码；直接进入策略/价值
+共享状态的卡组通道仍保留。它让模型**学习**时局与构筑条件下的特征选择，不手工指定
+“某卡组一定进攻/防守”，也不会为一局生成并替换整套网络权重。
 
 ### SwiGLU 门控前馈网络 (v3.2.0 新增)
 
-传统 MLP (Linear→ReLU→Linear) 被全面替换为 SwiGLU 门控线性单元：
+Transformer 前馈子层将传统 MLP (Linear→ReLU→Linear) 替换为 SwiGLU 门控线性单元：
 
 ```python
 class SwiGLU(nn.Module):
@@ -176,8 +120,9 @@ class SwiGLU(nn.Module):
 ```
 
 **核心优势**：
+
 - **门控机制**：SiLU 激活的 Gate 分支对 Up 分支进行逐元素筛选，让网络自行决定哪些特征通过
-- **无偏置设计**：所有 Linear 层去除 bias，减少参数量并提升训练稳定性
+- **无偏置设计**：该 SwiGLU 模块的三个 Linear 层不使用 bias，减少相应参数；不表示整网所有 Linear 都无偏置
 - **Tensor Core 64 对齐**：`hidden_features` 自动补齐至 64 倍数，充分利用 GPU 硬件算力
 
 ### 双塔匹配机制
@@ -209,7 +154,8 @@ class SwiGLU(nn.Module):
 
 ### 好奇心驱动探索
 
-GalateaCore 主要通过 **熵正则化** 和 **历史模型对战联盟** 来驱动探索行为，确保 AI 既不会过早收敛到局部最优，也不会遗忘已经学到的策略。
+GalateaCore 通过 **熵正则化** 和 **历史模型对战联盟** 鼓励探索、增加对手多样性，
+降低过早收敛和策略遗忘的风险，但不保证避免局部最优或自动获得更强棋力。
 
 ## 特征编码系统
 
@@ -350,7 +296,7 @@ V4 的 `MODEL_PROTOCOL_VERSION=4` 由 `protocol_schema.py` 唯一维护，
 后续编码器把“已抽走的卡”误认为构筑本身不存在。`MatchContext`/`DuelSummary` 仅为未来
 BO3 换备与组卡层提供外部接口，当前返回空策略输入，不进入单局观测、网络或 PPO 轨迹。
 
-3.10.1 将稳定画像接入训练轨迹，但仍不改变模型输入。每个 Worker 以 `profile_id`
+在 3.10.1 批次中，稳定画像先接入训练轨迹，当时尚不改变模型输入。每个 Worker 以 `profile_id`
 登记实际训练座位的一局画像，逐步样本只保存 `int32 deck_profile_index`；动态
 `deck_idx/deck_mask` 继续逐步保存。`deck_race/deck_attr/deck_setcodes` 属于精确
 card token 的静态属性，改为每个 Worker 只登记一次，Trainer 合并时检查冲突并建立
@@ -358,8 +304,8 @@ card token 的静态属性，改为每个 Worker 只登记一次，Trainer 合�
 逐元素一致，因此 GalateaNet、中央推理、PTH/ONNX 和协议结构修订均保持不变。
 
 内部画像目录只含张量，可由 `weights_only=True` 加载；局部索引会在合并时重映射成
-Trainer 全局索引。画像索引当前用于身份校验和为 3.10.2 Deck Encoder 预留稳定入口，
-不会作为新特征偷偷进入现有策略。Side 仍从 `DeckProfile` 的类型层排除。
+Trainer 全局索引。3.10.1 时画像索引仅用于身份校验和预留入口；3.10.2 起才重建下述
+Deck Encoder 输入，索引数值本身不作为策略特征。Side 仍从 `DeckProfile` 的类型层排除。
 
 3.10.2 为稳定画像新增 128 条目的模型输入。每个唯一条目携带精确卡片 token、
 主卡组/额外卡组分区、初始投入数量、当前剩余数量及原有种族/属性/字段标签；同一卡密
@@ -372,7 +318,7 @@ Main/Extra，`DeckSection.SIDE` 仅保留给未来位于 `DuelState` 外部的�
 复用精确 token 与静态属性，并对该卡全部有效 Lua 代码向量作掩码均值；它不依赖卡面文本，
 也不在热路径读取脚本或 CDB。当前策略仅把 `deck_style` 加入统一意图表示，因此同时影响
 策略头和价值头，并跳过未消费的逐卡回写；独立接口被上层显式调用时仍返回完整三类输出。
-分层 FiLM、规划 latent 与上层组卡消费者仍留在后续阶段。原动态
+分层 FiLM 和规划 latent 已在后续3.11/3.12批次接入，上层组卡消费者仍待实现。原动态
 `deck_idx/deck_mask` 暂时保留，确保对局中被效果加入卡组、但不属于初始构筑的卡仍可见。
 
 这里的 8 个学习型 latent 不是人工定义的“启动点/终端”等标签，而是参与反向传播的查询
@@ -486,7 +432,7 @@ Embedding，不再把位掩码除以常数当作连续距离。
 Lua 脚本 (c12345678.lua)
          ↓
     ┌─────────────┐
-    │ Lua Parser  │  ← 正则表达式提取
+    │ Lua Parser  │  ← 词法/块栈与静态引用解析
     └──────┬──────┘
            ↓
     ┌─────────────┐
@@ -515,7 +461,7 @@ semantic_lookup_v1.npz + semantic_lookup_v1.json
 | race | 4 | 关联种族 |
 | attr | 4 | 关联属性 |
 
-效果槽除表中内容外还包含 0～7 的显式槽位身份。GitHub 同步会以同一目录中的四个语义资产为一组：结构化知识库负责可解释字段，Hash 映射用于继续聚类，代码语义矩阵及索引用于恢复已有 Lua 向量。向量生成器会在资产一致时只追加新效果槽；这属于真正的增量接续，而不是重新编码全部旧脚本。
+效果槽除表中内容外还包含0～7的显式槽位身份。同步以完整语义源组为单位：知识库、Hash接续映射、代码矩阵/索引和新版 `code_embeddings_meta.json` 生成清单。3.13.4起接续按源码、依赖、编码器及分块策略校验；未变化槽复用，同键内容改变重新生成，无清单旧向量首次更新重建。不能把“键已存在”当成内容未变化。详见 [语义资产指南](code_semantics.md)。
 
 3.6.1 在编码器初始化前交叉校验知识库中所有 0～7 效果槽、代码向量行和索引键。3.6.2 进一步在语义生成阶段按 `Effect.CreateEffect(c)` 对象追踪其 `SetDescription(aux.Stringid(...))`，把完整运行时 `desc` 绑定到同一个 Lua 代码语义槽。GameState、候选动作、连锁、历史和 `used_effect_mask` 共用这份映射；不能静态证明的动态写法回退到整卡语义。卡面描述文本与 Stringid 数值均不参与槽位定义。
 
@@ -542,6 +488,8 @@ def _hash_code_block(self, code_block):
 
 ## PPO 训练框架
 
+各项训练/辅助/规划指标的准确统计口径与源码入口见 [TensorBoard 指标手册](tensorboard_metrics.md)，其中也区分训练拟合、实际更新和独立棋力评估。
+
 3.13.0 起，`ppo_control.py` 统一默认 GAE lambda=0.98、最多 4 个 epoch、目标 KL=0.02。
 CLI/WebUI 可显式对照 lambda=0.95/0.99，或以 target KL=0 关闭有限偏移阈值。每个小批
 在反向前用已选动作的 old/new log-prob 估计 `mean(expm1(log_ratio)-log_ratio)`，超过
@@ -554,6 +502,44 @@ KL/clip fraction 的小批均值分位数和停止标志；它们不是单个动
 `Configuration/PPO` 记录当前配置、请求学习率与优化器真实学习率，续训仍按当前启动
 参数选择 GAE/KL 等控制，不把文件内审计值自动当作命令行覆盖。`train_step` 只统计实际
 优化器更新，FP16 GradScaler 跳步不会推进辅助梯度渐入日程。模型协议与网络均未修改。
+
+### KL 提前停止如何解读
+
+KL 衡量本轮采样时的旧策略与当前策略的分布偏移，不是胜率、Loss百分比或“学了多少知识”。
+PPO clipping 不能保证整个动作分布始终贴近旧策略，因此还有提前停止保护，见
+[OpenAI PPO 说明](https://spinningup.openai.com/en/latest/algorithms/ppo.html)。
+
+代码使用当前小批**已采样动作**的 log-prob，计算
+`mean(expm1(new_log_prob-old_log_prob)-(new_log_prob-old_log_prob))`。
+这是非负近似估计，不是整轮精确 KL，也没有额外调用网络。
+默认目标 `target_kl=0.02`，实际阈值为 `1.5×0.02=0.03`。
+检查发生在小批前向后、反向前；超过阈值或偏移非有限就退出本轮所有剩余 epoch。
+
+已完成的参数更新保留，**不回滚模型、不结束训练、不把整轮样本判成异常局**。
+策略、价值、辅助与规划共享网络，所以剩余联合更新一并停止；下一轮正常用新策略采集。
+这会减少旧经验的复用次数，换取较小偏移和更新鲜的采样，并非零影响，但不会关闭正常学习。
+它不保证绝不会策略退化，也不意味着已经收敛。
+
+日志 `KL=0.03670 > 0.03000，已更新165小批` 表示保护正常触发。
+若样本31,648、切片512、上限4个 epoch，每次遍历有61个完整小批、最多244次更新；
+165次是两次完整遍历加第三次43个小批，有效复用率为 `165×512/31648≈2.67`。
+尾部416条沿用固定批次舍弃；每次重新打乱，并非固定丢弃同一批局。
+触发检查的小批不再反向，所显示 KL 也不是更新该小批后的再次评估。
+
+在第3轮或更早触发不代表异常：保护针对每轮偏移，不需要等训练很久才生效。
+在 **训练流形图 → TensorBoard → Scalars** 结合固定竞技场基准观察：
+
+| 指标 | 解读 |
+| --- | --- |
+| `PPO_Update/Effective_Epochs`、`Optimizer_Updates` | 实际样本复用次数和更新数 |
+| `PPO_Update/KL_Early_Stop`、`Approx_KL_P95`、`Approx_KL_Max` | 停止频率和小批平均偏移，不是棋力 |
+| `PPO_Update/Clip_Fraction_P95` | 比率越过裁剪区间的样本比例 |
+| `PPO_Update/Nonfinite_Batches` | 应保持0，数值异常与有限 KL 停止分开排查 |
+
+若持续在第一或少数小批就停、有效 epoch 很低，或同时出现非有限值/基准退化，再检查
+old log-prob、采样/更新条件和学习率；不能仅凭一次日志放宽阈值。
+`Configuration/PPO` 文本页保留当前参数。保留显存与 CPU 合并池跨轮复用本身不证明泄漏，
+应比较预热后多个轮次同阶段的量；Worker回收后的低值也不代表 PPO 的反向峰值。
 
 ### 训练流程
 
@@ -645,7 +631,7 @@ class MessageParser:
 
 ### 状态同步
 
-状态快照会通过随包 Core 的公开旧式查询接口校准场、手牌、墓地和除外区，并以消息流维护回合、LP、连锁和禁用区域。最新上游 Core 已迁移到结构化 `OCG_DuelQuery`；未来升级必须整体适配公开 ABI，而不是给本地二进制追加私有字段。
+状态快照会通过随包 Core 的公开旧式查询接口校准场、手牌、墓地和除外区，并以消息流维护回合、LP、连锁和禁用区域。采用新式 API 的上游 Core 版本使用结构化 `OCG_DuelQuery`；未来升级必须整体适配公开 ABI，而不是给本地二进制追加私有字段。
 
 当前 `galatea_env.py` 绑定的是 `create_duel/process/get_message/set_response*/query_card` 旧式导出，不能直接用新版 `OCG_DuelProcess/OCG_DuelGetMessage/OCG_DuelSetResponse/OCG_DuelQuery` 二进制覆盖。新版还增加 64 位种族、TLV 查询字段及 Type 121/122/123/180/190 等消息。升级必须新增公开双后端适配器并完成 Windows/Linux 回归；在该迁移完成前，应继续使用随包公开旧式 Core。
 
@@ -681,6 +667,40 @@ with torch.amp.autocast('cuda', dtype=self.amp_dtype):
 ```
 
 CPU 模式使用 FP32，不启用 CUDA autocast、GradScaler 或锁页内存。
+
+#### CUDA 语义直接聚合（2026-10-10）
+
+`GalateaNet.process_semantics()` 的类别、关联字段、卡片引用、种族和属性仍逐效果槽求和；
+CUDA 使用同一个 Embedding 权重的 `embedding_bag(mode='sum')`，避免先生成全部引用向量。
+它不是均值、去重、裁剪或静态缓存：重复引用计数不变，八个效果槽、代码向量、查询与掩码不变，
+也不冻结任何可训练权重。非零 padding 行仍参与前向，其贡献通过 detached 行补回，padding
+梯度仍为零。CPU Worker、CPU 训练、ONNX 导出及非默认 Embedding 配置沿用原算子。
+
+混合精度没有改变原 FP32 Embedding 求和。512/75/8/4/512 形状的前向峰值增量实测从
+2.9297 GiB 降到 0.6123 GiB，消除了单个 2.34375 GiB 的引用展开；这不是整网峰值降幅。
+数学目标和梯度路径保持一致，但不同 GPU/算子归约顺序可能存在浮点末位差异，不保证所有
+训练轨迹逐位重现。Model Protocol 4 / Checkpoint Format 3 / schema revision 14、参数名称/
+形状、语义资产身份和 PPO/GAE/辅助/规划目标不变，已有兼容 V4 检查点可以继续恢复，无需重建资产。
+
+本机 RTX 5070 Ti 16 GiB、Torch 2.9.1+cu130、512/8/6、BF16、未编译，在包含真实语义卡片的
+合成观测/标签上通过现有完整 PPO 前向、反向和 Adam 更新；每种批量重复三次。建立优化器状态后：
+
+| mini-batch | 原实现活动显存峰值 | 直接聚合活动显存峰值 | 更新结束后的保留显存：原 → 新 |
+|---|---:|---:|---:|
+| 128 | 7.2790 GiB | 7.3387 GiB | 8.3594 → 7.4570 GiB |
+| 256 | 13.8014 GiB | 13.9213 GiB | 15.1895 → 14.2051 GiB |
+
+直接聚合需要反向索引/分组元数据，本测试整网活动峰值约高 0.9%，并未明显降低；收益主要是
+去掉语义阶段的大块临时分配及减少缓存保留压力。每次释放梯度后活动显存稳定在约 0.67 GiB，
+没有连续更新累积；保留显存不是活动张量或泄漏。不能据此保证云端 32 GiB 的 mini-batch 512
+能完成整个 PPO。此修补不自动改批量、不新增梯度累积或语义梯度检查点。
+
+开发回归覆盖重复引用、非零 padding、越界引用原有截取、空槽、混合精度、有限梯度、真实
+CUDA PPO、ONNX/Core 与输入/参数/协议身份。512/8/6 BF16 夹具的所有输出及 307 个有梯度
+参数与原算子完全对齐；这不是长期学习强度保证。`tests/benchmark_semantic_aggregation.py`
+可复测完整 PPO，测试目录仍遵循现有忽略约定。编译检查仅覆盖 Dynamo eager 完整图，未宣称
+验收 Linux Inductor。用户已报告相同32 GiB云端配置修补后短期暂时稳定；仍需多场景峰值、
+50轮趋势及生产长训/棋力验收，不能以短期反馈代替。
 
 ### 2. 静态内存池
 

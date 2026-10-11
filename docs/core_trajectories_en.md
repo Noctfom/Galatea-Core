@@ -1,14 +1,17 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-3.13.1 completed Phase 7 batch 2; 3.13.2 stabilizes fixed Core decoding. Model Protocol **4**,
-Checkpoint Format **3**, schema revision **13**, network parameters/inputs, rewards and standard
-ONNX remain unchanged. Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
+This document applies to **v3.14.0**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
+Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
+public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
+Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
 fixed message-protocol identity and automatic empty-chain responses. Raw Schema 1 traces are no
 longer accepted as current traces. Holographic JSON remains format 3; formats 1/2 remain viewable.
 
 ## Enabling recording
 
-3.13.3 adds public observations and schema revision14. Trajectory2/replay3 remain unchanged, but older-schema raw traces cannot share new observation checks. See [Public observations](public_observations_en.md). The opening unchanged-network/input statement applies only to3.13.2.
+Trajectory format 2 and holographic format 3 are maintained independently of the observation schema;
+older-schema raw traces cannot use current observation checks. For public events, hint lifetimes
+and known deck-position displays, see [Public observations](public_observations_en.md).
 
 Both options default to off and affect only games selected by a positive `--thought_freq`.
 They can be used independently; training Workers and PPO storage are unchanged.
@@ -114,7 +117,7 @@ Per-chunk `parsed_bytes/message_count/parse_complete` remain; other unconsumed b
 - Curves reflect the model's assessment, not actual win rates or a sole measure of playing strength.
   Standard ONNX still returns only logits/value; prediction recordings require full PTH.
 
-## Cost and next batch
+## Cost and remaining boundaries
 
 Disabled options execute no diagnostic decoder, checkpoint hashing, or raw recording. Enabled options
 add a small decoder, scalar GPU→CPU synchronization, candidate/observation hashing and gzip I/O only to
@@ -122,9 +125,11 @@ logged games; checkpoint hashes are read once and asset hashes at first capture.
 but PPO/shared-memory/training pools do not grow. Checks may scan gzip multiple times to validate before
 execution while keeping memory bounded.
 
-Next: Link/YRP raw-input adapters, whole-duel/deck/player isolation and quality gates. Cognition additions
-for Type 120/160/165 and 35/37/38/162 await design approval; see the message audit. This batch does not
-revive the parked Replay Worker, add imitation optimization, or counterfactual search.
+Core-side Link/YRP adapters, whole-duel/deck/player isolation and quality gates arrived in 3.13.5;
+see below. They are not an imitation learner, and the external Link project still needs SDK integration.
+Public cognition for Types 120, 160/165, 37/38 and 162 arrived in 3.13.3. Type 35 remains deferred
+by agreement and Tag 161 unsupported. The abandoned Replay Worker has been removed; imitation
+optimization and counterfactual search are not implemented.
 
 ## 3.13.5: External ingestion and isolated quality gates
 
