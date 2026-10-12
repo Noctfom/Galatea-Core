@@ -4,6 +4,50 @@
 
 ---
 
+## [v3.14.1] - 2026-10-11
+
+### 🧩 Release and compatibility boundaries
+
+- Groups the still-uncommitted decoding/export, UI and documentation fixes following 3.14.0 deployment into **3.14.1**.
+- Aligns framework, WebUI, README, dependency and setup versions. Model Protocol4 / Checkpoint3 / revision14 / static assets1 / GKG4 / raw traces2 / holographic format3 remain unchanged. Networks, inputs, asset identities, training settings and Arena policies are not changed.
+
+### 🩹 Cloud-feedback parser and export hotfix
+
+- **Type160 legal boundaries**: subtype0 clears only scalar hints, leaving independent description references. Public-Core initialization at `PLAYER_NONE(2)/location0`, and other legal empty zones, creates no visible host/history/holographic event. Real20989253 initialization and `SetHint(0,0)` reproduce the old rejection; this is not a missing dependency or broken deck. Strict nine-byte/subtype/controller validation remains, with field-specific diagnostics. Raw packets are retained.
+- **Type142 alignment**: pure interpreter `card_announcement.py` treats `[1]` as constant true, not a whitelist. Adds arithmetic/negation/division toward zero and preserves raw Core bit-intersection results for type/race/attribute. Removes invented Level/Link opcode semantics; validates stack shape and packet length. Cached real metadata excludes missing cards, aliases and Tokens without removing legal low codes or truncating complete identities.
+- **Candidates and visibility**: legal small-pool entries retain sources, ordering and existing caps/weighted reduction. An empty pool searches the database under the same predicate; legality is never waived. The actual responding player supplies the own deck; hidden opponent facedown-banished identities cannot populate/prioritize candidates. No legal match fails through existing abnormal-game rollback rather than inventing valid options.
+- **ONNX tracing warnings**: only export skips Python shape assertions in Deck/Event Encoders; normal PyTorch inference/training retains validation. Empty-deck/event masks remain live tensor computations, not trace-time constants. ONNXRuntime `CanUpdateImplicitInputNameInSubgraphs` warnings remain: unsafe name-collision rewrites are skipped without disabling all optimization, changing graph semantics or suppressing warnings globally. Existing ONNX files need not be re-exported solely for these warnings; subsequent normal checkpoint exports use the fix.
+- **Learning and resumption**: PPO/GAE/rewards, network parameters/input shapes, Model Protocol4/Checkpoint3/revision14 and asset identities are unchanged. Correcting formerly invalid candidates can change choices without migrating weights. Database expansion runs only when a142 small pool has no match, with no new per-step large semantic/trajectory allocations. Restart processes and resume the last saved compatible checkpoint; already-running cloud Workers are not patched live, and unsaved iterations are not automatically retained.
+- **Hotfix acceptance**:448 tests and50 subtests pass with real public-Core gates enabled;4 independent rebuilt-asset gates remain disabled. An additional74 targeted hotfix/bilingual-document tests pass. Covers real160 initialization/clearing,9 real142 response/rejection cases, arithmetic/setcodes/masks, invalid packets/constrained fallback, legacy/default ONNX export, empty/nonempty deck/public-event CPU parity, normal shape rejection and PPO/trajectory/deployment paths. Comparing pre-fix encoders separately at512/8/6 gives bitwise-identical outputs and gradients across all313 parameter entries for empty/nonempty contexts. First-time metadata caching for14,981 cards measures0.103s including tracemalloc,4.61MiB retained/5.95MiB peak per process; this is not a whole-training benchmark. Portable scanning includes the new module; syntax/whitespace checks pass. No Core modification, asset rebuild or cloud long-run test.
+
+### 📖 Public documentation and deployment UI corrections
+
+- **142 announcement add-on pool**: aligns WebUI, quickstart, features and special-handling names, explaining how it extends known candidates and distinguishing it from constrained database expansion on an empty pool. Candidate generation, priorities, reduction, caching and file formats are unchanged.
+- **Package names and versions**: WebUI defaults and examples derive the V4 label from the current model-protocol constant; the interface separately displays framework, model protocol and GKG format. CLI removes its stale V3.0.0 title. Embedded identity and validation rules are unchanged.
+- **Public metric reference**: both languages retain all 80 fixed scalars, 3 distributions and configuration text, with clearer purposes, units, formulas and trend interpretation. Single-run statistics and attribution move to a separate development analysis record; README does not add development-plan navigation. Public architecture/functionality and source links remain, without changes to networks, training settings, protocols or checkpoint versions.
+- **UI/documentation acceptance**:189 tests pass across bilingual add-on editing, protocol-derived default/custom names, unsafe-path rejection, documentation links/anchors/metric coverage, deployment artifacts and the preceding real-Core/ONNX hotfix. Syntax/whitespace checks pass; no additional cloud training was run.
+
+Chart definitions: [TensorBoard Metric Reference](tensorboard_metrics_en.md). That experiment's statistics: [Initial V4 cloud training analysis](training_analysis_v4_initial_en.md).
+
+### 📈 Holographic prediction display fixes
+
+- **Persistent visibility**: replaces the default-collapsed prediction panel with a stateful toggle that persists across pauses, stepping, seeks and replay changes. Axes, legends, hover labels and terminal references follow the interface language.
+- **Playback position**: both charts use the slider’s zero-based steps. A dashed cursor follows playback; distinct colored dots mark each side’s latest prediction source. Win probability uses0–100%; remaining events use a separate nonnegative numerical axis.
+- **Separate figures**: P0/P1 retain independent latest predictions, source steps and frame ages through events/pauses. No future/opponent values are substituted, no model is rerun, and retained historical predictions are not presented as fresh inference.
+- **Coverage diagnostics**: shows counts/spans, explicitly model-sourced decisions without predictions and rejection reasons. Normal gaps are not missing-data failures; RuleBot/old recordings are explained. Actual outcomes remain separate, and recordings beyond5,000 points avoid chart row limits.
+- **Compatibility/scope**: prediction/recording formats stay unchanged, including early decisions-list support; only replay display and read-only validation change. Secondary-stage greedy Cancel improvements remain under discussion; masks, cancellation, soft bans, rewards and training are not modified.
+- **Regression acceptance**:468 tests and50 subtests pass with real public-Core gates enabled;4 independent rebuilt-asset gates remain disabled. A subsequent22-test pass covers legacy chart API compatibility and final documentation/UI checks. Coverage includes localized axes/tooltips/cursors, retaining past values on events, no future leakage on backward seeks, pause/step/replay changes, rule/malformed records,5,500-point charts and existing PPO/ONNX/trajectory/deployment paths. Actual Game4 (2,205 frames/1,090 predictions) and Game6 (502 frames/221 predictions) contain no missing or invalid predictions; Game6 renders successfully in the patched real Streamlit panel. New modules enter portable scanning; syntax/whitespace checks pass. No additional cloud training or manual browser visual acceptance.
+
+See [prediction curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
+
+### 📊 2026-10-12 dashboard matrix display hotfix
+
+- **Cause/fix**: growing deck counts exceed the Pandas Styler cell limit, not training-data/VRAM capacity. Keeps the full pivot statistics and paginates styling at up to50×50 by default, respecting any lower environment budget without raising global Pandas limits.
+- **Data/controls**: independent own/opponent pages, stale-page clamping after filters, full CSV export, original0–1 rates and unknown-matchup blanks. A fixed0–100% color scale keeps rates comparable across pages. Small matrices retain full percentage views; a disabled Styler uses plain raw-rate tables.
+- **Scope/verification**: WebUI-only fix with bilingual descriptions; release remains3.14.1. Training, networks, protocols, evaluation sampling and greedy decisions stay unchanged.14 targeted tests pass, reproducing560,250 cells, bilingual paging, low/zero limits, changed filters, full CSV and unchanged source data.42 tests pass with prediction replay, deployment forms and bilingual documentation included. Portable scanning includes the new module; syntax/whitespace checks pass. Auxiliary heads and secondary-choice mechanisms are not modified.
+
+---
+
 ## [v3.14.0] - 2026-10-11
 
 ### 🧭 Full V4 main-framework deployment and CUDA semantic aggregation
@@ -22,7 +66,6 @@
 - **Versions**: framework, WebUI, README and portable-package version source move to3.14.0. Model Protocol4/Checkpoint3/revision14/static1/GKG4/raw trajectory2/holographic replay3 remain unchanged. Compatible V4 checkpoints resume with matching vocabulary/semantic identities; V3 is not migrated.
 
 See [CUDA semantic allocation boundaries](architecture_en.md#direct-cuda-semantic-aggregation-2026-10-10).
-For metrics and run interpretation, see the [TensorBoard Metric Reference](tensorboard_metrics_en.md).
 
 ---
 

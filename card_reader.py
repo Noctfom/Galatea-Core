@@ -6,6 +6,7 @@ CardReader 模块
 
 import sqlite3
 import os
+from card_announcement import AnnouncementCard
 
 class CardReader:
     def __init__(self, db_path='cards.cdb'):
@@ -15,6 +16,8 @@ class CardReader:
         self.cache = {}
         self.stats_cache = {}
         self.exists_cache = {}
+        self.announcement_cache = {}
+        self.announcement_catalog = None
         
         if os.path.exists(db_path):
             try:
@@ -60,6 +63,38 @@ class CardReader:
             exists = False
         self.exists_cache[normalized] = exists
         return exists
+
+    def _announcement_from_row(self, row):
+        """缓存原始宣言字段，保留 alias 和完整类型位供 Core 合法性判断"""
+        code, alias, card_type, race, attribute, packed_setcodes = row
+        card = AnnouncementCard(
+            int(code), int(alias or 0), int(card_type or 0), int(race or 0),
+            int(attribute or 0),
+            tuple((int(packed_setcodes or 0) >> shift) & 0xFFFF
+                  for shift in (0, 16, 32, 48)),
+        )
+        self.announcement_cache[card.code] = card
+        return card
+
+    def get_announcement_card(self, code):
+        """读取宣言专用元数据；不存在的卡返回 None，不伪造成合法零属性卡"""
+        code = int(code)
+        if code not in self.announcement_cache:
+            row = self.cursor.execute(
+                'SELECT id, alias, type, race, attribute, setcode FROM datas WHERE id=?',
+                (code,),
+            ).fetchone() if self.cursor else None
+            self.announcement_cache[code] = self._announcement_from_row(row) if row else None
+        return self.announcement_cache[code]
+
+    def get_announcement_catalog(self):
+        """仅在常识池无合法项时缓存完整卡库，仍须经过相同 RPN 过滤"""
+        if self.announcement_catalog is None:
+            rows = self.cursor.execute(
+                'SELECT id, alias, type, race, attribute, setcode FROM datas ORDER BY id'
+            ).fetchall() if self.cursor else ()
+            self.announcement_catalog = tuple(self._announcement_from_row(row) for row in rows)
+        return self.announcement_catalog
 
     def get_card_name(self, code):
         # ... (保持不变) ...

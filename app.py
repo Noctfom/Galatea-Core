@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.14.0"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.14.1"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -565,7 +565,8 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
                                 st.divider()
                                 st.markdown(_("#### ⚔️ 卡组克制矩阵 (行: 我方, 列: 敌方)", "#### ⚔️ Matchup Matrix (Row: My Deck, Col: Opponent)"))
                                 pivot_df = env_df.pivot_table(index='my_deck', columns='opp_deck', values='is_win', aggfunc='mean')
-                                st.dataframe(pivot_df.style.format("{:.1%}").background_gradient(cmap='RdYlGn', axis=None).highlight_null(color='lightgrey'))
+                                from matchup_matrix_ui import render_matchup_matrix
+                                render_matchup_matrix(pivot_df, _, key=f'matchup_matrix_{env}')
                             else:
                                 st.info(_("该池子有效对局数不足。", "Not enough valid games in this pool."))
                                 
@@ -1961,17 +1962,29 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
     st.title(_("🗃️ 资产与卡组管理", "🗃️ Assets & Decks Manager"))
     
     tab_staples, tab_decks, tab_global, tab_virtual,tab_online= st.tabs([
-        _("🃏 泛用卡池配置 (142 兜底)", "🃏 Meta Staples (142 Cache)"),
+        _("🃏 142 宣言追加池", "🃏 142 Announcement Add-on Pool"),
         _("📂 卡组与环境管理", "📂 Deck & Pool Manager"),
         _("⚖️ 动态环境权重调度", "⚖️ Dynamic Pool Weights"),
         _("🧠 虚拟环境构建器", "🧠 Virtual Mix Pool Builder"),
         _("🌐 在线动态环境构建", "🌐 Online Fetcher")
     ])
     
-    # --- 1. 泛用卡池配置 ---
+    # --- 1. Type 142 宣言追加池配置 ---
     with tab_staples:
-        st.markdown(_("当引擎发来极限刁钻的 142 宣言条件时，AI 将优先从这个纯净池里挑选答案。", 
-                      "AI will prioritize this clean pool when facing extreme 142 card announce conditions."))
+        st.markdown(_(
+            "为 Type 142 卡名宣言补充候选：自身主/额外卡组、已知手牌和公开区域的卡片会自动纳入，"
+            "这里可以追加当前未见但可能需要宣言的卡片。所有候选仍须满足引擎的宣言条件；追加池不是白名单，也不保证优先选中。",
+            "Adds candidates for Type 142 card-name announcements. Own Main/Extra cards, known hands, and public cards "
+            "are included automatically; this pool adds cards that are not currently known but may be worth announcing. "
+            "Every candidate must still meet Core's predicate. This is neither a whitelist nor a guarantee of selection.",
+        ))
+        st.caption(_(
+            "配置保存在 meta_staples.json。合并候选筛选后仍为空时，系统才按相同条件扫描 cards.cdb 补全合法选项；"
+            "这与追加池是两个不同机制。运行中的进程会缓存追加池，修改后需重启相关训练/对局进程。",
+            "Stored in meta_staples.json. Only when the combined pool has no legal match does the system search cards.cdb "
+            "under the same predicate. That fallback is separate from this add-on pool. Running processes cache the pool; "
+            "restart the affected training/duel processes after edits.",
+        ))
         
         staples_file = 'meta_staples.json'
         # 确保文件存在
@@ -1985,8 +1998,12 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         c_add, c_del = st.columns(2)
         with c_add:
             st.subheader(_("➕ 添加新卡", "Add New Card"))
-            new_code = st.text_input(_("输入 8 位卡片密码", "Enter 8-digit Card Code"), placeholder="例如: 14558127")
-            if st.button(_("添加到泛用池", "Add to Pool"), use_container_width=True):
+            new_code = st.text_input(
+                _("输入卡片密码", "Card Code"),
+                placeholder="14558127",
+                help=_("输入 cards.cdb 中存在的数字卡密，无需补足 8 位。", "Use a numeric code present in cards.cdb; eight-digit padding is not required."),
+            )
+            if st.button(_("添加到宣言追加池", "Add to Announcement Pool"), use_container_width=True):
                 if new_code.isdigit():
                     code_int = int(new_code)
                     if code_int in staples_list:
@@ -2009,7 +2026,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             # 构建字典供选择
             options = {code: f"{card_db_ui.get_card_name(code)} ({code})" for code in staples_list}
             to_delete = st.multiselect(_("选择要移除的卡片", "Select cards to remove"), options=list(options.keys()), format_func=lambda x: options[x])
-            if st.button(_("从泛用池中移除", "Remove Selected"), type="primary", use_container_width=True):
+            if st.button(_("从宣言追加池移除", "Remove from Announcement Pool"), type="primary", use_container_width=True):
                 if to_delete:
                     staples_list = [c for c in staples_list if c not in to_delete]
                     with open(staples_file, 'w', encoding='utf-8') as f:
@@ -2020,7 +2037,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                     st.warning(_("请先选择卡片！", "Please select cards first!"))
         
         st.divider()
-        st.write(_("📜 当前卡池列表预览：", "📜 Current Staples Preview:"))
+        st.write(_("📜 当前宣言追加池：", "📜 Current Announcement Add-on Pool:"))
         # 用易读的格式展示
         display_list = [f"- **{card_db_ui.get_card_name(code)}** (`{code}`)" for code in staples_list]
         st.markdown("\n".join(display_list))
@@ -3332,25 +3349,29 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             ctrl1, ctrl2, ctrl3, ctrl4, ctrl5 = st.columns([1,1,1,2,5])
             
             def step_prev():
+                """回退一帧并暂停，同步滑块与预测图游标。"""
                 set_replay_cursor(st.session_state, st.session_state.replay_step - 1, max_steps)
                 st.session_state.is_playing = False
             def step_next():
+                """前进一帧并暂停，同步滑块与预测图游标。"""
                 set_replay_cursor(st.session_state, st.session_state.replay_step + 1, max_steps)
                 st.session_state.is_playing = False
             def toggle_play():
+                """切换播放状态，不改变预测面板的显示偏好。"""
                 st.session_state.is_playing = not st.session_state.is_playing
             def on_slider():
+                """跳转到滑块选定帧并暂停播放。"""
                 st.session_state.replay_step = st.session_state.step_slider_widget
                 st.session_state.is_playing = False
             
-            ctrl1.button("⏮️ 上一步", key="btn_prev_step", on_click=step_prev, **REPLAY_BUTTON_WIDTH)
-            play_label = "⏸️ 暂停播放" if st.session_state.is_playing else "▶️ 自动播放"
+            ctrl1.button(_("⏮️ 上一步", "⏮️ Previous"), key="btn_prev_step", on_click=step_prev, **REPLAY_BUTTON_WIDTH)
+            play_label = _("⏸️ 暂停播放", "⏸️ Pause") if st.session_state.is_playing else _("▶️ 自动播放", "▶️ Play")
             ctrl2.button(play_label, type="primary" if st.session_state.is_playing else "secondary", key="btn_toggle_play", on_click=toggle_play, **REPLAY_BUTTON_WIDTH)
-            ctrl3.button("⏭️ 下一步", key="btn_next_step", on_click=step_next, **REPLAY_BUTTON_WIDTH)
+            ctrl3.button(_("⏭️ 下一步", "⏭️ Next"), key="btn_next_step", on_click=step_next, **REPLAY_BUTTON_WIDTH)
 
             play_speed = ctrl4.slider("⏱️ 播放间隔", 0.5, 5.0, 1.5, 0.5, label_visibility="collapsed", key="slider_play_speed")
             if max_steps > 0:
-                st.slider("时间轴", 0, max_steps, format="Step %d", label_visibility="collapsed", key="step_slider_widget", on_change=on_slider)
+                st.slider(_("时间轴", "Timeline"), 0, max_steps, format=_("第 %d 步", "Step %d"), label_visibility="collapsed", key="step_slider_widget", on_change=on_slider)
             else:
                 st.caption(_("该录像仅包含一个有效帧。", "This replay contains one frame."))
                 
@@ -3363,28 +3384,8 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
             t_col6.toggle(_("📊 P1 置信度", "📊 P1 Confidence"), key="tgl_p1_confidence")
 
             step_data = replay_frames[st.session_state.replay_step]
-            with st.expander(_("📈 AI 预测曲线", "📈 AI prediction curves"), expanded=False):
-                from decision_evaluation import replay_evaluation_points
-                evaluation_points = replay_evaluation_points(replay_data)
-                st.caption(_(
-                    "曲线反映 AI 对当前局面的判断，不代表实际胜率。P0/P1 各按自己的可见信息预测，不是互补曲线；剩余长度为动作转移事件数，不是回合数。仅模型决策有预测。",
-                    "Curves show the AI's current assessment, not an actual win rate. Each side uses its own visible information; curves are not complements. Length counts action transitions, not turns. Only model decisions have predictions.",
-                ))
-                if evaluation_points:
-                    evaluation_table = pd.DataFrame(evaluation_points)
-                    st.line_chart(evaluation_table, x='frame', y='win_probability', color='perspective', height=200)
-                    st.line_chart(evaluation_table, x='frame', y='remaining_events', color='perspective', height=160)
-                    current_evaluation = next((point for point in evaluation_points
-                                               if point['frame'] == st.session_state.replay_step + 1), None)
-                    if current_evaluation:
-                        e1, e2, e3 = st.columns(3)
-                        e1.metric(_("AI 预测胜利概率", "AI-predicted win probability"), f"{current_evaluation['win_probability']:.1%}")
-                        e2.metric(_("AI 预测平局概率", "AI-predicted draw probability"), f"{current_evaluation['draw_probability']:.1%}")
-                        e3.metric(_("预计剩余转移事件", "Estimated remaining transitions"), f"{current_evaluation['remaining_events']:.1f}")
-                    if step_data.get('evaluation_actual'):
-                        st.caption(_("真实终局对照（与预测分开）：", "Actual terminal reference (separate from prediction): ") + str(step_data['evaluation_actual']))
-                else:
-                    st.caption(_("该录像没有状态预测。启动竞技场时可勾选对应记录选项；旧录像不反推预测。", "No state evaluations in this replay. Enable recording when starting Arena; old replays are not retroactively predicted."))
+            from replay_evaluation_ui import render_replay_evaluations
+            render_replay_evaluations(replay_data, st.session_state.replay_step, _)
             state = get_replay_frame_state(replay_data, step_data)
             replay_decklists = get_replay_decklists(replay_data)
             api_lang = "sc" if lang == "🇨🇳 中文" else "en"
@@ -4108,7 +4109,7 @@ elif menu == _("📉 训练流形图", "📉 TensorBoard"):
         st.info(_("⚪ TensorBoard 尚未启动，请点击左上方按钮启动服务器。", "⚪ TensorBoard is not running. Click Start."))
     
 # ==========================================
-# 📦 模块八：模型部署与打包 (Model Deployment V3.0.0 本地直连版)
+# 📦 模块八：模型部署与打包（本地封装与协议资产校验）
 # ==========================================
 elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     import zipfile
@@ -4117,6 +4118,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     import platform
     import subprocess
     from model_artifacts import (
+        DEPLOY_PACKAGE_FORMAT_VERSION,
         create_deployment_package,
         get_model_iteration_mismatch,
         install_model_artifact_bundle,
@@ -4128,8 +4130,14 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     )
     
     st.title(_("📦 模型打包与发布工厂", "📦 Model Deployment Factory"))
-    st.markdown(_("将训练好的模型与知识库打包为 `.gkg` 部署包。已启用纯本地原生 I/O 加速，彻底免除网页端大文件传输导致的卡顿与内存溢出。", 
-                  "Package models and knowledge bases into `.gkg` files. Native local I/O enabled to prevent browser freezing and OOM."))
+    st.markdown(_(
+        "将模型与配套协议资产在本地封装为 `.gkg` 部署包，无需通过浏览器上传模型。",
+        "Package models and matching protocol assets into local `.gkg` files without uploading models through the browser.",
+    ))
+    st.caption(_(
+        f"框架 v{LOCAL_VERSION} · 模型协议 V{MODEL_PROTOCOL_VERSION} · GKG 格式 {DEPLOY_PACKAGE_FORMAT_VERSION}。包名仅作文件标识，兼容性以包内清单为准。",
+        f"Framework v{LOCAL_VERSION} · Model Protocol V{MODEL_PROTOCOL_VERSION} · GKG format {DEPLOY_PACKAGE_FORMAT_VERSION}. Names label files; the embedded manifest determines compatibility.",
+    ))
     
     deploy_dir = os.path.abspath("./deploy_packages")
     unpack_dir = os.path.join(deploy_dir, "unpacked")
@@ -4260,8 +4268,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 sel_models = []
                 preview_records = []
                 st.warning(_(
-                    "暂无可验证的模型池；仍可打包完整运行时语义或兜底池。",
-                    "No verified model pool is available; a complete runtime semantic bundle or staples can still be packaged.",
+                    "暂无可验证的模型池；仍可打包完整运行时语义或宣言追加池。",
+                    "No verified model pool is available; a complete runtime semantic bundle or announcement add-on pool can still be packaged.",
                 ))
 
             selection_warning = get_model_iteration_mismatch(preview_records)
@@ -4301,11 +4309,23 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                             "code_embeddings_idx.json + 新版 code_embeddings_meta.json；用于继续生成语义，关闭后仍会自动携带运行表"
                         ),
                     )
-                with c2: inc_staples = st.checkbox("包含 兜底池", value=True, help="meta_staples.json")
+                with c2:
+                    inc_staples = st.checkbox(
+                        _("包含 142 宣言追加池", "Include 142 Announcement Add-on Pool"),
+                        value=True,
+                        help=_("meta_staples.json：补充可宣言卡密，不替代引擎合法性筛选。", "meta_staples.json: additional announcement codes, still filtered by Core's predicate."),
+                    )
                 with c3: st.checkbox("强制安全清单", value=True, disabled=True, help="manifest.json")
                 
                 st.markdown("##### 🏷️ 包体信息")
-                pkg_name = st.text_input(_("自定义包名 (留空默认自动生成)", "Package Name"), placeholder="e.g. Galatea_V3_Full")
+                pkg_name = st.text_input(
+                    _("自定义包名 (留空默认自动生成)", "Package Name (blank for automatic name)"),
+                    placeholder=f"Galatea_V{MODEL_PROTOCOL_VERSION}_Full",
+                    help=_(
+                        f"留空生成 Galatea_V{MODEL_PROTOCOL_VERSION}_Pkg_<时间戳>.gkg；V{MODEL_PROTOCOL_VERSION} 指模型协议，不是框架版本。",
+                        f"Blank generates Galatea_V{MODEL_PROTOCOL_VERSION}_Pkg_<timestamp>.gkg; V{MODEL_PROTOCOL_VERSION} refers to the model protocol, not the framework release.",
+                    ),
+                )
                 
                 if st.form_submit_button(
                     "🔨 " + _("原生极速打包 (.gkg)", "Generate .gkg Fast"),
@@ -4331,7 +4351,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                     else:
                         try:
                             with st.spinner("正在校验身份并进行本地封装..."):
-                                final_name = pkg_name.strip() if pkg_name.strip() else f"Galatea_Pkg_{int(time.time())}"
+                                final_name = pkg_name.strip() if pkg_name.strip() else f"Galatea_V{MODEL_PROTOCOL_VERSION}_Pkg_{int(time.time())}"
                                 validate_package_name(final_name)
                                 target_zip = os.path.join(deploy_dir, f"{final_name}.gkg")
                                 extra_files = {}
@@ -4511,7 +4531,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     ],
                                 ),
                                 (
-                                    "142 泛用宣言池",
+                                    _("142 宣言追加池", "142 Announcement Add-on Pool"),
                                     ["meta_staples.json"] if "meta_staples.json" in staged_files else [],
                                 ),
                             ]

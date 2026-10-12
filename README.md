@@ -7,8 +7,8 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.14.0](https://img.shields.io/badge/Release-v3.14.0-brightgreen.svg)](docs/changelog.md)
-[![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/protocol_v4_implementation.md)
+[![Release: v3.14.1](https://img.shields.io/badge/Release-v3.14.1-brightgreen.svg)](docs/changelog.md)
+[![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/architecture.md#精确卡片身份model-protocol-v4)
 [![Python: 3.11 recommended](https://img.shields.io/badge/Python-3.11_recommended-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -146,7 +146,7 @@ python -m streamlit run app.py
 | [🚀 快速上手](docs/quickstart.md) | 安装、资产准备和首次训练 |
 | [📚 功能详解](docs/features.md) | WebUI 和命令行完整指南 |
 | [🔧 架构设计](docs/architecture.md) | 技术原理和核心算法 |
-| [📊 TensorBoard 指标手册](docs/tensorboard_metrics.md) | 全部固定图表的口径、源码跳转与 V4 云端训练分析 |
+| [📊 TensorBoard 指标手册](docs/tensorboard_metrics.md) | 各项图表的功能、记录口径、纵轴单位与趋势含义 |
 | [🧬 特殊处理逻辑](docs/special_handling.md) | 框架独特特性的实现细节 |
 | [📝 更新日志](docs/changelog.md) | 版本更新历史 |
 

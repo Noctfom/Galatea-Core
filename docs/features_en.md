@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.14.0**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.14.1**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -37,7 +37,7 @@
    - Overall Win Rate: all decks ranked by total win rate
    - Going First Win Rate: each deck's win rate when going first
    - Going Second Win Rate: each deck's breakthrough rate when going second
-   - Counter Matrix: mutual counter relationships between decks
+   - Counter Matrix: training win rates between decks within the current filter. Large matrices paginate both sides for styling and allow full CSV export. Pagination does not change statistics; unplayed matchups stay blank, not 0% wins. Colors consistently represent 0–100%
 
 2. **Dual Deck Comparison**
    - Select two decks for detailed comparison
@@ -59,7 +59,7 @@
 
 **Overview**: Embedded TensorBoard for real-time training metric monitoring.
 
-See the [TensorBoard Metric Reference](tensorboard_metrics_en.md) for complete axes, frequencies, source/design links and measured-run interpretation. The table below is a quick reference, not the full aggregation specification.
+See the [TensorBoard Metric Reference](tensorboard_metrics_en.md) for complete axes, frequencies, source/functionality links and trend interpretation. The table below is a quick reference, not the full aggregation specification.
 
 #### Key Metrics
 
@@ -194,14 +194,14 @@ Bottom of page shows real-time training/arena logs:
 
 **Overview**: Manage deck files, staple pools, environment weights, and virtual mix pools.
 
-#### 🃏 Meta Staples (142 Cache)
+#### 🃏 142 Announcement Add-on Pool
 
-When AI encounters effects requiring card announcement, it prioritizes this pool.
+`meta_staples.json` adds cards to Type 142's known-candidate range. Own Main/Extra cards, known hands, and public cards are collected automatically; the add-on pool supplies currently unknown environment cards, not an independently preferred pool or whitelist. All sources are combined and filtered by Core's RPN predicate. Only an empty filtered pool triggers a database search under the same predicate.
 
 **Features**:
-- Add card: enter 8-digit card code
+- Add card: enter a numeric code present in the current database; eight-digit padding is not required
 - Remove card: select and delete unwanted cards
-- Preview list: view all cards in current pool
+- Preview list: view additional codes; running processes cache this configuration, so restart affected training/duel processes after edits
 
 > 📖 See [Special Handling - 142 Announce Pool](special_handling.md#142-宣言池包装逻辑)
 
@@ -406,6 +406,10 @@ Full deck lists are post-game audit metadata only. They are never exposed to the
 
 Enable “Record AI prediction curves” in Arena to show both models' independent win/loss/draw probabilities and remaining-transition estimates in logged games, separately from actual outcomes. These reflect AI understanding, not actual win rates; PPO value is not a win probability. Full PTH is required, while standard ONNX still returns logits/value. See [interpretation and cost](core_trajectories_en.md#evaluation-semantics).
 
+A persistent replay toggle keeps each side's latest prediction and source step visible through pauses
+and seeks. Localized charts show a playback cursor, source markers and coverage diagnostics, distinguishing
+normal decision gaps from invalid records. See [curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
+
 ![Holographic Replay](图片/全息回放.png)
 
 ---
@@ -422,10 +426,10 @@ Package models as .gkg format:
 - Referenced `.onnx.data` files are included automatically
 - When both PTH and ONNX are selected, their embedded iteration sets must match
 - Always include the compiled `semantic_lookup_v1.npz` + `semantic_lookup_v1.json` runtime assets and exact vocabulary, allowing PTH construction and cross-machine ONNX identity validation
-- Optionally include semantic sources for continuation (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, modern `code_embeddings_meta.json` and `hash_mapping_report.json` when present) and the staple pool (`meta_staples.json`)
+- Optionally include semantic sources for continuation (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, modern `code_embeddings_meta.json` and `hash_mapping_report.json` when present) and the 142 announcement add-on pool (`meta_staples.json`)
 - The three semantic source files cannot be imported or exported separately; the manifest cross-checks source files, compiled tables, vocabulary, and the model's logical semantic identity
 - Always generate and validate `manifest.json`
-- Custom package name support
+- Custom package names; leaving the WebUI field blank generates `Galatea_V4_Pkg_<timestamp>.gkg`. `V4` identifies the model protocol. Compatibility is determined by the embedded manifest, not the filename
 
 #### 📤 Unpack & Selective Import
 

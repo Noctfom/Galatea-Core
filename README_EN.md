@@ -7,8 +7,8 @@
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.14.0](https://img.shields.io/badge/Release-v3.14.0-brightgreen.svg)](docs/changelog_en.md)
-[![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/protocol_v4_implementation_en.md)
+[![Release: v3.14.1](https://img.shields.io/badge/Release-v3.14.1-brightgreen.svg)](docs/changelog_en.md)
+[![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/architecture_en.md#exact-card-identity-model-protocol-v4)
 [![Python: 3.11 recommended](https://img.shields.io/badge/Python-3.11_recommended-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 
@@ -150,7 +150,7 @@ python -m streamlit run app.py
 | [🚀 Quick Start](docs/quickstart_en.md) | Installation, asset preparation and first training |
 | [📚 Feature Guide](docs/features_en.md) | Complete WebUI and CLI guide |
 | [🔧 Architecture](docs/architecture_en.md) | Technical principles and core algorithms |
-| [📊 TensorBoard Metric Reference](docs/tensorboard_metrics_en.md) | All fixed metrics, source links and V4 cloud-run analysis |
+| [📊 TensorBoard Metric Reference](docs/tensorboard_metrics_en.md) | Chart purposes, logging definitions, y-axis units and trend interpretation |
 | [🧬 Special Handling](docs/special_handling_en.md) | Implementation details of unique features |
 | [📝 Changelog](docs/changelog_en.md) | Version history |
 

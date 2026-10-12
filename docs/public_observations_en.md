@@ -1,6 +1,6 @@
 # 3.13.3: Public hints, timing feedback and known deck positions
 
-> Usage guidance applies to v3.14.0; dated repair and measurement evidence below remains historical.
+> Usage guidance applies to v3.14.1; dated repair and measurement evidence below remains historical.
 
 This batch connects Types120,160/165,37/38 and162 to the shared state/observation path. It does not modify public Core, rewards, decision-request counts, MCTS or a universal active-effect tracker.
 
@@ -13,6 +13,7 @@ Framework3.13.3; Model Protocol4 and Checkpoint Format3 remain unchanged; schema
 | Message | Information | Lifetime/boundary |
 | --- | --- | --- |
 | 120 | Missed-timing code/location, result flag, notification order and last processing chain | Separate from the original action source; no desc/target/cause IDs and no extra penalty |
+| 160 subtype0 | Clear the latest scalar hint | Independent description references remain; the clear notification uses existing event/replay fields |
 | 160 subtypes1–5 | Latest typed32-bit value | Does not overwrite identity/stats/counters; ordinary moves clear the scalar, same-coordinate position changes do not |
 | 160 subtypes6/7 | Instance+desc reference counts | ADD increments, REMOVE decrements; follows known movement/reindexing/swaps/material layers |
 | 165 | Affected player+desc reference counts | No field-slot assumption or invented expiry; persists beyond16-step history until Core REMOVE |
@@ -20,6 +21,14 @@ Framework3.13.3; Model Protocol4 and Checkpoint Format3 remain unchanged; schema
 | 162 | Fixed7/8 slots, positions/overlay counts, LP, zone counts and chains | Strict whole-packet validation before atomic rebuild; public query completes available identities, never invents unknown ones |
 
 Hand shuffle clears mappings before Core re-emits description ADD, avoiding doubled references. Hidden set-card shuffles cannot use internal identity queries to secretly follow instances. Unrecoverable hints are cleared with an incomplete-state flag; unmatched REMOVE never produces negative counts. Player hints survive source-card departure.
+
+### 3.14.1 hint-boundary hotfix
+
+Type160 retains its exact nine-byte layout and accepts Core subtypes0–7. Public Core may emit CLIENT_HINT during script initialization before inserting a card into a zone: `controller=PLAYER_NONE(2), location=0`. This was reproduced with20989253. Empty zones for controller0/1 also have no visible host. Following public-client behavior, these notifications are ignored without creating P2 cards, occupying hint/history slots, marking observations incomplete or creating holographic events. Raw trajectories still retain the actual packets.
+
+A valid-zone hint does not require its host to have reached the Python query mirror, avoiding information loss from update ordering. Subtype0 clears only the scalar;6/7 reference lifetimes remain unchanged. Unknown subtypes, invalid controllers, PLAYER_NONE with a nonempty zone and truncated/trailing bytes still fail, with location/subtype/value diagnostics. Validation is not disabled, and no guessed active-effect tracking is introduced.
+
+Model Protocol4/Checkpoint3/revision14, all23 public input fields and semantic asset identities remain unchanged. Compatible checkpoints resume after restarting training/arena processes; updating source does not patch already-running Workers.
 
 Hint presence does not guarantee the corresponding rule is active. Age is elapsed time since notification, not remaining duration. Effects without CLIENT_HINT, including relevant bundled Maxx “C”/Droll effects, are not magically covered. CARD_QUESTION blocks graveyard query identities/dynamic state only for the player receiving that viewing restriction; legitimate prior event memory is not erased.
 

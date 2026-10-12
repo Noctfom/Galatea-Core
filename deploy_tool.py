@@ -5,6 +5,7 @@ import shutil
 import tempfile
 
 from card_vocab import synchronize_authoritative_card_vocabulary
+from checkpoint_utils import MODEL_PROTOCOL_VERSION
 
 from model_artifacts import (
     create_deployment_package,
@@ -25,7 +26,7 @@ def clear_screen():
 def print_header():
     clear_screen()
     print("==================================================")
-    print("      📦 Galatea 模型部署与打包工具 V3.0.0      ")
+    print(f"      📦 Galatea 模型部署与打包工具（模型协议 V{MODEL_PROTOCOL_VERSION}）      ")
     print("==================================================\n")
 
 def pack_model():

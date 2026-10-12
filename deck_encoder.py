@@ -121,25 +121,27 @@ class DeckEncoder(nn.Module):
         return_per_card: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """返回卡组风格、固定 latent 和与输入顺序等变的逐卡表示"""
-        if card_features.ndim != 3 or card_features.shape[-1] != self.d_model:
-            raise ValueError("deck card_features must have shape [B, N, d_model]")
-        expected_shape = card_features.shape[:2]
-        for name, value in (
-            ("section", section),
-            ("initial_count", initial_count),
-            ("remaining_count", remaining_count),
-            ("valid_mask", valid_mask),
-        ):
-            if tuple(value.shape) != tuple(expected_shape):
-                raise ValueError(
-                    f"deck {name} has shape {tuple(value.shape)}, "
-                    f"expected {tuple(expected_shape)}"
-                )
+        # 固定协议在正常推理时校验；导出不把 Python 形状判断写入追踪图
+        if not torch.onnx.is_in_onnx_export():
+            if card_features.ndim != 3 or card_features.shape[-1] != self.d_model:
+                raise ValueError("deck card_features must have shape [B, N, d_model]")
+            expected_shape = card_features.shape[:2]
+            for name, value in (
+                ("section", section),
+                ("initial_count", initial_count),
+                ("remaining_count", remaining_count),
+                ("valid_mask", valid_mask),
+            ):
+                if tuple(value.shape) != tuple(expected_shape):
+                    raise ValueError(
+                        f"deck {name} has shape {tuple(value.shape)}, "
+                        f"expected {tuple(expected_shape)}"
+                    )
+            if valid_mask.shape[1] <= 0:
+                raise ValueError("deck encoder requires at least one padded entry")
 
         mask = valid_mask.bool()
         empty_profiles = ~mask.any(dim=1)
-        if mask.shape[1] <= 0:
-            raise ValueError("deck encoder requires at least one padded entry")
         fallback_entry = torch.arange(
             mask.shape[1],
             device=mask.device,

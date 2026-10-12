@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from game_constants import LocationInfo, Position, Zone
 from data_types import TRANSITION_EVENT_HISTORY_SIZE
 from event_history import MAX_PUBLIC_NOTIFICATIONS
+from core_message_protocol import card_hint_has_host
 
 
 MAX_PUBLIC_HINTS = 128
@@ -94,12 +95,15 @@ class PublicObservationState:
 
     def card_hint(self, raw, kind, value, turn):
         """更新最新数值提示或说明引用；撤销只删除一份引用"""
+        if not card_hint_has_host(raw, kind, value):
+            return
         key = location_key(raw)
-        if key[0] not in (0, 1) or key[1] == 0 or not 1 <= kind <= 7:
-            raise ValueError("invalid public card hint")
         scalar, descriptions = self.card_hints.get(key, (None, {}))
         descriptions = dict(descriptions)
-        if kind <= 5:
+        if kind == 0:
+            # Core 的 SetHint(0, 0) 只清除数值提示，不撤销说明引用
+            scalar = None
+        elif kind <= 5:
             scalar = PublicHint(key[0], encode_location_key(key), kind, value, turn=turn)
         elif kind == 6:
             previous = descriptions.get(value)

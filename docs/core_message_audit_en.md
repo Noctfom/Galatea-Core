@@ -1,6 +1,6 @@
 # 3.13.2: Fixed Core messages and cognition gaps
 
-> This page preserves the 3.13.2 audit. For v3.14.0, read it alongside the 3.13.3 implementation status below.
+> This page preserves the 3.13.2 audit. For v3.14.1, read it alongside the 3.13.3 implementation status below.
 > Current Model Protocol 4 / Checkpoint Format 3 / schema revision 14; historical gaps are not necessarily still open.
 
 Splitting a message, maintaining its state and exposing it to the model are separate layers.
@@ -15,6 +15,10 @@ Independent raw Trajectory Schema 2; holographic JSON remains format 3.
 ### 3.13.3 implementation status
 
 Types120,160/165,37/38 and162 now have shared state/input/network/training/ONNX/replay support; see [lifetimes and cost](public_observations_en.md). Model Protocol4 / Checkpoint3 remain unchanged, revision14. Type35 stays deferred and Tag161 is unsupported. Hints are not universal active-effect tracking; old assets without code/source metadata remain unknown. The following current-gap/proposal/unchanged-network statements describe the historical3.13.2 audit, not incomplete3.13.3 implementation.
+
+### 3.14.1 parser hotfix
+
+Type160 accepts clear subtype0 and initialization without a placed host instead of rolling back valid Core notifications; malformed fields/lengths still fail. Type142 now aligns constant `[1]`, arithmetic, bit intersections, database/alias/Token eligibility and constrained fallback; invented Level/Link opcode meanings are removed. See [hint boundaries](public_observations_en.md#3141-hint-boundary-hotfix) and [announcement pools](special_handling_en.md#142-announce-pool-wrapper-logic). Network, input fields and revision14 are unchanged. Other3.13.2 gap statements remain historical.
 
 Type 16 SELECT_CHAIN, little-endian payload:
 

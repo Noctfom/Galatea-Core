@@ -12,12 +12,14 @@ from copy import copy
 from game_constants import LocationInfo, Position, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
+from card_announcement import CardAnnouncementPredicate
 from deck_protocol import DeckProfile
 from core_message_protocol import (
     CoreMessageProtocolError,
     is_empty_chain_prompt,
     parse_chain_prompt,
     parse_confirm_cards,
+    parse_card_hint,
     read_chain_prompt,
     read_confirm_cards,
     read_reload_field,
@@ -723,7 +725,7 @@ class DuelState:
             elif msg_type == 38:
                 self.public_observation.deck_top(*struct.unpack('<BBI', msg_payload))
             elif msg_type == 160:
-                raw, kind, value = struct.unpack('<IBI', msg_payload)
+                raw, kind, value, _ = parse_card_hint(msg_payload)
                 self.public_observation.card_hint(raw, kind, value, self.turn)
             elif msg_type == 165:
                 player, kind, desc = struct.unpack('<BBI', msg_payload)
@@ -1697,7 +1699,9 @@ class DuelState:
             # [阶段一追加] 9. 宣言类消息解析
             # =================================================================
             elif msg_type in [140, 141, 142, 143]:
-                stream.read(1) # P
+                player = stream.read(1)[0]
+                if player not in (0, 1):
+                    raise CoreMessageProtocolError('announcement player must be 0 or 1')
                 count = struct.unpack('<B', stream.read(1))[0]
                 
                 # 种族 (140) / 属性 (141)
@@ -1726,27 +1730,31 @@ class DuelState:
                     opcodes = []
                     for _ in range(count):
                         buf = stream.read(4)
-                        if len(buf) < 4: break # 防御性编程
+                        if len(buf) != 4:
+                            raise CoreMessageProtocolError('Type 142 opcode truncated')
                         opcodes.append(struct.unpack('<I', buf)[0])
+                    if stream.read(1):
+                        raise CoreMessageProtocolError('Type 142 has unexpected trailing bytes')
+                    predicate = CardAnnouncementPredicate(opcodes)
                     
                     unique_codes = set()
                     
                     def add_valid_code(raw_code):
-                        pure_code = raw_code & 0x0FFFFFFF
-                        if pure_code > 10000: # 屏蔽乱码/Token
-                            try:
-                                card_db.get_full_stats(pure_code) # 数据库自检
-                                unique_codes.add(pure_code)
-                            except Exception as e:
-                                print(f"⚠️ [RPN VM] 无法识别的卡片代码 {pure_code}，已自动忽略: {e}")
+                        """只加入真实存在的卡，保留低位卡密及未被标记的完整编号"""
+                        code = int(raw_code)
+                        card = card_db.get_announcement_card(code)
+                        if card is None and code & 0x80000000:
+                            code &= 0x7FFFFFFF
+                            card = card_db.get_announcement_card(code)
+                        if card is not None:
+                            unique_codes.add(code)
                     
-                    # 有些卡会把真实卡密直接作为参数发过来！
-                    for op in opcodes:
-                        if 10000 < op < 0x40000000: 
-                            add_valid_code(op)
+                    # 仅 ISCODE 的字面参数是明确卡名，不把恒真1或属性掩码当作白名单
+                    for code in predicate.literal_card_codes():
+                        add_valid_code(code)
 
                     # 2. 收集自身卡组与公开情报
-                    my_cards = (self.p0_deck + self.p0_extra) if self.active_player == 0 else (self.p1_deck + self.p1_extra)
+                    my_cards = (self.p0_deck + self.p0_extra) if player == 0 else (self.p1_deck + self.p1_extra)
                     for c in my_cards: add_valid_code(c)
                         
                     for p in [0, 1]:
@@ -1758,7 +1766,7 @@ class DuelState:
                                 is_public = bool(
                                     pos & 0x1 or pos & 0x4 or pos & 0x20
                                 )
-                                if p != self.active_player and not is_public and loc not in [Zone.GRAVE, Zone.REMOVED]:
+                                if p != player and not is_public and loc != Zone.GRAVE:
                                     continue
                                 if code != 0: add_valid_code(code)
 
@@ -1772,108 +1780,24 @@ class DuelState:
                             _META_STAPLES = [14558127, 23434538, 10045474, 24094653, 73642296, 32807846]
                     for c in _META_STAPLES: add_valid_code(c)
                     
-                    if not unique_codes: unique_codes = {14558127, 23434538}
-
-                    # 微型 RPN 逆波兰计算器 (严格 C++ 协议版)
-                    def evaluate_rpn(code_to_test):
-                        if not opcodes: return True
-                        try:
-                            stats = card_db.get_full_stats(code_to_test)
-                            c_type = stats[0]; c_race = stats[1]; c_att = stats[2]
-                            c_level = stats[3]; c_link = stats[7]; c_setcodes = stats[10]
-                        except:
-                            return False
-                        
-                        stack = []
-                        for op in opcodes:
-                            if op < 0x40000000: # 参数压栈
-                                stack.append(op)
-                            else: # 执行操作
-                                if not stack: return False
-                                if op == 0x40000100: # ISCODE
-                                    stack.append(1 if code_to_test == stack.pop() else 0)
-                                elif op == 0x40000101: # ISSETCARD
-                                    v = stack.pop()
-                                    match = 0
-                                    settype = v & 0xfff
-                                    setsubtype = v & 0xf000
-                                    for sc in c_setcodes:
-                                        if (sc & 0xfff) == settype and (sc & 0xf000 & setsubtype) == setsubtype:
-                                            match = 1
-                                            break
-                                    stack.append(match)
-                                elif op == 0x40000102: # ISTYPE
-                                    val = stack.pop()
-                                    stack.append(1 if (c_type & val) == val else 0) # 严格位包含
-                                elif op == 0x40000103: # ISRACE
-                                    val = stack.pop()
-                                    stack.append(1 if (c_race & val) == val else 0)
-                                elif op == 0x40000104: # ISATTRIBUTE
-                                    val = stack.pop()
-                                    stack.append(1 if (c_att & val) == val else 0)
-                                elif op == 0x40000105: # ISLEVEL (补全等级判定)
-                                    stack.append(1 if c_level == stack.pop() else 0)
-                                elif op == 0x40000107: # ISLINK (补全连接判定)
-                                    stack.append(1 if c_link == stack.pop() else 0)
-                                elif op == 0x40000004: # AND
-                                    if len(stack) < 2: return False
-                                    v2 = stack.pop(); v1 = stack.pop()
-                                    stack.append(1 if (v1 and v2) else 0)
-                                elif op == 0x40000005: # OR
-                                    if len(stack) < 2: return False
-                                    v2 = stack.pop(); v1 = stack.pop()
-                                    stack.append(1 if (v1 or v2) else 0)
-                                elif op == 0x40000007: # NOT
-                                    stack.append(0 if stack.pop() else 1)
-                                else:
-                                    stack.append(0) # 兜底未知操作
-                                    print(f"⚠️ [RPN VM] 未知操作码 {hex(op)}，已自动忽略")
-                        return bool(stack[-1]) if stack else True # 必须返回 stack[-1] (栈顶)
-
-                    # 区分“纯白名单”和“RPN计算”
-                    def is_strictly_valid(c_test):
-                        if not opcodes: return True
-                        has_real_ops = any(op >= 0x40000000 for op in opcodes)
-                        if not has_real_ops:
-                            # 只发来纯卡密列表的，必须且只能在列表内
-                            return c_test in opcodes
-                        return evaluate_rpn(c_test)
-
-                    # 批改返回卡池，只保留满足条件的选项
-                    def is_really_valid(c_test):
-                        if not opcodes: return True
-                        # 检查 opcodes 是否包含任何真正的 RPN 操作符
-                        has_real_ops = any(op >= 0x40000000 for op in opcodes)
-                        if not has_real_ops:
-                            # 如果只是卡密列表（如抹杀指名者），必须在列表内才合法
-                            return c_test in opcodes
-                        # 否则走原本的虚拟机计算
-                        return evaluate_rpn(c_test)
-                    filtered_codes = [c for c in unique_codes if is_really_valid(c)]
-                    
-                    # 防御机制：如果 RPN 解析有瑕疵导致全灭，回退到全集交给 RuleBot 强行穷举
-                    if not filtered_codes: 
-                        trigger_card = "未知卡片/时点动作"
-                        try:
-                            # 借助状态机自带的堆栈，直接抓出幕后黑手
-                            if hasattr(self, 'chain_stack') and self.chain_stack:
-                                top_code = self.chain_stack[-1]['code']
-                                trigger_card = f"连锁中 -> 【{card_db.get_card_name(top_code)}】({top_code})"
-                            elif hasattr(self, 'history_stack') and self.history_stack:
-                                top_code = self.history_stack[0]['code']
-                                trigger_card = f"最近动向 -> 【{card_db.get_card_name(top_code)}】({top_code})"
-                        except Exception as e:
-                            print(f"⚠️ [Gamestate RPN雷达] 回退机制触发，但抓取触发源头失败: {e}")
-
-                        print("❌ [Gamestate RPN雷达] Type 142 (卡名宣言) 过滤后选项集全空！")
-                        print(f"   -> 🎯 触发源头: {trigger_card}")
-                        print(f"   -> 📊 原始 Opcodes 数量(Count): {count}")
-                        print(f"   -> 🔒 原始 Opcodes 编码流: {opcodes}")
-                        print("   -> 💡 状态: 已安全启动兜底回退，开放 unique_codes 全集，防止 AI 无处点选导致死锁。")
-
-                        filtered_codes = list(unique_codes)
+                    filtered_codes = [
+                        code for code in unique_codes
+                        if predicate.matches(card_db.get_announcement_card(code))
+                    ]
+                    if not filtered_codes:
+                        # 小池未覆盖条件时只扩大搜索，不撤销 Core 的合法性约束
+                        filtered_codes = [
+                            card.code for card in card_db.get_announcement_catalog()
+                            if predicate.matches(card)
+                        ]
+                        if not filtered_codes:
+                            raise CoreMessageProtocolError(
+                                f'Type 142 has no declarable card in cards.cdb: opcodes={opcodes}'
+                            )
+                        print(f"ℹ️ [卡名宣言] 常识池未命中条件，已从卡库补入 {len(filtered_codes)} 张合法候选。")
                     
                     def get_priority_score(c):
+                        """保留原常识池优先级，只按已知或公开身份提升权重"""
                         score = 0
                         if c in my_cards: score += 100 # 自己卡组/额外里的卡最重要
                         for p in [0, 1]:
@@ -1881,6 +1805,9 @@ class DuelState:
                             # 遍历所有区域，如果在场上/墓地/除外区出现过，权重提升
                             for loc in [Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED]:
                                 for info in self.field_map[p].get(loc, {}).values():
+                                    pos = info.get('pos', 0)
+                                    if p != player and not pos & (0x1 | 0x4 | 0x20) and loc != Zone.GRAVE:
+                                        continue
                                     pure_c = info.get('code', 0) & 0x7FFFFFFF
                                     if pure_c == c: score += 50
                         if c in _META_STAPLES: score += 10 # 泛用手坑保底分
@@ -1891,7 +1818,7 @@ class DuelState:
                         
                     self.announce_card_candidates = list(filtered_codes)
                     
-                    # 此时，交给 AI 的选项将是 100% 完美的
+                    # 响应仍是实际卡密；后续沿用既有候选上限与加权缩减。
                     for i, code in enumerate(self.announce_card_candidates):
                         self.current_valid_actions.append(GameAction(
                             action_type=142,

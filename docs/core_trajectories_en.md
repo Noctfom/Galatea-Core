@@ -1,6 +1,6 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.14.0**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
+This document applies to **v3.14.1**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
@@ -21,9 +21,23 @@ They can be used independently; training Workers and PPO storage are unchanged.
 ```
 
 WebUI Arena offers “Record canonical Core trajectories” and “Record AI prediction curves”.
-The replay expander displays independent perspective win/remaining-event curves, the current
-decision's draw probability, and available actual-terminal references. Rule agents have no
-fabricated predictions; old recordings are not retroactively evaluated.
+The replay “AI prediction curves” toggle displays independent win/draw probabilities, remaining-event
+curves and available actual-terminal references. Its state persists across pauses and seeks.
+Rule agents have no fabricated predictions; old recordings are not retroactively evaluated.
+
+### Prediction curves and playback position
+
+- **Horizontal axis**: zero-based replay steps, matching the slider and including model decisions, rule decisions and visible events. These are neither turns nor training-sample counts.
+- **Vertical axes**: the upper chart shows each AI's prediction of its own eventual win (0–100%); the lower chart shows estimated remaining action-transition events, nonnegative and not formatted as probabilities.
+- **Colors and cursor**: P0 blue, P1 orange. The dashed line marks the playback step; dots mark each side's latest valid prediction at or before it. Hover shows the source step, perspective, win/draw/loss probabilities and remaining events.
+- **Figures**: P0/P1 are displayed separately. On events and pauses, previous predictions remain visible with source steps and age in frames. They are not recomputed for the current position or backfilled from future predictions. A side with no earlier prediction is explicitly left empty.
+- **Blank beginnings/endings**: only actual model decisions record predictions. Different first/last decision times normally produce different curve spans. Rule agents have no model curves; terminal events do not automatically add predictions. Connecting lines do not mean every intermediate frame was evaluated.
+- **Missing-data diagnostics**: “Prediction coverage and gaps” lists valid points/spans, explicitly model-sourced decisions without predictions and rejected invalid predictions. Format, units, perspective and numerical issues are explained rather than represented as zero probabilities.
+- **Actual outcomes**: separate references give each source decision's real outcome and remaining-event count. They do not enter predicted curves or figures. The sides' predictions need not add to one, and PPO value is not a win probability.
+
+See [prediction validation](../decision_evaluation.py) and [prediction UI](../replay_evaluation_ui.py).
+This display fix changes neither recording formats, networks, action selection, training data,
+protocols nor checkpoints.
 
 Raw trajectories: `replays/core_trajectories/*.core.jsonl.gz`. Holographic JSON remains in
 `ai_thoughts/`. Both are manageable in Storage & Logs → AI Thought Records. Trajectories contain

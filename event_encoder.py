@@ -118,7 +118,7 @@ class EventHistoryEncoder(nn.Module):
 
     def _encode_locations(self, context):
         """编码 `[角色, 区域, 序号, 表示]` 四元组"""
-        if context.shape[-1] != TRANSITION_EVENT_LOCATION_DIM:
+        if not torch.onnx.is_in_onnx_export() and context.shape[-1] != TRANSITION_EVENT_LOCATION_DIM:
             raise ValueError("transition location context width is invalid")
         context = context.long()
         return (
@@ -164,7 +164,7 @@ class EventHistoryEncoder(nn.Module):
             ],
             dim=-1,
         )
-        if numeric.shape[-1] != EVENT_NUMERIC_DIM:
+        if not torch.onnx.is_in_onnx_export() and numeric.shape[-1] != EVENT_NUMERIC_DIM:
             raise ValueError("transition numeric feature width is invalid")
 
         tokens = (

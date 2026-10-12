@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.14.0**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.14.1**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -15,7 +15,7 @@
 - [Build Semantic Knowledge Base](#build-semantic-knowledge-base)
 - [Prepare Decks](#prepare-decks)
 - [Adjust Deck Weights (Optional)](#adjust-deck-weights-optional)
-- [Check Special Announce Pool (Optional)](#check-special-announce-pool-optional)
+- [Configure the 142 Announcement Add-on Pool (Optional)](#configure-the-142-announcement-add-on-pool-optional)
 - [RuleBot Stress Test (Optional)](#rulebot-stress-test-optional)
 - [Start Training](#start-training)
 - [View Training Results](#view-training-results)
@@ -136,12 +136,14 @@ Go to **🗃️ Assets & Deck Management → ⚖️ Dynamic Pool Weights**:
 
 ---
 
-## Check Special Announce Pool (Optional)
+## Configure the 142 Announcement Add-on Pool (Optional)
 
-Go to **🗃️ Assets & Deck Management → 🃏 Meta Staples (142 Cache)**:
+Go to **🗃️ Assets & Deck Management → 🃏 142 Announcement Add-on Pool**:
 
-- View current staple cards (default includes common handtraps: Ash Blossom, Maxx "C", etc.)
-- Add/remove cards as needed
+- Own Main/Extra cards, known hands, and public cards automatically supply candidates; there is no need to repeat full deck lists here
+- Add common but currently unknown cards through `meta_staples.json` (defaults include Ash Blossom and Maxx "C"); every candidate still passes Core's predicate
+- This is not a whitelist or guaranteed priority. Only an empty filtered pool triggers a database search under the same predicate
+- Running processes cache this pool; restart affected training/duel processes after edits
 
 ![Staple Configuration](图片/泛用卡组配置.png)
 
@@ -243,7 +245,7 @@ After training starts, view real-time logs at the bottom of **⚔️ Launch & Mo
 
 ### TensorBoard Curves
 
-See the [TensorBoard Metric Reference](tensorboard_metrics_en.md) for every fixed chart's axes, aggregation and example analysis.
+See the [TensorBoard Metric Reference](tensorboard_metrics_en.md) for every fixed chart's purposes, axes, aggregation and trend interpretation.
 
 Go to **📉 Training Manifold**, click **🚀 Start TensorBoard** to view:
 
@@ -301,7 +303,9 @@ Enable “Record AI prediction curves” and a positive thought-log frequency in
 players' state predictions in Holographic Replay. Manual calibration is not required to view them,
 but they express AI understanding, not actual win rates. Remaining length means both players'
 decision-transition events, not turns. This diagnostic requires full PTH; standard ONNX still
-outputs only logits/value. See [trajectories and curves](core_trajectories_en.md).
+outputs only logits/value. The dashed cursor follows the zero-based timeline; separate P0/P1 figures
+retain their latest source step through pauses and events. Coverage diagnostics explain blank spans
+and rejected records. See [curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
 
 ### Meta Dashboard
 
@@ -341,7 +345,7 @@ Imported models appear in `./models/`. Jump to [Arena Testing](#arena-model-test
 
 ## Next Steps
 
-- 🎞️ Use [Canonical Core trajectories and state-evaluation replay](core_trajectories_en.md): enable Arena recording options, expand evaluation curves in replay, or run read-only `trajectory-check --replay`
+- 🎞️ Use [Canonical Core trajectories and state-evaluation replay](core_trajectories_en.md): enable Arena recording options, turn on evaluation curves in replay, or run read-only `trajectory-check --replay`
 - 🧪 3.13.5 external files: Storage & Logs → Trajectory Ingress & Quality. `replay-ingest` / `dataset-build` inspect, convert and split without starting training; readable YRP/partial Link data does not automatically qualify for learning
 - 📚 Read [Feature Guide](features.md) for detailed module usage
 - 🔧 Read [Architecture](architecture.md) for framework internals

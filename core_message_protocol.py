@@ -11,6 +11,29 @@ class CoreMessageProtocolError(ValueError):
     """表示报文不符合当前随包 Core 的固定协议"""
 
 
+def card_hint_has_host(raw, kind, value):
+    """校验卡片提示；未放入区域的初始化实例没有可见宿主"""
+    controller, zone = raw & 0xFF, (raw >> 8) & 0xFF
+    if not (0 <= raw <= 0xFFFFFFFF and 0 <= value <= 0xFFFFFFFF
+            and 0 <= kind <= 7 and controller in (0, 1, 2)
+            and (controller in (0, 1) or zone == 0)):
+        raise CoreMessageProtocolError(
+            f'invalid public card hint: raw={raw:#x}, controller={controller}, '
+            f'zone={zone:#x}, kind={kind}, value={value}'
+        )
+    return zone != 0
+
+
+def parse_card_hint(payload):
+    """严格解码 Type 160 的九字节负载，保留清除提示与空宿主语义"""
+    if len(payload) != 9:
+        raise CoreMessageProtocolError(
+            f'Type 160 payload must be 9 bytes, got {len(payload)}'
+        )
+    raw, kind, value = struct.unpack('<IBI', payload)
+    return raw, kind, value, card_hint_has_host(raw, kind, value)
+
+
 def _read_exact(stream, size, label):
     """读取完整字段，拒绝把截断报文静默当成空消息"""
     value = stream.read(size)

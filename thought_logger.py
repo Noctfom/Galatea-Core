@@ -10,6 +10,7 @@ from card_reader import card_db
 from data_types import ActionOperation, SummonMethod
 from game_constants import LocationInfo, Phases, Zone
 from public_hint_semantics import resolve_public_hint
+from core_message_protocol import parse_card_hint
 
 
 REPLAY_FORMAT_VERSION = 3
@@ -402,14 +403,16 @@ def _build_core_event(snapshot, msg_type, payload):
                      actor=_reference_from_raw(snapshot, raw, code), source_code=code, location=raw)
     elif msg_type in (160, 165):
         if msg_type == 160:
-            raw, hint_kind, value = struct.unpack('<IBI', payload)
+            raw, hint_kind, value, has_host = parse_card_hint(payload)
+            if not has_host:
+                return None
             reference = _reference_from_raw(snapshot, raw)
             player = reference['owner']
             owner = _card_name(reference.get('code', 0))
         else:
             player, hint_kind, value = struct.unpack('<BBI', payload)
             raw, reference, owner = -1, None, f"P{player}"
-        hint_names = {1: "回合计数", 2: "卡片宣言", 3: "种族宣言", 4: "属性宣言", 5: "数字提示", 6: "说明 ADD", 7: "说明 REMOVE"}
+        hint_names = {0: "清除数值提示", 1: "回合计数", 2: "卡片宣言", 3: "种族宣言", 4: "属性宣言", 5: "数字提示", 6: "说明 ADD", 7: "说明 REMOVE"}
         shown = _card_name(value) if hint_kind == 2 else str(value)
         event.update(kind="public_hint", label=f"{owner}：{hint_names.get(hint_kind, hint_kind)} {shown}",
                      actor=reference, player=player, location=raw, hint_kind=hint_kind, hint_value=value)
@@ -789,6 +792,8 @@ class AIThoughtLogger:
             return
         try:
             event = _build_core_event(snapshot, msg_type, payload)
+            if event is None:
+                return
             self.thoughts.append({
                 "frame_type": "event",
                 "turn": int(turn),

@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.14.0. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.14.1. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -21,6 +21,7 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 ## V4 deployment and training validation
 
 - [x] 3.14.0: full V4 main-framework deployment, direct CUDA semantic aggregation and bilingual documentation audit; Model Protocol4/Checkpoint3/revision14 unchanged
+- [x] 3.14.1: public-hint/announcement hotfixes, deployment labels and public metric-reference corrections, dual-view prediction cursors/coverage diagnostics; protocols and network unchanged
 - [ ] Complete50-iteration trends,100–200-iteration medium runs and long-term fixed Arena comparisons; temporary short-run stability is not acceptance
 - [ ] Select compatible PyTorch by Python/GPU/driver in the Linux helper without overwriting existing cloud environments; use documented manual installation meanwhile
 

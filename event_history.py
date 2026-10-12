@@ -15,6 +15,7 @@ from data_types import (
     TransitionResultFlag,
 )
 from game_constants import Zone
+from core_message_protocol import parse_card_hint
 
 
 TRANSITION_EVENT_FORMAT_VERSION = 2
@@ -265,6 +266,11 @@ class TransitionEventRecorder:
         msg_type = int(msg_type)
         if msg_type not in _PUBLIC_EVENT_MESSAGES:
             return
+        if msg_type == 160:
+            raw_hint, hint_subtype, hint_value, has_host = parse_card_hint(payload)
+            if not has_host:
+                # 初始化阶段的空位置提示没有玩家可见宿主，不占历史通知槽
+                return
         pending.event_visibility_mask = ALL_PLAYERS_VISIBILITY_MASK
         pending.message_count += 1
         if msg_type not in pending.message_types:
@@ -287,8 +293,7 @@ class TransitionEventRecorder:
                 code = int.from_bytes(payload[4:8], 'little') & 0x7FFFFFFF
                 pending.result_flags |= int(TransitionResultFlag.MISSED_TIMING)
             elif msg_type == 160:
-                raw = int.from_bytes(payload[:4], 'little')
-                subtype, value = payload[4], int.from_bytes(payload[5:9], 'little')
+                raw, subtype, value = raw_hint, hint_subtype, hint_value
             else:
                 raw, subtype, value = payload[0], payload[1], int.from_bytes(payload[2:6], 'little')
             if len(pending.public_notifications) < MAX_PUBLIC_NOTIFICATIONS:

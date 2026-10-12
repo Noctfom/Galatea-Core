@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.14.0**. The model protocol is V4; historical V3 audit names are retained.
+> This document applies to **Galatea-Core v3.14.1**. The model protocol is V4; historical V3 audit names are retained.
 
 ---
 
@@ -114,7 +114,7 @@ Galatea-Core implements a **three-layer filtering mechanism** to compress tens o
 
 #### Layer 1: RPN Reverse Polish Expression Filtering
 
-The 142 message from OCGCore contains a string of RPN opcodes describing legal card conditions (e.g., "must be Dragon-type", "must be Level 4 or below").
+The 142 message carries RPN conditions on identity, setcode, type, race or attribute. The bundled public Core has no separate Level/Link opcode; undefined numbers must not acquire invented semantics.
 
 The framework implements a complete RPN virtual machine:
 
@@ -125,12 +125,17 @@ OP_ISSETCARD  = 0x40000101  # Whether matches archetype
 OP_ISTYPE     = 0x40000102  # Whether matches card type
 OP_ISRACE     = 0x40000103  # Whether matches race
 OP_ISATTRIBUTE= 0x40000104  # Whether matches attribute
-OP_ISLEVEL    = 0x40000105  # Whether matches level
-OP_ISLINK     = 0x40000107  # Whether matches link rating
+OP_ADD        = 0x40000000  # Addition
+OP_SUB        = 0x40000001  # Subtraction
+OP_MUL        = 0x40000002  # Multiplication
+OP_DIV        = 0x40000003  # Integer division toward zero; zero divisor returns0
 OP_AND        = 0x40000004  # Logical AND
 OP_OR         = 0x40000005  # Logical OR
+OP_NEG        = 0x40000006  # Negation
 OP_NOT        = 0x40000007  # Logical NOT
 ```
+
+The3.14.1 hotfix extracts the interpreter into `card_announcement.py`. A single `[1]` is constant true, not a card-code whitelist; whitelists use predicates such as `ISCODE`. Type/race/attribute operations return the actual bit intersection: multiple bits allow any match, not all bits simultaneously. Other words follow Core literal semantics; evaluation must leave exactly one nonzero stack value. Missing database entries, `alias` alternate artwork and Tokens are excluded. Numeric thresholds no longer guess Token status, and real card-code high nibbles are not truncated.
 
 #### Layer 2: Common-Sense Candidate Pool Collection
 
@@ -139,7 +144,7 @@ The framework collects potential legal card candidates from:
 1. **Own Deck/Extra Deck**: Cards in your own deck are most likely to be announced
 2. **Known Hand**: Opponent hand cards tracked by hand tracker
 3. **Public Information**: Face-up cards on field, in graveyard, and banished zone
-4. **Staple Pool** (meta_staples.json): Most common environment staples (Ash Blossom, Maxx "C", etc.)
+4. **Announcement Add-on Pool** (meta_staples.json): Adds currently unknown cards worth announcing, including environment staples such as Ash Blossom and Maxx "C"; combined with the sources above rather than used only on errors
 
 #### Layer 3: Priority Sorting
 
@@ -157,12 +162,17 @@ def get_priority_score(c):
 
 ### Crash Prevention Fallback
 
-If RPN parsing has flaws causing the candidate pool to be wiped out, the framework automatically falls back to the full candidate pool, delegating to RuleBot for brute-force enumeration — ensuring the program never crashes.
+When the small pool has legal entries, its sources, priorities and existing candidate cap/weighted reduction remain in use. The actual prompt owner determines the own deck; hidden opponent identities cannot supply candidates or priority scores. If the pool has no match, the real database is searched under **the same RPN predicate**, lazily caching declaration metadata. Neither the model nor RuleBot receives an unvalidated fallback pool. Malformed expressions or no legal database match fail explicitly through the existing abnormal-game rollback rather than repeatedly submitting rejected responses.
+
+No model fields, parameters, semantic assets or learning rewards are added. Steps without142 do not search the database. Removing formerly invalid candidates can change decisions; this is a legality fix, not network migration.
 
 ### WebUI Operation
 
-In **🗃️ Assets & Deck Management → 🃏 Meta Staples (142 Cache)**:
-- Add/remove commonly used environment staple cards
+In **🗃️ Assets & Deck Management → 🃏 142 Announcement Add-on Pool**:
+
+- Add/remove environment staples or cards from a custom database; already-known cards need not be added again
+- Addition does not guarantee selection: Core's predicate, candidate priorities and existing caps still apply; this differs from constrained database expansion on an empty pool
+- Running processes cache `meta_staples.json`; restart affected training/duel processes after edits
 - Default template includes: Ash Blossom, Maxx "C", Called by the Grave, Infinite Impermanence, etc.
 
 ---
