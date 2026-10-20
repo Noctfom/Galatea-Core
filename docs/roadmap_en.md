@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.14.1. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.0. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -16,7 +16,24 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 - [ ] Type35 bulk region exchange remains deferred; unproven old semantic assets require trusted regeneration, not forced parent-vector matching
 - [x] 3.13.4 confirms missing/empty-source generation plus key-only reuse caused collapse; source provenance, content identity and complete chunking now support isolated rebuilds without network/input/coarse-classification changes. New assets have26,092 distinct vectors and27 explicitly incomplete slots; see [asset guide](code_semantics_en.md)
 - [x] Phase7 batch3 (3.13.5): Core-side Link capture SDK, strict diagnostic YRP1/YRP2/YRP3D conversion, transitive whole-duel/exact-deck/stable-player isolation and quality manifests; no network/training changes or eligibility without evidence
-- [ ] External Link wiring/live acceptance, historical YRP evidence, related-deck-family splits, and an independent imitation learner after gates pass
+- [x] Core defines shared external-session/capture interfaces and explicit-provenance response-label contracts; Link reuses them after Core stabilizes and is not a development prerequisite
+- [ ] Historical YRP evidence, related-deck-family splits and an independent imitation learner after gates pass; accept actual Link networking separately
+
+## Optional external opponents and demonstration learning
+
+WindBot belongs to this Core repository's [optional integration directory](../integrations/windbot/README.md), without requiring a Link proxy. 3.15.0 implements batch 1's controlled BO1 prototype; Link/YRP evidence extensions and imitation training remain pending.
+
+- [x] Batch 1: Core session contract v1, pinned IceYGO source, explicit CLI/WebUI controlled BO1, masked views, faithful capture and independent replay. Real WindBot/RuleBot both-seat and mirror gates pass; Linux and broader executor acceptance remain pending
+- [ ] Batch 2: process full Link captures and YRP with original-message/asset evidence through the same canonical interpreter; compare observations and unique expert-action mapping, including multi-selection/cancellation, without inventing evidence
+- [ ] Audit program-participant identity and split granularity before imitation learning: a shared model/Bot ID can merge multiple builds into one connected group. Retain truthful provenance and distinguish in-distribution validation from held-out builds/executors; never fabricate identities or split individual frames randomly to obtain validation data
+- [x] WindBot-side Type15 physical-index-set label equivalence uses a Core-owned versioned interface for future Link reuse. All471 decisions in the original Albaz capture now map, with original responses/observations unchanged. Default/ordered matching, public ygocore, RuleBot packaging and training semantics are unchanged
+- [ ] Separately audit true reduced-pool coverage and other prompt-specific adapters. Design per-sample eligibility independently, without expert-answer injection or automatic whole-duel gate relaxation
+- [ ] Define host-generated Start/query player-view reconstruction in Core before Link reuse; keep unknown-information masks and never label derived host packets as original native Core chunks
+- [ ] Batch 3: build an isolated imitation learner with separate experimental checkpoints; verify action learning and fixed Arena performance. Human demonstrations reuse capture interfaces, never fabricated PPO probabilities or advantages
+- [ ] Evaluate a separate WindBot pool and small-fraction training integration only after acceptance; leave PPO, league sampling, rewards, V4 networks and public ygocore unchanged meanwhile
+- [x] Default paths do not require the module/runtime. Dependencies are checked only on activation; `--with-windbot` optionally packages source, licenses and an already installed runtime
+
+Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.
 
 ## V4 deployment and training validation
 

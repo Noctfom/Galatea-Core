@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.14.1**: full V4 main-framework deployment. Model Protocol 4 / Checkpoint Format 3 / schema revision 14 remain unchanged; memory optimization and display/decoding hotfixes do not alter training controls, protocol assets or learning objectives.
+> This document applies to **Galatea-Core v3.15.0**: the full V4 framework and optional external sessions. Model Protocol 4 / Checkpoint Format 3 / schema revision 14 remain unchanged; controlled WindBot integration does not alter PPO/the league or learning objectives. Type 23 corrects the responding-player view.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 

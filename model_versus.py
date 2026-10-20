@@ -19,7 +19,7 @@ from action_candidates import (
 )
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
-from core_message_protocol import CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt
+from core_message_protocol import CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt, decision_player_from_message
 from ai_bot import AiBot
 from feature_encoder import MAX_CARDS
 from checkpoint_utils import MODEL_PROTOCOL_VERSION
@@ -517,6 +517,11 @@ class ModelArena:
             self.last_duel_metadata["policy_seed"] = policy_seed
 
         steps = 0
+        state_evaluator = None
+        if self.logger.is_active and getattr(self, 'record_evaluations', False):
+            from arena_evaluation import ArenaStateEvaluator
+            state_evaluator = ArenaStateEvaluator(physical_bots, self._inference_metadata())
+            self.logger.recording_metadata['evaluation_sampling'] = 'recorded_frames'
         if self.logger.is_active:
             self.logger.recording_metadata.update({
                 'policy_seed': self.last_duel_metadata.get('policy_seed'),
@@ -554,6 +559,7 @@ class ModelArena:
             # 回放 V2 同时记录 Core 状态事件，避免只看到模型决策而看不到移动与结算。
             if self.logger.is_active and msg_type in REPLAY_EVENT_MSGS:
                 event_snapshot = interpreter.snapshot()
+                previous_frame_count = len(self.logger.thoughts)
                 self.logger.log_core_event(
                     turn=brain.turn,
                     phase_id=brain.phase,
@@ -561,6 +567,13 @@ class ModelArena:
                     msg_type=msg_type,
                     payload=msg[1:],
                 )
+                if state_evaluator is not None:
+                    from arena_evaluation import record_frame_evaluations
+                    record_frame_evaluations(
+                        self.logger, state_evaluator, event_snapshot,
+                        brain.transition_recorder.completed_event_count,
+                        previous_frame_count=previous_frame_count,
+                    )
 
             if msg_type in DECISION_MSGS:
                 current_macro_pool = None
@@ -653,7 +666,7 @@ class ModelArena:
 
             # --- 决策 ---
             if msg_type in DECISION_MSGS:
-                player_to_act = msg[1] if len(msg) > 1 else 0
+                player_to_act = decision_player_from_message(msg_type, msg[1:])
                 response_snapshot = None
                 response_observation = None
                 response_index = None
@@ -784,6 +797,7 @@ class ModelArena:
                                 except Exception as error:
                                     print(f'⚠️ 状态预测记录跳过：{error}')
                             probs = F.softmax(logits.squeeze(0), dim=-1)
+                            previous_frame_count = len(self.logger.thoughts)
                             self.logger.log_decision(
                                 turn=brain.turn,
                                 phase_id=brain.phase,
@@ -795,6 +809,15 @@ class ModelArena:
                                 agent_name=physical_names[player_to_act],
                                 evaluation=evaluation,
                             )
+                            if state_evaluator is not None:
+                                from arena_evaluation import record_frame_evaluations
+                                record_frame_evaluations(
+                                    self.logger, state_evaluator, snap,
+                                    brain.transition_recorder.next_sequence_id,
+                                    previous_frame_count=previous_frame_count,
+                                    existing={player_to_act: evaluation} if evaluation is not None else None,
+                                    snapshot_source='decision_query',
+                                )
 
                         chosen = snap.valid_actions[sel_idx]
                         response_snapshot, response_observation = snap, tensor_dict
@@ -849,6 +872,7 @@ class ModelArena:
                             msg[1:],
                             self.p0_bot,
                         )
+                        previous_frame_count = len(self.logger.thoughts)
                         self.logger.log_external_decision(
                             turn=brain.turn,
                             phase_id=brain.phase,
@@ -859,6 +883,14 @@ class ModelArena:
                             agent_name=physical_names[player_to_act],
                             chosen_index=rule_chosen_index,
                         )
+                        if state_evaluator is not None:
+                            from arena_evaluation import record_frame_evaluations
+                            record_frame_evaluations(
+                                self.logger, state_evaluator, rule_snapshot,
+                                brain.transition_recorder.next_sequence_id,
+                                previous_frame_count=previous_frame_count,
+                                snapshot_source='decision_query',
+                            )
                         response_snapshot = rule_snapshot
                         response_index = rule_chosen_index
                         if interpreter.writer and not interpreter.writer.stopped:

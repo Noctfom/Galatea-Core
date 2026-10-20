@@ -744,8 +744,11 @@ class AIThoughtLogger:
         player_id,
         agent_name="RuleBot",
         chosen_index=None,
+        *,
+        source="rule",
+        response_payload=None,
     ):
-        """记录没有模型概率分布的规则对手决策。"""
+        """记录规则/外部实际动作；展示响应，不生成专家概率或学习标签"""
         if not self.is_active:
             return
         try:
@@ -762,7 +765,7 @@ class AIThoughtLogger:
             else:
                 options.append({
                     "index": -1,
-                    "desc": f"RuleBot 响应 {response_text}",
+                    "desc": f"{agent_name} 响应 {response_text}",
                     "confidence": 1.0,
                     "is_chosen": True,
                     "action_type": int(msg_type),
@@ -771,6 +774,26 @@ class AIThoughtLogger:
                     "targets": [],
                     "semantic": {"raw_response": response_text},
                 })
+                if response_payload is not None and msg_type in (15, 20, 23):
+                    # Display-only decoding of the actual selection. It never
+                    # adds the expert answer to a policy pool or relaxes BC gates.
+                    from selection_protocol import CANCEL_RESPONSE, parse_selection_prompt, validate_selection_response
+                    raw = validate_selection_response(msg_type, response_payload, response)
+                    if raw[:4] != CANCEL_RESPONSE:
+                        prompt = parse_selection_prompt(msg_type, response_payload)
+                        indices = list(raw[1:1 + raw[0]])
+                        mandatory = prompt.get('mandatory', [])
+                        selected = mandatory + [prompt['candidates'][index] for index in indices[len(mandatory):]]
+                        targets = [_find_entity_reference(snapshot, card['controller'], card['location'],
+                            card['sequence'], code=card['code'], position=card.get('position', 0)) for card in selected]
+                        options[0].update(desc=f"{agent_name} 选择：" + '、'.join(_card_name(card['code']) for card in selected),
+                            target=targets[0] if targets else None, targets=targets)
+                        options[0]['semantic'].update(selection_count=len(selected),
+                            selection_min=prompt['minimum'], selection_max=prompt['maximum'],
+                            response_indices=indices)
+            if source == 'windbot':
+                for option in options:
+                    option['confidence'] = None
             self.thoughts.append({
                 "frame_type": "decision",
                 "turn": int(turn),
@@ -778,7 +801,8 @@ class AIThoughtLogger:
                 "phase_id": int(phase_id),
                 "player": int(player_id),
                 "agent": agent_name,
-                "source": "rule",
+                "source": source,
+                "has_model_confidence": False,
                 "msg_type": int(msg_type),
                 "state_id": self._register_state(snapshot),
                 "options": options,
@@ -809,30 +833,36 @@ class AIThoughtLogger:
             print(f"\n[Logger Error] Core 事件记录失败: {error}")
 
     def save(self, winner_id, game_idx, win_reason="正常结束", *,
-             core_terminal=False, terminal_event_count=None):
+             core_terminal=False, terminal_event_count=None, root="./ai_thoughts"):
         """保存完整录像；没有有效帧时不创建空文件。"""
         if not self.is_active:
             return None
         self.is_active = False
         if not self.thoughts:
             return None
-        os.makedirs("./ai_thoughts", exist_ok=True)
+        os.makedirs(root, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = f"./ai_thoughts/Game{game_idx}_{timestamp}_P{winner_id}Win.json"
+        filepath = os.path.join(root, f"Game{game_idx}_{timestamp}_P{winner_id}Win.json")
         # 真实 MSG_WIN 才补后验答案；截断、失败和异常局不冒充终局标签
         if core_terminal and winner_id in (0, 1, 2) and terminal_event_count is not None:
+            from decision_evaluation import _frame_evaluations
             for frame in self.thoughts:
-                evaluation = frame.get('evaluation')
-                if evaluation is None:
-                    continue
-                sequence = evaluation.get('sequence_id')
-                if type(sequence) is int and 0 <= sequence < terminal_event_count:
-                    frame['evaluation_actual'] = {
-                        'outcome': (0 if winner_id == 2 else
-                                    1 if winner_id == evaluation['perspective'] else -1),
-                        'remaining_events': terminal_event_count - sequence,
-                        'length_unit': 'transition_events',
-                    }
+                actuals = {}
+                for player, evaluation in _frame_evaluations(frame):
+                    if (not isinstance(evaluation, dict) or type(player) is not int
+                            or player not in (0, 1) or evaluation.get('perspective') != player):
+                        continue
+                    sequence = evaluation.get('sequence_id')
+                    if type(sequence) is int and 0 <= sequence <= terminal_event_count:
+                        actuals[str(player)] = {
+                            'outcome': (0 if winner_id == 2 else 1 if winner_id == player else -1),
+                            'remaining_events': terminal_event_count - sequence,
+                            'length_unit': 'transition_events',
+                        }
+                if 'evaluations' in frame:
+                    frame['evaluation_actuals'] = actuals
+                if frame.get('evaluation') is not None and str(frame.get('player')) in actuals:
+                    frame['evaluation_actual'] = actuals[str(frame['player'])]
         replay = {
             "replay_format_version": REPLAY_FORMAT_VERSION,
             "model_name": self.player_name,

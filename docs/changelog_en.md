@@ -4,12 +4,44 @@
 
 ---
 
+## [v3.15.0] - 2026-10-13
+
+### Optional external sessions and controlled WindBot duels
+
+- Core owns contract v1: independent UUID, monotonic request ID, physical seat and actual response submission. No Link prerequisite or change to Model Protocol4 / Checkpoint3 / revision14 or existing trace formats.
+- Vendors the unmodified IceYGO/windbot `master` snapshot `dec0535f8669dca01457a898890a968139711b19` under `integrations/windbot/`, preserving MIT/dependency notices and `UPSTREAM.json`. Original adapters are separate; WindBot decisions and public ygocore remain unmodified.
+- Explicit CLI/WebUI activation supports native RuleBot/V4 PTH versus WindBot, two Bots and swapped seats in controlled BO1. One native Core is authoritative; derived masked client messages are separate from full raw capture. Loopback peers use room tokens, deck checks, serialized responses and bounded logs. Disconnect/timeout/Retry/unknown external messages preserve an abnormal prefix without replacement opponents or invented outcomes.
+- Reuses the Link SDK and optional independent conversion/replay with participant provenance retained. No PPO samples, league/reward/network changes, imitation optimizer, human wiring or complete YRP sidecar ingestion.
+- Default portable packages exclude vendor/runtime/build; `--with-windbot` includes installed runtime and source/licenses without implicit downloading/building. Ordinary features do not depend on the optional directory.
+- Anchors the root deck ignore to `/decks/`, preventing Windows from excluding upstream `vendor/Decks/` and `Game/AI/Decks/`. All 294 snapshot files remain trackable; build outputs remain ignored.
+- Scope: P0 starts; Core seeds do not control Bot randomness. Native models use CPU and uniform canonical macro pools, not full training Pass1 equivalence or fixed benchmark semantics. Initial Windows closed loops pass; Linux, every executor and long sessions need separate acceptance.
+- Acceptance (October15): the real Core/WindBot full regression passes554 tests and50 subtests, with4 independent semantic-asset gates disabled. Coverage includes real Blue-Eyes/RuleBot both-seat sessions, Blue-Eyes/Albaz mirrors, response-label contracts, UI reactivity, deck sources, Holographic Replay/prediction provenance, bilingual displays and abnormal cleanup. An actual mirror reaches mode0/P1 Type23; original output/decision observations replay independently, abnormal prefixes remain ineligible and Bot processes are reclaimed. Default/optional file scans, syntax and local documentation links pass. No Linux live run, cloud long training or imitation optimization.
+- The WebUI reads executor/compatible V4 model lists and reacts immediately to side-type changes. Native opponents reuse weighted/physical/virtual/single-deck Arena sources, defaulting to the Bot's exact build. Independent Holographic Replay and native-model state-evaluation options supplement always-on raw capture; external actions show actual selections without fabricated confidence.
+- October15 adds WindBot-side Type15 label equivalence: the two Albaz end-phase discard misses are index permutations, not pool truncation; all28 combinations already exist. Validate first, compare physical-index sets, and let Core define an explicit versioned per-seat comparison contract for future Link reuse. Actual responses/default matching are not reordered; ordered prompts are not relaxed and unknown contracts fail closed.
+- Re-converting the original Albaz capture now uniquely maps all471 decisions, fixing the two labels to pool slots6 and26. Real terminal/exact raw output pass; actual responses and every observation digest are unchanged. Existing canonical files retain their old rule: re-convert raw capture and rebuild quality/split manifests. Unique matching, the120-slot boundary and all other whole-duel gates remain; no expert-answer injection or training is started. See [interface and label boundaries](../integrations/windbot/README.md#原始重放与学习标签等价性).
+- October20 exposes native V4 policy/deployment-temperature controls in WindBot WebUI, reusing the existing CLI/sampler and preserving the training-style T=1.0 default. WindBot and normal Arena settings are unaffected. Results add effective `native_policy`; replays retain existing policy metadata. Documents the three play/conversion/replay script initializations, adds scoped stage logs and separate `verification_seconds`; script caching, public Core, network and training are unchanged.
+- October20 related regressions pass112 tests: bilingual policy/temperature reactivity and CLI forwarding, all three real-model policies, three verified/one unverified script-preload counts, Blue-Eyes/Albaz controlled sessions and cleanup, ordinary trajectory/Arena regression and documentation checks. This is separate from the October15 full-suite result above.
+
+### Type23 responding-player correction
+
+- Sum-selection payload begins with mode, then player. Mode-derived seats could give P1 material choices the P0 view or mode1/P0 the P1 view.
+- State, Worker rule dispatch, self-check, Arena, Link/YRP ingestion and canonical replay now share strict player decoding. Both modes/seats are tested. Shapes, parameters and PPO are unchanged; actual decision ownership/observations are corrected. Old wrong-actor labels are not silently rewritten.
+
+See [module build and usage](../integrations/windbot/README.md).
+
+---
+
 ## [v3.14.1] - 2026-10-11
 
 ### 🧩 Release and compatibility boundaries
 
 - Groups the still-uncommitted decoding/export, UI and documentation fixes following 3.14.0 deployment into **3.14.1**.
 - Aligns framework, WebUI, README, dependency and setup versions. Model Protocol4 / Checkpoint3 / revision14 / static assets1 / GKG4 / raw traces2 / holographic format3 remain unchanged. Networks, inputs, asset identities, training settings and Arena policies are not changed.
+
+### 2026-10-13 Optional external-module boundaries
+
+- Adds `integrations/windbot/README.md` with IceYGO/windbot provenance, MIT licensing and requirements for source snapshots, pinned commits and local patches. Git excludes local runtime/build outputs. No third-party source, dependency or working integration has been introduced.
+- Bilingual roadmaps and V4 change control establish Core-owned project interfaces with later Link reuse. WindBot is independent and optional; controlled capture, provenance evidence and isolated imitation experiments precede training/league integration. Small UI/chart changes remain in existing files. Framework version and all protocol identities are unchanged.
 
 ### 🩹 Cloud-feedback parser and export hotfix
 
@@ -39,6 +71,14 @@ Chart definitions: [TensorBoard Metric Reference](tensorboard_metrics_en.md). Th
 - **Regression acceptance**:468 tests and50 subtests pass with real public-Core gates enabled;4 independent rebuilt-asset gates remain disabled. A subsequent22-test pass covers legacy chart API compatibility and final documentation/UI checks. Coverage includes localized axes/tooltips/cursors, retaining past values on events, no future leakage on backward seeks, pause/step/replay changes, rule/malformed records,5,500-point charts and existing PPO/ONNX/trajectory/deployment paths. Actual Game4 (2,205 frames/1,090 predictions) and Game6 (502 frames/221 predictions) contain no missing or invalid predictions; Game6 renders successfully in the patched real Streamlit panel. New modules enter portable scanning; syntax/whitespace checks pass. No additional cloud training or manual browser visual acceptance.
 
 See [prediction curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
+
+### 📈 2026-10-12 Arena per-frame state predictions
+
+- New recordings evaluate each model side on visible-event/decision snapshots, including opponent actions and terminal events. No invented RuleBot curve or legacy recomputation. Optional same-frame multi-view fields preserve individual format1/holographic format3 compatibility.
+- Reuses existing state/planner weights through an entry that skips the action tower. Existing actor predictions are reused and non-actor candidate lists excluded. No new parameters or changes to sampling, rewards, PPO/GAE, standard ONNX or model/checkpoint identities.
+- Events use consumed-message mirrors; decisions retain original query correction. No extra Core queries or future-state reads. Hover identifies snapshot sources and coverage accounting follows recording mode. Actual outcomes are separate per physical perspective, never replacing predictions or forcing final points to100% win/loss.
+- Extra state-backbone inference and prediction storage affect only logged games with evaluations enabled. Disabled recording adds no inference; training Workers stay unchanged. Replay viewing needs no network; portable scanning includes the new module.
+- Acceptance on2026-10-13:493 tests and50 subtests pass with real public-Core gates enabled;4 independent rebuilt-asset gates remain disabled. Fixed seeds/swapped seats preserve every decision, outcome, step count and Core query count compared with recording off; canonical traces replay completely. Two models produce two predictions per frame; rule-opponent games produce only the model-side prediction. At512/8/6, CUDA FP32/BF16 state representations, values and terminal predictions are bitwise-identical to the original full forward; parameter keys/shapes stay unchanged. Tests cover absent candidate inputs, unchanged random streams, nonfatal evaluation failures, separate terminal references, legacy compatibility and real Streamlit rendering. Syntax/whitespace and portable-module checks pass. No WindBot integration, Core modification or cloud long-run training.
 
 ### 📊 2026-10-12 dashboard matrix display hotfix
 

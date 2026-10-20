@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.14.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.15.0"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1206,8 +1206,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             d_record_evaluations = st.checkbox(
                 _("记录 AI 预测曲线（仅录像局）", "Record AI prediction curves (logged games only)"),
                 value=False,
-                help=_("反映模型对当前局面的判断，不代表实际胜率；不影响动作选择。长度单位为转移事件。",
-                       "Shows the model's assessment, not an actual win rate; does not change action selection. Length counts transition events."),
+                help=_("逐事件/决策快照记录模型侧胜负预测，RuleBot侧不伪造曲线；不影响动作选择或训练。会增加录像局的状态推理和文件体积，长度单位为转移事件。",
+                       "Record model-side predictions on event/decision snapshots, with no fabricated RuleBot curve. Does not change actions or training; adds state inference and file size for logged games. Length counts transitions."),
             )
             d_protocol_audit = st.checkbox(
                 _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
@@ -1266,6 +1266,140 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     st.rerun()
                 else:
                     st.error(_("请至少为 P0 选择一个有效的出战模型！", "Please select a valid P0 model!"))
+
+        with st.expander(_("🧩 WindBot 可选受控对局", "🧩 Optional WindBot Controlled Duels")):
+            st.info(_(
+                "独立 BO1 会话，不加入 PPO 或联盟。由当前公开 Core 驱动，完整捕获用于重放校验；P0 固定先手，可交换 WindBot 座位。Core 种子不控制 WindBot 自身随机数，因此不是固定竞技场基准。",
+                "Independent BO1 sessions, outside PPO and the league. The current public Core drives faithful captures. P0 goes first; WindBot seats can be swapped. Core seeds do not control WindBot randomness, so this is not a fixed Arena benchmark.",
+            ))
+            wb_runtime = st.text_input(_("WindBot.exe 路径", "WindBot.exe Path"),
+                value="integrations/windbot/runtime/WindBot.exe", key="wb_runtime",
+                help=_("需先独立构建并安装，界面不会自动下载、编译或更改系统环境。", "Build/install separately; this UI never downloads, compiles or changes the system environment."))
+            if st.button(_("读取/刷新执行器与 V4 模型列表", "Read/Refresh Executors and V4 Models"), key="wb_inspect"):
+                try:
+                    from integrations.windbot.runtime import inspect_runtime
+                    wb_inspection = inspect_runtime(wb_runtime)
+                    wb_model_options = []
+                    wb_model_errors = {}
+                    for path in models[1:]:
+                        try:
+                            metadata = inspect_training_checkpoint(path, map_location='cpu')
+                            if metadata.get('format_warning') or metadata.get('model_protocol_warning'):
+                                raise ValueError(metadata.get('format_warning') or metadata.get('model_protocol_warning'))
+                            wb_model_options.append(path)
+                        except Exception as error:
+                            wb_model_errors[path] = str(error)
+                    st.session_state.wb_inspection = wb_inspection
+                    st.session_state.wb_inspected_runtime = wb_runtime
+                    st.session_state.wb_model_options = wb_model_options
+                    st.session_state.wb_model_errors = wb_model_errors
+                except (ImportError, OSError, ValueError) as error:
+                    st.warning(_(f"WindBot 可选组件不可用：{error}", f"Optional WindBot component unavailable: {error}"))
+            wb_inspection = st.session_state.get('wb_inspection', {})
+            wb_executors = [item['executor'] for item in wb_inspection.get('executors', []) if item['deck_available']]
+            wb_model_options = [path for path in st.session_state.get('wb_model_options', []) if os.path.isfile(path)]
+            if wb_inspection:
+                st.caption(_(f"已读取 {len(wb_executors)} 个带构筑的执行器、{len(wb_model_options)} 个兼容 V4 模型。",
+                    f"Loaded {len(wb_executors)} executors with decks and {len(wb_model_options)} compatible V4 models."))
+                with st.expander(_("运行环境与跳过的模型", "Runtime and Skipped Models")):
+                    st.json({**wb_inspection, 'skipped_models': st.session_state.get('wb_model_errors', {})})
+            else:
+                st.info(_("请先点击上方读取按钮；仅扫描本地文件，不启动对局。", "Read the local lists above first; this does not start a duel."))
+            # These controls deliberately live outside a form: mode/deck changes
+            # must rerun immediately, before the launch button is pressed.
+            if wb_executors:
+                wb_executor = st.selectbox(_("WindBot 执行器", "WindBot Executor"), wb_executors,
+                    index=wb_executors.index('Blue-Eyes') if 'Blue-Eyes' in wb_executors else 0, key='wb_executor',
+                    help=_("执行器始终携带自己的上游固定构筑；不从训练池给 WindBot 随机换牌。", "Each executor keeps its upstream fixed deck, never a random training-pool deck."))
+                wb_other = st.selectbox(_("另一侧类型", "Other Side"), ["rule", "model", "windbot"],
+                    key='wb_other',
+                    format_func=lambda kind: {"rule": "RuleBot", "model": _("V4 模型", "V4 Model"), "windbot": "WindBot"}[kind])
+                wb_model = wb_second = wb_native_source = None
+                wb_policy_mode, wb_policy_temperature = 'training', 0.8
+                if wb_other == 'model':
+                    wb_model = st.selectbox(_("另一侧 V4 模型", "Other-side V4 Model"), wb_model_options,
+                        key='wb_model', format_func=lambda path: os.path.basename(path),
+                    help=_("原生模型当前使用 CPU 推理；与普通竞技场的中央推理设置独立。", "Native models use CPU inference here, independently of normal Arena settings."))
+                    if not wb_model_options:
+                        st.warning(_("未找到兼容的 V4 PTH，请导入模型后刷新列表。", "No compatible V4 PTH found; import a model and refresh the lists."))
+                    wb_policy_mode = st.radio(
+                        _("原生模型决策策略", "Native model decision policy"),
+                        ['greedy', 'training', 'deployment'], index=1, key='wb_policy_mode', horizontal=True,
+                        format_func=lambda mode: {
+                            'greedy': _("贪心决策（Argmax）", "Greedy (Argmax)"),
+                            'training': _("训练式采样（T=1.0）", "Training-style sampling (T=1.0)"),
+                            'deployment': _("部署温度采样", "Deployment temperature sampling"),
+                        }[mode],
+                        help=_("只改变原生 V4 模型的动作采样，不控制 WindBot，不修改权重或训练。与普通竞技场的策略设置相互独立。",
+                            "Changes only native V4 action selection, not WindBot, weights or training. Independent of normal Arena policy settings."))
+                    if wb_policy_mode == 'deployment':
+                        wb_policy_temperature = st.number_input(
+                            _("原生模型采样温度", "Native model sampling temperature"),
+                            min_value=0.05, max_value=5.0, value=0.8, step=0.05, format='%.2f',
+                            key='wb_policy_temperature',
+                            help=_("温度越低越接近贪心；越高越容易探索其他合法动作。只用于部署温度采样。",
+                                "Lower temperatures approach greedy play; higher values explore other legal actions. Used only in deployment sampling."))
+                    elif wb_policy_mode == 'training':
+                        st.caption(_("按 Categorical(logits) 采样，温度固定为1.0；本入口的宏候选仍使用均匀先验，不表示完整复现训练 Pass1 选池。",
+                            "Samples Categorical(logits) at fixed T=1.0. Macro pools still use uniform priors here, not the full training Pass1 selection pipeline."))
+                    else:
+                        st.caption(_("每次选择最高 Logit 的合法动作，不使用采样温度。", "Chooses the legal action with the highest logit; no sampling temperature is used."))
+                elif wb_other == 'windbot':
+                    wb_second = st.selectbox(_("另一侧 WindBot 执行器", "Other WindBot Executor"), wb_executors,
+                        index=wb_executors.index('Blue-Eyes') if 'Blue-Eyes' in wb_executors else 0, key='wb_second')
+                wb_seat = st.selectbox(_("WindBot 物理座位", "WindBot Physical Seat"), [1, 0], key='wb_seat', format_func=lambda actor: f"P{actor}")
+                if wb_other != 'windbot':
+                    wb_same_deck = st.checkbox(_("原生侧使用该 WindBot 的相同构筑", "Native Side Uses the Same WindBot Deck"),
+                        value=True, key='wb_same_deck', help=_("关闭后复用普通竞技场选池器，每局从所选来源重新抽取。只改变原生 RuleBot/模型，不改变 WindBot 构筑。", "Disable to use normal Arena deck sources, sampled per game. Only the native RuleBot/model deck changes."))
+                    if not wb_same_deck:
+                        wb_native_source = render_arena_deck_source('WB', load_arena_deck_catalog('./decks'))
+                wb_games = st.number_input(_("受控对局数", "Controlled Games"), min_value=1, max_value=100, value=1, key='wb_games')
+                wb_seed = st.number_input(_("Core 开局种子", "Core Starting Seed"), min_value=0, max_value=4294967196, value=73, key='wb_seed')
+                wb_timeout = st.number_input(_("单局时间上限（秒）", "Duel Time Limit (seconds)"), min_value=1, max_value=3600, value=600, key='wb_timeout')
+                wb_record = st.checkbox(_("保存全息录像（双方动作与场面事件）", "Save Holographic Replay (Both Sides and Board Events)"),
+                    value=False, key='wb_record', help=_("写入 ai_thoughts，可在全息回放页播放。WindBot 只有实际动作，没有模型置信度。", "Saved under ai_thoughts for Holographic Replay. WindBot supplies actual actions, not model confidence."))
+                wb_evaluations = False
+                if wb_record and wb_other == 'model':
+                    wb_evaluations = st.checkbox(_("记录原生模型侧状态预测曲线", "Record Native Model State-Prediction Curves"),
+                        value=False, key='wb_evaluations', help=_("逐已记录状态追加 CPU 预测，增加对局耗时；不会为 WindBot 伪造曲线。", "Adds CPU evaluation per recorded state, with extra runtime. No WindBot curve is fabricated."))
+                st.caption(_("原始 Core 捕获始终开启；全息录像和终局重放校验是两个独立选项。", "Raw Core capture is always enabled; Holographic Replay and terminal replay verification are separate options."))
+                wb_verify = st.checkbox(_("终局后独立转换与重放", "Convert and Independently Replay After Terminal"), value=True,
+                    key='wb_verify',
+                    help=_("每个正常终局额外初始化两次 Core（离线转换、独立重放），因此通常每局加载三次脚本，不是新增对局。关闭后仍保存原始捕获和已勾选的全息录像，可稍后手动转换。校验不会启动学习。",
+                        "Each successful terminal adds two Core initializations for conversion and independent replay: normally three script loads per game, not three games. Disable to keep raw captures/selected Holographic Replays and convert later. Verification never starts learning."))
+                if st.button(_("启动独立受控对局", "Start Controlled Duel"), key='wb_launch'):
+                    if is_running:
+                        st.error(_("请先终止当前任务。", "Stop the current task first."))
+                    elif wb_other == "model" and (not wb_model or not os.path.isfile(wb_model)):
+                        st.error(_("请选择存在的模型 PTH。", "Select an existing PTH checkpoint."))
+                    elif wb_other != 'windbot' and not wb_same_deck and not wb_native_source:
+                        st.error(_("请选择有效的原生侧卡组来源。", "Select a valid native-side deck source."))
+                    elif st.session_state.get('wb_inspected_runtime') != wb_runtime:
+                        st.error(_("运行路径已修改，请重新读取列表。", "Runtime path changed; refresh the lists first."))
+                    elif not os.path.isfile(wb_runtime):
+                        st.error(_("WindBot 运行文件不存在，其他功能不受影响。", "WindBot runtime is missing; other features are unaffected."))
+                    else:
+                        cmd = [sys.executable, "main.py", "windbot", "--runtime", wb_runtime,
+                            "--executor", wb_executor, "--windbot-seat", str(wb_seat),
+                            "--games", str(wb_games), "--seed", str(wb_seed), "--timeout", str(wb_timeout)]
+                        if wb_other == "windbot":
+                            cmd.extend(["--opponent-executor", wb_second])
+                        elif wb_other == "model":
+                            cmd.extend(["--model", wb_model, "--policy-mode", wb_policy_mode])
+                            if wb_policy_mode == 'deployment':
+                                cmd.extend(["--temperature", str(wb_policy_temperature)])
+                        if wb_other != "windbot" and wb_native_source:
+                            cmd.extend(["--native-deck-source", wb_native_source])
+                        if wb_record:
+                            cmd.append('--record-replay')
+                        if wb_evaluations:
+                            cmd.append('--record-evaluations')
+                        if wb_verify:
+                            cmd.append("--verify")
+                        process = launch_managed_task(cmd)
+                        st.success(_(f"受控会话启动，PID {process.pid}；日志在系统日志，原始捕获在轨迹入口中管理。",
+                            f"Controlled session started, PID {process.pid}; manage logs and captures in Storage and Logs."))
+                        st.rerun()
 
         benchmark_results = load_benchmark_results(limit=100)
         if benchmark_results:
@@ -3896,7 +4030,9 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
                 for opt in step_data.get("options", []):
                     df_data.append({
                         _("采纳", "Action"): "✅" if opt.get("is_chosen") else "",
-                        _("信心", "Confidence"): f"{opt.get('confidence', 0)*100:.1f}%",
+                        _("信心", "Confidence"): (_("不适用（外部/规则动作）", "N/A (external/rule action)")
+                            if step_data.get('has_model_confidence') is False or opt.get('confidence') is None
+                            else f"{opt.get('confidence', 0)*100:.1f}%"),
                         _("动作推演", "Operation Detail"): opt.get("desc", ""),
                         _("协议语义", "Protocol Semantics"): " ｜ ".join(
                             format_action_semantics(opt.get("semantic"))

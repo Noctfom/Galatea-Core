@@ -31,7 +31,7 @@ tests/
 .galatea_train.lock.owner.json
 
 # 卡组文件 
-decks/
+/decks/
 
 # Galatea 临时异步通讯文件
 tmp_rollout_*.pt
@@ -44,6 +44,14 @@ Galatea_Core_V*.zip
 Galatea_Core_V*.zip.part*
 Galatea_Core_V*.zip.sha256.txt
 Merge_Galatea_Core_V*.bat
+
+# WindBot 可选模块：保留适配代码、来源记录和上游源码，忽略本地运行/编译产物
+/integrations/windbot/runtime/
+/integrations/windbot/build/
+/integrations/windbot/vendor/**/bin/
+/integrations/windbot/vendor/**/obj/
+/integrations/windbot/vendor/**/.vs/
+/integrations/windbot/vendor/**/.git/
 
 # --- 允许提交引擎核心 ---
 !ocgcore.dll

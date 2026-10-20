@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.14.1**：完整 V4 主框架部署。Model Protocol 4 / Checkpoint Format 3 / 结构修订 14 不变；显存优化与显示/解析热修不改变训练参数、协议资产与学习目标。
+> 文档适用于 **Galatea-Core v3.15.0**：完整 V4 主框架及可选外部会话。Model Protocol 4 / Checkpoint Format 3 / 结构修订 14 不变；受控 WindBot 接入不改变 PPO/联盟或学习目标，Type 23 修正响应者视角。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 

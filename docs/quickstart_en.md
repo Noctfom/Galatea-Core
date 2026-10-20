@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.14.1**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.15.0**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -303,9 +303,10 @@ Enable “Record AI prediction curves” and a positive thought-log frequency in
 players' state predictions in Holographic Replay. Manual calibration is not required to view them,
 but they express AI understanding, not actual win rates. Remaining length means both players'
 decision-transition events, not turns. This diagnostic requires full PTH; standard ONNX still
-outputs only logits/value. The dashed cursor follows the zero-based timeline; separate P0/P1 figures
-retain their latest source step through pauses and events. Coverage diagnostics explain blank spans
-and rejected records. See [curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
+outputs only logits/value. New recordings evaluate model sides on every recorded event/decision snapshot;
+the cursor follows the zero-based timeline and hover identifies message mirrors or corrected decisions.
+Legacy recordings are not recomputed. Extra state inference can increase logged-game duration and file size,
+not training costs. Coverage diagnostics explain gaps. See [curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
 
 ### Meta Dashboard
 
@@ -347,6 +348,7 @@ Imported models appear in `./models/`. Jump to [Arena Testing](#arena-model-test
 
 - 🎞️ Use [Canonical Core trajectories and state-evaluation replay](core_trajectories_en.md): enable Arena recording options, turn on evaluation curves in replay, or run read-only `trajectory-check --replay`
 - 🧪 3.13.5 external files: Storage & Logs → Trajectory Ingress & Quality. `replay-ingest` / `dataset-build` inspect, convert and split without starting training; readable YRP/partial Link data does not automatically qualify for learning
+- 🧩 Optional [WindBot controlled duels](../integrations/windbot/README.md): install separately and enable under Arena or run `python main.py windbot --inspect`; outside PPO and the league
 - 📚 Read [Feature Guide](features.md) for detailed module usage
 - 🔧 Read [Architecture](architecture.md) for framework internals
 - 🧬 Read [Special Handling](special_handling.md) for unique features

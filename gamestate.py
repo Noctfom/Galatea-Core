@@ -15,6 +15,7 @@ from card_reader import card_db
 from card_announcement import CardAnnouncementPredicate
 from deck_protocol import DeckProfile
 from core_message_protocol import (
+    decision_player_from_message,
     CoreMessageProtocolError,
     is_empty_chain_prompt,
     parse_chain_prompt,
@@ -1012,7 +1013,7 @@ class DuelState:
             # --- 动作空间解析 (Action Parsing) ---
             # 如果是交互消息，解析出 valid_actions
             if msg_type in [10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 140, 141, 142, 143]:
-                self.active_player = struct.unpack('<B', msg_payload[0:1])[0]
+                self.active_player = decision_player_from_message(msg_type, msg_payload)
                 if self.active_player not in (0, 1):
                     raise ValueError(
                         f"interaction player must be 0 or 1, got {self.active_player}"

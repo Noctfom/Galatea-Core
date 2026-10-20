@@ -14,7 +14,7 @@ from pathlib import Path
 
 from data_types import GameAction
 from core_message_protocol import (
-    CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt, parse_chain_prompt,
+    CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt, parse_chain_prompt, decision_player_from_message,
 )
 from selection_protocol import build_core_response_buffer
 
@@ -215,20 +215,40 @@ def deserialize_actions(items):
     return result
 
 
-def matching_action_indices(snapshot, response, msg_type, payload):
-    """用既有包装器找全部响应匹配项，歧义不伪装成监督标签"""
+def matching_action_indices(snapshot, response, msg_type, payload, *, response_adapter=None):
+    """默认逐字节匹配；外部显式合同可提供标签键，歧义始终不作监督标签"""
     from ai_bot import AiBot
     packer = AiBot.__new__(AiBot)
-    expected = canonical_response(response)
+    def comparison_key(value):
+        if response_adapter is not None:
+            from integrations.duel_session import response_label_bytes
+            value = response_label_bytes(response_adapter, value, msg_type, payload)
+        return canonical_response(value)
+
+    expected = comparison_key(response)
     matches = []
     for index, action in enumerate(snapshot.valid_actions):
         try:
             packed = packer._pack_response(action, msg_type=msg_type, msg_args=payload)
-            if canonical_response(packed) == expected:
+            if comparison_key(packed) == expected:
                 matches.append(index)
         except (ValueError, TypeError, OverflowError, struct.error):
             continue
     return matches
+
+
+def _response_label_adapters(header):
+    """Opt-in external labels only; ordinary trajectories keep strict byte matching."""
+    if 'response_label_adapters' not in header:
+        return {}
+    from integrations.duel_session import validate_response_label_adapters
+    ingress = header.get('ingress')
+    if not isinstance(ingress, dict) or header.get('source') != 'link' or ingress.get('kind') != 'link':
+        raise ValueError('response label adapters require external Link session provenance')
+    session = ingress.get('external_session')
+    if not isinstance(session, dict):
+        raise ValueError('response label adapters require external participants')
+    return validate_response_label_adapters(header['response_label_adapters'], session.get('participants'))
 
 
 def observation_sha256(batch):
@@ -250,6 +270,7 @@ class CoreTrajectoryWriter:
         """创建独立轨迹文件，摘要只校验损坏，不宣称来源认证"""
         if file_kind not in ('core', 'link'):
             raise ValueError('unsupported trajectory file kind')
+        self.response_label_adapters = _response_label_adapters(header)
         os.makedirs(root, exist_ok=True)
         self.trace_id = str(uuid.uuid4())
         self.path = os.path.abspath(os.path.join(root, f'duel_{self.trace_id}.{file_kind}.jsonl.gz'))
@@ -353,11 +374,12 @@ class CoreTrajectoryInterpreter:
 
     def record_response(self, snapshot, response, msg_type, payload, actor,
                         chosen_index=None, observation=None, evaluation=None, source='model'):
-        """记录实际响应和严格映射，不能映射的规则宏动作只保留原始数据"""
+        """按轨迹声明的比较合同映射标签，实际响应始终原样记录"""
         if not self.writer or self.writer.stopped:
             return
         try:
-            matches = matching_action_indices(snapshot, response, msg_type, payload)
+            adapter = self.writer.response_label_adapters.get(str(actor))
+            matches = matching_action_indices(snapshot, response, msg_type, payload, response_adapter=adapter)
             mapped = len(matches) == 1 and matches[0] < 120
             if chosen_index is not None:
                 mapped = mapped and matches[0] == chosen_index
@@ -412,6 +434,7 @@ def inspect_core_trajectory(path):
             if kind != 'header' or record.get('schema_version') != TRAJECTORY_SCHEMA_VERSION:
                 raise ValueError('unsupported trajectory schema')
             header = record
+            _response_label_adapters(header)
             if not isinstance(record.get('source'), str) or not 1 <= len(record['source']) <= 64:
                 raise ValueError('invalid trajectory source')
             if not isinstance(record.get('trace_id'), str) or len(record['trace_id']) != 36:
@@ -525,6 +548,7 @@ def _replay_core_trajectory_source(source):
     result = inspect_core_trajectory(source)
     source.seek(0)
     header, footer = result['header'], result['footer']
+    response_adapters = _response_label_adapters(header)
     if footer['truncated']:
         raise ValueError('truncated trajectory cannot be replay-verified')
     old_callback_environment = get_callback_environment()
@@ -600,10 +624,11 @@ def _replay_core_trajectory_source(source):
             elif kind == 'response':
                 if (snapshot is None or prompt is None or prompt[0] != record['prompt_type']
                         or bytes(prompt[1:]) != _decode_hex(record['payload'], 65536)
-                        or prompt[1] != record['actor']):
+                        or decision_player_from_message(prompt[0], prompt[1:]) != record['actor']):
                     raise ValueError('response does not belong to current prompt/actor')
                 response = decode_response(record['response'])
-                matches = matching_action_indices(snapshot, response, prompt[0], prompt[1:])
+                matches = matching_action_indices(snapshot, response, prompt[0], prompt[1:],
+                    response_adapter=response_adapters.get(str(record['actor'])))
                 if matches != record['matches']:
                     raise ValueError('response/candidate mapping diverged')
                 unique = len(matches) == 1 and matches[0] < 120

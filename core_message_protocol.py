@@ -11,6 +11,19 @@ class CoreMessageProtocolError(ValueError):
     """表示报文不符合当前随包 Core 的固定协议"""
 
 
+def decision_player_from_message(msg_type, payload):
+    """读取物理响应者；Type 23 的 mode 在 player 前，不能把 mode 当座位"""
+    offset = 1 if msg_type == 23 else 0
+    if len(payload) <= offset:
+        raise CoreMessageProtocolError('decision prompt is missing its player')
+    if msg_type == 23 and payload[0] not in (0, 1):
+        raise CoreMessageProtocolError('Type 23 has invalid selection mode')
+    player = payload[offset]
+    if player not in (0, 1):
+        raise CoreMessageProtocolError(f'decision player must be 0 or 1, got {player}')
+    return player
+
+
 def card_hint_has_host(raw, kind, value):
     """校验卡片提示；未放入区域的初始化实例没有可见宿主"""
     controller, zone = raw & 0xFF, (raw >> 8) & 0xFF

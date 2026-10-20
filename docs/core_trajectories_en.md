@@ -1,6 +1,6 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.14.1**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
+This document applies to **v3.15.0**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
@@ -30,14 +30,16 @@ Rule agents have no fabricated predictions; old recordings are not retroactively
 - **Horizontal axis**: zero-based replay steps, matching the slider and including model decisions, rule decisions and visible events. These are neither turns nor training-sample counts.
 - **Vertical axes**: the upper chart shows each AI's prediction of its own eventual win (0–100%); the lower chart shows estimated remaining action-transition events, nonnegative and not formatted as probabilities.
 - **Colors and cursor**: P0 blue, P1 orange. The dashed line marks the playback step; dots mark each side's latest valid prediction at or before it. Hover shows the source step, perspective, win/draw/loss probabilities and remaining events.
-- **Figures**: P0/P1 are displayed separately. On events and pauses, previous predictions remain visible with source steps and age in frames. They are not recomputed for the current position or backfilled from future predictions. A side with no earlier prediction is explicitly left empty.
-- **Blank beginnings/endings**: only actual model decisions record predictions. Different first/last decision times normally produce different curve spans. Rule agents have no model curves; terminal events do not automatically add predictions. Connecting lines do not mean every intermediate frame was evaluated.
-- **Missing-data diagnostics**: “Prediction coverage and gaps” lists valid points/spans, explicitly model-sourced decisions without predictions and rejected invalid predictions. Format, units, perspective and numerical issues are explained rather than represented as zero probabilities.
+- **Per-frame evaluation**: new recordings evaluate model sides on every saved visible-event/decision snapshot, including opponent actions and terminal events. Both models have curves; RuleBot receives no invented predictions. Existing actor predictions are reused; observers run only the original state/planner weights, without action towers, sampling or new training rows.
+- **Snapshot timing**: events use mirrors maintained by already-consumed messages, with dynamic attributes from the latest query correction. They do not query Core ahead or put future state into past frames. Decisions use existing query-corrected snapshots; hover identifies the source. Per-frame means recorded replay frames, not every notification, internal engine state or wall-clock instant.
+- **Figures/legacy replays**: P0/P1 display predictions separately at the current step and remain visible on pause. Missing values retain only earlier predictions with source labels, never future values. Old replays retain their original decision predictions without automatic recomputation; blank spans/events are normally expected.
+- **Missing-data diagnostics**: shows counts/spans and rejection reasons. New recordings count expected model-side frames without predictions; legacy recordings count only explicitly model-sourced decisions without predictions. RuleBot is excluded. Format, units, perspective and numerical failures are explained rather than shown as zero probabilities.
 - **Actual outcomes**: separate references give each source decision's real outcome and remaining-event count. They do not enter predicted curves or figures. The sides' predictions need not add to one, and PPO value is not a win probability.
 
 See [prediction validation](../decision_evaluation.py) and [prediction UI](../replay_evaluation_ui.py).
-This display fix changes neither recording formats, networks, action selection, training data,
-protocols nor checkpoints.
+Optional same-frame `evaluations` / `evaluation_actuals` fields preserve legacy single-view fields
+and holographic format3. Individual predictions remain format1; parameters, input protocols,
+action selection, training data and checkpoints are unchanged.
 
 Raw trajectories: `replays/core_trajectories/*.core.jsonl.gz`. Holographic JSON remains in
 `ai_thoughts/`. Both are manageable in Storage & Logs → AI Thought Records. Trajectories contain
@@ -60,6 +62,28 @@ consider information boundaries before sharing. **Side never enters the single-d
 - Empty Type 16 `automatic_response` records save the actual `-1`, prompt and actor without a model
   observation, action, transition event or behavior-cloning label. Replay reports `automatic_response_count` separately.
 - Stream checksum and terminal/prefix outcome, recording/parse/Retry/mapping quality flags.
+
+### External response-label adapters (3.15.0)
+
+Original responses always drive submission and replay. Label comparison may use an explicit source
+contract. Ordinary Arena, RuleBot, YRP and old canonical files without a declaration retain strict
+`canonical_response` byte matching. Conversion of a full WindBot capture uses
+`windbot_select_card_set_v1` only for seats explicitly identified as `windbot`; the new canonical
+header's optional `response_label_adapters` maps physical seats to contract IDs.
+[Core's session interface](../integrations/duel_session.py) owns dispatch; the set conversion itself
+stays in the WindBot adapter.
+
+Only valid Type15 physical-index sets use the same comparison key on both expert/candidate sides.
+Same-code copies remain distinct; neither raw responses nor pool actions are rewritten. The existing
+validator checks counts, index bounds, duplicates and cancellation first. Ordered Type21/25 and other
+prompts keep byte comparison. Independent replay rechecks all matching under the recorded version,
+then still compares original Core output and observation digests. Unknown contracts/wrong participant
+kinds fail closed. Unique matching, the120-slot boundary, real terminal and all other gates remain;
+expert answers are never inserted into candidates.
+
+Old canonical WindBot files are not upgraded in place: re-convert the original `*.link.jsonl.gz` and
+rebuild quality/split manifests. Eligibility is not an instruction to start training, and provenance
+metadata is not identity authentication. See [WindBot label equivalence](../integrations/windbot/README.md#原始重放与学习标签等价性).
 
 Ordinary Arena shuffles decks in Python as well as using Core RNG, so the seed alone is insufficient.
 Replay uses actual injection order but original lists for stable `DuelState` profiles. Query markers
@@ -116,7 +140,7 @@ Per-chunk `parsed_bytes/message_count/parse_complete` remain; other unconsumed b
   auxiliary head or future-resource branch. No new weights, policy/value modifications, prediction-driven
   selection, tree search, or MCTS.
 - Save loss/draw/win probabilities, physical perspective, UUID/iteration/checkpoint digest, policy mode/
-  temperature and existing internal calibration provenance, using only that side's pre-action encoded
+  temperature and existing internal calibration provenance, using only that side's snapshot-time encoded
   observation. UI labels say “AI predictions”; internal `uncalibrated` metadata is not a warning title.
 - Independent views/models need not produce complementary curves. `P(win)` differs from expected score
   `P(win)+0.5×P(draw)`. PPO value estimates discounted returns, not win probability.
@@ -126,15 +150,16 @@ Per-chunk `parsed_bytes/message_count/parse_complete` remain; other unconsumed b
 - Length inverts the training target `log1p(events)/log1p(1500)`: an estimate, not an exact expectation.
   It counts **both sides' action-transition events**, not turns or remaining own actions. Display values
   cap at one million events with an explicit clipped flag, without affecting policy/training.
-- Only real `MSG_WIN` adds separate `evaluation_actual` outcomes and remaining transition counts,
-  including the current action. Predictions stay immutable; aborted/truncated games get no fabricated labels.
+- Only real `MSG_WIN` adds separate `evaluation_actual` / dual-view `evaluation_actuals` outcomes and counts
+  from the marked transition sequence (zero at the terminal event). Predictions stay immutable, without forcing
+  the last model point to100% win/loss; aborted/truncated games receive no fabricated labels.
 - Curves reflect the model's assessment, not actual win rates or a sole measure of playing strength.
   Standard ONNX still returns only logits/value; prediction recordings require full PTH.
 
 ## Cost and remaining boundaries
 
 Disabled options execute no diagnostic decoder, checkpoint hashing, or raw recording. Enabled options
-add a small decoder, scalar GPU→CPU synchronization, candidate/observation hashing and gzip I/O only to
+add state encoding/backbone inference, a small decoder, scalar GPU→CPU synchronization and prediction storage, plus candidate/observation hashing and gzip I/O when tracing is enabled, only to
 logged games; checkpoint hashes are read once and asset hashes at first capture. This is not zero cost,
 but PPO/shared-memory/training pools do not grow. Checks may scan gzip multiple times to validate before
 execution while keeping memory bounded.
@@ -220,6 +245,10 @@ Ordinary YRP lacks historical asset hashes and original full Core output; flags
 `historical_assets_unknown/original_core_output_unavailable` keep behavior-cloning eligibility false.
 
 ### Link capture contract
+
+The optional 3.15.0 controlled runner reuses this SDK without the Link project. Optional `external_session` contract-v1 metadata contains a session UUID, both physical participants, executors, declared source commit and actual executable digest. It is not a model input or source authentication. Conversion preserves it under `ingress`; existing captures without it retain the old contract.
+
+Type23's responder is `payload[1]`; `payload[0]` is the selection mode. State, training dispatch, Arena, ingestion and independent replay share Core's player reader. Old traces with a mode-derived wrong actor are rejected rather than silently relabeled. Complete YRP evidence and imitation optimization remain pending; see the [controlled module](../integrations/windbot/README.md).
 
 `LINK_CAPTURE_FORMAT_VERSION=1` lives in `trajectory_ingest.py`. The SDK records raw Core chunks and
 actually submitted responses, using physical seats0/1; it does not operate the policy.

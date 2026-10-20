@@ -79,12 +79,18 @@ def is_excluded_file(path):
     return any(fnmatch.fnmatch(path.name, pattern) for pattern in EXCLUDED_FILE_PATTERNS)
 
 
-def iter_package_files(project_root=None):
+def iter_package_files(project_root=None, *, include_windbot=False):
     """遍历源码与一键环境，同时跳过开发目录和用户运行数据"""
     project_root = Path(project_root or PROJECT_ROOT).resolve()
     for current_root, directory_names, file_names in os.walk(project_root):
         current_path = Path(current_root)
         relative_current = current_path.relative_to(project_root)
+
+        if relative_current == Path('integrations/windbot'):
+            directory_names[:] = [name for name in directory_names
+                if name != 'build' and (include_windbot or name not in ('runtime', 'vendor'))]
+        if relative_current.parts[:3] == ('integrations', 'windbot', 'vendor'):
+            directory_names[:] = [name for name in directory_names if name not in ('bin', 'obj', '.vs', '.git')]
 
         if relative_current == Path("."):
             directory_names[:] = [
@@ -365,13 +371,14 @@ def main(argv=None):
         action="store_true",
         help="只检查环境和待打包文件，不生成 ZIP",
     )
+    parser.add_argument('--with-windbot', action='store_true', help='显式携带可选 WindBot 源码/许可证及 runtime/ 已安装运行文件；不自动下载或编译')
     args = parser.parse_args(argv)
 
     if args.release_part_mib < 0 or args.release_part_mib >= 2048:
         parser.error("--release-part-mib 必须为 0 到 2047 之间的整数")
     part_size_bytes = args.release_part_mib * 1024**2
     if args.split_existing is not None:
-        if args.validate_only or args.allow_cpu_only:
+        if args.validate_only or args.allow_cpu_only or args.with_windbot:
             parser.error("--split-existing 不能与 --validate-only/--allow-cpu-only 同时使用")
         if not part_size_bytes:
             parser.error("--split-existing 需要启用非零 Release 分卷大小")
@@ -389,7 +396,11 @@ def main(argv=None):
 
     # 发布包预先生成运行表，目标机器无需首次启动时重新编译大语义资产
     ensure_static_semantic_assets(PROJECT_ROOT)
-    files = list(iter_package_files())
+    if args.with_windbot:
+        optional_root = PROJECT_ROOT / 'integrations/windbot'
+        if not (optional_root / 'runtime/WindBot.exe').is_file() or not (optional_root / 'vendor/LICENSE').is_file():
+            raise RuntimeError('--with-windbot 需要已安装的 runtime/WindBot.exe 和 vendor/LICENSE；不会隐式安装')
+    files = list(iter_package_files(include_windbot=args.with_windbot))
     if not files:
         raise RuntimeError("没有找到可打包文件")
 

@@ -6,7 +6,7 @@
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.14.1 (full V4 deployment hotfix, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.15.0 (optional external sessions, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | 2 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |
@@ -223,6 +223,9 @@ Before long training: 5–10 iterations at 4K/8K steps, 50 iterations at 32,768 
 
 ## 9. Change control
 
+- Core defines and accepts shared project interfaces. Link reuses stable contracts later and is not a prerequisite for new Core development.
+- WindBot is an optional Core-owned component under `integrations/windbot/`; default paths do not depend on its source or runtime. Record upstream provenance, licenses, pinned commits and local patches; see the [development sequence](roadmap_en.md#optional-external-opponents-and-demonstration-learning).
+- Keep small UI/chart changes in existing source files; create files for independent responsibilities, not each patch. Retain existing modules.
 - “Complete” requires code, tests, and runtime evidence.
 - New fields document visibility, source, lifecycle, missing value, dtype, shape, and consumers.
 - Auxiliary heads document label generation, masking, weight, and trunk-gradient behavior.

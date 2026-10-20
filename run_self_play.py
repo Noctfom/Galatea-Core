@@ -16,7 +16,7 @@ import deck_utils
 import rule_bot
 from galatea_env import GalateaEnv
 from gamestate import DuelState, MessageParser
-from core_message_protocol import is_empty_chain_prompt
+from core_message_protocol import is_empty_chain_prompt, decision_player_from_message
 from card_reader import card_db
 from game_constants import Zone, Phases, CardType, LocationInfo
 from data_types import GameSnapshot, CardEntity
@@ -130,9 +130,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                 continue
             
             # 追踪操作者
-            if msg_type in [10, 11, 16, 15]:
-                try: active_player = msg_payload[0] # 大部分交互消息第一个字节是 player
-                except: pass
+            if msg_type in {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 132, 140, 141, 142, 143}:
+                active_player = decision_player_from_message(msg_type, msg_payload)
             
             brain = brain_0 if active_player == 0 else brain_1
 
@@ -223,8 +222,7 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
             # 包含所有需要 Bot 决策的消息 ID
             if msg_type in interaction_msgs:
                 last_interaction_msg = msg
-                try: active_player = msg_payload[0]
-                except: pass
+                active_player = decision_player_from_message(msg_type, msg_payload)
 
                 # [新增] --- 动作空间验证探针 ---
                 # 只有当它是纯交互消息时才检查 (Type 11=Idle, 16=Chain, 15=Card)

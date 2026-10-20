@@ -18,7 +18,7 @@ import psutil
 
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
-from core_message_protocol import is_empty_chain_prompt
+from core_message_protocol import is_empty_chain_prompt, decision_player_from_message
 from ai_bot import AiBot
 from action_candidates import (
     MACRO_ACTION_MSGS,
@@ -1113,8 +1113,7 @@ def worker_process(
 
                     # --- RuleBot 兜底 ---
                     if not ai_handled:
-                        p = 0
-                        if len(msg) > 1: p = msg[1]
+                        p = decision_player_from_message(msg_type, msg[1:])
                         
                         clean_ignore_list = []
                         for val in current_step_ignore_list:

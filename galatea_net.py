@@ -869,6 +869,7 @@ class GalateaNet(nn.Module):
         auxiliary_actions=None,
         auxiliary_backbone_scale=0.0,
         return_evaluation=False,
+        state_evaluation_only=False,
     ):
         # --- 全局状态调制器 ---
         phase_context = self.phase_context_embed(
@@ -1146,6 +1147,10 @@ class GalateaNet(nn.Module):
         )
         value = self.value_head(value_state_repr)
 
+        if state_evaluation_only:
+            # 竞技场被动状态只读取原有主干/规划解码器，不计算动作塔或生成采样
+            return value, state_repr, self.goal_planner.target_decoder.evaluate_terminal(plan_latent)
+
         # === Action Head (因果决策) ===
         act_card_idx = batch_dict['act_card_idx'] # 新形状: [B, 120, 5]
         act_mask = batch_dict['act_mask']         # 形状: [B, 120]
@@ -1317,6 +1322,10 @@ class GalateaNet(nn.Module):
         )
         return logits, value, state_repr, auxiliary_predictions
     
+    def evaluate_state(self, batch_dict):
+        """复用既有权重评估玩家可见状态，不要求合法动作或改变标准推理输出"""
+        return self.forward(batch_dict, state_evaluation_only=True)
+
     def update_rnd_stats(self, v_input):
         with torch.no_grad():
             self.rnd.obs_norm.update(v_input)

@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/IceYGO/windbot.git",
+  "branch": "master",
+  "commit": "dec0535f8669dca01457a898890a968139711b19",
+  "imported_on": "2026-10-13",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2015-2017 IceYGO",
+  "source_directory": "vendor",
+  "archive_sha256": "e65ab1f245ec06dac0751b0a31a013605e6951066b6ee32b50fd54790f3dfb84",
+  "local_patches": []
+}

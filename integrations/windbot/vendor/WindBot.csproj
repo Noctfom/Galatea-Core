@@ -1,0 +1,207 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{3E7FAF67-A27D-4A61-B161-93AD4414183E}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>WindBot</RootNamespace>
+    <AssemblyName>WindBot</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <TargetFrameworkProfile />
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>none</DebugType>
+    <PlatformTarget>x86</PlatformTarget>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup>
+    <StartupObject>WindBot.Program</StartupObject>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ApplicationIcon>WindBot.ico</ApplicationIcon>
+  </PropertyGroup>
+  <PropertyGroup>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|AnyCPU'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|AnyCPU'">
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>none</DebugType>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <ErrorReport>prompt</ErrorReport>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);SQLITE_STANDARD</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Configuration" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.Transactions" />
+    <Reference Include="System.Web" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Config.cs" />
+    <Compile Include="Game\AI\AIUtil.cs" />
+    <Compile Include="Game\AI\CardContainer.cs" />
+    <Compile Include="Game\AI\CardExecutor.cs" />
+    <Compile Include="Game\AI\CardExtension.cs" />
+    <Compile Include="Game\AI\CardSelector.cs" />
+    <Compile Include="Game\AI\DeckAttribute.cs" />
+    <Compile Include="Game\AI\DecksManager.cs" />
+    <Compile Include="Game\AI\Decks\*.cs" />
+    <Compile Include="Game\AI\DefaultExecutor.cs" />
+    <Compile Include="Game\AI\Dialogs.cs" />
+    <Compile Include="Game\AI\Enums\*.cs" />
+    <Compile Include="Game\AI\Executor.cs" />
+    <Compile Include="Game\AI\HintMsg.cs" />
+    <Compile Include="Game\AI\Opcodes.cs" />
+    <Compile Include="Game\AI\Zones.cs" />
+    <Compile Include="Game\AI\ExecutorType.cs" />
+    <Compile Include="Game\BattlePhase.cs" />
+    <Compile Include="Game\BattlePhaseAction.cs" />
+    <Compile Include="Game\ChainInfo.cs" />
+    <Compile Include="Game\ClientCard.cs" />
+    <Compile Include="Game\ClientField.cs" />
+    <Compile Include="Game\Deck.cs" />
+    <Compile Include="Game\Duel.cs" />
+    <Compile Include="Game\GameAI.cs" />
+    <Compile Include="Game\GameBehavior.cs" />
+    <Compile Include="Game\GameClient.cs" />
+    <Compile Include="Game\GamePacketFactory.cs" />
+    <Compile Include="Game\MainPhase.cs" />
+    <Compile Include="Game\MainPhaseAction.cs" />
+    <Compile Include="Game\Room.cs" />
+    <Compile Include="Logger.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="WindBotInfo.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLite3.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLite3_UTF16.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteBase.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteCommand.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteCommandBuilder.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteConnection.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteConnectionPool.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteConnectionStringBuilder.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteConvert.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteDataAdapter.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteDataReader.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SqliteDataSourceEnumerator.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteEnlistment.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteException.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteFactory.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteFunction.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteFunctionAttribute.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteKeyReader.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteMetaDataCollectionNames.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteParameter.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteParameterCollection.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteStatement.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SQLiteTransaction.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\SR.Designer.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\UnsafeNativeMethods.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\LINQ\SQLiteConnection_Linq.cs">
+      <SubType>Component</SubType>
+    </Compile>
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\Mono.Data.Sqlite_2.0\LINQ\SQLiteFactory_Linq.cs" />
+    <Compile Include="ThirdParty\Mono.Data.Sqlite\MonoPInvokeCallbackAttribute.cs" />
+    <Compile Include="YGOSharp.Network\BinaryClient.cs" />
+    <Compile Include="YGOSharp.Network\Enums\CtosMessage.cs" />
+    <Compile Include="YGOSharp.Network\Enums\GameState.cs" />
+    <Compile Include="YGOSharp.Network\Enums\PlayerChange.cs" />
+    <Compile Include="YGOSharp.Network\Enums\PlayerState.cs" />
+    <Compile Include="YGOSharp.Network\Enums\PlayerType.cs" />
+    <Compile Include="YGOSharp.Network\Enums\StocMessage.cs" />
+    <Compile Include="YGOSharp.Network\NetworkClient.cs" />
+    <Compile Include="YGOSharp.Network\Utils\BinaryExtensions.cs" />
+    <Compile Include="YGOSharp.Network\YGOClient.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\CardAttribute.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\CardLinkMarker.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\CardLocation.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\CardPosition.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\CardRace.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\CardType.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\DuelPhase.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\GameMessage.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\PlayerHintType.cs" />
+    <Compile Include="YGOSharp.OCGWrapper.Enums\Query.cs" />
+    <Compile Include="YGOSharp.OCGWrapper\Card.cs" />
+    <Compile Include="YGOSharp.OCGWrapper\CardsManager.cs" />
+    <Compile Include="YGOSharp.OCGWrapper\NamedCard.cs" />
+    <Compile Include="YGOSharp.OCGWrapper\NamedCardsManager.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="App.config" />
+    <Content Include="ThirdParty\sqlite\x86\sqlite3.dll">
+      <TargetPath>x86\sqlite3.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="ThirdParty\sqlite\x64\sqlite3.dll">
+      <TargetPath>x64\sqlite3.dll</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <EmbeddedResource Include="ThirdParty\Mono.Data.Sqlite\resources\SR.resx">
+      <LogicalName>SR.resources</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Decks\*.ydk">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Dialogs\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="WindBot.ico" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
+       Other similar extension points exist, see Microsoft.Common.targets.
+  <Target Name="BeforeBuild">
+  </Target>
+  <Target Name="AfterBuild">
+  </Target>
+  -->
+</Project>

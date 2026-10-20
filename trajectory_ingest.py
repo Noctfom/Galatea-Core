@@ -6,7 +6,7 @@ import time
 from collections import deque
 from copy import deepcopy
 
-from core_message_protocol import CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt
+from core_message_protocol import CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt, decision_player_from_message
 from core_trajectory import (
     CoreTrajectoryInterpreter, CoreTrajectoryWriter, MAX_RECORDS, MAX_TRAJECTORY_BYTES,
     MAX_RECORD_BYTES, _iter_records, _decode_hex, canonical_response, decode_response,
@@ -47,6 +47,25 @@ def _validate_link_header(header):
     if header['visibility'] == 'player_view' and perspective is None:
         raise ValueError('player-view Link capture requires a perspective')
     validate_player_ids(header.get('player_ids'))
+    if 'external_session' in header:
+        import uuid
+        metadata = header['external_session']
+        if (not isinstance(metadata, dict) or type(metadata.get('format_version')) is not int or metadata.get('format_version') != 1
+                or not isinstance(metadata.get('participants'), dict)
+                or set(metadata['participants']) != {'0', '1'}):
+            raise ValueError('invalid external session metadata')
+        try:
+            uuid.UUID(metadata['session_id'])
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            raise ValueError('invalid external session identity') from error
+        for seat, participant in metadata['participants'].items():
+            if (not isinstance(participant, dict) or participant.get('kind') not in ('windbot', 'model', 'rule', 'human')
+                    or not isinstance(participant.get('identity'), str)
+                    or participant.get('identity') != header['player_ids'][seat]):
+                raise ValueError('external participant identity disagrees with capture')
+        import json
+        if len(json.dumps(metadata, ensure_ascii=False, allow_nan=False).encode('utf-8')) > 16384:
+            raise ValueError('external session metadata exceeds 16 KiB')
     if header['visibility'] == 'full_core':
         validate_reset_metadata(header.get('reset'))
         decks = header.get('decks')
@@ -70,13 +89,15 @@ class LinkCaptureWriter:
     """供 Link 调用的有界采集 SDK；记录原始数据而不运行策略或生成 PPO 样本"""
 
     def __init__(self, *, visibility='player_view', perspective=None, player_ids=None,
-                 reset=None, decks=None, assets=None, root=DEFAULT_LINK_ROOT):
+                 reset=None, decks=None, assets=None, root=DEFAULT_LINK_ROOT, session_metadata=None):
         """开局建立捕获文件；普通在线视角可明确缺少种子、对方构筑及资产"""
         header = {'source': 'link_capture', 'capture_format_version': LINK_CAPTURE_FORMAT_VERSION,
                   'core_message_protocol': CORE_MESSAGE_PROTOCOL, 'framework_version': framework_version(),
                   'visibility': visibility, 'perspective': perspective,
                   'player_ids': validate_player_ids(player_ids), 'reset': deepcopy(reset),
                   'decks': deepcopy(decks), 'assets': deepcopy(assets)}
+        if session_metadata is not None:
+            header['external_session'] = deepcopy(session_metadata)
         _validate_link_header(header)
         self._writer = CoreTrajectoryWriter(header, root, file_kind='link')
         self.path = self._writer.path
@@ -198,6 +219,11 @@ def _offline_candidate_snapshot(interpreter, env, msg, rng):
     return snapshot
 
 
+# Core owns the shared uniform candidate reconstruction entry. Existing private
+# callers retain their name; optional sessions and future Link clients reuse it.
+prepare_canonical_decision_snapshot = _offline_candidate_snapshot
+
+
 def _convert(reset, decks, origin, output_root, *, link_source=None, responses=None,
              expected_assets=None, timeout_seconds=300):
     """用唯一解释器驱动公开 Core，逐条提交原响应并写出可独立重放的规范轨迹"""
@@ -222,6 +248,8 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
         header = {'source': origin['kind'], 'visibility': 'omniscient_local_core',
                   'core_message_protocol': CORE_MESSAGE_PROTOCOL, 'framework_version': framework_version(),
                   'assets': assets, 'reset': reset, 'decks': decks, 'ingress': origin}
+        if 'response_label_adapters' in origin:
+            header['response_label_adapters'] = deepcopy(origin['response_label_adapters'])
         writer = CoreTrajectoryWriter(header, output_root)
         if origin['kind'] == 'yrp':
             writer.flag('historical_assets_unknown')
@@ -267,7 +295,7 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
                         raise ValueError('unconsumed messages after a decision prompt')
                     if link_records is not None:
                         record = next(link_records, ({}, None))[0]
-                        if record.get('kind') != 'response' or record.get('actor') != msg[1]:
+                        if record.get('kind') != 'response' or record.get('actor') != decision_player_from_message(msg[0], msg[1:]):
                             raise ValueError('Link response order/actor mismatch')
                         response = decode_response(record['response'])
                     else:
@@ -282,11 +310,12 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
                         env.send_action(-1)
                     else:
                         snapshot = _offline_candidate_snapshot(interpreter, env, msg, rng)
-                        observation = encoder.encode(snapshot, player_id=msg[1])
-                        interpreter.record_response(snapshot, response, msg[0], msg[1:], msg[1],
+                        actor = decision_player_from_message(msg[0], msg[1:])
+                        observation = encoder.encode(snapshot, player_id=actor)
+                        interpreter.record_response(snapshot, response, msg[0], msg[1:], actor,
                                                     observation=observation, source=origin['kind'])
                         env.send_action(response)
-                        interpreter.brain.begin_transition_event(msg[1], msg[0], response)
+                        interpreter.brain.begin_transition_event(actor, msg[0], response)
                 if interpreter.terminal is not None:
                     if link_records is not None:
                         record = next(link_records, ({}, None))[0]
@@ -371,5 +400,16 @@ def import_link_capture(path, output_root=DEFAULT_INGEST_ROOT, *, timeout_second
         origin = {'format_version': 1, 'kind': 'link', 'file_sha256': digest.hexdigest(),
                   'player_ids': validate_player_ids(header.get('player_ids')),
                   'original_core_output_available': True, 'historical_assets_known': True}
+        if 'external_session' in header:
+            origin['external_session'] = deepcopy(header['external_session'])
+            # This explicit source has already passed the external-session
+            # identity contract. Retain versioned per-seat comparison semantics
+            # in the new trajectory; raw capture/response bytes are untouched.
+            from integrations.duel_session import WINDBOT_SELECTION_LABEL_V1
+            adapters = {seat: WINDBOT_SELECTION_LABEL_V1 for seat, participant
+                        in header['external_session']['participants'].items()
+                        if participant['kind'] == 'windbot'}
+            if adapters:
+                origin['response_label_adapters'] = adapters
         return _convert(header['reset'], header['decks'], origin, output_root,
                         link_source=frozen, expected_assets=header['assets'], timeout_seconds=timeout_seconds)

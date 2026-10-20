@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.14.1**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.0**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -406,9 +406,10 @@ Full deck lists are post-game audit metadata only. They are never exposed to the
 
 Enable “Record AI prediction curves” in Arena to show both models' independent win/loss/draw probabilities and remaining-transition estimates in logged games, separately from actual outcomes. These reflect AI understanding, not actual win rates; PPO value is not a win probability. Full PTH is required, while standard ONNX still returns logits/value. See [interpretation and cost](core_trajectories_en.md#evaluation-semantics).
 
-A persistent replay toggle keeps each side's latest prediction and source step visible through pauses
-and seeks. Localized charts show a playback cursor, source markers and coverage diagnostics, distinguishing
-normal decision gaps from invalid records. See [curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
+A persistent toggle shows new model-side predictions on each recorded event/decision snapshot through
+pauses and seeks. Localized charts include a playback cursor, source markers, snapshot timing and coverage
+diagnostics; legacy recordings retain their original decision predictions without recomputation.
+See [curves and playback](core_trajectories_en.md#prediction-curves-and-playback-position).
 
 ![Holographic Replay](图片/全息回放.png)
 
@@ -780,6 +781,16 @@ python main.py update --data
 Or click sync in WebUI's **🔄 Resource Sync Hub**.
 
 ---
+
+## Optional WindBot controlled duels
+
+3.15.0 provides a separate Arena panel for native RuleBot/V4 models versus WindBot or WindBot mirrors. It runs controlled BO1, faithful capture and optional independent replay, without modifying PPO, league sampling or weights.
+
+Read/refresh local executor and compatible-model lists, then select entries from dropdowns with immediate side-type updates. Native opponents may follow the Bot build or reuse weighted/physical/virtual/single-deck Arena sources; WindBot keeps its fixed build. Optional Holographic Replay records both sides and board events for the existing viewer, with optional native-model state-prediction curves. External/rule actions have no model confidence, and WindBot win-rate curves are not fabricated.
+
+V4 opponents have independent greedy, training-style sampling (default T=1.0) and adjustable-temperature deployment controls, affecting only native model decisions. Terminal conversion and independent replay each initialize another Core, normally producing three script preloads per game with verification enabled. Disable immediate checks to retain captures and convert later; see [initialization/verification cost](../integrations/windbot/README.md#初始化次数与校验开销).
+
+Executors use their paired builds, not random training-pool decks. P0 starts; Bot seats can be swapped. Core seeds do not control WindBot randomness, so this is not a fixed Arena benchmark. Ordinary features need no component installation; missing dependencies fail only on activation. See [module build/CLI/provenance and MIT licensing](../integrations/windbot/README.md).
 
 ## Next Steps
 

@@ -208,6 +208,7 @@ def main():
         'vocab': 'Vocabulary',
         'replay-ingest': 'ReplayIngest',
         'dataset-build': 'DatasetQuality',
+        'windbot': 'ExternalDuel',
     }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
     
@@ -294,7 +295,7 @@ def main():
     duel_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
     duel_parser.add_argument('--thought_freq', type=int, default=0, help='每隔几局保存一次AI心声 (0为不保存)')
     duel_parser.add_argument('--record-trajectory', action='store_true', help='仅录像局额外保存原始 Core 规范轨迹')
-    duel_parser.add_argument('--record-evaluations', action='store_true', help='仅录像局保存 AI 状态预测，反映模型判断而非实际胜率')
+    duel_parser.add_argument('--record-evaluations', action='store_true', help='仅录像局逐事件/决策快照保存模型侧状态预测，不影响训练或动作选择，会增加录像推理开销')
     duel_parser.add_argument('--trajectory-root', default='./replays/core_trajectories', help='规范轨迹保存目录')
     duel_parser.add_argument(
         '--policy-mode', '--policy_mode',
@@ -408,6 +409,32 @@ def main():
     dataset_parser.add_argument('--seed', type=int, default=20261009, help='划分 uint32 种子')
     dataset_parser.add_argument('--validation-fraction', type=float, default=0.1, help='独立连通组验证抽样比例')
     dataset_parser.add_argument('--test-fraction', type=float, default=0.1, help='独立连通组测试抽样比例')
+
+    external_parser = subparsers.add_parser('windbot', help='可选受控 BO1 对局/完整采集，不加入 PPO 或联盟')
+    external_parser.add_argument('--inspect', action='store_true', help='仅检查源码目录和运行依赖，不启动 Bot/Core')
+    external_parser.add_argument('--executor', default='Blue-Eyes', help='上游执行器名称，--inspect 可列出')
+    external_parser.add_argument('--opponent-executor', default=None, help='指定后运行两个 WindBot；默认另一侧为原生 RuleBot/模型')
+    external_parser.add_argument('--runtime', default=None, help='显式 WindBot.exe 路径；默认 integrations/windbot/runtime/WindBot.exe')
+    external_parser.add_argument('--mono', default=None, help='Linux Mono 可执行名称或路径；不自动安装')
+    external_parser.add_argument('--windbot-seat', type=int, choices=(0, 1), default=1, help='物理座位；当前受控局 P0 固定先手')
+    external_parser.add_argument('--model', default=None, help='可选原生 V4 PTH；未提供时另一侧为 RuleBot')
+    external_parser.add_argument('--native-deck', default=None, help='原生侧 YDK；默认与指定 WindBot 构筑相同')
+    external_parser.add_argument('--native-deck-source', default=None, help='原生侧使用竞技场选池：weighted、physical:<池>、virtual:<池>、deck:<池>/<卡组>；与 --native-deck 互斥')
+    external_parser.add_argument('--deck_dir', default='./decks', help='原生侧卡组目录，不改变 WindBot 执行器的固定构筑')
+    external_parser.add_argument('--seed', type=int, default=73, help='公开 Core uint32 种子；不控制 WindBot 自身随机数')
+    external_parser.add_argument('--games', type=int, default=1, help='受控局数，1～100；逐局隔离并记录不同种子')
+    external_parser.add_argument('--timeout', type=float, default=600, help='单局机器会话时间预算秒数，最大3600')
+    external_parser.add_argument('--response-timeout', type=float, default=30, help='单次握手/响应预算秒数')
+    external_parser.add_argument('--max-decisions', type=int, default=2000, help='真实决策数上限；空连锁自动响应不计入')
+    external_parser.add_argument('--capture-root', default='./replays/link_captures', help='完整原始采集输出目录')
+    external_parser.add_argument('--verify', action='store_true', help='真实终局后独立转换和重放；不启动模仿学习')
+    external_parser.add_argument('--record-replay', action='store_true', help='额外保存双方决策和 Core 事件的全息录像；原始捕获始终保留')
+    external_parser.add_argument('--replay-root', default='./ai_thoughts', help='可选全息录像输出目录')
+    external_parser.add_argument('--record-evaluations', action='store_true', help='全息录像补充原生模型侧逐状态预测；WindBot 不产生模型概率')
+    external_parser.add_argument('--policy-mode', choices=('greedy', 'training', 'deployment'), default='training',
+        help='仅控制原生 V4 模型：greedy取最高Logit，training固定T=1，deployment使用指定温度；不控制WindBot')
+    external_parser.add_argument('--temperature', type=float, default=0.8,
+        help='仅deployment生效，范围0.05～5.0；training固定1.0，greedy不使用温度')
 
     args = parser.parse_args()
     if args.command == 'duel' and (args.record_trajectory or args.record_evaluations) and args.thought_freq <= 0:
@@ -623,6 +650,47 @@ def main():
             parser.exit(1, f'数据门禁失败: {error}\n')
         print(json.dumps({key: value for key, value in report.items() if key != 'entries'},
                          ensure_ascii=False, indent=2))
+
+    elif args.command == 'windbot':
+        import json
+        try:
+            from integrations.windbot.runtime import inspect_runtime
+            if args.inspect:
+                print(json.dumps(inspect_runtime(args.runtime, args.mono), ensure_ascii=False, indent=2))
+                return
+            if not 1 <= args.games <= 100 or not 0 <= args.seed < 2**32 or args.seed + args.games > 2**32:
+                parser.error('受控局数必须为1～100，种子序列必须位于uint32范围')
+            if args.record_evaluations and (not args.record_replay or not args.model):
+                parser.error('状态预测需要 --record-replay 和原生 --model')
+            from integrations.windbot.session import run_controlled_duel
+            for game in range(args.games):
+                report = run_controlled_duel(executor=args.executor, runtime=args.runtime, mono=args.mono,
+                    opponent_executor=args.opponent_executor, windbot_seat=args.windbot_seat,
+                    model=args.model, native_deck=args.native_deck,
+                    native_deck_source=args.native_deck_source, deck_dir=args.deck_dir, seed=args.seed + game,
+                    timeout=args.timeout, response_timeout=args.response_timeout,
+                    max_decisions=args.max_decisions, capture_root=args.capture_root,
+                    verify=args.verify, policy_mode=args.policy_mode, temperature=args.temperature,
+                    record_replay=args.record_replay, record_evaluations=args.record_evaluations,
+                    game_index=game + 1, replay_root=args.replay_root)
+                # Keep a concise result; the canonical conversion report contains
+                # full assets/decks and is available through the existing ingress UI.
+                if 'verification' in report:
+                    verification = report['verification']
+                    report['verification'] = {key: verification.get(key) for key in (
+                        'trajectory_path', 'conversion_error', 'verification_error',
+                        'replay_verified', 'raw_output_exact', 'behavior_clone_eligible')}
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+                if report['error']:
+                    parser.exit(2, '受控局异常已隔离，未替换对手或生成学习样本。\n')
+                verification = report.get('verification')
+                if verification and (verification.get('conversion_error') or verification.get('verification_error')
+                                     or not verification.get('replay_verified')):
+                    parser.exit(2, '对局原始捕获已保存，但独立重放未通过，不具备学习资格。\n')
+        except ImportError as error:
+            parser.exit(1, f'WindBot 可选模块或依赖缺失，不影响其他命令: {error}\n')
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.exit(1, f'WindBot 接入失败: {error}\n')
 
     elif args.command == 'vocab':
         print("⚠️ 本地词表追加会形成模型协议身份；请备份并向所有训练/部署机器分发同一 card_vocab.json。")
