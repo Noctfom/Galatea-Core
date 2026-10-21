@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.0. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.1. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -28,7 +28,8 @@ WindBot belongs to this Core repository's [optional integration directory](../in
 - [ ] Audit program-participant identity and split granularity before imitation learning: a shared model/Bot ID can merge multiple builds into one connected group. Retain truthful provenance and distinguish in-distribution validation from held-out builds/executors; never fabricate identities or split individual frames randomly to obtain validation data
 - [x] WindBot-side Type15 physical-index-set label equivalence uses a Core-owned versioned interface for future Link reuse. All471 decisions in the original Albaz capture now map, with original responses/observations unchanged. Default/ordered matching, public ygocore, RuleBot packaging and training semantics are unchanged
 - [ ] Separately audit true reduced-pool coverage and other prompt-specific adapters. Design per-sample eligibility independently, without expert-answer injection or automatic whole-duel gate relaxation
-- [ ] Define host-generated Start/query player-view reconstruction in Core before Link reuse; keep unknown-information masks and never label derived host packets as original native Core chunks
+- [x] 3.15.1: Core-owned host Start/query ingress, framing, sparse attributes and diagnostic projection. WindBot reuses packet builders/filtering; queries create neither actions nor transition events and never masquerade as original Core chunks
+- [ ] Accept full V4 online inference from a single-player view separately: opponent response boundaries, Type160 hints and dynamic-attribute coverage are not fully proven by this conservative profile. Default encoding stays gated; actual Link networking is future work
 - [ ] Batch 3: build an isolated imitation learner with separate experimental checkpoints; verify action learning and fixed Arena performance. Human demonstrations reuse capture interfaces, never fabricated PPO probabilities or advantages
 - [ ] Evaluate a separate WindBot pool and small-fraction training integration only after acceptance; leave PPO, league sampling, rewards, V4 networks and public ygocore unchanged meanwhile
 - [x] Default paths do not require the module/runtime. Dependencies are checked only on activation; `--with-windbot` optionally packages source, licenses and an already installed runtime

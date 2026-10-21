@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录实现 Galatea-Core 3.15.0 的可选受控 BO1 会话。一个公开 Core 驱动对局，WindBot 通过本地协议桥响应；另一侧可为原生 RuleBot、V4 PTH 模型或第二个 WindBot。普通训练与竞技场不依赖本模块，尚未接入 PPO/联盟、真人客户端、BO3 或模仿学习器。
+此目录提供 Galatea-Core 3.15.1 的可选受控 BO1 会话（3.15.0引入）。一个公开 Core 驱动对局，WindBot 通过本地协议桥响应；另一侧可为原生 RuleBot、V4 PTH 模型或第二个 WindBot。普通训练与竞技场不依赖本模块，尚未接入 PPO/联盟、真人客户端、BO3 或模仿学习器。
 
 ## 接口归属与运行边界
 
@@ -85,7 +85,13 @@ WebUI 入口在竞技场的“WindBot 可选受控对局”。点击读取/刷�
 
 当前受控桥已把这些查询发给 WindBot，由它自己的客户端解码；Galatea 原生侧仍通过自己的 Core 查询取得状态。因此当前本地闭环可运行，但这不意味着未来 Link 只保存过滤后的 TCP 包就能独立重建同一 V4 观测。
 
-Core 后续应定义玩家视角适配器：先拆 TCP/STOC 帧，分离可见事件和派生查询；在有序刷新边界内按 query flags 更新同一实体模型，再复用现有 V4 Encoder。接口需明确物理座位、区域替换/增量更新、离场/洗牌后的身份与记忆清理、未提供属性的未知状态以及双方隐藏信息掩码。不额外暴露对方手牌、盖卡、卡组顺序或 Side。仅玩家视角的数据保持 `player_view`，不能据此承诺缺少资产/种子/原始信息的录像可原样重放。这是观测来源适配与证据合同，不要求修改 V4 网络。
+3.15.1已在 `../player_view.py` 定义有界分帧、Start/整区/单卡刷新、稀疏查询和诊断投影接口。
+WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不额外创建一份状态或推理。
+新SDK明确物理座位、缓存/无缓存语义、离场/洗牌失效、未知字段和隐私掩码；
+只接受本方构筑，不暴露对方手牌、盖卡、主卡组隐藏顺序或Side。
+当前保守profile仍缺对手响应边界/Type160提示/完整动态属性的证明，默认V4编码及学习资格均不开放。
+仅玩家视角的数据保持 `player_view`，不承诺从缺资产/种子/原始消息的录像恢复完整重放。
+接口、调用示例及完整性报告见 [Core玩家视角SDK](../../docs/core_trajectories.md#3151core-玩家视角接收接口)。
 
 本机标准构建遇到缺少 4.8 引用包；本地验证产物用已安装框架程序集进行临时编译，未修改上游项目目标，也未安装系统 SDK。正式构建应使用完整开发引用包；本地 smoke 不替代跨平台发行验证。
 
@@ -95,7 +101,7 @@ Core 后续应定义玩家视角适配器：先拆 TCP/STOC 帧，分离可见�
 
 ## English summary
 
-Galatea-Core 3.15.0 owns this optional controlled BO1 runner. One public native Core drives a loopback WindBot client; the other seat can be native RuleBot, a V4 PTH model or another WindBot. Source is pinned to `dec0535f8669dca01457a898890a968139711b19` with no upstream decision patches. PPO, league integration, human clients, BO3 and imitation optimization remain outside this batch.
+Galatea-Core 3.15.1 owns this optional controlled BO1 runner, introduced in3.15.0. One public native Core drives a loopback WindBot client; the other seat can be native RuleBot, a V4 PTH model or another WindBot. Source is pinned to `dec0535f8669dca01457a898890a968139711b19` with no upstream decision patches. PPO, league integration, human clients, BO3 and imitation optimization remain outside this batch.
 
 Core owns the shared session, observation, action and capture contracts. WindBot lifecycle management belongs here; Link reuses stable Core interfaces later and is not a prerequisite. Normal startup must not import, probe, download or launch this component. Its absence must not affect existing training, Arena, replay or packaging. Selecting WindBot without its dependencies must report the missing setup instead of silently substituting another opponent. Future Link player-view reconstruction needs Core's host-generated Start/query adapter; these packets are not original native Core chunks.
 
@@ -117,4 +123,4 @@ Core owns the closed `response_label_bytes(adapter, response, prompt_type, paylo
 
 Ordinary `canonical_response`, default matching, RuleBot packaging, training, network and public ygocore semantics are unchanged. Other prompt types, including ordered Type21/25 and Type20/23/26, retain their original byte-order comparison. Existing canonical files without a contract retain strict matching. Re-convert the original WindBot capture through WebUI or `python main.py replay-ingest PATH --source link` and rebuild quality/split manifests; no old file is overwritten automatically. Ambiguity, missing candidates, slots beyond120, missing real terminal/evidence and all other whole-duel gates still reject eligibility. True coverage gaps from enumeration/equivalence reduction/120-slot sampling remain separate future cases; expert answers are never inserted into policy candidates.
 
-Link's player view also needs Core-owned host Start/query reconstruction: TCP/STOC framing, original visible events versus derived GameMsg4/6/7, atomic replacement/incremental query flags, physical seats, entity lifecycle and unknown/private masks. Reuse the V4 Encoder after reconstructing the view; do not feed host refreshes as actions or label them `full_core`. The current bridge sends such refreshes to WindBot's decoder, while native Galatea queries its own Core. This local success does not yet validate a standalone online Link decoder or exact raw replay from filtered network captures alone.
+3.15.1 provides Core-owned bounded framing, Start/zone/card refreshes, sparse attributes and diagnostic projection in `../player_view.py`. WindBot reuses its builders/filter without changed bytes, another state adapter or extra inference. Physical seats, cache modes, instance invalidation and unknown/private fields are explicit; only the own build is accepted. The conservative profile still cannot prove all opponent response boundaries, Type160 hints or dynamic fields, so default V4 encoding/learning eligibility remain closed. Host refreshes never become actions or `full_core` evidence. This does not validate a standalone online Link client or exact raw replay from filtered captures. See [Core's player-view SDK](../../docs/core_trajectories_en.md#3151-core-owned-player-view-ingress).

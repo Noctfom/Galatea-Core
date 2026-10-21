@@ -1,6 +1,6 @@
 # 规范 Core 轨迹、AI 预测回放与外部数据入口
 
-文档适用于 **v3.15.0**：Model Protocol **4**、Checkpoint Format **3**、结构修订 **14**。
+文档适用于 **v3.15.1**：Model Protocol **4**、Checkpoint Format **3**、结构修订 **14**。
 规范轨迹与预测回放于 3.13.1 引入，固定 Core 解码修正于 3.13.2 完成，
 公开观测于 3.13.3 补齐，外部数据入口与隔离门禁于 3.13.5 接入。
 `TRAJECTORY_SCHEMA_VERSION=2` 独立维护于 `core_trajectory.py`，新增固定报文身份及空连锁
@@ -278,7 +278,77 @@ Retry、原始报文偏差、观测摘要不符、非唯一或不可见候选映
 本批不实现行为克隆优化器、预测曲线回填或外部Link联网接线；YRP后验预测可在下一
 批基于已验证的玩家观测独立接入。正常训练不开启这些工具时没有新增逐步计算或存储。
 
-### 验收证据
+## 3.15.1：Core 玩家视角接收接口
+
+开发者入口为 [`integrations/player_view.py`](../integrations/player_view.py)，独立格式号
+`PLAYER_VIEW_FORMAT_VERSION=1`。这是 Core 定义、供后续 Link 复用的接收与诊断 SDK；
+不是 Link 客户端、模仿学习器或新的训练开关。V4协议4/检查点3/结构修订14保持不变。
+
+### 消息与查询合同
+
+- `YGOProFrameDecoder.feed` 接收分片/粘连的 uint16-LE YGOPro 网络帧，保留 STOC 类型。
+  调用方处理大厅/控制包；只有 STOC类型1的载荷才是宿主 GameMessage，且本 profile 每次接收一条。
+  网络帧、Start、查询刷新都不能写进 `LinkCaptureWriter.record_chunk` 冒充原始 Core 块。
+- `PlayerViewAdapter.accept_game_message` 区分 Start(4)、整区刷新(6)、单卡刷新(7)与可见事件。
+  Start固定物理座位/LP/主额外数量，不接收对手构筑或Side。角色不按本地UI的“我方=0”翻转。
+  重复Start、旁观/Tag、不支持的布局、倒序编号和损坏报文拒绝处理，失败实例不可继续复用。
+- 构造时必须指定 `query_mode='replace'` 或 `'merge'`。前者将本次更新行的属性重新建立；
+  后者在同一已知个体上合并缓存增量。Type6替换整区的槽位集合，Type7只更新指定槽。
+  `length=4` 表示空槽；`length=8/flags=0` 在无缓存profile里没有已知属性，不能解释成“属性全零”。
+  这些语义不能只凭字节猜测，必须与宿主查询配置一致。
+- 二进制属性仍由原有 `parse_legacy_card_query` 解码。`ViewCard.known_flags` 与稀疏 `fields`
+  只记录有证据的字段：已发送ATK=0仍为已知零，未发送ATK则字段不存在。未知查询位拒绝猜测。
+  例外是公开Core在无装备目标时会省略 `QUERY_EQUIP_CARD`；只有调用方明确提供
+  `requested_flags` 包含该位时，才能证明其为零，而不是未知。
+- 整个刷新报文验证/脱敏后原子应用；移动、换控制权、洗牌、盖卡重排和恢复快照会失效相关
+  个体缓存，不能按相同卡密把旧实例的动态状态或已用效果重新带回来。
+  主卡组查询不建立隐藏顺序；对方手牌/里侧身份和动态值再次遮蔽，墓地查看限制按查看者处理。
+- 实际发送本方响应后，用 `record_submitted_response(ResponseSubmission(...))` 登记；
+  UUID/请求号/物理座位沿用会话合同。查询刷新不调用动作解析/转移记录，空连锁自动应答也不增加决策。
+
+最小接线示意（网络连接与响应发送仍由调用端负责）：
+
+```python
+from integrations.player_view import PlayerViewAdapter, YGOProFrameDecoder
+from integrations.duel_session import ResponseSubmission
+
+view = PlayerViewAdapter(
+    physical_seat, query_mode='replace',
+    own_main=own_main_codes, own_extra=own_extra_codes,
+)
+decoder = YGOProFrameDecoder()
+for packet in decoder.feed(network_bytes):
+    if packet[0] == 1:  # STOC_GAME_MSG；本profile每个包一条GameMessage
+        view.accept_game_message(packet[1:])
+
+# 仅在实际发送响应后登记，不登记尚未执行的模型建议。
+request = view.gate.pending
+view.record_submitted_response(ResponseSubmission(
+    request.session_id, request.request_id, physical_seat, actual_response,
+))
+projection = view.diagnostic_projection()
+print(projection.coverage)
+```
+
+### 完整性、使用范围与开销
+
+`diagnostic_projection()` 在状态副本上调用现有 `DuelState.get_snapshot`，返回
+`PlayerViewProjection(snapshot, coverage)`；读取不在实时事件记录器中制造边界。
+投影中的旧V4数据类仍有默认值，**不能把这些默认值当成缺失字段已知为零**，应以配套覆盖报告为准。
+报告包含物理视角、消息序号、缓存模式、待刷新区域、缺失属性、失败/终局状态及来源限制。
+
+当前保守profile无法保证对手每次响应边界、完整Type160提示或所有动态属性均可获得。
+其 `v4_observation_complete` 和 `behavior_clone_eligible` 始终为false；
+`encode_v4` 默认抛出 `IncompletePlayerViewError`，不会偷偷补零后把它送入模型。
+受控合成条件下的投影/编码一致，仅证明已知信息的映射正确，不是完整在线V4推理验收。
+原生训练、完整Core捕获和既有学习门禁不经过这一不完整视图，也不因此失去信息或被阻止。
+
+WindBot只复用轻量封包和原有可见性过滤，不额外创建此状态适配器、加载模型或增加逐步推理。
+只有显式创建适配器时才维护单局稀疏缓存；诊断读取会复制当前状态，故不宜当作零成本逐帧操作。
+输入按65535字节网络包、8192字节查询行、256行/区域、100000条消息等边界限制；失败关闭，
+不启动Core、不推进决斗、不产生PPO或示范学习样本。
+
+### 既有轨迹验收证据
 
 已验证压缩/未压缩、取消/零尾字节、YRP3D伪魔数/截断/多包、YRP2完整种子、未知模式、
 部分Link拒绝原生执行、来源摘要、传递隔离、损坏文件隔离、重复局去重及报告不覆写。

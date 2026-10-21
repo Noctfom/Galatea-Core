@@ -11,11 +11,10 @@ import struct
 import time
 
 from integrations.duel_session import SessionProtocolError, finite_timeout, response_bytes
+from integrations.player_view import (
+    DECISIONS, PUBLIC_MESSAGES, encode_player_start, encode_zone_refresh, visible_core_message,
+)
 
-DECISIONS = frozenset((10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 132, 140, 141, 142, 143))
-PUBLIC_MESSAGES = frozenset((5, 32, 34, 35, 36, 37, 40, 41, 42, 56, 61, 63, 65,
-    70, 71, 72, 73, 74, 75, 76, 83, 91, 92, 93, 94, 95, 96, 97, 100, 101, 102,
-    110, 111, 112, 113, 114, 120, 130, 131, 133, 165, 170))
 
 
 def selection_label_bytes(response, prompt_type, payload):
@@ -53,88 +52,8 @@ def frame(packet):
 
 
 def visible_message(message, perspective):
-    """Never forward authoritative bytes without explicit visibility classification.
-
-    Query updates use a separate masked path. Unknown messages fail closed; BO3,
-    tags and reconnection are deliberately not supported by this BO1 prototype.
-    """
-    if perspective not in (0, 1) or not message:
-        raise SessionProtocolError('invalid player view')
-    kind = message[0]
-    raw = bytearray(message)
-    if kind in DECISIONS:
-        if prompt_actor(raw) != perspective:
-            return None
-        # Selection pools can contain unknown opposing cards. Their positions
-        # remain selectable; identity comes from already-visible client state.
-        groups = []
-        if kind in (15, 20):
-            groups.append((raw[5], 6, 8))
-        elif kind == 26:
-            count = raw[6]
-            groups.append((count, 7, 8))
-            offset = 7 + count * 8
-            groups.append((raw[offset], offset + 1, 8))
-        for count, offset, stride in groups:
-            for index in range(count):
-                entry = offset + index * stride
-                if raw[entry + 4] != perspective:
-                    raw[entry:entry + 4] = b'\0' * 4
-        return bytes(raw)
-    if kind == 2:
-        hint, actor = raw[1:3]
-        if actor not in (0, 1):
-            raise SessionProtocolError('invalid hint recipient')
-        if ((hint in (1, 2, 3, 4, 5) and actor == perspective)
-                or (hint in (6, 7, 8, 9) and actor != perspective) or hint == 10):
-            return bytes(raw)
-        return None
-    if kind in (90, 33, 39):
-        actor, count = raw[1:3]
-        if actor != perspective:
-            for index in range(count):
-                offset = 3 + index * 4
-                code = struct.unpack_from('<I', raw, offset)[0]
-                if kind != 90 or not code & 0x80000000:
-                    raw[offset:offset + 4] = b'\0' * 4
-        return bytes(raw)
-    if kind == 50:  # MOVE: recipient/controller, destination zone and position.
-        actor, zone, position = raw[9], raw[10], raw[12]
-        if actor != perspective and (zone & (1 | 2) or position & 0xA):
-            raw[1:5] = b'\0' * 4
-        return bytes(raw)
-    if kind in (53, 54, 60, 62, 64):
-        actor = raw[5]
-        position = raw[9] if kind == 53 else raw[8]
-        if kind == 54 or (actor != perspective and position & 0xA):
-            raw[1:5] = b'\0' * 4
-        return bytes(raw)
-    if kind == 55:  # SWAP has two code/location pairs.
-        for offset in (1, 9):
-            actor, zone, position = raw[offset + 4], raw[offset + 5], raw[offset + 7]
-            if actor != perspective and (zone & (1 | 2) or position & 0xA):
-                raw[offset:offset + 4] = b'\0' * 4
-        return bytes(raw)
-    if kind == 120:
-        return bytes(raw) if raw[1] == perspective else None
-    if kind == 31:
-        from core_message_protocol import parse_confirm_cards
-        reveal = parse_confirm_cards(raw[1:])
-        cards = reveal['cards']
-        hand_reveal = cards and all(card['location'] == 2 for card in cards)
-        return bytes(raw) if reveal['player'] == perspective or hand_reveal else None
-    if kind in (30, 38):
-        # These are explicit reveal notifications, not arbitrary query results.
-        return bytes(raw)
-    if kind == 160:
-        # Card hint descriptions may identify a still-hidden host. The bridge
-        # does not disclose them; the full capture/native V4 path retains them.
-        return None
-    if kind in (3, 4, 81, 163, 164):
-        return None
-    if kind in PUBLIC_MESSAGES:
-        return bytes(raw)
-    raise SessionProtocolError(f'unsupported external-view Core message {kind}; no unsafe broadcast')
+    """Reuse Core's unchanged conservative BO1 visibility profile."""
+    return visible_core_message(message, perspective)
 
 
 def query_updates(env, perspective):
@@ -171,7 +90,7 @@ def query_updates(env, perspective):
                 if actor != perspective and not public:
                     row = struct.pack('<II', 8, 0)
                 rows.append(row)
-            yield bytes((6, actor, zone)) + b''.join(rows)
+            yield encode_zone_refresh(actor, zone, rows)
 
 
 class YGOProPeer:
@@ -259,8 +178,7 @@ class YGOProPeer:
 
     def start(self, decks):
         self.send(0x15)
-        self.game_message(bytes((4, self.seat, 5)) + struct.pack('<IIHHHH', 8000, 8000,
-            len(decks['0']['main']), len(decks['0']['extra']), len(decks['1']['main']), len(decks['1']['extra'])))
+        self.game_message(encode_player_start(self.seat, decks))
 
     def check_idle(self):
         if self.connection and select.select([self.connection], [], [], 0)[0]:

@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.0**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.1**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -783,6 +783,10 @@ Or click sync in WebUI's **🔄 Resource Sync Hub**.
 ---
 
 ## Optional WindBot controlled duels
+
+3.15.1 adds Core's player-view SDK for future Link reuse of Start/query, physical-seat and visibility
+contracts. It currently provides coverage-aware diagnostic projections, not complete online V4 inference
+or another normal training/Arena toggle. See [player-view ingress](core_trajectories_en.md#3151-core-owned-player-view-ingress).
 
 3.15.0 provides a separate Arena panel for native RuleBot/V4 models versus WindBot or WindBot mirrors. It runs controlled BO1, faithful capture and optional independent replay, without modifying PPO, league sampling or weights.
 

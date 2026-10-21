@@ -4,6 +4,22 @@
 
 ---
 
+## [v3.15.1] - 2026-10-21
+
+### Core-owned player-view ingress and diagnostics
+
+- Adds the independent `integrations/player_view.py`: BO1 physical seats, Start4, full-zone6/single-card7 refreshes and bounded YGOPro framing. Host refreshes remain separate from original Core events/traces. Future Link reuses Core's interface without being a runtime prerequisite.
+- Explicit query-cache modes reuse the existing binary decoder. Sparse fields/known bits distinguish unknown from zero. Entire refreshes apply atomically; unsupported flags, invalid slots, truncation and reordering fail closed. Movement/shuffle/reload invalidates instance caches without same-code state resurrection.
+- Queries never establish hidden Main Deck order; opposing hand/face-down identities and dynamic values are masked again. Grave restrictions apply to the actual viewer. Only the own stable Main/Extra profile is accepted, never opponent builds/Side.
+- Diagnostic projections reuse existing DuelState/V4 data structures without finalizing live transitions; empty-chain automatic replies create no decisions. Default V4 encoding remains gated: this single-player profile cannot prove all opponent response boundaries, Type160 hints or attribute coverage. Reports never claim complete observations or learning eligibility.
+- WindBot reuses Core's builders/visibility filter without extra player-state adapters, networks or inference. Native training, weights, Protocol4/Checkpoint3/revision14, PPO and full-trace gates remain unchanged.
+- New/old visibility bytes match in8,980 seat-message comparisons across6 existing captures. Adds framing, malformed input, cached/uncached fields, privacy, lifecycle, diagnostic encoding and real Core both-seat query tests.
+- Complete regression passes613 tests and50 subtests;4 independent semantic-asset gates are disabled. Covers real Core/WindBot, Blue-Eyes/Albaz mirrors, all three model policies, script-initialization counts, trace replay, source isolation, ingress privacy and abnormal cleanup. Protocol boundaries, syntax and bilingual documentation links pass. No actual Linux networking, complete single-player online V4 inference or imitation training was performed.
+
+See the [player-view SDK](core_trajectories_en.md#3151-core-owned-player-view-ingress) for usage, completeness and cost.
+
+---
+
 ## [v3.15.0] - 2026-10-13
 
 ### Optional external sessions and controlled WindBot duels

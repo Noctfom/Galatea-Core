@@ -1,6 +1,6 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.15.0**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
+This document applies to **v3.15.1**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
@@ -297,7 +297,79 @@ trusted training authorization. No imitation optimizer, counterfactual search, h
 backfill or external Link client wiring is implemented. Ordinary training adds no per-step work or
 storage when these manual tools are unused.
 
-### Acceptance evidence
+## 3.15.1: Core-owned player-view ingress
+
+The developer SDK is [`integrations/player_view.py`](../integrations/player_view.py), with independent
+`PLAYER_VIEW_FORMAT_VERSION=1`. It defines ingress and diagnostic projection for future Link reuse,
+not a Link client, imitation learner or training toggle. Protocol4/Checkpoint3/revision14 are unchanged.
+
+### Message/query contract
+
+- `YGOProFrameDecoder.feed` handles fragmented/coalesced uint16-LE frames and preserves STOC types.
+  The caller handles lobby/control packets; only type1 payloads are host GameMessages, one per call
+  in this profile. Neither network frames, Start nor refreshes are original Core chunks for `record_chunk`.
+- `PlayerViewAdapter.accept_game_message` separates Start4, full-zone UpdateData6, single-card UpdateCard7
+  and visible events. Start preserves physical seats, LP and Main/Extra counts, without opponent builds/Side.
+  Repeated Start, spectator/Tag, unsupported layouts, out-of-order IDs and malformed data fail closed.
+- Explicit `query_mode='replace'` rebuilds the updated row's attributes; `'merge'` combines cached deltas
+  for the same known instance. Type6 replaces the zone's slot collection; Type7 changes one slot.
+  A length4 row is empty; length8/flags0 in an uncached profile means unknown attributes, not all-zero
+  attributes. The host's cache settings, not guessed bytes, determine these semantics.
+- The existing `parse_legacy_card_query` decodes binary fields. Sparse `ViewCard.fields` and `known_flags`
+  preserve known zero versus unknown; unsupported flags are rejected. Only an explicit `requested_flags`
+  contract proves the public Core's omitted `QUERY_EQUIP_CARD` means no target rather than unavailable data.
+- Entire refreshes are validated/masked before atomic application. Movement, control changes, shuffling,
+  set-card relocation and reload invalidate affected instance caches, without same-code state resurrection.
+  Queries never establish hidden Main Deck order; opposing hand/face-down identities and dynamic values
+  are masked again. Grave restrictions apply to the viewer, not the graveyard owner.
+- After actually sending an own response, `record_submitted_response(ResponseSubmission(...))` uses
+  session UUID/request/physical-seat checks. Refreshes and empty-chain automatic replies create no decisions.
+
+Minimal wiring, with transport/response sending owned by the caller:
+
+```python
+from integrations.player_view import PlayerViewAdapter, YGOProFrameDecoder
+from integrations.duel_session import ResponseSubmission
+
+view = PlayerViewAdapter(
+    physical_seat, query_mode='replace',
+    own_main=own_main_codes, own_extra=own_extra_codes,
+)
+decoder = YGOProFrameDecoder()
+for packet in decoder.feed(network_bytes):
+    if packet[0] == 1:  # This profile carries one host GameMessage per packet.
+        view.accept_game_message(packet[1:])
+
+# Only after sending an actual response, not an unexecuted model suggestion.
+request = view.gate.pending
+view.record_submitted_response(ResponseSubmission(
+    request.session_id, request.request_id, physical_seat, actual_response,
+))
+projection = view.diagnostic_projection()
+print(projection.coverage)
+```
+
+### Completeness, scope and cost
+
+`diagnostic_projection()` calls the existing `DuelState.get_snapshot` on a detached copy and returns
+`PlayerViewProjection(snapshot, coverage)`, without finalizing the live transition recorder. Legacy V4
+data-class defaults in the projection are **not proof that unavailable fields equal zero**. Always retain
+the coverage sidecar: physical perspective, message sequence, cache mode, stale zones, missing fields,
+failure/terminal state and source limitations.
+
+This conservative profile cannot prove all opponent response boundaries, Type160 hints or dynamic
+attributes. Both `v4_observation_complete` and `behavior_clone_eligible` remain false; `encode_v4`
+raises `IncompletePlayerViewError` instead of silently zero-filling a model input. Matching synthetic
+projections/encodings proves the known-field mapping, not complete online V4 inference. Native training,
+full Core capture and existing learning gates do not pass through this partial view and lose no inputs.
+
+WindBot reuses lightweight builders and the unchanged visibility filter only: no extra adapter, model or
+per-step inference is instantiated. Explicit adapters maintain one bounded sparse cache; diagnostic reads
+copy current state and are not zero-cost per-frame operations. Limits include65535-byte network packets,
+8192-byte query rows,256 rows/zone and100000 messages. No engine is launched/advanced or PPO/example row
+created. Actual Link networking and full-view acceptance remain separate work.
+
+### Earlier trajectory acceptance evidence
 
 Tests cover compression/plain data, zero/cancel bytes, framing/magic/truncation/multi-packet errors,
 seed sequences, unsupported modes, partial capture refusal, asset mismatches, transitive isolation,
