@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> This document applies to **Galatea-Core v3.15.1**: the full V4 framework and optional external sessions. Model Protocol 4 / Checkpoint Format 3 / schema revision 14 remain unchanged. Core's player-view ingress and diagnostic projection do not assert complete native observations from partial network views.
+> This document applies to **Galatea-Core v3.15.2**: the full V4 framework and optional external sessions. Model Protocol 4 / Checkpoint Format 3 / schema revision 14 remain unchanged. Complete traces support read-only expert CPU samples and identity association audits, not imitation optimization. Partial player views still provide diagnostics, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 

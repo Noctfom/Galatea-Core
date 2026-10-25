@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.1**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.2**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -783,6 +783,11 @@ Or click sync in WebUI's **🔄 Resource Sync Hub**.
 ---
 
 ## Optional WindBot controlled duels
+
+3.15.2 adds read-only expert sample verification in section4 of Trajectory Ingress & Quality.
+Actual WindBot labels/CPU inputs open only after whole-duel acceptance; no training starts.
+Dataset manifests add program identity association audits without changing isolation policy.
+See [expert samples](core_trajectories_en.md#3152-expert-samples-from-complete-verified-traces).
 
 3.15.1 adds Core's player-view SDK for future Link reuse of Start/query, physical-seat and visibility
 contracts. It currently provides coverage-aware diagnostic projections, not complete online V4 inference

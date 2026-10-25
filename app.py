@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.15.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.15.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -3137,8 +3137,8 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         st.divider()
         st.subheader(_("3. 查看质量审查结果", "3. View Quality Audit Results"))
         st.caption(_(
-            "选择第 2 区生成的数据质量清单。数量表示各区的轨迹文件数，不是决策步数或已参与训练的样本数；隔离文件仍保留在原目录。单文件转换细节可在第 4 区的入口诊断报告中查看。",
-            "Select a section 2 dataset manifest. Counts represent trajectory files, not decision steps or samples already used for training; quarantined files stay in their original locations. Individual conversion details are in section 4 ingress reports.",
+            "选择第 2 区生成的数据质量清单。数量表示各区的轨迹文件数，不是决策步数或已参与训练的样本数；隔离文件仍保留在原目录。单文件转换细节可在第 5 区的入口诊断报告中查看。",
+            "Select a section 2 dataset manifest. Counts represent trajectory files, not decision steps or samples already used for training; quarantined files stay in their original locations. Individual conversion details are in section 5 ingress reports.",
         ))
         with st.expander(_("❓ 如何理解门禁与隔离原因", "❓ Understanding Eligibility & Quarantine")):
             st.markdown(_(
@@ -3192,10 +3192,65 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                 st.dataframe([{'file': entry['path'], 'split': entry['split'], 'eligible': entry['eligible'],
                                'reasons': '; '.join(entry['rejection_reasons']), 'group': entry.get('group_id', '')[:12]}
                               for entry in report['entries']], hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+                audit = report.get('identity_audit')
+                if audit:
+                    st.markdown(_("#### 程序参与者关联审计", "#### Program Participant Association Audit"))
+                    st.caption(_(
+                        "模型/Bot 的稳定身份仍参与原有隔离。下列去除程序身份连边的组数仅用于诊断，不是新的划分，也不构成独立验证；真人及未知身份连边始终保留。旧清单需重新审查才能补充此报告。",
+                        "Stable model/Bot identities still participate in isolation. The hypothetical group count without program edges is diagnostic, not a new split or independent validation; human/unknown identity edges remain. Rebuild older manifests to add this audit.",
+                    ))
+                    st.json(audit)
             except Exception as error:
                 st.error(str(error))
         st.divider()
-        st.subheader(_("4. 分类文件管理（查看 / 下载 / 删除）", "4. File Management by Category"))
+        st.subheader(_("4. 专家样本只读核验（不训练）", "4. Read-only Expert Sample Verification (No Training)"))
+        st.caption(_(
+            "选取一份完整规范轨迹，重新验证整局后读取指定一侧的真实动作标签与 CPU 输入。临时张量在任务结束后删除，仅保存审查报告；不加载模型、不修改 PPO。合格不代表专家水平或已获得独立验证。",
+            "Select a complete canonical trace. Re-verify the whole duel before reading the selected seat's actual labels and CPU inputs. Temporary tensors are deleted at task exit; only a review report remains. No model or PPO changes. Eligibility proves neither expert skill nor independent validation.",
+        ))
+        expert_files = sorted(glob.glob('./replays/**/*.core.jsonl.gz', recursive=True))
+        expert_path = st.selectbox(_("专家来源规范轨迹", "Expert Source Canonical Trace"), expert_files,
+            key='expert_trace_path', help=_("原始 .link/.yrp 文件需先转换。不能直接信任旧清单的合格标记；本操作会重新核对资产、实际响应和逐项观测摘要。",
+                                           "Convert raw .link/.yrp first. Old manifest eligibility is not trusted: assets, actual responses and observation hashes are checked again."))
+        expert_seat_mode = st.selectbox(_("读取哪一侧的示范", "Demonstration Seats"), ('windbot', '0', '1', 'both'),
+            key='expert_seats', format_func=lambda value: {'windbot': _("自动：仅 WindBot", "Automatic: WindBot Only"),
+                '0': _("明确指定 P0", "Explicit P0"), '1': _("明确指定 P1", "Explicit P1"),
+                'both': _("明确指定双方", "Explicit Both Seats")}[value],
+            help=_("自动模式不模仿作为陪练的 V4 模型或 RuleBot。真人/其他来源须明确选择座位；来源身份是声明，不是认证。",
+                   "Automatic mode excludes native V4/RuleBot opponents. Select seats explicitly for human/other sources; metadata is a declaration, not authentication."))
+        if st.button(_("重放核验并生成专家样本报告", "Re-verify & Review Expert Samples"), disabled=not expert_path, key='expert_read_start',
+            help=_("独立 CPU 任务：一次 Core 重放，至多 512MiB 匿名临时张量缓存；任何整局门禁失败都不开放前缀样本。输出报告位于 replay_data/expert_reports。",
+                   "Separate CPU task: one Core replay and up to 512 MiB of anonymous temporary tensor storage. Failed whole-duel gates expose no prefix samples. Reports go to replay_data/expert_reports."),
+            **REPLAY_BUTTON_WIDTH):
+            if is_process_alive(st.session_state.running_pid, st.session_state.running_process_create_time):
+                st.error(_("请等待或停止当前托管任务。", "Wait for or stop the current managed task."))
+            else:
+                import uuid
+                output = os.path.join('./replay_data/expert_reports', f'expert_{uuid.uuid4().hex}.json')
+                command = [sys.executable, 'main.py', 'expert-read', expert_path, '--report', output]
+                for seat in (('0', '1') if expert_seat_mode == 'both' else (expert_seat_mode,)):
+                    if seat != 'windbot':
+                        command.extend(['--expert-seat', seat])
+                process = launch_managed_task(command)
+                st.success(_(f"已启动 PID {process.pid}；报告: {output}。", f"Started PID {process.pid}; report: {output}."))
+        expert_reports = sorted(glob.glob('./replay_data/expert_reports/*.json'))
+        expert_report = st.selectbox(_("专家样本报告", "Expert Sample Report"), expert_reports,
+            help=_("显示标签数、物理座位、提示类型、输入规格及少量标签预览，不包含观测张量或任何训练结果。",
+                   "Label counts, physical seats, prompt types, input specifications and a few labels; no observation tensors or training results."))
+        if st.button(_("查看专家样本报告", "View Expert Sample Report"), disabled=not expert_report,
+                     key='expert_read_show', help=_("只读打开所选报告，不重新重放或启动训练。",
+                                                   "Opens the selected report without another replay or any training."),
+                     **REPLAY_BUTTON_WIDTH):
+            try:
+                with open(expert_report, 'rb') as stream:
+                    raw = stream.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    raise ValueError('expert report size limit exceeded')
+                st.json(json.loads(raw))
+            except Exception as error:
+                st.error(str(error))
+        st.divider()
+        st.subheader(_("5. 分类文件管理（查看 / 下载 / 删除）", "5. File Management by Category"))
         st.caption(_(
             "展开对应类别后管理文件。删除只作用于该类别的目录和后缀，不会联动删除来源录像、其他报告或模型；删除清单也不会删除其中引用的轨迹。删除前请下载备份。",
             "Expand a category to manage files. Deletion affects only its directory/extension, not source replays, other reports or models; deleting a manifest does not delete referenced traces. Download backups first.",
@@ -3216,6 +3271,10 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
             st.caption(_("记录逐轨迹门禁结论、拒绝原因、关联组与划分；这里只保存文件引用，不包含轨迹本体或模型权重。",
                          "Per-trace eligibility, rejection reasons, groups and splits; manifests contain file references, not trajectory contents or model weights."))
             build_file_manager('./replay_data/datasets', '.json', _("数据质量清单", "Dataset Manifests"), allow_view=True)
+        with st.expander(_("🧑‍🏫 专家样本报告 · 只读标签与输入规格", "🧑‍🏫 Expert Reports · Read-only Labels & Input Specs")):
+            st.caption(_("仅保存样本计数、来源和标签预览；删除报告不会删除原始轨迹，也不涉及模型权重。",
+                         "Sample counts, provenance and label previews only. Deletion affects neither source traces nor model weights."))
+            build_file_manager('./replay_data/expert_reports', '.json', _("专家样本报告", "Expert Sample Reports"), allow_view=True)
     with tab_models:
         st.markdown("### 🧬 " + _("按模型 UUID 管理制品", "Artifacts grouped by model UUID"))
         st.caption(_(

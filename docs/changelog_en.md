@@ -4,6 +4,23 @@
 
 ---
 
+## [v3.15.2] - 2026-10-21
+
+### Expert samples from complete traces and identity association audit
+
+- Adds a context-managed read-only expert API in existing `trajectory_dataset.py`. One strict Core replay reuses the canonical interpreter, original candidate labels and V4 Encoder to expose CPU observations, unique action indices and physical-seat/provenance/digest metadata. Defaults to explicitly declared WindBot seats; human/model/rule examples require explicit selection. Losses are not automatically excluded.
+- Freezes a bounded source copy and optionally checks expected file SHA-256. Provenance, assets, terminal, raw output, parse coverage, unique mapping and observation-digest gates all precede iteration. No expert-answer injection, examples from automatic empty chains or invented PPO probabilities/advantages.
+- Anonymous temporary numeric storage is capped at8MiB/sample and512MiB/duel, read without pickle into individual CPU observations and deleted on context exit. Exhaustion rejects access rather than releasing a staged prefix. Normal PPO/Arena/WindBot execution uses neither the cache nor extra inference.
+- Adds `expert-read` CLI and WebUI section4 under Trajectory Ingress & Quality: expert-seat selection, separate offline verification, sample/prompt counts, input specifications and label previews. Section5 manages JSON expert reports, not persistent tensor archives; deletion does not affect source traces/models.
+- Dataset manifests add declared participant kinds, per-seat original decision counts and program-identity association audits. Actual splits still isolate all stable identities. Hypothetical counts without program edges are diagnostic only; human/unknown/conflicting declarations remain conservative, without manufactured independent validation.
+- Reads322 WindBot examples out of520 decisions in5 existing native-model/Blue-Eyes duels and471 examples from an Albaz mirror. All6 traces pass strict replay with byte-exact original output. Even without program edges, the5 Blue-Eyes duels remain1 group through the shared build; isolation is not relaxed.
+- Bilingual public documentation and release entry points move to3.15.2. Protocol4/Checkpoint3/revision14, trajectory2, GKG4 and static semantic assets1 stay unchanged. No network, reward, PPO/league, public Core or upstream WindBot changes; no imitation training or complete single-player online Link inference is claimed.
+- Complete regression passes629 tests and50 subtests, with4 independent semantic-asset gates disabled. A subsequent41-test pass covers added boundaries, real expert reading, source isolation, bilingual WebUI and documentation: wrong digests, absent terminals/default experts, masked labels, non-finite inputs, cache limits, withheld failed prefixes, interrupted-reader cleanup and mixed program/human declarations.
+
+See [expert reader usage, cache lifecycle and audit semantics](core_trajectories_en.md#3152-expert-samples-from-complete-verified-traces).
+
+---
+
 ## [v3.15.1] - 2026-10-21
 
 ### Core-owned player-view ingress and diagnostics

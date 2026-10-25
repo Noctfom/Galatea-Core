@@ -1,6 +1,9 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.15.1 的可选受控 BO1 会话（3.15.0引入）。一个公开 Core 驱动对局，WindBot 通过本地协议桥响应；另一侧可为原生 RuleBot、V4 PTH 模型或第二个 WindBot。普通训练与竞技场不依赖本模块，尚未接入 PPO/联盟、真人客户端、BO3 或模仿学习器。
+此目录提供 Galatea-Core 3.15.2 的可选受控 BO1 会话（3.15.0引入）。一个公开 Core 驱动对局，WindBot 通过本地协议桥响应；另一侧可为原生 RuleBot、V4 PTH 模型或第二个 WindBot。普通训练与竞技场不依赖本模块，尚未接入 PPO/联盟、真人客户端、BO3 或模仿学习器。
+
+3.15.2可从完整合格规范轨迹读取真实专家样本，默认只选WindBot，不自动模仿陪练模型；
+仅离线CPU读取与报告，不改对局执行或启动学习。见 [专家样本CLI/API与身份审计](../../docs/core_trajectories.md#3152完整轨迹的专家样本读取)。
 
 ## 接口归属与运行边界
 
@@ -101,7 +104,11 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 
 ## English summary
 
-Galatea-Core 3.15.1 owns this optional controlled BO1 runner, introduced in3.15.0. One public native Core drives a loopback WindBot client; the other seat can be native RuleBot, a V4 PTH model or another WindBot. Source is pinned to `dec0535f8669dca01457a898890a968139711b19` with no upstream decision patches. PPO, league integration, human clients, BO3 and imitation optimization remain outside this batch.
+Galatea-Core 3.15.2 owns this optional controlled BO1 runner, introduced in3.15.0. One public native Core drives a loopback WindBot client; the other seat can be native RuleBot, a V4 PTH model or another WindBot. Source is pinned to `dec0535f8669dca01457a898890a968139711b19` with no upstream decision patches. PPO, league integration, human clients, BO3 and imitation optimization remain outside this batch.
+
+3.15.2 reads real expert examples from complete eligible canonical traces, defaulting to WindBot rather
+than native opponents. This is offline CPU reading/reporting, not altered duel execution or learning.
+See [expert CLI/API and identity audits](../../docs/core_trajectories_en.md#3152-expert-samples-from-complete-verified-traces).
 
 Core owns the shared session, observation, action and capture contracts. WindBot lifecycle management belongs here; Link reuses stable Core interfaces later and is not a prerequisite. Normal startup must not import, probe, download or launch this component. Its absence must not affect existing training, Arena, replay or packaging. Selecting WindBot without its dependencies must report the missing setup instead of silently substituting another opponent. Future Link player-view reconstruction needs Core's host-generated Start/query adapter; these packets are not original native Core chunks.
 

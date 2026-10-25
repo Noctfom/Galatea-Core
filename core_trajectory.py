@@ -539,7 +539,7 @@ def replay_core_trajectory(path):
         return _replay_core_trajectory_source(frozen)
 
 
-def _replay_core_trajectory_source(source):
+def _replay_core_trajectory_source(source, *, _on_decision=None):
     """在相同公开 Core/资产下重放，校验原始输出和实际编码观测"""
     import gamestate
     from feature_encoder import GalateaEncoder
@@ -637,11 +637,18 @@ def _replay_core_trajectory_source(source):
                     raise ValueError('selected candidate does not match response')
                 mappings_complete &= unique
                 expected_observation = record['observation_sha256']
+                actual = None
                 if expected_observation is not None:
                     actual = encoder.encode(snapshot, player_id=record['actor'])
                     if observation_sha256(actual) != expected_observation:
                         raise ValueError('encoded model observation diverged')
                     observations += 1
+                # 私有离线读取钩子只交付已核对的 CPU 编码；调用方必须等整局门禁
+                # 通过后才能开放缓存，不能把尚未验证的前缀当作训练样本
+                if _on_decision is not None:
+                    if not unique or actual is None:
+                        raise ValueError('demonstration requires unique label and verified observation')
+                    _on_decision(record, actual)
                 env.send_action(response)
                 brain.begin_transition_event(record['actor'], prompt[0], response)
                 if queue:

@@ -208,6 +208,7 @@ def main():
         'vocab': 'Vocabulary',
         'replay-ingest': 'ReplayIngest',
         'dataset-build': 'DatasetQuality',
+        'expert-read': 'ExpertRead',
         'windbot': 'ExternalDuel',
     }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
@@ -409,6 +410,14 @@ def main():
     dataset_parser.add_argument('--seed', type=int, default=20261009, help='划分 uint32 种子')
     dataset_parser.add_argument('--validation-fraction', type=float, default=0.1, help='独立连通组验证抽样比例')
     dataset_parser.add_argument('--test-fraction', type=float, default=0.1, help='独立连通组测试抽样比例')
+
+    expert_parser = subparsers.add_parser('expert-read', help='完整重放后只读专家 CPU 样本，不启动学习')
+    expert_parser.add_argument('path', help='完整且可严格重放的 *.core.jsonl.gz')
+    expert_parser.add_argument('--expert-seat', action='append', type=int, choices=(0, 1), default=None,
+                               help='明确指定专家物理座位，可重复；不填时仅选来源声明的 WindBot')
+    expert_parser.add_argument('--preview-rows', type=int, default=5, help='预览标签条数，0～20，不导出观测张量')
+    expert_parser.add_argument('--expected-sha256', default=None, help='可选的清单文件摘要；不匹配时在重放前拒绝')
+    expert_parser.add_argument('--report', default=None, help='新建只读样本审查报告 JSON，不覆盖现有文件')
 
     external_parser = subparsers.add_parser('windbot', help='可选受控 BO1 对局/完整采集，不加入 PPO 或联盟')
     external_parser.add_argument('--inspect', action='store_true', help='仅检查源码目录和运行依赖，不启动 Bot/Core')
@@ -650,6 +659,24 @@ def main():
             parser.exit(1, f'数据门禁失败: {error}\n')
         print(json.dumps({key: value for key, value in report.items() if key != 'entries'},
                          ensure_ascii=False, indent=2))
+
+    elif args.command == 'expert-read':
+        import json
+        from pathlib import Path
+        from trajectory_dataset import preview_verified_demonstrations
+        try:
+            target = Path(args.report) if args.report else None
+            if target is not None and target.exists():
+                raise FileExistsError('expert report already exists; choose a new output name')
+            report = preview_verified_demonstrations(args.path, expert_seats=args.expert_seat,
+                preview_rows=args.preview_rows, expected_file_sha256=args.expected_sha256)
+            if target is not None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, 'x', encoding='utf-8') as stream:
+                    json.dump(report, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        except (ValueError, RuntimeError, OSError, KeyError, EOFError, RecursionError) as error:
+            parser.exit(1, f'专家样本读取拒绝: {error}\n')
 
     elif args.command == 'windbot':
         import json

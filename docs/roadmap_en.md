@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.1. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.2. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -25,7 +25,9 @@ WindBot belongs to this Core repository's [optional integration directory](../in
 
 - [x] Batch 1: Core session contract v1, pinned IceYGO source, explicit CLI/WebUI controlled BO1, masked views, faithful capture and independent replay. Real WindBot/RuleBot both-seat and mirror gates pass; Linux and broader executor acceptance remain pending
 - [ ] Batch 2: process full Link captures and YRP with original-message/asset evidence through the same canonical interpreter; compare observations and unique expert-action mapping, including multi-selection/cancellation, without inventing evidence
-- [ ] Audit program-participant identity and split granularity before imitation learning: a shared model/Bot ID can merge multiple builds into one connected group. Retain truthful provenance and distinguish in-distribution validation from held-out builds/executors; never fabricate identities or split individual frames randomly to obtain validation data
+- [x] 3.15.2: Read-only expert CPU sample API and CLI/WebUI verification for complete eligible traces; reuse strict replay, observation digests and original candidate labels. No prefix access before whole-duel acceptance, default WindBot-only selection, no optimizer
+- [x] 3.15.2: Program identity association audit reports shared identities and hypothetical group counts without program edges. Actual isolation still uses all stable identities; human/unknown handling remains conservative
+- [ ] Define program-identity isolation and similar-build families against explicit evaluation goals: within-program tests versus cross-build/executor holdouts. Never invent identities or randomly split frames to manufacture validation
 - [x] WindBot-side Type15 physical-index-set label equivalence uses a Core-owned versioned interface for future Link reuse. All471 decisions in the original Albaz capture now map, with original responses/observations unchanged. Default/ordered matching, public ygocore, RuleBot packaging and training semantics are unchanged
 - [ ] Separately audit true reduced-pool coverage and other prompt-specific adapters. Design per-sample eligibility independently, without expert-answer injection or automatic whole-duel gate relaxation
 - [x] 3.15.1: Core-owned host Start/query ingress, framing, sparse attributes and diagnostic projection. WindBot reuses packet builders/filtering; queries create neither actions nor transition events and never masquerade as original Core chunks

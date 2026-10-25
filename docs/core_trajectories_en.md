@@ -1,6 +1,6 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.15.1**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
+This document applies to **v3.15.2**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
@@ -296,6 +296,82 @@ not tensors or PPO data. A future learner must recheck file hashes/identities; e
 trusted training authorization. No imitation optimizer, counterfactual search, hindsight evaluation
 backfill or external Link client wiring is implemented. Ordinary training adds no per-step work or
 storage when these manual tools are unused.
+
+## 3.15.2: Expert samples from complete verified traces
+
+The reader reconstructs **V4 CPU observations + unique candidate indices of actual actions** for
+demonstration-data checks. It does not implement a behavior-cloning optimizer or create checkpoints.
+Partial Link views, ordinary YRP without original evidence, unmapped decisions and nonterminal
+diagnostic traces remain ineligible.
+
+### CLI and WebUI
+
+```bash
+# Defaults to participants explicitly declared WindBot, not native model/RuleBot opponents
+python main.py expert-read replays/imported_trajectories/duel_EXAMPLE.core.jsonl.gz
+
+# Human/other demonstrations require explicit physical seats; both seats can be requested
+python main.py expert-read replays/core_trajectories/duel_EXAMPLE.core.jsonl.gz --expert-seat 0 --preview-rows 5 --report replay_data/expert_reports/review_001.json
+```
+
+Optional `--expected-sha256` checks a manifest's `file_sha256` before native execution.
+`--preview-rows` accepts0–20;0 reports counts only. Report files are created exclusively, never overwritten.
+Participant/expert declarations are **not authentication or proof of playing strength**. Losses are not
+automatically excluded.
+
+WebUI: **Storage & Logs → Trajectory Ingress & Quality → 4. Read-only Expert Sample Verification**.
+Choose a canonical trace and expert seats, launch a separate CPU task, then select its report to view.
+Reports contain per-seat original decision counts, selected sample counts, prompt distributions,
+actual responses, label previews and tensor shapes/dtypes—not complete observation tensors.
+Section5 manages expert reports without deleting their source traces or model weights.
+Rejected reads create no success report; reasons appear in CLI output or managed-task logs.
+
+### Core reader API and lifecycle
+
+```python
+from trajectory_dataset import open_verified_demonstrations
+
+with open_verified_demonstrations(path, expert_seats=[1]) as examples:
+    print(examples.report['sample_count'])
+    for example in examples:
+        observation = example['observation']  # All existing Encoder CPU inputs, batch=1 retained
+        action_index = example['action_index']  # Actual action in the original pool, 0..119
+        provenance = example['metadata']  # Seat, identity, record index and file/duel/observation hashes
+```
+
+The reader freezes a bounded source copy, checks format/provenance, performs **one** strict native replay
+and observation-digest check, and stages selected samples in a temporary cache. Iteration opens only
+after every whole-duel gate passes. It reuses the existing interpreter, visibility, Encoder and explicit
+response-label contracts. There is no alternate parser or expert-answer injection into candidate pools.
+Cancel, select/unselect and multi-select retain actual submitted responses. Automatic empty-chain
+replies create no examples. Labels must be unique, within120 slots and unmasked.
+
+Examples contain no invented PPO behavior probabilities, advantages or tactical rewards. Side remains
+isolation metadata, never model input; opposing hidden builds do not become the own stable deck profile.
+Limits are8MiB/sample and512MiB of anonymous temporary storage/duel. Exhaustion rejects the read rather
+than releasing a qualified prefix. Numeric arrays are staged without pickle and decoded individually
+on CPU. Exiting `with` closes/deletes the cache; callers retaining tensors own that memory usage.
+Only explicit offline reads incur this cost. Normal PPO, Arena and WindBot sessions create no cache
+or additional inference.
+Core callbacks are process-global: this is not a thread-concurrent reader. Do not replay alongside
+another duel in the same process; use isolated processes for parallel work. WebUI already launches
+the reader in a separate CLI process.
+
+### Program identities and isolation audit
+
+Rebuilding a dataset adds `participants`, per-seat decision counts and `identity_audit` to the existing
+format1 manifest. Older reports remain viewable. Actual splits still use transitive complete-duel,
+exact Main/Extra/Side composition and **all stable participant identities**, with no policy relaxation.
+
+The audit lists shared program identities, declared kinds and duel counts, and computes a hypothetical
+group count without program-identity edges. This is diagnostic—not another split or independent
+validation. Human/unknown identities remain isolated; prefixes such as `windbot:` do not determine
+kind. Conflicting declarations for the same identity retain the more conservative non-program edge.
+
+Identical builds still join groups without program edges. Generalization claims for shared models,
+executors or similar builds require a defined evaluation goal and a separately reviewed split policy.
+Do not invent player IDs or randomly split frames to manufacture a holdout. Future learners must
+recheck referenced file digests rather than trusting a stale editable eligibility flag.
 
 ## 3.15.1: Core-owned player-view ingress
 
