@@ -19,7 +19,8 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         response_timeout=30, max_decisions=2000, capture_root='./replays/link_captures',
         log_root='./system_logs/windbot', verify=False, policy_mode='training', temperature=0.8,
         native_deck_source=None, deck_dir='./decks', record_replay=False,
-        record_evaluations=False, game_index=1, replay_root='./ai_thoughts'):
+        record_evaluations=False, game_index=1, replay_root='./ai_thoughts',
+        expert_sink=None, session_purpose='controlled', windbot_deck=None):
     """Drive one public Core and optional external clients, with exact full capture.
 
     External packets and masked query refreshes are derived transports, not raw
@@ -39,6 +40,10 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     from action_candidates import MODEL_ACTION_MSGS
 
     timeout = finite_timeout(timeout)
+    if session_purpose not in ('controlled', 'imitation_collection', 'imitation_evaluation'):
+        raise ValueError('unsupported controlled-session purpose')
+    if expert_sink is not None and session_purpose != 'imitation_collection':
+        raise ValueError('expert collection must be an explicitly separate workflow')
     response_timeout = finite_timeout(response_timeout)
     if type(seed) is not int or not 0 <= seed < 2**32:
         raise ValueError('seed must be uint32')
@@ -52,6 +57,8 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         raise ValueError('state evaluations require replay recording and a native model')
     if opponent_executor and (model or native_deck or native_deck_source):
         raise ValueError('two WindBots cannot be combined with a native model/deck')
+    if windbot_deck and opponent_executor:
+        raise ValueError('a WindBot deck override applies only to a single external opponent')
     policy_mode, temperature = resolve_arena_policy(policy_mode, temperature)
     catalog = executor_catalog()
     if executor not in catalog or (opponent_executor and opponent_executor not in catalog):
@@ -71,7 +78,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
             native_deck_source, rng=random.Random(seed))
         native_deck = pick.deck_path
     for actor in (0, 1):
-        deck_paths[actor] = (catalog[bot_names[actor]]['deck_file'] if actor in bot_names
+        deck_paths[actor] = (windbot_deck or catalog[bot_names[actor]]['deck_file'] if actor in bot_names
                             else native_deck or catalog[executor]['deck_file'])
     decks = {str(actor): load_deck(deck_paths[actor]) for actor in (0, 1)}
     for actor in bot_names:
@@ -132,14 +139,15 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
             capture = LinkCaptureWriter(visibility='full_core', reset=reset, decks=decks,
                 assets=runtime_asset_identity(env), root=capture_root,
                 player_ids={seat: value['identity'] for seat, value in participants.items()},
-                session_metadata={'format_version': 1, 'session_id': gate.session_id, 'participants': participants})
+                session_metadata={'format_version': 1, 'session_id': gate.session_id,
+                                  'participants': participants, 'purpose': session_purpose})
             result['capture_path'] = capture.path
             interpreter = CoreTrajectoryInterpreter(DuelState(decks['0']['main'], decks['0']['extra'],
                 decks['1']['main'], decks['1']['extra']))
             if record_replay:
                 from thought_logger import AIThoughtLogger
                 names = [f'WindBot ({bot_names[actor]})' if actor in bot_names else
-                         Path(model).stem if model else 'RuleBot' for actor in (0, 1)]
+                         bot.model_metadata.get('display_name', Path(model).stem) if model else 'RuleBot' for actor in (0, 1)]
                 logger = AIThoughtLogger(*names)
                 logger.start_recording()
                 logger.set_decklists(decks['0']['main'], decks['0']['extra'],
@@ -183,6 +191,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                             raise TimeoutError('controlled duel decision limit')
                         actor = prompt_actor(message)
                         decision_snapshot = None
+                        expert_snapshot = None
                         selected = probabilities = None
                         request = gate.request(actor, kind)
                         for peer in peers.values():
@@ -190,6 +199,8 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                         if is_empty_chain_prompt(kind, message[1:]):
                             response = -1
                         elif actor in peers:
+                            if expert_sink is not None and kind in MODEL_ACTION_MSGS:
+                                expert_snapshot = prepare_canonical_decision_snapshot(interpreter, env, message, rng)
                             response = peers[actor].respond(message, env)
                         elif model and kind in MODEL_ACTION_MSGS:
                             import torch
@@ -207,6 +218,9 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                             rule_bot.sync_valid_actions(interpreter.brain.current_valid_actions)
                             response = rule_bot.get_rule_decision(actor, kind, message, interpreter.brain)
                         raw_response = gate.submit(ResponseSubmission(request.session_id, request.request_id, actor, response))
+                        if expert_snapshot is not None:
+                            expert_sink.record(expert_snapshot, message, raw_response, actor,
+                                               participants[str(actor)], result['decisions'])
                         env.send_action(raw_response)
                         capture.record_response(raw_response, actor)
                         if not is_empty_chain_prompt(kind, message[1:]):
@@ -271,6 +285,14 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         if capture:
             capture.finish(winner=result['winner'] if result['core_terminal'] else -1,
                 reason=result['reason'] if result['core_terminal'] else -1, core_terminal=result['core_terminal'])
+        if expert_sink is not None:
+            try:
+                result['expert_cache'] = expert_sink.finish(
+                    capture.path if capture else None,
+                    valid=bool(result['core_terminal'] and env and not env.query_card_error_count))
+            except Exception as error:
+                result['expert_cache_error'] = str(error)
+                expert_sink.close()
         if logger:
             try:
                 result['replay_path'] = logger.save(result['winner'] if result['core_terminal'] else -1,

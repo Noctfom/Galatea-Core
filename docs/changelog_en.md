@@ -4,6 +4,28 @@
 
 ---
 
+## [v3.15.3] - 2026-10-28
+
+### Independent imitation learning and fixed-opponent evaluation
+
+- UI review: defaults now split different complete games from shared teachers; executor holdouts move to optional advanced settings, with a train-all option. Collection/ordinary WindBot/evaluation randomize Core starts by default, optionally pinned and always recorded; split seeds are separate. Existing replays require no executor import. Teacher seats, split goals, BC resume consequences and evaluation controls gain explanations/help.
+- Imitation tab1 unifies checks, reconstruction, label extraction and splitting into one task; standalone expert-read is removed from everyday UI but retains its developer CLI/API. YRP diagnostics avoid redundant independent self-replay, producing reports without datasets when ineligible. Storage only manages files, adding source/batch/category selection for caches, captures, traces, reports, logs, BC models and TensorBoard, never following manifests into external-source deletion.
+
+- Adds optional `integrations/imitation/` and `imitate collect/prepare/train/evaluate` CLI commands. Launch & Monitor Hub exposes separate teacher/data, BC training and evaluation tabs. Every stage is explicit; ordinary duels, main PPO, the league and online-human learning are not automatically connected.
+- Freezes teacher executors/builds and split settings before collection. Supports episode, exact-build and executor isolation while retaining human/unknown identity associations. Explicit executor holdouts keep identical builds/declared families within roles, and duplicate openings always stay together. Upstream levels are declarations, not measured ratings; final test data is not monitored each epoch or used for checkpoint selection.
+- Native WindBot mirrors directly cache both teachers' actual observations and unique labels using one Core per game. Complete legacy Link captures generate examples during one original-output reconstruction; epochs never replay Core. Canonical traces reuse strict expert reading. Unmapped actions do not inject answers; failed/nonterminal games do not publish partial caches.
+- Compressed numeric NPZ blocks deduplicate static deck profiles and verify digests without pickle. Decompression is capped at32MiB/block and compressed blocks at2GiB/duel. Relative dataset references permit workspace relocation. BC requires matching vocabulary/semantic input protocols, not identical Core binaries across operating systems.
+- Teacher-balanced cross-entropy supervises policy; forced choices contribute neither loss nor accuracy. Defaults are5 epochs, batch64 and learning rate1e-5. Critic, auxiliary and planning-target decoders receive no direct BC supervision, while shared policy representations can change. Optimizer, new UUID, experiment outputs and10 TensorBoard metrics are separate; action imitation is distinct from playing strength.
+- Retains checkpoint format3 with `training_stage=imitation`, dataset/provenance and epoch counters. Explicit BC resume restores its optimizer/scaler/RNG. BC cannot use PPO `--resume` but explicitly initializes a fresh PPO weight branch via `train --init-from`. Online WindBot Workers remain a later batch.
+- Naming/continuation review: `galatea_iter_<cumulative PPO>_bc_<cumulative BC>.pth` retains independently advancing counters and parent provenance. Main training, Arena, model storage and packaging include BC/branch directories. PPO initialization creates a new UUID/directory and optimizer/update/rollout counters without modifying BC. PTH/ONNX artifacts retain/check lineage. New replays display full names; independent evaluation recordings default to model-side state predictions, separate candidate/baseline directories and unified replay discovery. Old recordings are not recomputed.
+- Evaluation freezes actual held-out builds, Core seeds, model policy and paired seats for candidate/baseline comparisons. Reports outcomes, failures and descriptive Wilson intervals. WindBot RNG remains uncontrolled and paired games are not IID evidence. Evaluation-only captures are excluded from learning.
+- Aligns bilingual documentation and release entry points to3.15.3. Model Protocol4/Checkpoint3/revision14, network, rewards and PPO remain unchanged; public Core and upstream WindBot source are unmodified.
+- Acceptance: 655 regressions and 50 subtests pass in the full check. After adapting four packaging test fixtures to the new model-directory argument, all 131 final related tests pass with real Core/WindBot enabled. Coverage includes BC→PPO→BC counter round trips, exact initial PPO weights, fresh optimizers, unchanged BC files, PTH/ONNX lineage pairing, bilingual UI and prediction recordings in real evaluations. Native/reconstructed input parity, BC resume, best-checkpoint selection, batch cleanup and external-source preservation pass, along with syntax, documentation links and default portable-package scanning. Four independent semantic rebuild gates remain disabled. No Linux/cloud-GPU long training or human-online wiring was performed; small engineering checks do not establish stronger play.
+
+See [Independent imitation learning](core_trajectories_en.md#3153-independent-imitation-workflow) and the [imitation metric reference](tensorboard_metrics_en.md#10-independent-imitation-metrics).
+
+---
+
 ## [v3.15.2] - 2026-10-21
 
 ### Expert samples from complete traces and identity association audit

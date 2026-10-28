@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.2**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.3**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -330,7 +330,7 @@ Enter card code to view AI-perspective semantic features.
 | System Logs | `./system_logs/` | `.log` |
 | V3 Audit Reports | `./system_logs/protocol_v3_audit/` | `.json` |
 | Thought Records | `./ai_thoughts/` | `.json` |
-| Trajectory Ingress & Quality | Categorized directories under `./replays/` | `.link.jsonl.gz`, `.core.jsonl.gz`, ingress reports/dataset manifests `.json` |
+| Trajectory & Imitation Files | `./replays/`, `./replay_data/imitation/`, `./models/imitation/` and matching TensorBoard | Source replays, captures, traces, caches, reports, logs and BC checkpoints |
 | Model Storage | `./models/` | `.pth`, `.onnx`, `.onnx.data`, `.artifacts.json` |
 | Match Data | `./web_data/` | `.csv` |
 | TensorBoard | `./runs/` | Binary |
@@ -354,7 +354,10 @@ an iteration removes its PTH, ONNX, external data, and artifact manifest togethe
 The WebUI warns about the same prefix with different UUIDs, or one UUID with multiple prefixes.
 Resume and overwrite authorization always use the embedded UUID rather than trusting filenames alone.
 
-Trajectory Ingress & Quality has four sections: raw inspection/conversion, canonical audit/splits, results and categorized file management. Captures, canonical trajectories, ingress reports and dataset manifests have separate headings and scopes. Delete/clear affects only matching files of the displayed category, not nested directories, and never starts training. See [workflow and quality boundaries](core_trajectories_en.md#3135-external-ingestion-and-isolated-quality-gates).
+Trajectory & Imitation Files only views, exports and cleans files. New outputs group by data batch/BC
+experiment, legacy files by direct provenance. Select whole batches then adjust categories/files; manifests
+never trigger external-source deletion. Inspection/conversion, example extraction and splits are unified
+in imitation tab1. See [workflow and quality boundaries](core_trajectories_en.md#3135-external-ingestion-and-isolated-quality-gates).
 
 ![Storage & Logs](图片/存储与日志仓库.png)
 
@@ -784,10 +787,22 @@ Or click sync in WebUI's **🔄 Resource Sync Hub**.
 
 ## Optional WindBot controlled duels
 
-3.15.2 adds read-only expert sample verification in section4 of Trajectory Ingress & Quality.
-Actual WindBot labels/CPU inputs open only after whole-duel acceptance; no training starts.
-Dataset manifests add program identity association audits without changing isolation policy.
-See [expert samples](core_trajectories_en.md#3152-expert-samples-from-complete-verified-traces).
+3.15.3 adds Independent Imitation in the training console: separate teacher/validation/test pools,
+one-time compressed caches, BC epochs/experimental checkpoints and fixed-build swapped-seat
+candidate/baseline evaluation. It never auto-joins PPO or online-human learning, and PPO `--resume`
+cannot restore BC optimizers. See the [workflow guide](core_trajectories_en.md#3153-independent-imitation-workflow).
+
+Names such as `galatea_iter_200_bc_5.pth` keep separate PPO/BC counters. Selecting BC weights on
+the main training page explicitly creates a separate PPO branch with a fresh optimizer and both
+cumulative counters retained. Model Storage and packaging offer experiment/branch directory selectors.
+Independent evaluation replays default to model-side state predictions, with an opt-out, and appear
+in the unified replay list.
+
+Imitation tab1 now unifies format checks, reconstruction, example extraction and splitting. Defaults
+use different complete games from shared teachers; no split or separate-executor holdouts are optional.
+Existing files need no executor import. Storage only manages files, with source/batch selection covering
+caches, reports, captures, models and TensorBoard. Standalone expert verification remains a developer
+CLI/API, not an everyday prerequisite; see [expert API](core_trajectories_en.md#3152-expert-samples-from-complete-verified-traces).
 
 3.15.1 adds Core's player-view SDK for future Link reuse of Start/query, physical-seat and visibility
 contracts. It currently provides coverage-aware diagnostic projections, not complete online V4 inference

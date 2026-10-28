@@ -1,6 +1,11 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.15.2 的可选受控 BO1 会话（3.15.0引入）。一个公开 Core 驱动对局，WindBot 通过本地协议桥响应；另一侧可为原生 RuleBot、V4 PTH 模型或第二个 WindBot。普通训练与竞技场不依赖本模块，尚未接入 PPO/联盟、真人客户端、BO3 或模仿学习器。
+此目录提供 Galatea-Core 3.15.3 的可选受控 BO1 会话（3.15.0引入）。一个公开 Core 驱动对局，WindBot通过本地协议桥响应；另一侧可为RuleBot、V4模型或第二个WindBot。普通训练不依赖本模块，尚未接入PPO/联盟、真人客户端或BO3。
+
+3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
+换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
+自动触发，也不自动接续主训练或真人在线学习。BC权重可由用户显式选择 `train --init-from`
+建立新的PPO分支；不恢复BC优化器，PPO/BC累计计数分别保留。[完整操作说明](../../docs/core_trajectories.md#3153独立模仿学习工作流)。
 
 3.15.2可从完整合格规范轨迹读取真实专家样本，默认只选WindBot，不自动模仿陪练模型；
 仅离线CPU读取与报告，不改对局执行或启动学习。见 [专家样本CLI/API与身份审计](../../docs/core_trajectories.md#3152完整轨迹的专家样本读取)。
@@ -49,6 +54,10 @@ python main.py windbot --executor Blue-Eyes --model models/your_v4_model.pth --p
 `--runtime` 可指定其他已构建的 WindBot.exe；Linux 可用 `--mono` 指定 Mono。必须保留 exe 同目录的配置、SQLite 运行文件与 Dialogs；单拷贝 exe 不构成完整运行包。未自定义原生侧 YDK 时，使用对应执行器的相同构筑，不从普通训练池随机换牌。
 
 WebUI 入口在竞技场的“WindBot 可选受控对局”。点击读取/刷新后，执行器与当前兼容 V4 PTH 通过下拉列表选择；切换另一侧类型立即显示对应控件，不再等待表单提交。缺少构筑的执行器不进入列表，旧协议/资产不匹配模型列入诊断说明，不伪装为可用模型。模型最终仍由原生严格加载器验证。
+
+WebUI和CLI默认随机Core开局，各局使用起始种子加局数偏移；实际值记入日志与捕获。
+取消“随机Core开局”或传入 `--seed 73` 可固定序列。该种子不控制WindBot自身随机性。
+同样的随机/固定选项也用于独立模仿采集和评测，数据划分种子与Core开局独立。
 
 选择 V4 模型后，可独立设置“原生模型决策策略”：默认 `training` 按 `Categorical(logits)` 采样，温度固定1.0；`greedy` 取最高 Logit，不使用温度；`deployment` 使用0.05～5.0的可调温度，初始值0.8。对应 CLI 为 `--policy-mode` 和仅部署采样使用的 `--temperature`。这些设置不沿用普通竞技场控件，也不控制 WindBot。本入口宏池仍使用均匀先验，因此训练式采样不表示完全复现训练 Pass1。结果 JSON 的 `native_policy` 和全息录像元数据保存实际生效策略/温度；非模型对局的 `native_policy` 为 null。
 
@@ -100,11 +109,24 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 
 受控局的 P0 固定先手，交换座位不会更改这一规则。种子只控制 Core，不控制上游 Bot 的时间初始化随机数，因此该入口不等于固定竞技基准。原生模型目前使用 CPU，并沿用竞技场策略采样；宏候选采用 Core 规范重建的均匀先验，不宣称与训练 Pass1 选池完全同分布。可选全息录像不提供 WindBot 置信度，也不把显示用响应解码当作学习标签。
 
-只有完整来源、真实终局、唯一动作映射及独立重放等门禁都通过时，轨迹才可能成为后续示范数据。镜像/相同 Bot 或构筑会进入同一隔离组，不能据此声称独立泛化验证。完整 YRP 旁证入口和独立模仿学习器留在下一批次；不以本批采集自动更新任何模型。
+普通 `--verify` 和旧质量清单仍按严格整局门禁运行。独立 `imitate collect` 在原生实际对局中
+直接准备样本；`imitate prepare` 对旧完整Link只重建一次并同步产样，不重复调用Core。
+原生/重建源的个别未映射动作只排除标签，状态失效仍拒绝整局。独立数据集可明确选择整局、
+构筑或执行器留出；同构筑新对局不冒充跨构筑泛化。完整YRP旁证和真人在线接线仍待开发。
 
 ## English summary
 
-Galatea-Core 3.15.2 owns this optional controlled BO1 runner, introduced in3.15.0. One public native Core drives a loopback WindBot client; the other seat can be native RuleBot, a V4 PTH model or another WindBot. Source is pinned to `dec0535f8669dca01457a898890a968139711b19` with no upstream decision patches. PPO, league integration, human clients, BO3 and imitation optimization remain outside this batch.
+Galatea-Core 3.15.3 owns this optional controlled BO1 runner, introduced in3.15.0. One public Core drives a loopback WindBot client against RuleBot, V4 or another WindBot. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. PPO/league integration, human clients and BO3 remain outside this module.
+
+The independent `../imitation/` workflow adds teacher/holdout pools, one-time preparation, a BC optimizer
+and swapped-seat fixed evaluation. Only explicit WebUI/`imitate` commands start it; ordinary games do
+not train automatically or auto-join PPO/online-human learning. Explicit `train --init-from` can
+initialize a separate PPO branch from BC weights, with a fresh optimizer and independent cumulative
+PPO/BC counters. See the [workflow guide](../../docs/core_trajectories_en.md#3153-independent-imitation-workflow).
+Ordinary `--verify` retains strict whole-duel replay. Independent native collection prepares samples
+in the actual duel; complete older Link sources reconstruct and produce examples in one Core pass.
+Individual unmapped labels are skipped, while invalid states reject the game. Explicit duel/build/
+executor splits replace universal program-ID grouping only in the separate imitation dataset.
 
 3.15.2 reads real expert examples from complete eligible canonical traces, defaulting to WindBot rather
 than native opponents. This is offline CPU reading/reporting, not altered duel execution or learning.

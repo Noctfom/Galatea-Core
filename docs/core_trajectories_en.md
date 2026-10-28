@@ -1,6 +1,6 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.15.2**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
+This document applies to **v3.15.3**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
@@ -165,10 +165,11 @@ but PPO/shared-memory/training pools do not grow. Checks may scan gzip multiple 
 execution while keeping memory bounded.
 
 Core-side Link/YRP adapters, whole-duel/deck/player isolation and quality gates arrived in 3.13.5;
-see below. They are not an imitation learner, and the external Link project still needs SDK integration.
+see below. These diagnostic commands do not train. See the explicit [3.15.3 BC workflow](#3153-independent-imitation-workflow);
+the external Link project still needs SDK integration.
 Public cognition for Types 120, 160/165, 37/38 and 162 arrived in 3.13.3. Type 35 remains deferred
-by agreement and Tag 161 unsupported. The abandoned Replay Worker has been removed; imitation
-optimization and counterfactual search are not implemented.
+by agreement and Tag 161 unsupported. The abandoned Replay Worker has been removed;
+trajectory recording invokes neither a BC optimizer nor counterfactual search.
 
 ## 3.13.5: External ingestion and isolated quality gates
 
@@ -188,34 +189,22 @@ and `yrp_parser.py` are removed; the new reader is `yrp_ingest.py` with the sing
 .\python_env\python.exe main.py dataset-build --directory .\replays --output .\replay_data\datasets\review_001.json --seed 20261009
 ```
 
-WebUI: **Storage & Logs → Trajectory Ingress & Quality** has four numbered workflow sections,
-with headings and input/output explanations before controls. Question-mark help covers source,
-file, directory, split seed and actions.
+In3.15.3, WebUI processing is unified under **Control & Logs → Independent Imitation → tab1**.
+Choose a file/directory, teacher seats and optional split settings, then one action reads the format,
+reconstructs where needed, verifies labels and assigns splits. Complete Link sources reconstruct once;
+canonical traces are strictly read once. Separate conversion, dataset-audit and expert-read clicks are
+not required. The older CLI commands above remain developer diagnostics, not mandatory training steps.
 
-1. **Inspect & Convert Raw Replays**: choose YRP/YRP3D or raw Link captures. Read-only inspection
-   never calls Core or writes files. Managed conversion writes
-   `replays/imported_trajectories/*.core.jsonl.gz` and `replay_data/ingest_reports/*.json`, without
-   modifying the source or starting learning. Each source has separate file-selection state.
-2. **Audit & Split Canonical Trajectories**: recursively scans only `.core.jsonl.gz`, including
-   native Arena and converted diagnostic traces. Writes `replay_data/datasets/dataset_*.json`
-   without moving traces. The seed controls grouped splits, not duel/model randomness; targets
-   default to80%/10%/10%, but group isolation does not guarantee exact file-count proportions.
-3. **View Quality Audit Results**: shows candidate train/validation/test and quarantine counts
-   plus per-trace rejection reasons. Counts are files, not steps or already-trained samples.
-   Expandable help explains common codes and insufficient-independent-validation warnings.
-   Viewing a manifest does not re-audit; re-run after adding data or changing assets.
-4. **File Management by Category**: four separate collapsible areas for raw Link captures,
-   imported diagnostic traces, ingress reports and dataset manifests. Category, directory,
-   suffix and count precede controls, with category-specific deletion labels. Batch deletion/
-   clearing affects only matching files directly in that directory, never subdirectories or
-   related artifacts. Deleting a manifest keeps its referenced traces; native traces stay in
-   Thought Replays. No UI undo is available; download backups first.
+Each task writes `preparation.json` under `replay_data/imitation/<batch>/`. Usable sources also produce
+`dataset.json` and `cache/`; diagnostic-only batches explain their exclusions without creating a dataset.
+Ordinary YRP without original messages/historical assets stays diagnostic: self-replay cannot prove eligibility.
 
-Progress appears in Control & Logs and `system_logs/ReplayIngest*` / `DatasetQuality*`; an existing
-managed task is not replaced. No automatic Core replay runs on page refresh and no external assets
-are downloaded. This UI patch remains3.13.5 without protocol/checkpoint/training changes. Outputs
-require new filenames. Conversion failures seal a diagnostic prefix and return CLI status2;
-format/asset refusal returns1. Successful diagnosis does not authorize training.
+**Storage & Logs → Trajectory & Imitation Files** only views, exports and cleans files. Read/refresh the
+inventory, filter data batches/BC experiments/legacy source groups, select categories and adjust individual
+files. New batches include captures, converted traces, caches, reports, Bot logs and optional holographic
+replays; BC experiment groups include checkpoints and matching TensorBoard. Legacy copies/reports join
+through direct provenance; a multi-source manifest does not join every referenced game. Deletion affects
+only explicitly listed managed files, never externally referenced sources, and is disabled during managed tasks.
 
 ### YRP boundaries
 
@@ -293,14 +282,191 @@ Similar deck archetypes are not automatically clustered—only exact composition
 
 Manifests contain relative paths, file/duel hashes, grouping, origin/assets/outcome and quality counts,
 not tensors or PPO data. A future learner must recheck file hashes/identities; editable JSON is not
-trusted training authorization. No imitation optimizer, counterfactual search, hindsight evaluation
-backfill or external Link client wiring is implemented. Ordinary training adds no per-step work or
-storage when these manual tools are unused.
+trusted training authorization. These diagnostic manifests do not start learning; independent BC is
+provided by3.15.3 below. Counterfactual search, hindsight backfill and external Link client wiring
+remain separate work. Ordinary PPO incurs no extra per-step work from these tools.
+
+## 3.15.3: Independent imitation workflow
+
+WebUI: **Control & Logs → Independent Imitation**, with Collect / Prepare Replays, Independent BC Training,
+and Playing Evaluation tabs. CLI commands use `imitate`. They do not automatically join PPO,
+ordinary Arena games or online-human learning. Recording a game does not start learning. WindBot as
+an online PPO opponent remains a future integration; BC-to-PPO initialization requires explicit selection.
+
+### 1. Teacher, validation and final-test pools
+
+```bash
+python main.py imitate collect --train-executor Blue-Eyes --games-per-executor 10 --output replay_data/imitation/example
+# Optional unseen-executor evaluation:
+python main.py imitate collect --train-executor Blue-Eyes --validation-executor Albaz --test-executor BlueEyesMaxDragon --games-per-executor 10 --output replay_data/imitation/executor_holdout
+```
+
+Training updates weights; validation checks demonstration fit and records the best checkpoint each epoch;
+final test is reserved for explicit evaluation, never checkpoint selection. These measure learning, not
+executor installation/import. Default episode splitting allows the same teachers/builds in each split,
+using different complete games. Choose `--split-mode none` to train on everything. Build/executor
+holdouts are optional stricter generalization checks, not a prerequisite for everyday imitation.
+
+Only separate-executor holdouts require disjoint lists. Each executor mirrors
+its paired build and both real teacher seats provide examples. `plan.json` freezes executor, declared
+level, actual YDK hash, role, Core seed range and executable hash before games. Levels
+`Normal/Easy/NotFinished/Test` are upstream declarations, not measured strength ratings.
+Optional `--families families.json` accepts an explicit `{"executor":"family"}` mapping. Identical
+builds or declared families cannot cross held-out roles; names are not guessed into families.
+
+Collection randomizes the initial Core seed by default, incrementing it per duel and recording actual
+values in the plan/captures. `--seed 73` pins Core starts; `--split-seed 73` independently controls data
+assignment. Neither controls WindBot's own RNG.
+
+Examples are prepared in the actual Core session without separate conversion/replay engines. Retry,
+parse failure, disconnection or no real terminal prevents publication of that game's cache. An action
+outside the model's unique120-slot mapping loses only its label and is counted; answers are never
+injected into the pool. No per-game human approval is needed. Raw captures remain available for
+independent diagnostic replay.
+
+### 2. Prepare complete existing sources once
+
+```bash
+python main.py imitate prepare replays/imported_trajectories --split-mode episode --output replay_data/imitation/imported_example
+```
+
+Scans `.core.jsonl.gz`, `.link.jsonl.gz`, `.yrp` and `.yrp3d` without importing an executor catalog or
+requiring WindBot installation for existing files. One task checks formats, reconstructs, extracts
+labels and assigns splits. Complete Link captures produce examples during one
+original-output reconstruction. Older canonical traces use one strict replay/read; epochs then use
+the prepared cache without Core. The older canonical reader still requires whole-duel unique mapping;
+if raw captures remain, the new raw preparation path can retain individually usable labels.
+Ordinary YRP without original output/historical evidence and player-only Link captures remain
+ineligible. Missing private information is not invented.
+
+Ordinary YRP reconstruction writes diagnostic results without a redundant independent self-replay.
+Diagnostic-only batches still save preparation.json, but no dataset.json or training starts.
+
+The teacher-seat setting selects whose actions become labels, not a viewing perspective or starting role.
+The default teachers are explicitly declared WindBot seats. Human/other sources require
+`--expert-seat 0` and/or `--expert-seat 1`. Provenance is a declaration, not authentication or proof of
+skill. Losses are not automatically excluded. `preparation.json` records excluded sources, not a queue
+waiting for human approval.
+
+| Split mode | Grouping | Does not establish |
+|---|---|---|
+| `none` | All games train, duplicate wrappers still deduplicated | Held-out validation or final-test conclusions |
+| `episode` | Complete duel, same opening and human/unknown identities; programs/builds may be shared | Cross-build/executor generalization |
+| `deck` | Above plus exact Main/Extra/Side composition | Automatic isolation of similar-build families |
+| `executor` | Above plus WindBot executor; explicit validation/test names, remaining executors train | That a parent PPO model has never seen the deck |
+
+Human/unknown associations remain transitive; program IDs remain provenance without automatically
+joining the entire corpus. Duplicate wrappers of one game are deduplicated. Episode/deck modes target
+80%/10%/10% by groups, not exact file counts. At least one training group remains; a single group
+stays entirely in training rather than fabricating a frame-level holdout. No-validation datasets
+can support engineering fitting, but cannot claim held-out checkpoint selection.
+
+### 3. Start BC explicitly
+
+```bash
+python main.py imitate train --dataset replay_data/imitation/example/dataset.json --init-from models/your_v4_model.pth --epochs 5 --batch-size 64 --lr 0.00001 --device auto
+```
+
+Each epoch traverses training examples once, optimizing cross-entropy of the actual expert candidate
+index. Forced single-choice states contribute neither policy loss nor accuracy. Inverse effective
+sample counts balance teachers so long/high-volume teachers do not dominate. Existing V4 Main/Extra
+inputs remain unchanged; Side is provenance/isolation metadata, not model input. Macro pools retain
+canonical uniform priors and do not claim exact PPO Pass1 distribution equivalence.
+
+Shared encoders, deck/FiLM, policy branches and the existing planning-to-policy path learn. Critic,
+structured auxiliary heads, planning target decoder and planning value branch receive no direct
+supervision. Their outputs can still drift when shared representations change: BC prediction curves
+are not automatically revalidated win rates. There are no invented PPO advantages/behavior
+probabilities or tactical rewards.
+
+The dataset's `cache/` holds bounded compressed numeric blocks with deduplicated stable deck profiles.
+Only mini-batches reach the GPU; trainable Encoder/latent outputs are never frozen into the cache.
+Relative references allow moving the whole dataset. BC consumption checks vocabulary/semantic
+protocol identity, not an identical native Core binary across operating systems. Collection Core/Lua/CDB
+hashes remain provenance. Prepare new data after those source resources change; old caches are not
+silently rewritten.
+
+Outputs go to `models/imitation/<run_id>/`: epoch reports, saved PTH/artifact manifests and stage
+results. New tasks generate new UUIDs and record parent checkpoint/dataset hashes. Epoch monitoring
+reads validation, never final test. Balanced validation cross-entropy identifies the best checkpoint,
+which may remain the initialization checkpoint. Action accuracy is not playing win rate.
+
+Resume with `--resume path/to/galatea_iter_200_bc_N.pth`; `--epochs` adds more imitation passes. Dataset
+digest, batch size, learning rate and seed must match; historical-best validation selection is retained.
+Use `--init-from` to branch instead.
+
+| UI choice | Weights | Optimizer / UUID / epochs | Result |
+|---|---|---|---|
+| New experiment | Copy selected PTH | New optimizer/UUID, epoch zero | Branch without changing the source task |
+| Continue BC experiment | Restore BC PTH | Restore momentum/scaler/RNG and cumulative epochs | Append epochs; epoch5 plus2 ends at7 |
+
+Checkpoints
+retain Format3/Protocol4/revision14 and support inference. `training_stage=imitation` prevents ordinary
+PPO `--resume` from restoring a BC optimizer. Continuing into PPO requires explicit weight initialization.
+
+### Dual counters, model management and continuing PPO
+
+`galatea_iter_200_bc_5.pth` means cumulative PPO iteration200 and BC epoch5. Continuing PPO to210
+saves `galatea_iter_210_bc_5.pth`; another BC epoch saves `galatea_iter_210_bc_6.pth`. Checkpoints
+also store both counters/parent provenance, independently of filenames. Local BC `iteration` remains
+the current experiment's epoch, never PPO age. Separate directories/UUIDs prevent collisions even when
+two experiments have identical counters.
+
+Storage & Logs → Model Storage automatically lists BC/PPO branch directories. Tables show full names,
+stages and cumulative counters; deployment packaging accepts those directories too. Main training and
+ordinary Arena list PTH recursively. Original3.15.3 BC metadata supplies parent-derived display names
+without silently renaming existing files or rewriting old replays.
+
+Selecting BC on the main training page explicitly initializes a new PPO branch via `--init-from`:
+
+```bash
+python main.py train --init-from models/imitation/RUN/galatea_iter_200_bc_5.pth --additional-iterations 10 --device auto --no_compile
+```
+
+Creates `models/ppo_branches/<new UUID>/galatea_iter_200_bc_5.pth`, then trains to210. Weights are
+inherited exactly; PPO optimizer/scaler and task-local update/rollout counters reset while cumulative
+PPO200/BC5 remain. BC files/optimizers are untouched. The ordinary PPO algorithm, including existing
+auxiliary/planning warm-up, applies; BC updates are not counted as PPO updates. Use `train --resume`
+only to restore the resulting PPO branch's optimizer/progress.
+
+### 4. Fixed-opponent game evaluation
+
+```bash
+python main.py imitate evaluate --dataset replay_data/imitation/example/dataset.json --checkpoint models/imitation/RUN/galatea_iter_200_bc_5.pth --baseline models/your_v4_model.pth --split validation --games-per-seat 5 --record-replay --output replay_data/imitation/eval_example
+```
+
+Candidate and optional baseline run the same Core-seed/both-seat schedule. Both model and Bot use
+the actual held-out build frozen into the output directory, not a substituted executor default.
+`--split test` explicitly runs final testing. `--executor NAME` overrides regression opponents and is
+marked as a regression override, not unseen-opponent evidence.
+
+The WebUI defaults to known-teacher regression, which requires no separate executor pool. Held-out
+validation/final test use reserved data. This tab runs actual games, unlike example CE/agreement on
+the training tab. Candidate/baseline share a schedule without updating weights. Random starts are
+recorded by default; `--seed` or disabling random mode pins the schedule. WindBot RNG remains separate.
+
+Default `training` policy usesT=1; `greedy` takes argmax; `deployment --temperature 0.2` samples at the
+specified temperature. Core seeds do not fully control WindBot randomness, so evaluation repeats a
+fixed configuration rather than guaranteeing byte-identical games. Reports include wins/losses/draws,
+aborts, completed-game win rate, executor breakdowns and descriptive Wilson95% intervals. Paired seeds
+are correlated; intervals are not guarantees of strictly independent trials. Infrastructure failures
+are not wins or fabricated draws, and opponents are not replaced mid-game. Captures carry
+`imitation_evaluation` and automatic preparation excludes them from learning.
+
+`--record-replay` saves Holographic Replay files and defaults to recording the model side's state
+predictions; use `--no-record-evaluations` to omit their extra CPU inference cost. WebUI exposes the
+same choice. WindBot has no fabricated prediction curve. Candidate/baseline replays use separate
+subdirectories and appear in the unified Holographic Replay selector, with full model names and
+independent counters. Existing recordings are not retroactively evaluated. WebUI tab3 reads the report. TensorBoard
+uses `runs/imitation_<run_id>` with BC epoch on the X-axis; see [metric definitions](tensorboard_metrics_en.md#10-independent-imitation-metrics).
+Engineering regression does not establish GPU long-run behavior, stronger play across all executors
+or online-human client integration.
 
 ## 3.15.2: Expert samples from complete verified traces
 
 The reader reconstructs **V4 CPU observations + unique candidate indices of actual actions** for
-demonstration-data checks. It does not implement a behavior-cloning optimizer or create checkpoints.
+demonstration-data checks. This read-only entry does not train; the independent3.15.3 workflow provides
+the optimizer and experimental checkpoints.
 Partial Link views, ordinary YRP without original evidence, unmapped decisions and nonterminal
 diagnostic traces remain ineligible.
 
@@ -319,12 +485,10 @@ Optional `--expected-sha256` checks a manifest's `file_sha256` before native exe
 Participant/expert declarations are **not authentication or proof of playing strength**. Losses are not
 automatically excluded.
 
-WebUI: **Storage & Logs → Trajectory Ingress & Quality → 4. Read-only Expert Sample Verification**.
-Choose a canonical trace and expert seats, launch a separate CPU task, then select its report to view.
-Reports contain per-seat original decision counts, selected sample counts, prompt distributions,
-actual responses, label previews and tensor shapes/dtypes—not complete observation tensors.
-Section5 manages expert reports without deleting their source traces or model weights.
-Rejected reads create no success report; reasons appear in CLI output or managed-task logs.
+`expert-read` remains a developer CLI/API for inspecting labels/input specifications, removed from
+the everyday WebUI. Unified preparation already performs these checks and creates reusable caches;
+there is no extra verification step to click. Old JSON reports remain viewable/downloadable/deletable
+in Storage & Logs → Trajectory & Imitation Files.
 
 ### Core reader API and lifecycle
 

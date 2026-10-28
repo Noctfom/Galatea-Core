@@ -225,7 +225,7 @@ prepare_canonical_decision_snapshot = _offline_candidate_snapshot
 
 
 def _convert(reset, decks, origin, output_root, *, link_source=None, responses=None,
-             expected_assets=None, timeout_seconds=300):
+             expected_assets=None, timeout_seconds=300, _expert_sink=None, _verify_replay=True):
     """用唯一解释器驱动公开 Core，逐条提交原响应并写出可独立重放的规范轨迹"""
     import numpy as np
     from feature_encoder import GalateaEncoder
@@ -256,6 +256,9 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
             writer.flag('original_core_output_unavailable')
         interpreter = CoreTrajectoryInterpreter(DuelState(
             decks['0']['main'], decks['0']['extra'], decks['1']['main'], decks['1']['extra']), writer)
+        if _expert_sink is not None:
+            from trajectory_dataset import _participants
+            expert_participants = _participants(header)
         encoder = GalateaEncoder()
         rng = np.random.default_rng(reset['seed'])
         # 宏构建器的现有排序提示可能使用 Python random；局部固定并在 finally 恢复
@@ -314,6 +317,9 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
                         observation = encoder.encode(snapshot, player_id=actor)
                         interpreter.record_response(snapshot, response, msg[0], msg[1:], actor,
                                                     observation=observation, source=origin['kind'])
+                        if _expert_sink is not None:
+                            _expert_sink.record(snapshot, msg, response, actor,
+                                expert_participants[str(actor)], input_count, observation=observation)
                         env.send_action(response)
                         interpreter.brain.begin_transition_event(actor, msg[0], response)
                 if interpreter.terminal is not None:
@@ -340,7 +346,10 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
         result = {'converted': True, 'trajectory_path': writer.path, 'source': origin['kind'],
                   'source_response_count': input_count, 'conversion_error': error,
                   'behavior_clone_eligible': False}
-        if error is None:
+        if _expert_sink is not None:
+            result['expert_cache'] = _expert_sink.finish(writer.path, valid=error is None and terminal is not None)
+            result['independent_replay_performed'] = False
+        elif error is None and _verify_replay:
             try:
                 result.update(replay_core_trajectory(writer.path))
             except (ValueError, RuntimeError) as exception:
@@ -361,7 +370,7 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
                 previous.install_callbacks()
 
 
-def import_yrp(path, output_root=DEFAULT_INGEST_ROOT, *, player_ids=None, timeout_seconds=300):
+def import_yrp(path, output_root=DEFAULT_INGEST_ROOT, *, player_ids=None, timeout_seconds=300, _verify_replay=True):
     """把受支持 YRP 重建为诊断轨迹；缺原始报文/历史资产仍拒绝模仿资格"""
     data = read_yrp(path)
     if not data['replay_mode_supported']:
@@ -382,10 +391,11 @@ def import_yrp(path, output_root=DEFAULT_INGEST_ROOT, *, player_ids=None, timeou
               'original_core_output_available': False, 'historical_assets_known': False,
               'yrp_version': data['version'], 'container': data['container'], 'header_seed': data['seed'],
               'replay_profile': 'fluorohydride_uniform_mt19937_v1_seedseq_v2_direct_order'}
-    return _convert(reset, decks, origin, output_root, responses=data['responses'], timeout_seconds=timeout_seconds)
+    return _convert(reset, decks, origin, output_root, responses=data['responses'],
+                    timeout_seconds=timeout_seconds, _verify_replay=_verify_replay)
 
 
-def import_link_capture(path, output_root=DEFAULT_INGEST_ROOT, *, timeout_seconds=300):
+def import_link_capture(path, output_root=DEFAULT_INGEST_ROOT, *, timeout_seconds=300, _expert_sink=None):
     """全量 Link 严格比较原始报文，单方/截断捕获只返回诊断而不补造隐藏信息"""
     with _freeze_source(path) as frozen:
         report = inspect_link_capture(frozen)
@@ -400,6 +410,9 @@ def import_link_capture(path, output_root=DEFAULT_INGEST_ROOT, *, timeout_second
         origin = {'format_version': 1, 'kind': 'link', 'file_sha256': digest.hexdigest(),
                   'player_ids': validate_player_ids(header.get('player_ids')),
                   'original_core_output_available': True, 'historical_assets_known': True}
+        if _expert_sink is not None and _expert_sink.source_override is not None:
+            if _expert_sink.source_override['file_sha256'] != origin['file_sha256']:
+                raise ValueError('original capture changed during imitation preparation')
         if 'external_session' in header:
             origin['external_session'] = deepcopy(header['external_session'])
             # This explicit source has already passed the external-session
@@ -412,4 +425,5 @@ def import_link_capture(path, output_root=DEFAULT_INGEST_ROOT, *, timeout_second
             if adapters:
                 origin['response_label_adapters'] = adapters
         return _convert(header['reset'], header['decks'], origin, output_root,
-                        link_source=frozen, expected_assets=header['assets'], timeout_seconds=timeout_seconds)
+                        link_source=frozen, expected_assets=header['assets'], timeout_seconds=timeout_seconds,
+                        _expert_sink=_expert_sink)

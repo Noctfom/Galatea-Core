@@ -1,10 +1,11 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.14.1 / Model Protocol V4。
+> 适用于 Galatea-Core v3.15.3 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
-训练面板包含 **80 个固定标量、3 个规划分布和 1 个配置文本**，另有随卡组变化的 `Deck_WinRates/*`。这些图表分别回答不同问题，不能把“预测更准”“更新更多”和“对局更强”当成同一个指标。
+主PPO面板包含 **80 个固定标量、3 个规划分布和 1 个配置文本**，另有 `Deck_WinRates/*`。
+独立模仿工作流另有10个标量，使用独立run，不改变PPO图表。不能把预测更准、更新更多、模仿更像和对局更强混为同一指标。
 
 | 分组 | 回答的问题 |
 |---|---|
@@ -15,8 +16,9 @@
 | Planning | 不预先指定动作时，能否形成对未来资源和结果有用的表示？ |
 | Train / PPO_Update | 策略和值如何更新，实际用了多少样本，是否触及保护边界？ |
 | Performance / Configuration | 时间花在哪里，实际按什么训练参数运行？ |
+| Imitation（独立 run） | 策略是否更愿意选择专家动作，对留出示范的拟合是否改善？ |
 
-快速跳转：[记录规则](#1-记录位置横轴与读图规则) · [对局胜率](#2-league训练内对局胜率) · [采集结果](#3-rollout采集结果与终止情况) · [标签覆盖](#4-auxiliary_targets标签覆盖与事件分布) · [辅助预测](#5-auxiliary_train结构化预测学习) · [目标规划](#6-planning目标隐变量与策略接入) · [训练更新](#7-train当前小批的-ppo-联合更新) · [更新保护](#8-ppo_update整轮更新控制与实际复用) · [耗时与配置](#9-performance-与-configuration)
+快速跳转：[记录规则](#1-记录位置横轴与读图规则) · [对局胜率](#2-league训练内对局胜率) · [采集结果](#3-rollout采集结果与终止情况) · [标签覆盖](#4-auxiliary_targets标签覆盖与事件分布) · [辅助预测](#5-auxiliary_train结构化预测学习) · [目标规划](#6-planning目标隐变量与策略接入) · [训练更新](#7-train当前小批的-ppo-联合更新) · [更新保护](#8-ppo_update整轮更新控制与实际复用) · [耗时与配置](#9-performance-与-configuration) · [独立模仿](#10-独立模仿学习指标)
 
 ## 1. 记录位置、横轴与读图规则
 
@@ -264,3 +266,25 @@ KL 衡量策略改变的幅度，不衡量改变后的优劣；低 KL 可能表�
 | `Configuration/PPO` | 启动时记录 gamma、lambda、请求/实际学习率、entropy、clip、epochs、target KL、multiplier、mini_batch | Text，不是标量图；恢复时看实际优化器学习率，不能只看命令行请求值 |
 
 配置文本目前**不记录** Worker 数、采集 timeout、网络层数、Core/资产指纹或逐组对局数。事件文件也不能证明 CUDA 峰值/RSS 无增长，需另看启动与内存日志。
+
+## 10. 独立模仿学习指标
+
+记录位置：[独立训练器](../integrations/imitation/workflow.py)，文件为
+`runs/imitation_<run_id>/events.out.tfevents.*`。每个epoch结束记录一次，横轴为BC遍历轮次，
+不是PPO iteration或对局事件数。恢复BC延续同一run与epoch，并清理检查点之后的旧事件显示。
+训练统计跨本轮依次更新的小批次；验证统计是本轮结束后固定权重的只读前向，不参与梯度。
+强制单候选状态不进入这两类指标。
+
+| 图表 | 纵轴与记录方式 | 走向与限制 |
+|---|---|---|
+| `Imitation_Train/cross_entropy`、`Imitation_Validation/cross_entropy` | 所有有效示范的平均 `-log π(专家动作)`，自然对数 | 下降表示更愿意选专家动作；训练下降而验证持续上升可能过拟合，不代表真实对局胜率 |
+| `Imitation_Train/balanced_cross_entropy`、`Imitation_Validation/balanced_cross_entropy` | 每位教师按有效样本数反比加权后的平均交叉熵 | 教师总体等权，避免长展开支配；验证该值用于记录最佳检查点，不读取测试集 |
+| `Imitation_Train/top1_accuracy`、`Imitation_Validation/top1_accuracy` | 最高Logit候选等于专家标签的有效样本比例，0～1 | 上升表示更像教师，不代表只有该动作正确，也不代表最优策略 |
+| `Imitation_Train/effective_samples`、`Imitation_Validation/effective_samples` | 本epoch实际统计的多候选样本数 | 固定数据时通常保持不变；不是累计步数，也不含单候选、无映射或无效对局 |
+| `Imitation_Train/learning_rate` | BC优化器的配置学习率 | 当前阶段为固定值；不是主PPO的学习率 |
+| `Imitation_Train/optimizer_updates` | 本BC任务累计实际优化小批次数，恢复后延续 | 衡量训练预算，不衡量棋力或对局数 |
+
+每位教师和每种提示类型的数量、交叉熵、Top1位于实验目录 `epoch_*.json` 的 `breakdown`，
+不展开为大量TensorBoard卡片。`result_*.json`记录父模型、数据摘要、已保存与最佳验证检查点。
+独立实际对局的胜负/异常/完成局胜率见 `evaluation.json`，不能用动作准确率代替。
+教师池、缓存与显式启动入口见 [独立模仿工作流](core_trajectories.md#3153独立模仿学习工作流)。

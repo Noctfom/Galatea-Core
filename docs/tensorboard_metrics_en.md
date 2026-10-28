@@ -1,10 +1,12 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.14.1 / Model Protocol V4.
+> Applies to Galatea-Core v3.15.3 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
-The dashboard contains **80 fixed scalars, 3 planning distributions, and 1 configuration text**, plus variable per-deck `Deck_WinRates/*` series. These groups answer different questions: better prediction, more updates, and stronger play are not interchangeable.
+Main PPO contains **80 fixed scalars, 3 planning distributions and 1 configuration text**, plus `Deck_WinRates/*`.
+Independent imitation adds10 scalars in its own run without changing PPO charts. Prediction, update budget,
+expert agreement and playing strength are different quantities.
 
 | Group | Question it answers |
 |---|---|
@@ -15,8 +17,9 @@ The dashboard contains **80 fixed scalars, 3 planning distributions, and 1 confi
 | Planning | Without specifying the chosen action, is the representation informative about future resources and outcomes? |
 | Train / PPO_Update | How do policy/value change, how much data is actually used, and which guards trigger? |
 | Performance / Configuration | Where does runtime go, and which training settings are actually used? |
+| Imitation (separate run) | Does policy agree more with experts, and does agreement improve on held-out demonstrations? |
 
-Jump to: [logging rules](#1-storage-axes-and-reading-rules) · [win rates](#2-league-training-game-win-rates) · [collection](#3-rollout-collection-outcomes-and-termination) · [labels](#4-auxiliary_targets-coverage-and-event-distribution) · [auxiliary prediction](#5-auxiliary_train-structured-predictive-learning) · [planning](#6-planning-latent-goals-and-policy-integration) · [training updates](#7-train-current-mini-batch-ppo-joint-update) · [update guards](#8-ppo_update-iteration-controls-and-actual-reuse) · [runtime and settings](#9-performance-and-configuration)
+Jump to: [logging rules](#1-storage-axes-and-reading-rules) · [win rates](#2-league-training-game-win-rates) · [collection](#3-rollout-collection-outcomes-and-termination) · [labels](#4-auxiliary_targets-coverage-and-event-distribution) · [auxiliary prediction](#5-auxiliary_train-structured-predictive-learning) · [planning](#6-planning-latent-goals-and-policy-integration) · [training updates](#7-train-current-mini-batch-ppo-joint-update) · [update guards](#8-ppo_update-iteration-controls-and-actual-reuse) · [runtime and settings](#9-performance-and-configuration) · [independent imitation](#10-independent-imitation-metrics)
 
 ## 1. Storage, axes, and reading rules
 
@@ -264,3 +267,26 @@ Sources: [collect_rollouts](../trainer.py#L921), [run_training_loop](../trainer.
 | `Configuration/PPO` | gamma, lambda, requested/actual lr, entropy, clip, epochs, target KL, multiplier, mini_batch at launch | Text, not a scalar; actual optimizer lr matters when resuming |
 
 Configuration currently **omits** Worker count, collection timeout, layer configuration, Core/asset fingerprints, and per-group game counts. Events cannot establish CUDA peak/RSS stability; consult startup/memory logs separately.
+
+## 10. Independent imitation metrics
+
+Source: [independent trainer](../integrations/imitation/workflow.py), writing
+`runs/imitation_<run_id>/events.out.tfevents.*`. Ten additional scalar tags are separate from PPO.
+Each records once per completed BC epoch; X is an imitation pass, not a PPO iteration or Core event.
+BC resume preserves run/epoch and purges later stale event displays. Training statistics span changing
+mini-batch weights during an epoch; validation is read-only with final epoch weights. Single-choice
+forced states contribute to neither.
+
+| Chart | Y-axis and aggregation | Interpretation and limits |
+|---|---|---|
+| `Imitation_Train/cross_entropy`, `Imitation_Validation/cross_entropy` | Mean natural-log `-log π(expert action)` over effective examples | Lower means assigning more probability to demonstrations, not higher playing strength. Falling train/rising validation may indicate overfitting |
+| `Imitation_Train/balanced_cross_entropy`, `Imitation_Validation/balanced_cross_entropy` | Mean CE with inverse teacher-effective-count weights | Teachers contribute equally overall; balanced validation CE identifies best checkpoints without test data |
+| `Imitation_Train/top1_accuracy`, `Imitation_Validation/top1_accuracy` | Fraction of effective examples whose argmax equals the expert label,0–1 | Agreement, not proof the label is uniquely good or optimal |
+| `Imitation_Train/effective_samples`, `Imitation_Validation/effective_samples` | Effective multi-choice examples measured this epoch | Usually constant for fixed data; not cumulative events or forced/unmapped/invalid examples |
+| `Imitation_Train/learning_rate` | BC optimizer's configured learning rate | Currently fixed and separate from main PPO |
+| `Imitation_Train/optimizer_updates` | Cumulative BC mini-batch optimizer steps, continuing on resume | Training budget, not games or playing strength |
+
+Per-teacher/prompt counts, CE and Top1 are in each experiment's `epoch_*.json` under `breakdown`, not
+thousands of scalar cards. `result_*.json` records parent, dataset digest, saved and best-validation
+checkpoints. Actual game outcomes, aborts and completed-game win rates are in `evaluation.json` and
+cannot be replaced by action accuracy. See [explicit workflow and cache usage](core_trajectories_en.md#3153-independent-imitation-workflow).

@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.15.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.15.3"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -383,6 +383,18 @@ def get_model_identity_signature(model_dir):
         except OSError:
             continue
     return tuple(sorted(records))
+
+
+def model_repository_directories(root='./models'):
+    """Expose isolated BC/PPO branches without flattening or renaming files."""
+    from pathlib import Path
+    directory = Path(root).resolve()
+    folders = {directory}
+    for pattern in ('**/*.pth', '**/*.onnx'):
+        for path in directory.glob(pattern):
+            if not path.is_symlink() and path.resolve().is_relative_to(directory):
+                folders.add(path.parent.resolve())
+    return [str(directory)] + sorted(str(path) for path in folders if path != directory)
 
 
 @st.cache_data(show_spinner=False)
@@ -709,15 +721,16 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 st.warning(_(f"部分进程清理失败: {result['failed']}", f"Some processes could not be stopped: {result['failed']}"))
     st.divider()
     
-    tab_train, tab_duel, tab_selfcheck = st.tabs([
+    tab_train, tab_duel, tab_selfcheck, tab_imitation = st.tabs([
         _("🔥 发起训练 (Train)", "🔥 Start Training"), 
         _("🏟️ 发起竞技 (Duel)", "🏟️ Start Arena"),
-        _("🛠️ 规则自检压测 (Self-Check)", "🛠️ Rules Self-Check") # <--- 新增
+        _("🛠️ 规则自检压测 (Self-Check)", "🛠️ Rules Self-Check"),
+        _("🧑‍🏫 独立模仿学习", "🧑‍🏫 Independent Imitation")
     ])
     models = ["None"] + sorted(
         (
             path
-            for path in glob.glob("./models/*.pth")
+            for path in glob.glob("./models/**/*.pth", recursive=True)
             if is_primary_model_filename(os.path.basename(path))
             and not os.path.islink(path)
         ),
@@ -740,6 +753,11 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             get_model_identity_signature("./models"),
         )
         saved_meta = load_model_metadata(t_resume) if is_resume else {}
+        is_bc_initialization = is_resume and saved_meta.get('training_stage') == 'imitation'
+        saved_lineage = saved_meta.get('training_lineage') or {}
+        if is_bc_initialization:
+            st.info(_("此BC模型将作为权重来源建立新PPO分支：保留PPO/BC累计计数，重建PPO优化器、更新步与采集步计数；原BC实验不修改。",
+                      "This BC model initializes a new PPO branch: cumulative PPO/BC counts remain, PPO optimizer/update/rollout counters reset, and the BC experiment is preserved."))
         saved_cfg = saved_meta.get('net_config', {})
         resume_metadata_error = saved_meta.get('load_error') if is_resume else None
         resume_format_warning = saved_meta.get('format_warning') if is_resume else None
@@ -775,7 +793,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 st.success(_("🔒 已选择恢复存档，架构参数已自动读取并锁定！", "Architecture locked to the selected checkpoint."))
 
             default_model_prefix = (
-                saved_meta.get('model_prefix')
+                saved_lineage.get('base_prefix', saved_meta.get('model_prefix')) if is_bc_initialization else saved_meta.get('model_prefix')
                 if is_resume and saved_meta.get('model_prefix')
                 else st.session_state.ui_cache['t_model_prefix']
             )
@@ -794,7 +812,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
 
             identity_conflicts = []
             prefix_namespace_files = []
-            if is_resume and saved_meta.get('model_id') and saved_meta.get('model_prefix'):
+            if is_resume and not is_bc_initialization and saved_meta.get('model_id') and saved_meta.get('model_prefix'):
                 identity_conflicts = [
                     record
                     for record in folder_identity_records
@@ -820,8 +838,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
 
             if is_resume and saved_meta.get('model_id'):
                 st.caption(_(
-                    f"模型 UUID（只读）: {saved_meta['model_id']} | 当前轮次: {saved_meta.get('iteration')} | 检查点协议: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION} | 模型协议: {saved_meta.get('model_protocol_version')}/{MODEL_PROTOCOL_VERSION}",
-                    f"Model UUID (read-only): {saved_meta['model_id']} | Current iteration: {saved_meta.get('iteration')} | Checkpoint protocol: {saved_meta.get('checkpoint_format_version')}/{CHECKPOINT_FORMAT_VERSION} | Model protocol: {saved_meta.get('model_protocol_version')}/{MODEL_PROTOCOL_VERSION}",
+                    f"来源模型: {saved_meta.get('display_name', os.path.basename(t_resume))} | 来源UUID: {saved_meta['model_id']} | 累计PPO: {saved_lineage.get('ppo_iteration', saved_meta.get('iteration'))} | 累计BC: {saved_lineage.get('bc_epochs', 0)} | 模型协议: {saved_meta.get('model_protocol_version')}/{MODEL_PROTOCOL_VERSION}",
+                    f"Source: {saved_meta.get('display_name', os.path.basename(t_resume))} | Source UUID: {saved_meta['model_id']} | PPO: {saved_lineage.get('ppo_iteration', saved_meta.get('iteration'))} | BC: {saved_lineage.get('bc_epochs', 0)} | Model protocol: {saved_meta.get('model_protocol_version')}/{MODEL_PROTOCOL_VERSION}",
                 ))
             
             m1, m2, m3 = st.columns(3)
@@ -995,7 +1013,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         raise PermissionError(
                             "新模型前缀已被现有 UUID 使用，请更换模型前缀"
                         )
-                    current_iteration = int(saved_meta.get('iteration', 0)) if is_resume else 0
+                    current_iteration = (int(saved_lineage['ppo_iteration']) if is_bc_initialization else
+                                         int(saved_meta.get('iteration', 0)) if is_resume else 0)
                     if iteration_mode == _("训练至指定轮次", "Train to iteration"):
                         resolve_training_target(
                             current_iteration,
@@ -1041,7 +1060,10 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     "--ppo-epochs", str(t_ppo_epochs),
                     "--target-kl", str(t_target_kl),
                 ]
-                if t_resume != "None": cmd.extend(["--resume", t_resume])
+                if t_resume != "None":
+                    cmd.extend(['--init-from' if is_bc_initialization else '--resume', t_resume])
+                    if not is_bc_initialization:
+                        cmd.extend(['--dir', os.path.dirname(os.path.abspath(t_resume))])
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
                 if c_protocol_audit: cmd.append("--protocol-audit")
@@ -1354,7 +1376,12 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     if not wb_same_deck:
                         wb_native_source = render_arena_deck_source('WB', load_arena_deck_catalog('./decks'))
                 wb_games = st.number_input(_("受控对局数", "Controlled Games"), min_value=1, max_value=100, value=1, key='wb_games')
-                wb_seed = st.number_input(_("Core 开局种子", "Core Starting Seed"), min_value=0, max_value=4294967196, value=73, key='wb_seed')
+                wb_random_seed = st.checkbox(_("随机 Core 开局", "Random Core Starts"), value=True, key='wb_random_seed',
+                    help=_("每批随机生成起始种子并在日志/捕获中记录；取消后使用固定序列。只控制Core，不控制WindBot自身随机性。",
+                           "Generates and records a random starting seed for this batch. Disable for a fixed sequence. WindBot RNG is separate."))
+                wb_seed = None if wb_random_seed else st.number_input(_("固定 Core 起始种子", "Fixed Core Starting Seed"),
+                    min_value=0, max_value=4294967196, value=73, key='wb_seed',
+                    help=_("各局使用此值加局数偏移，记录后可重用。", "Each game adds its index to this seed; reuse the recorded value to reproduce Core starts."))
                 wb_timeout = st.number_input(_("单局时间上限（秒）", "Duel Time Limit (seconds)"), min_value=1, max_value=3600, value=600, key='wb_timeout')
                 wb_record = st.checkbox(_("保存全息录像（双方动作与场面事件）", "Save Holographic Replay (Both Sides and Board Events)"),
                     value=False, key='wb_record', help=_("写入 ai_thoughts，可在全息回放页播放。WindBot 只有实际动作，没有模型置信度。", "Saved under ai_thoughts for Holographic Replay. WindBot supplies actual actions, not model confidence."))
@@ -1381,7 +1408,9 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     else:
                         cmd = [sys.executable, "main.py", "windbot", "--runtime", wb_runtime,
                             "--executor", wb_executor, "--windbot-seat", str(wb_seat),
-                            "--games", str(wb_games), "--seed", str(wb_seed), "--timeout", str(wb_timeout)]
+                            "--games", str(wb_games), "--timeout", str(wb_timeout)]
+                        if wb_seed is not None:
+                            cmd.extend(['--seed', str(wb_seed)])
                         if wb_other == "windbot":
                             cmd.extend(["--opponent-executor", wb_second])
                         elif wb_other == "model":
@@ -1442,6 +1471,300 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 hide_index=True,
                 **REPLAY_DATAFRAME_WIDTH,
             )
+
+    with tab_imitation:
+        st.subheader(_("独立模仿学习", "Independent Imitation Learning"))
+        st.info(_("先准备示范数据，再显式训练，最后选择是否评测。普通对局不会自动进入学习；此处不启动 PPO 或真人在线学习。",
+                  "Prepare demonstrations, explicitly train, then optionally evaluate. Ordinary games do not train automatically; this workflow starts neither PPO nor online-human learning."))
+        im_data_tab, im_train_tab, im_eval_tab = st.tabs([
+            _("1. 采集 / 录像一站式准备", "1. Collect / Prepare Replays"),
+            _("2. 独立模仿训练", "2. Independent BC Training"),
+            _("3. 对局评测", "3. Playing Evaluation")])
+        im_models = sorted(set(glob.glob('./models/**/*.pth', recursive=True)), key=os.path.getmtime, reverse=True)
+        im_datasets = sorted(glob.glob('./replay_data/imitation/**/dataset.json', recursive=True), key=os.path.getmtime, reverse=True)
+        with im_data_tab:
+            im_source_mode = st.radio(_("数据来源", "Data Source"), ('collect', 'prepare'), horizontal=True,
+                key='imitation_source_mode', format_func=lambda value: _("新采集 WindBot 示范", "Collect WindBot Demonstrations") if value == 'collect'
+                else _("已有录像 / 捕获", "Existing Replays / Captures"),
+                help=_("新采集需要本地 WindBot；已有文件直接读取其中的来源信息，不需要导入或启动执行器。",
+                       "New collection needs local WindBot. Existing files use their recorded provenance without importing or starting executors."))
+            im_catalog = st.session_state.get('imitation_catalog', {})
+            if im_source_mode == 'collect':
+                if st.button(_("读取 / 刷新 WindBot 教师名单", "Read / Refresh WindBot Teachers"), key='imitation_catalog_refresh',
+                    help=_("仅扫描本地执行器与自带构筑，不开始对局。", "Scans local executors and paired builds without starting games.")):
+                    try:
+                        from integrations.windbot.runtime import executor_catalog
+                        im_catalog = {name: info for name, info in executor_catalog().items() if info['deck_available']}
+                        st.session_state.imitation_catalog = im_catalog
+                    except Exception as error:
+                        st.error(str(error))
+                im_teachers = st.multiselect(_("要学习的教师执行器", "Teacher Executors to Learn From"), sorted(im_catalog),
+                    default=[name for name in ('Blue-Eyes', 'Albaz') if name in im_catalog], key='imitation_teachers',
+                    format_func=lambda name: f"{name} [{im_catalog.get(name, {}).get('level', 'Normal')}]",
+                    help=_("每个教师用自带构筑镜像对局，保存双方示范。方括号层级是上游声明，不是实测棋力。",
+                           "Mirrors each teacher with its paired build and records both sides. Bracketed levels are upstream declarations, not measured strength."))
+                im_games = st.number_input(_("每个教师采集局数", "Games per Teacher"), 1, 10000, 10, key='imitation_collect_games',
+                    help=_("完整对局是划分单位；只有一局时全部用于训练，不会把同局帧拆到验证集。", "Splits use whole duels. A single duel stays in training rather than splitting its frames into validation."))
+                im_random = st.checkbox(_("随机 Core 开局（推荐）", "Random Core Starts (Recommended)"), value=True, key='imitation_random_seed',
+                    help=_("每批生成随机起始种子，各局依次递增；实际值保存在 plan.json 和捕获中。取消后可指定固定值。WindBot 自身随机性不受此控制。",
+                           "Generates a random starting seed per batch, incremented per duel and recorded in plan.json/captures. Disable to reproduce a fixed schedule. WindBot RNG is separate."))
+                im_core_seed = None if im_random else int(st.number_input(_("固定 Core 起始种子", "Fixed Core Starting Seed"), 0, 2**32-1, 73,
+                    key='imitation_core_seed', help=_("只控制 Core 的开局序列，不是数据划分种子。", "Controls Core starts, not dataset splitting.")))
+                with st.expander(_("采集运行设置", "Collection Runtime Settings")):
+                    im_runtime = st.text_input(_("WindBot 运行文件（空为默认）", "WindBot Runtime (blank for default)"), key='imitation_collect_runtime',
+                        help=_("默认 integrations/windbot/runtime/WindBot.exe；Linux 另需 Mono。", "Defaults to integrations/windbot/runtime/WindBot.exe; Linux also needs Mono."))
+                    im_timeout = st.number_input(_("单局时间上限（秒）", "Time Limit per Game (seconds)"), 1, 3600, 600, key='imitation_collect_timeout',
+                        help=_("超时局保留诊断，不生成示范缓存或虚构终局。", "Timed-out games keep diagnostics but produce no demonstration cache or invented terminal."))
+            else:
+                im_paths = sorted(set(glob.glob('./replays/**/*.yrp', recursive=True) + glob.glob('./replays/**/*.yrp3d', recursive=True)
+                    + glob.glob('./replays/**/*.link.jsonl.gz', recursive=True) + glob.glob('./replays/**/*.core.jsonl.gz', recursive=True)))
+                im_input_mode = st.radio(_("选择处理范围", "Input Scope"), ('file', 'directory'), horizontal=True, key='imitation_input_mode',
+                    format_func=lambda v: _("一个已有文件", "One Existing File") if v == 'file' else _("一个目录内的全部文件", "All Files in a Directory"),
+                    help=_("文件和目录均自动识别格式，不需要先手动转换。目录递归扫描支持的录像及捕获。", "Both modes detect formats automatically; no prior conversion is needed. Directories are scanned recursively."))
+                if im_input_mode == 'file':
+                    im_path = st.selectbox(_("录像 / 捕获文件", "Replay / Capture File"), im_paths, key='imitation_prepare_file',
+                        help=_("支持 YRP/YRP3D、完整 Link 捕获与规范 Core 轨迹。也可切到目录方式填写自定义路径。",
+                               "Supports YRP/YRP3D, full Link captures and canonical Core traces. Use directory/path mode for another location."))
+                else:
+                    im_path = st.text_input(_("录像文件或目录路径", "Replay File or Directory Path"), value='./replays', key='imitation_prepare_source',
+                        help=_("自动完成读取、必要重建、标签提取与划分，原文件不修改。", "Reads, reconstructs where needed, extracts labels and splits in one task, leaving originals unchanged."))
+                im_seats = st.selectbox(_("学习录像中的哪一方", "Which Recorded Side to Imitate"), ('windbot', '0', '1', 'both'),
+                    key='imitation_prepare_seats', format_func=lambda value: {'windbot': _("自动：记录中声明的 WindBot", "Automatic: Recorded WindBot"),
+                        '0': _("只学习物理 P0", "Physical P0 Only"), '1': _("只学习物理 P1", "Physical P1 Only"),
+                        'both': _("学习双方", "Both Sides")}[value],
+                    help=_("决定提取哪一方的动作作为正确示范，不是选择观看视角或先后手。自动模式不会学习陪练模型/RuleBot；真人或其他来源请指定 P0/P1/双方。",
+                           "Selects whose actions become expert labels, not the viewing perspective or starting role. Automatic mode excludes native-model/RuleBot opponents; select seats for human/other sources."))
+                st.caption(_("一键准备已包含格式检查、必要重建和样本核验，无需再运行专家只读核验。普通 YRP 缺原始报文/历史资产时只产诊断报告；单方捕获不会补造隐藏信息。",
+                             "Preparation already includes format checks, reconstruction and label verification. No extra expert-read step is needed. Ordinary YRP without original output/assets stays diagnostic; partial views do not invent hidden information."))
+            im_val, im_test = [], []
+            with st.expander(_("数据划分与泛化测试（可选）", "Data Splitting & Generalization (Optional)")):
+                st.write(_("训练集用于更新权重；验证集每个 epoch 只读检查拟合并记录最佳检查点；测试集留到最后主动评估，不参与选模。它们不是检查执行器安装是否成功。",
+                           "Training updates weights; validation checks fit and records the best checkpoint each epoch; test data is reserved for explicit final evaluation. These are not executor installation checks."))
+                im_split = st.selectbox(_("如何划分示范", "How to Split Demonstrations"), ('episode', 'none', 'deck', 'executor'), key='imitation_split_mode',
+                    format_func=lambda value: {'episode': _("同一教师的不同对局（默认）", "Different Games from the Same Teachers (Default)"),
+                        'none': _("全部训练，不保留验证 / 测试", "Train on Everything, No Holdout"),
+                        'deck': _("按完整构筑分离", "Separate Exact Builds"), 'executor': _("额外保留不同 WindBot 执行器", "Hold Out Different WindBot Executors")}[value],
+                    help=_("默认允许相同教师/构筑出现在各集合，但同局不跨集合。构筑模式检查未见构筑；执行器模式检查未见教师。更严格不等于日常训练必需。",
+                           "Default allows shared teachers/builds, never frames from one game in multiple splits. Build mode tests unseen builds; executor mode tests unseen teachers. Stricter modes are optional."))
+                im_fraction_val = im_fraction_test = 0.0
+                if im_split in ('episode', 'deck'):
+                    im_fraction_val = st.number_input(_("验证集目标比例", "Target Validation Fraction"), 0.0, 0.4, 0.1, step=0.05, key='imitation_val_fraction',
+                        help=_("默认约10%；按独立完整组分配，组少时不能精确满足比例。", "Targets about 10%; whole independent groups may prevent exact fractions."))
+                    im_fraction_test = st.number_input(_("最终测试集目标比例", "Target Final-Test Fraction"), 0.0, 0.4, 0.1, step=0.05, key='imitation_test_fraction',
+                        help=_("默认约10%；不会每轮自动查看测试表现。", "Targets about 10%; test performance is not monitored every epoch."))
+                if im_split == 'executor':
+                    if im_source_mode == 'collect':
+                        im_names = sorted(im_catalog)
+                    else:
+                        im_names = []
+                        if im_path:
+                            from integrations.imitation.data import recorded_teacher_names
+                            im_names = recorded_teacher_names(im_path)
+                        st.caption(_("名单只从已有记录读取；不会启动或要求安装这些执行器。", "Names come from existing records; no executors are started or required."))
+                    im_val = st.multiselect(_("留作验证的执行器（可留空）", "Validation Executors (Optional)"), im_names, key='imitation_validation',
+                        help=_("这些执行器的整局不更新权重，用于开发验证。采集模式会额外采集它们；已有文件模式只筛选现有记录。", "Their games never update weights. Collection adds their games; existing-file mode only assigns recorded games."))
+                    im_test = st.multiselect(_("留作最终测试的执行器（可留空）", "Final-Test Executors (Optional)"), im_names, key='imitation_test',
+                        help=_("只在最后显式评测；不得同时属于训练教师或验证名单。", "Reserved for explicit final evaluation; cannot also be training or validation teachers."))
+                im_split_seed = st.number_input(_("数据划分种子", "Dataset Split Seed"), 0, 2**32-1, 73, key='imitation_split_seed',
+                    help=_("仅控制完整关联组的可复现分配，与 Core 开局种子和优化随机种子独立。", "Controls reproducible group assignment independently of Core starts and optimizer randomness."))
+            im_command = None
+            if st.button(_("采集并准备可学习数据" if im_source_mode == 'collect' else "一键检查、重建并准备数据",
+                           "Collect & Prepare Demonstrations" if im_source_mode == 'collect' else "Inspect, Reconstruct & Prepare Once"),
+                key='imitation_collect_start' if im_source_mode == 'collect' else 'imitation_prepare_start',
+                disabled=not im_teachers if im_source_mode == 'collect' else not im_path,
+                help=_("独立 CPU 任务，一次完成全部前处理；自动排除失败局和不可用标签，不训练、不需要逐局人工放行。结果和缓存写入同一批次目录。",
+                       "One separate CPU task completes preprocessing, excluding failed games/unavailable labels automatically. No training or per-game human approval; outputs and caches share a batch directory.")):
+                import uuid
+                if im_source_mode == 'collect' and (set(im_teachers) & (set(im_val) | set(im_test)) or set(im_val) & set(im_test)):
+                    st.error(_("额外保留的执行器不能同时成为训练教师。默认同教师不同对局模式无需填写这两个名单。",
+                               "Held-out executors cannot also teach training. Default same-teacher/different-game mode needs neither list."))
+                else:
+                    im_output = './replay_data/imitation/' + ('collection_' if im_source_mode == 'collect' else 'prepared_') + uuid.uuid4().hex
+                    im_command = [sys.executable, 'main.py', 'imitate', im_source_mode, '--output', im_output,
+                                  '--split-mode', im_split, '--validation-fraction', str(im_fraction_val),
+                                  '--test-fraction', str(im_fraction_test)]
+                    if im_source_mode == 'collect':
+                        im_command.extend(['--games-per-executor', str(im_games), '--timeout', str(im_timeout), '--split-seed', str(im_split_seed)])
+                        for name in im_teachers:
+                            im_command.extend(['--train-executor', name])
+                        if im_core_seed is not None:
+                            im_command.extend(['--seed', str(im_core_seed)])
+                        if im_runtime:
+                            im_command.extend(['--runtime', im_runtime])
+                    else:
+                        im_command.insert(4, im_path)
+                        im_command.extend(['--seed', str(im_split_seed)])
+                        for seat in (('0', '1') if im_seats == 'both' else (im_seats,)):
+                            if seat != 'windbot':
+                                im_command.extend(['--expert-seat', seat])
+                    for flag, names in (('--validation-executor', im_val), ('--test-executor', im_test)):
+                        for name in names:
+                            im_command.extend([flag, name])
+                    if is_running:
+                        st.error(_("请先停止当前托管任务。", "Stop the current managed task first."))
+                    else:
+                        process = launch_managed_task(im_command)
+                        st.success(_(f"已启动 PID {process.pid}；批次：{im_output}", f"Started PID {process.pid}; batch: {im_output}"))
+            im_reports = sorted(glob.glob('./replay_data/imitation/**/preparation.json', recursive=True)
+                                + glob.glob('./replay_data/imitation/**/dataset.json', recursive=True), key=os.path.getmtime, reverse=True)
+            im_report = st.selectbox(_("查看准备结果 / 划分报告", "Preparation / Split Report"), im_reports, key='imitation_data_report',
+                help=_("只读查看本批可用局数、排除原因及训练/验证/测试去向，不再重放。仅诊断批次没有 dataset.json，不能用于训练。",
+                       "Read ready games, exclusions and splits without another replay. Diagnostic-only batches have no dataset.json and cannot train."))
+            if im_report and st.button(_("显示准备结果", "Show Preparation Results"), key='imitation_data_show',
+                help=_("不启动检查或训练，只读取已有报告。", "Reads a saved report without starting verification or training.")):
+                with open(im_report, encoding='utf-8') as stream:
+                    im_report_value = json.load(stream)
+                if im_report_value.get('counts'):
+                    for column, role in zip(st.columns(3), ('train', 'validation', 'test')):
+                        column.metric({'train': _("训练对局", "Training Games"), 'validation': _("验证对局", "Validation Games"),
+                                       'test': _("最终测试对局", "Final-Test Games")}[role], im_report_value['counts'].get(role, 0))
+                if im_report_value.get('processing'):
+                    reason_names = {'original_output_or_assets_unverified': _("缺原始报文或历史资产证据，仅保留诊断", "Missing original output/historical assets; diagnostic only"),
+                                    'incomplete_visibility': _("单方视图，无法还原完整训练观测", "Partial view cannot reconstruct complete training observations")}
+                    st.dataframe([{_("来源文件", "Source"): row['path'], _("处理结果", "Result"):
+                        {'ready': _("可学习", "Ready"), 'diagnostic_only': _("仅诊断", "Diagnostic Only"), 'excluded': _("未纳入", "Excluded")}.get(row['status'], row['status']),
+                        _("说明", "Reason"): reason_names.get(row.get('reason'), row.get('reason', ''))}
+                        for row in im_report_value['processing']], hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+                if im_report_value.get('entries'):
+                    st.dataframe([{_("教师 / 来源", "Teacher / Source"): ', '.join(row.get('executors', [])) or row['cache'],
+                        _("用途", "Role"): {'train': _("训练", "Train"), 'validation': _("验证", "Validation"), 'test': _("最终测试", "Final Test")}[row['split']],
+                        _("样本数", "Samples"): row['sample_count'], _("有效多候选样本", "Effective Choices"): row['effective_count']}
+                        for row in im_report_value['entries']], hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+                with st.expander(_("查看原始报告详情", "Raw Report Details")):
+                    st.json(im_report_value)
+        with im_train_tab:
+            st.caption(_("不恢复：复制权重，创建新 UUID、优化器和 epoch 计数。恢复：继续原 BC 实验，保留优化器动量、累计 epoch 和随机状态。两者都不启动 PPO。",
+                         "New experiment: copy weights into a new UUID/optimizer with epoch zero. Resume: continue the BC experiment, retaining optimizer momentum, cumulative epochs and RNG. Neither starts PPO."))
+            im_dataset = st.selectbox(_("已准备的示范数据集", "Prepared Demonstration Dataset"), im_datasets, key='imitation_train_dataset',
+                help=_("选择一站式准备生成的 dataset.json；读取缓存，不再启动 Core。训练、验证、测试分区沿用此清单。", "Select prepared dataset.json; reuses caches without Core, retaining its train/validation/test assignments."))
+            im_model = st.selectbox(_("来源检查点", "Source Checkpoint"), ['None'] + im_models, key='imitation_train_model',
+                help=_("选择兼容 V4 PTH。默认只读取权重；若要继续已有 BC 任务，再勾选恢复。", "Choose a compatible V4 PTH. Weights initialize a new experiment unless BC resume is enabled."))
+            im_resume = st.checkbox(_("继续原 BC 实验（恢复优化器与进度）", "Continue BC Experiment (Restore Optimizer & Progress)"), key='imitation_resume',
+                help=_("只接受 BC 检查点；同 UUID/目录继续计数。数据清单、batch、学习率和种子必须一致。取消勾选则复制权重另开实验，原任务不修改。",
+                       "BC checkpoints only: continue the same UUID/directory. Dataset, batch, learning rate and seed must match. Uncheck to branch from weights without changing the original experiment."))
+            im_meta = load_model_metadata(im_model) if im_model and im_model != 'None' else {}
+            im_config = (im_meta.get('imitation') or {}).get('config') or {} if im_resume else {}
+            im_epochs = st.number_input(_("本次追加训练轮次（epoch）", "Additional Training Epochs"), 1, 10000, 5, key='imitation_epochs',
+                help=_("每轮遍历训练示范一次；恢复时是追加轮次。例如从 epoch 5 追加2轮，结束于7。不是 PPO 对局采集轮次。",
+                       "One pass over training demonstrations per epoch. Resuming epoch 5 for two more ends at 7; these are not PPO rollout iterations."))
+            im_batch = st.number_input(_("小批量样本数", "Mini-batch Samples"), 1, 1024, int(im_config.get('batch_size', 64)),
+                key=f'imitation_batch_resume_{im_model}' if im_resume else 'imitation_batch', disabled=im_resume,
+                help=_("每次优化同时处理的示范数；越大通常越占显存。恢复时沿用原设置。", "Examples per optimizer update; larger batches generally use more VRAM. Resume retains the original setting."))
+            im_lr = st.number_input(_("学习率", "Learning Rate"), 0.0000001, 0.01, float(im_config.get('learning_rate', 0.00001)), format='%.7f',
+                key=f'imitation_lr_resume_{im_model}' if im_resume else 'imitation_lr', disabled=im_resume,
+                help=_("控制 BC 权重更新幅度，默认1e-5，与 PPO 学习率独立。恢复不改原优化器设置。", "Controls BC update size, default 1e-5, independently of PPO. Resume retains the optimizer setting."))
+            im_train_seed = st.number_input(_("优化随机种子", "Optimizer Random Seed"), 0, 2**32-1, int(im_config.get('seed', 73)),
+                key=f'imitation_seed_resume_{im_model}' if im_resume else 'imitation_seed', disabled=im_resume,
+                help=_("控制示范打乱与模型训练随机性，不重建或改变 Core 开局。恢复还会读取保存的随机状态。", "Controls example shuffling/model randomness, not Core starts. Resume also restores saved RNG state."))
+            im_device = st.selectbox(_("训练设备", "Training Device"), ('auto', 'cpu', 'cuda'), key='imitation_device',
+                help=_("auto优先可用CUDA，否则CPU；不会启动 Worker 对局。", "Auto uses available CUDA, otherwise CPU; no duel Workers start."))
+            im_save = st.number_input(_("保存间隔（epoch）", "Save Interval (epochs)"), 1, int(im_epochs), 1, key='imitation_save_every',
+                help=_("每隔N个累计epoch保存PTH；最后一轮及新的最佳验证轮始终保存。", "Saves at cumulative epoch multiples of N; always saves the final epoch and new validation bests."))
+            if im_resume and im_meta.get('training_stage') != 'imitation':
+                st.warning(_("所选不是 BC 检查点；取消恢复可只复制其权重。", "This is not a BC checkpoint; uncheck resume to copy its weights only."))
+            if st.button(_("启动独立模仿训练", "Start Independent Imitation Training"), key='imitation_train_start',
+                disabled=not im_dataset or not im_model or im_model == 'None' or (im_resume and im_meta.get('training_stage') != 'imitation'),
+                help=_("仅运行选定epoch的BC。输出 models/imitation/<run_id> 和独立TensorBoard；不自动接续主训练。",
+                       "Runs only the requested BC epochs, writing models/imitation/<run_id> and separate TensorBoard logs; never auto-continues into PPO.")):
+                if is_running:
+                    st.error(_("请先停止当前托管任务。", "Stop the current managed task first."))
+                else:
+                    command = [sys.executable, 'main.py', 'imitate', 'train', '--dataset', im_dataset,
+                        '--resume' if im_resume else '--init-from', im_model, '--epochs', str(im_epochs), '--batch-size', str(im_batch),
+                        '--lr', str(im_lr), '--seed', str(im_train_seed), '--device', im_device, '--save-every', str(im_save)]
+                    process = launch_managed_task(command)
+                    st.success(_(f"独立 BC 任务 PID {process.pid}。", f"Independent BC task PID {process.pid}."))
+            im_results = sorted(glob.glob('./models/imitation/**/result_*.json', recursive=True), key=os.path.getmtime, reverse=True)
+            im_result = st.selectbox(_("训练报告", "Training Report"), im_results, key='imitation_result',
+                help=_("每个阶段的拟合指标与最佳检查点，不是实战胜率。", "Fit metrics and selected checkpoints, not playing win rates."))
+            if im_result and st.button(_("查看训练指标", "View Training Metrics"), key='imitation_metrics_show',
+                help=_("只读报告；详细教师/提示分项见epoch_*.json，曲线在runs/imitation_<run_id>。", "Reads reports only; teacher/prompt breakdowns are in epoch_*.json, curves in runs/imitation_<run_id>.")):
+                with open(im_result, encoding='utf-8') as stream:
+                    result = json.load(stream)
+                st.dataframe([{'epoch': row['epoch'], 'train_ce': row['train']['cross_entropy'], 'train_top1': row['train']['top1_accuracy'],
+                    'validation_ce': row['validation']['cross_entropy'], 'validation_top1': row['validation']['top1_accuracy']} for row in result['history']],
+                    hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+                st.caption(_("交叉熵越低表示越愿意选教师动作；Top1是动作一致率，不是胜率。", "Lower CE means greater probability on teacher actions; Top1 is action agreement, not win rate."))
+        with im_eval_tab:
+            st.write(_("此页实际运行模型对 WindBot，不更新权重。它与训练页的示范拟合验证不同，可使用已见教师做回归，也可用留出对手检查泛化。",
+                       "Runs actual model-versus-WindBot games without weight updates. Unlike validation-example fit, this checks playing behavior against known regression opponents or held-out opponents."))
+            im_eval_dataset = st.selectbox(_("提供构筑与来源的示范数据集", "Dataset Providing Builds & Provenance"), im_datasets, key='imitation_eval_dataset',
+                help=_("读取记录中的执行器及实际构筑，不重新采集数据或训练。实际对局仍需要WindBot运行文件。", "Reads recorded executors/builds without collection or training; actual games still need WindBot runtime."))
+            im_eval_model = st.selectbox(_("待评测模型", "Evaluation Candidate"), ['None'] + im_models, key='imitation_eval_model',
+                help=_("兼容V4 PTH，可以是BC、原PPO或其他兼容模型。评测不修改文件。", "Compatible V4 PTH, including BC or PPO models; evaluation does not modify it."))
+            im_baseline = st.selectbox(_("对照基线（可不选）", "Baseline (Optional)"), ['None'] + im_models, key='imitation_eval_baseline',
+                help=_("选择模仿前模型可比较前后；候选/基线共用构筑、种子、策略和换边计划。", "Choose the pre-BC model to compare before/after; both use the same builds, seeds, policy and paired seats."))
+            im_eval_role = st.radio(_("评测目的", "Evaluation Purpose"), ('regression', 'validation', 'test'), horizontal=True, key='imitation_eval_role',
+                format_func=lambda v: {'regression': _("已知教师回归", "Known-Teacher Regression"), 'validation': _("留出验证", "Held-out Validation"), 'test': _("最终测试", "Final Test")}[v],
+                help=_("回归可对训练过的教师检查进步，不宣称未见泛化。验证/测试使用准备时保留的集合；测试不应反复用于选模。",
+                       "Regression checks progress against learned teachers without an unseen claim. Validation/test use reserved splits; do not repeatedly use final test for selection."))
+            im_eval_executors = []
+            if im_eval_role == 'regression':
+                im_known = []
+                if im_eval_dataset:
+                    try:
+                        with open(im_eval_dataset, encoding='utf-8') as stream:
+                            im_known = sorted({name for entry in json.load(stream)['entries'] for name in entry.get('executors', [])})
+                    except (OSError, ValueError, KeyError):
+                        pass
+                im_eval_executors = st.multiselect(_("回归对手执行器", "Regression Opponent Executors"), im_known, default=im_known[:1], key='imitation_eval_executors',
+                    help=_("名单来自数据集，不需要额外读取执行器列表。回归使用执行器自带默认构筑，报告明确标注回归覆盖。",
+                           "Names come from the dataset without catalog import. Regression uses paired default builds and is explicitly labeled regression."))
+            im_eval_games = st.number_input(_("每个对手、每个模型座位的局数", "Games per Opponent per Model Seat"), 1, 1000, 5, key='imitation_eval_games',
+                help=_("每个模型/对手总局数=此值×2；选择基线再×2。例如5意味着候选10局，另有基线时共20局。",
+                       "Games per model/opponent equal this value times two; adding a baseline doubles total games. Five means ten candidate games, twenty with baseline."))
+            im_eval_policy = st.selectbox(_("模型决策策略", "Model Decision Policy"), ('training', 'greedy', 'deployment'), key='imitation_eval_policy',
+                help=_("training按T=1采样；greedy取最高概率；deployment使用下方温度。只影响模型，不影响WindBot。", "Training samples at T=1; greedy takes the highest logit; deployment uses the temperature below. WindBot is unaffected."))
+            im_eval_temperature = st.number_input(_("部署采样温度", "Deployment Sampling Temperature"), 0.05, 5.0, 0.8,
+                key='imitation_eval_temperature', disabled=im_eval_policy != 'deployment',
+                help=_("仅deployment生效；较低更集中于高概率动作，较高更分散。", "Only affects deployment sampling: lower concentrates on high-probability actions; higher spreads choices."))
+            im_eval_random = st.checkbox(_("随机生成本次评测开局计划", "Generate a Random Evaluation Schedule"), value=True, key='imitation_eval_random',
+                help=_("随机计划仍由候选和基线共用并保存，可用其中seed复现。取消后输入固定种子。", "Candidate/baseline share the random schedule, which is saved with its seed for reuse. Disable to supply a fixed seed."))
+            im_eval_seed = None if im_eval_random else int(st.number_input(_("评测 Core 起始种子", "Evaluation Core Starting Seed"), 0, 2**32-1, 10073,
+                key='imitation_eval_seed', help=_("只控制Core，WindBot自身随机性不保证完全复现。", "Controls Core; WindBot RNG prevents guaranteed exact reproduction.")))
+            im_eval_runtime = st.text_input(_("WindBot 运行文件（空为默认）", "WindBot Runtime (blank for default)"), key='imitation_eval_runtime',
+                help=_("实际评测时才启动本地WindBot，不用于读取录像或BC训练。", "Starts local WindBot only for actual evaluation, not replay preparation or BC training."))
+            im_eval_timeout = st.number_input(_("评测单局上限（秒）", "Evaluation Limit per Game (seconds)"), 1, 3600, 600, key='imitation_eval_timeout',
+                help=_("超时记为异常，不算获胜或伪造平局。", "Timeouts are aborts, not wins or invented draws."))
+            im_eval_replay = st.checkbox(_("保存全息录像", "Save Holographic Replays"), key='imitation_eval_replay',
+                help=_("保存在该评测批次的replays目录，包含双方动作；增加文件体积。", "Saves both sides under this evaluation batch's replays directory, with extra storage."))
+            im_eval_predictions = False
+            if im_eval_replay:
+                im_eval_predictions = st.checkbox(_("记录模型侧AI预测曲线", "Record Model AI Prediction Curves"), value=True,
+                    key='imitation_eval_predictions', help=_("逐已记录状态保存胜/平/负与预计剩余事件，只为模型侧记录；增加CPU推理耗时。BC只监督动作，冻结预测头的输出仍会随共享表示变化，曲线是AI判断而非实测胜率。",
+                        "Records model-side outcome/remaining-event predictions on recorded states, adding CPU inference. BC supervises actions; shared features can shift frozen prediction outputs. Curves are AI judgments, not measured win rates."))
+            if st.button(_("启动对局评测（不学习）", "Run Playing Evaluation (No Learning)"), key='imitation_eval_start',
+                disabled=not im_eval_dataset or not im_eval_model or im_eval_model == 'None' or (im_eval_role == 'regression' and not im_eval_executors),
+                help=_("候选和基线分别运行同一计划，输出胜负、异常与描述性区间。不会修改权重或回流示范训练。", "Runs the shared schedule for candidate/baseline, reporting outcomes, aborts and descriptive intervals. No weight updates or demonstration ingestion.")):
+                if is_running:
+                    st.error(_("请先停止当前托管任务。", "Stop the current managed task first."))
+                else:
+                    import uuid
+                    output = './replay_data/imitation/evaluation_' + uuid.uuid4().hex
+                    command = [sys.executable, 'main.py', 'imitate', 'evaluate', '--dataset', im_eval_dataset,
+                        '--checkpoint', im_eval_model, '--output', output, '--split', 'validation' if im_eval_role == 'regression' else im_eval_role,
+                        '--games-per-seat', str(im_eval_games), '--policy-mode', im_eval_policy, '--temperature', str(im_eval_temperature),
+                        '--timeout', str(im_eval_timeout)]
+                    for name in im_eval_executors:
+                        command.extend(['--executor', name])
+                    if im_eval_seed is not None:
+                        command.extend(['--seed', str(im_eval_seed)])
+                    if im_baseline != 'None':
+                        command.extend(['--baseline', im_baseline])
+                    if im_eval_runtime:
+                        command.extend(['--runtime', im_eval_runtime])
+                    if im_eval_replay:
+                        command.append('--record-replay')
+                        command.append('--record-evaluations' if im_eval_predictions else '--no-record-evaluations')
+                    process = launch_managed_task(command)
+                    st.success(_(f"评测 PID {process.pid}；批次 {output}", f"Evaluation PID {process.pid}; batch {output}"))
+            im_eval_reports = sorted(glob.glob('./replay_data/imitation/**/evaluation.json', recursive=True), key=os.path.getmtime, reverse=True)
+            im_eval_report = st.selectbox(_("对局评测报告", "Playing Evaluation Report"), im_eval_reports, key='imitation_eval_report',
+                help=_("查看已完成局的胜负与异常数；这是实际对局统计，与动作一致率不同。", "Shows completed-game outcomes and aborts, distinct from action agreement."))
+            if im_eval_report and st.button(_("查看评测结果", "View Evaluation Results"), key='imitation_eval_show',
+                help=_("只读已有evaluation.json，不重跑对局。", "Reads saved evaluation.json without running games again.")):
+                with open(im_eval_report, encoding='utf-8') as stream:
+                    st.json(json.load(stream))
 
     # --- 🛠️ 规则自检测试舱 ---
     with tab_selfcheck:
@@ -2925,7 +3248,7 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         _("📜 系统日志", "📜 System Logs"),
         _("🛡️ V3 审计报告", "🛡️ V3 Audit Reports"),
         _("🧠 读心记录", "🧠 Thought Replays"),
-        _("🧪 轨迹与数据门禁", "🧪 Trajectory Ingress & Quality"),
+        _("🧪 轨迹与模仿文件", "🧪 Trajectory & Imitation Files"),
         _("🤖 模型仓库", "🤖 Model Storage"),
         _("📊 对局大盘数据", "📊 Match Data"),
         _("📉 TensorBoard 数据", "📉 TensorBoard Runs"),
@@ -3038,250 +3361,103 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
         build_file_manager("./ai_thoughts", ".json", _("AI 读心记录", "AI Thought Records"), allow_view=True, allow_upload=False)
         build_file_manager("./replays/core_trajectories", ".core.jsonl.gz", _("规范 Core 轨迹", "Canonical Core Trajectories"), allow_view=False, allow_upload=False)
     with tab_ingress:
-        st.info(_(
-            "只检查/转换与划分，不启动模仿训练。普通 YRP 缺历史资产和原始 Core 报文；单方 Link 捕获缺完整信息，均不能自动成为训练数据。",
-            "Inspection/conversion/splitting only: no imitation training. Ordinary YRP lacks historical assets/raw Core output; player-view Link captures are incomplete and cannot automatically become training data.",
-        ))
-        st.subheader(_("1. 原始录像检查与诊断转换", "1. Inspect & Convert Raw Replays"))
-        st.write(_(
-            "输入：本地 YRP/YRP3D 录像或 Link 原始捕获。只读检查仅展示格式信息；诊断转换尝试用当前 Core 与资产重建对局，生成规范诊断轨迹和入口报告，不修改原文件。",
-            "Input: local YRP/YRP3D replays or raw Link captures. Inspection displays format information only. Diagnostic conversion attempts reconstruction with current Core/assets and writes a canonical diagnostic trace plus an ingress report, without modifying the source.",
-        ))
-        st.caption(_(
-            "转换轨迹：replays/imported_trajectories/*.core.jsonl.gz；入口报告：replay_data/ingest_reports/*.json。转换成功不代表已获准用于学习。",
-            "Converted traces: replays/imported_trajectories/*.core.jsonl.gz; ingress reports: replay_data/ingest_reports/*.json. Successful conversion does not grant learning eligibility.",
-        ))
-        ingress_source = st.selectbox(
-            _("输入来源", "Input Source"), ('yrp', 'link'), key='ingress_source',
-            format_func=lambda source: _("YRP / YRP3D 游戏录像", "YRP / YRP3D Game Replay") if source == 'yrp'
-                else _("Link 原始捕获", "Link Raw Capture"),
-            help=_(
-                "YRP/YRP3D 在 replays 下递归查找；Link 在 replays/link_captures 中查找 .link.jsonl.gz。来源决定读取格式，不改变数据门禁标准。",
-                "YRP/YRP3D is found recursively under replays; Link reads .link.jsonl.gz from replays/link_captures. The source selects the reader, not a weaker quality gate.",
-            ),
-        )
-        ingress_files = sorted(glob.glob('./replays/**/*.yrp', recursive=True)
-                               + glob.glob('./replays/**/*.yrp3d', recursive=True)) if ingress_source == 'yrp' else sorted(
-                                   glob.glob('./replays/link_captures/*.link.jsonl.gz'))
-        ingress_path = st.selectbox(
-            _("选择要检查或转换的原始文件", "Select Raw File to Inspect or Convert"), ingress_files,
-            key=f'ingress_file_{ingress_source}',
-            help=_("每次只处理选中的一个原始文件。这里不选择已转换的 .core.jsonl.gz 轨迹；它们在第 2 区统一审查。",
-                   "Processes one selected source file at a time. Converted .core.jsonl.gz traces are audited together in section 2."),
-        )
-        if not ingress_files:
-            st.caption(_("此来源暂未找到文件，请将原始录像或捕获放入上述对应目录。",
-                         "No files found for this source. Place the replay/capture in the directory above."))
-        if st.button(_("只读格式检查", "Inspect Format (Read-only)"), disabled=not ingress_path,
-                     help=_("不调用 Core、不产生新文件、不启动后台任务；仅检查格式、元数据与支持边界。",
-                            "Checks format, metadata and support boundaries without Core, output files or background tasks."),
-                     **REPLAY_BUTTON_WIDTH):
-            try:
-                from trajectory_ingest import inspect_link_capture
-                from yrp_ingest import inspect_yrp
-                report = inspect_yrp(ingress_path) if ingress_source == 'yrp' else inspect_link_capture(ingress_path)
-                st.json(report)
-            except Exception as error:
-                st.error(str(error))
-        if st.button(_("启动离线诊断转换", "Start Offline Diagnostic Conversion"), disabled=not ingress_path,
-                     help=_("启动独立 CPU 任务，不加载策略模型。失败也可能留下诊断前缀及报告；单方捕获、缺历史证据或响应不匹配不会自动成为训练样本。",
-                            "Starts a separate CPU task without policy weights. Failures may leave a diagnostic prefix/report. Partial captures, missing evidence or unmatched responses do not become training samples automatically."),
-                     **REPLAY_BUTTON_WIDTH):
-            if is_process_alive(st.session_state.running_pid, st.session_state.running_process_create_time):
-                st.error(_("请等待或停止当前托管任务。", "Wait for or stop the current managed task."))
-            else:
-                import uuid
-                report_path = os.path.join('./replay_data/ingest_reports', f'ingest_{uuid.uuid4().hex}.json')
-                process = launch_managed_task([sys.executable, 'main.py', 'replay-ingest', ingress_path,
-                    '--source', ingress_source, '--report', report_path])
-                st.success(_(f"已启动 PID {process.pid}；报告: {report_path}。日志在启动与监控中枢查看。",
-                              f"Started PID {process.pid}; report: {report_path}. See Control & Logs for progress."))
+        st.caption(_("录像检查、重建和学习数据准备已移至“启动与监控中枢 → 独立模仿学习 → 1. 采集 / 录像一站式准备”。此页仅查看、下载和清理文件。",
+                     "Replay checks, reconstruction and demonstration preparation moved to Control & Logs → Independent Imitation → tab 1. This page only views, downloads and cleans up files."))
+        st.subheader(_("按来源 / 批次选择文件", "Select Files by Source / Batch"))
+        st.write(_("一次采集、准备或评测生成的捕获、轨迹、缓存、报告和日志归为同批；BC 检查点与对应 TensorBoard 归为同一实验批次。旧文件仅按记录中的直接来源关联，不按相似文件名猜测。",
+                   "Captures, traces, caches, reports and logs from one collection/preparation/evaluation share a batch. BC checkpoints and matching TensorBoard files share an experiment batch. Legacy grouping uses direct recorded provenance, not similar filenames."))
+        include_legacy = st.checkbox(_("同时索引旧版录像与轨迹报告", "Include Legacy Replays & Trace Reports"), value=True, key='imitation_files_legacy',
+            help=_("读取旧捕获摘要和报告里的直接来源，以关联同一原文件的转换结果。不会重放、不加载模型；文件多时首次扫描会稍久。",
+                   "Reads legacy digests and direct report references to associate converted copies with their source. No replay/model loading; large inventories take longer to scan."))
+        if st.button(_("读取 / 刷新批次文件列表", "Read / Refresh Batch Files"), key='imitation_files_refresh',
+            help=_("只扫描受管理目录；不会沿dataset.json去读取或删除外部来源。新增输出后点击刷新。", "Scans managed directories only, never following dataset.json into external sources. Refresh after generating outputs.")):
+            from integrations.imitation.data import imitation_artifacts
+            st.session_state.imitation_file_inventory = imitation_artifacts(PROJECT_ROOT, include_legacy=include_legacy)
+        inventory = st.session_state.get('imitation_file_inventory', [])
+        if inventory:
+            category_names = {'source': _("原始录像", "Source Replay"), 'capture': _("原始捕获", "Raw Capture"),
+                'trajectory': _("转换轨迹", "Converted Trace"), 'cache': _("示范缓存", "Example Cache"),
+                'report': _("清单 / 报告", "Manifest / Report"), 'log': _("Bot日志", "Bot Log"),
+                'model': _("BC检查点", "BC Checkpoint"), 'tensorboard': 'TensorBoard', 'replay': _("全息录像", "Holographic Replay")}
+            groups = sorted({row['batch'] for row in inventory})
+            batch_sources = {row['batch']: row.get('source', row['batch'].removeprefix('source/')) for row in inventory}
+            selected_batches = st.multiselect(_("同一来源 / 工作批次", "Source / Workflow Batch"), groups, key='imitation_files_batches',
+                format_func=lambda value: f"{batch_sources[value]} · {value}",
+                help=_("选择一个或多个批次缩小范围；model/前缀表示BC实验，data/表示采集/准备/评测，source/表示旧来源关联。",
+                       "Select batches to narrow scope. model/ means a BC experiment, data/ collection/preparation/evaluation, source/ a legacy provenance group."))
+            categories = sorted({row['category'] for row in inventory})
+            selected_categories = st.multiselect(_("文件类别", "File Categories"), categories, default=categories, key='imitation_files_categories',
+                format_func=lambda value: category_names[value],
+                help=_("默认全部；取消某类可只清理缓存或报告，保留捕获/模型。", "All by default; deselect categories to retain captures/models while clearing caches or reports."))
+            visible_files = [row for row in inventory if (not selected_batches or row['batch'] in selected_batches)
+                             and row['category'] in selected_categories]
+            visible_paths = sorted(row['path'] for row in visible_files)
+            st.caption(_(f"当前范围：{len(visible_paths)} 个文件，合计 {sum(row['bytes'] for row in visible_files)/1024**2:.1f} MiB。只操作列出的文件，不联动删除清单引用的外部来源。",
+                         f"Current scope: {len(visible_paths)} files, {sum(row['bytes'] for row in visible_files)/1024**2:.1f} MiB. Operations affect listed files, not externally referenced sources."))
+            st.session_state.imitation_files_selected = [path for path in st.session_state.get('imitation_files_selected', []) if path in visible_paths]
+            if st.button(_("选中当前批次范围的全部文件", "Select All Files in the Current Batch Scope"), key='imitation_files_select_batch',
+                disabled=not selected_batches or not visible_paths,
+                help=_("把已选择批次中当前类别的全部文件加入下方待删除列表；这一步不会删除。", "Selects all visible categories in the chosen batches below; this action deletes nothing.")):
+                st.session_state.imitation_files_selected = visible_paths
+            selected_files = st.multiselect(_("待删除文件（可逐个调整）", "Files to Delete (Individually Adjustable)"), visible_paths,
+                key='imitation_files_selected', help=_("先按批次全选，再取消要保留的文件。删除检查点或缓存会使引用它们的任务无法继续，删除操作不可撤销。",
+                    "Select by batch, then deselect files to keep. Removing checkpoints/caches prevents their reuse; deletion cannot be undone."))
+            busy_files = is_process_alive(st.session_state.running_pid, st.session_state.running_process_create_time)
+            if st.button(_("删除所选批次文件", "Delete Selected Batch Files"), key='imitation_files_delete',
+                disabled=not selected_files or busy_files,
+                help=_("只删除上方明确选中的文件，并移除变空的批次子目录。托管任务运行时禁用；不修改任何网络或训练设置。",
+                       "Deletes only explicitly selected files and empty batch subdirectories. Disabled during managed tasks; no network/training settings change.")):
+                try:
+                    from integrations.imitation.data import delete_imitation_artifacts, imitation_artifacts
+                    deleted = delete_imitation_artifacts(selected_files, PROJECT_ROOT)
+                    st.session_state.imitation_file_inventory = imitation_artifacts(PROJECT_ROOT, include_legacy=include_legacy)
+                    st.success(_(f"已删除 {deleted} 个文件。", f"Deleted {deleted} files."))
+                    st.rerun()
+                except (ValueError, OSError) as error:
+                    st.error(str(error))
+            preview_file = st.selectbox(_("单文件查看 / 导出", "View / Export One File"), visible_paths, key='imitation_files_preview',
+                help=_("仅从当前文件范围选择；点击下方按钮才读取内容，避免自动加载大型PTH/缓存。", "Choose within current scope; content loads only after clicking below, avoiding automatic large-checkpoint/cache reads."))
+            if st.button(_("读取选中文件以预览 / 下载", "Load Selected File for Preview / Download"), key='imitation_files_load', disabled=not preview_file,
+                help=_("文件内容会进入WebUI内存；大型检查点优先直接复制本地文件。", "Loads file contents into WebUI memory; copying large checkpoints locally is preferable.")):
+                from pathlib import Path
+                target = (Path(PROJECT_ROOT) / preview_file).resolve()
+                if not target.is_relative_to(Path(PROJECT_ROOT).resolve()) or target.is_symlink():
+                    st.error(_("文件路径已变化，请刷新列表。", "File path changed; refresh the inventory."))
+                else:
+                    with open(target, 'rb') as stream:
+                        content = stream.read()
+                    st.download_button(_("下载此文件", "Download This File"), content, file_name=target.name, key='imitation_files_download')
+                    if target.suffix == '.json' and len(content) <= 1024*1024:
+                        try:
+                            st.json(json.loads(content))
+                        except ValueError:
+                            st.code(content.decode('utf-8', errors='replace')[-10000:])
+        else:
+            st.info(_("点击“读取 / 刷新批次文件列表”管理新模仿批次；下方仍可逐类管理旧文件。", "Read/refresh the inventory to manage imitation batches; legacy category managers remain below."))
         st.divider()
-        st.subheader(_("2. 规范轨迹审查与隔离划分", "2. Audit & Split Canonical Trajectories"))
-        st.write(_(
-            "输入：指定目录内的 .core.jsonl.gz 规范轨迹，包括框架原生录制和第 1 区转换结果，不直接审查 YRP 或 Link 原始捕获。检查完整性、来源证据与重放一致性后，把合格轨迹划入训练/验证/测试清单，其余放入隔离区。",
-            "Input: .core.jsonl.gz canonical traces under the selected directory, including native recordings and section 1 conversion results, not raw YRP/Link files. Integrity, provenance and replay consistency determine train/validation/test eligibility; other entries are quarantined.",
-        ))
-        st.caption(_(
-            "输出：replay_data/datasets/dataset_*.json。只生成文件引用与审查结果，不搬动轨迹、不启动训练。",
-            "Output: replay_data/datasets/dataset_*.json, containing file references and audit results only. No trajectory is moved and no training starts.",
-        ))
-        dataset_root = st.text_input(
-            _("规范轨迹目录（递归扫描）", "Canonical Trajectory Directory (recursive)"), value='./replays',
-            help=_("递归扫描此目录中的 .core.jsonl.gz；默认 replays 同时覆盖原生轨迹和导入轨迹。其他后缀不会进入审查。",
-                   "Recursively scans .core.jsonl.gz only. The default replays directory covers native and imported traces; other extensions are excluded."),
-        )
-        dataset_seed = st.number_input(
-            _("隔离划分种子", "Split Seed"), min_value=0, max_value=2**32 - 1, value=20261009,
-            help=_("控制独立关联组分配到训练/验证/测试区的可复现随机划分，不影响对局重建或模型随机性。同一数据和种子得到相同划分；默认目标比例为 80%/10%/10%，按组划分不保证精确数量。",
-                   "Controls reproducible train/validation/test assignment of independent groups, not duel reconstruction or model randomness. Defaults target 80%/10%/10%; grouped counts need not match exact ratios."),
-        )
-        st.caption(_(
-            "共享同一整局、精确主/额外/备牌构筑或稳定玩家的所有轨迹同组；关联会传递。独立组不足时不强行生成验证集。重放为 CPU 离线操作，不载入策略模型。",
-            "Trajectories sharing a duel, exact Main/Extra/Side composition or stable player remain in one transitive group. Insufficient independent groups do not produce artificial holdouts. Replay runs offline on CPU without policy weights.",
-        ))
-        if st.button(_("审查并生成隔离数据清单", "Audit & Build Isolated Dataset Manifest"),
-                     help=_("启动 CPU 离线审查，可能重放规范轨迹。共享整局、构筑或玩家的轨迹保持同组，避免数据泄漏；会保留拒绝原因而不是强行放行。",
-                            "Starts an offline CPU audit which may replay canonical traces. Shared duel/deck/player groups stay together to avoid leakage; refusals remain explicit."),
-                     **REPLAY_BUTTON_WIDTH):
-            if is_process_alive(st.session_state.running_pid, st.session_state.running_process_create_time):
-                st.error(_("请等待或停止当前托管任务。", "Wait for or stop the current managed task."))
-            elif not os.path.isdir(dataset_root):
-                st.error(_("输入目录不存在。", "Input directory does not exist."))
-            else:
-                import uuid
-                output = os.path.join('./replay_data/datasets', f'dataset_{uuid.uuid4().hex}.json')
-                process = launch_managed_task([sys.executable, 'main.py', 'dataset-build', '--directory', dataset_root,
-                    '--output', output, '--seed', str(int(dataset_seed))])
-                st.success(_(f"已启动 PID {process.pid}；清单: {output}。", f"Started PID {process.pid}; manifest: {output}."))
-        st.divider()
-        st.subheader(_("3. 查看质量审查结果", "3. View Quality Audit Results"))
-        st.caption(_(
-            "选择第 2 区生成的数据质量清单。数量表示各区的轨迹文件数，不是决策步数或已参与训练的样本数；隔离文件仍保留在原目录。单文件转换细节可在第 5 区的入口诊断报告中查看。",
-            "Select a section 2 dataset manifest. Counts represent trajectory files, not decision steps or samples already used for training; quarantined files stay in their original locations. Individual conversion details are in section 5 ingress reports.",
-        ))
-        with st.expander(_("❓ 如何理解门禁与隔离原因", "❓ Understanding Eligibility & Quarantine")):
-            st.markdown(_(
-                "合格仅表示通过当前数据门禁，**不代表已经训练，也不评定棋力高低**。常见拒绝代码：\n\n"
-                "- `original_output_or_assets_unverified`：缺原始完整报文或历史资产证据；普通 YRP 通常属于这一类。\n"
-                "- `incomplete_visibility`：只捕获单方视角，不能补造隐藏信息。\n"
-                "- `stable_player_ids_missing`：缺稳定匿名玩家身份，无法保证玩家隔离。\n"
-                "- `truncated_recording` / `no_real_terminal`：记录截断，或没有 Core 真实终局。\n"
-                "- `trajectory_quality_flags` / `strict_replay_or_mapping_gate_failed` / `replay_failed`：轨迹质量、严格重放或合法动作映射未通过。\n"
-                "- `duplicate_duel`：同一整局重复封装，保留一个合格副本，其他副本隔离。\n"
-                "- `format_or_quality_failed` / `unsupported_origin`：格式损坏、字段不合规或来源不受支持。\n\n"
-                "关联组过少或验证/测试候选为空时，报告会警告：不能把同组数据硬拆后称为独立验证。",
-                "Eligibility means passing current data gates, **not that training has run or playing strength is high**. Common rejection codes:\n\n"
-                "- `original_output_or_assets_unverified`: no original complete messages or historical asset proof; ordinary YRP commonly falls here.\n"
-                "- `incomplete_visibility`: a player-only capture cannot supply hidden information.\n"
-                "- `stable_player_ids_missing`: stable anonymized identities are missing, so player isolation cannot be guaranteed.\n"
-                "- `truncated_recording` / `no_real_terminal`: truncated recording or no genuine Core terminal.\n"
-                "- `trajectory_quality_flags` / `strict_replay_or_mapping_gate_failed` / `replay_failed`: quality, strict replay or legal-action mapping failed.\n"
-                "- `duplicate_duel`: duplicate packaging of the same duel; one eligible copy is retained and others quarantined.\n"
-                "- `format_or_quality_failed` / `unsupported_origin`: corrupt format, invalid fields or unsupported source.\n\n"
-                "Too few independent groups or empty validation/test candidates produce a warning: splitting a shared group cannot establish independent validation.",
-            ))
-        manifests = sorted(glob.glob('./replay_data/datasets/*.json'))
-        selected_manifest = st.selectbox(
-            _("选择数据质量/划分清单", "Select Dataset Quality/Split Manifest"), manifests,
-            help=_("读取 replay_data/datasets 中已有的 JSON 清单，不重新扫描或重放；新增数据或资产变更后需要重新运行第 2 区审查。",
-                   "Reads an existing JSON manifest in replay_data/datasets without rescanning/replaying. Re-run section 2 after adding data or changing assets."),
-        )
-        if st.button(_("查看数据门禁报告", "View Quality Report"), disabled=not selected_manifest,
-                     help=_("只读显示所选清单的数量、分组与拒绝原因，不启动数据转换、审查或训练。",
-                            "Displays counts, groups and rejection reasons only; no conversion, audit or training starts."),
-                     **REPLAY_BUTTON_WIDTH):
-            try:
-                with open(selected_manifest, 'rb') as stream:
-                    raw = stream.read(64 * 1024 * 1024 + 1)
-                if len(raw) > 64 * 1024 * 1024:
-                    raise ValueError('manifest size limit exceeded')
-                report = json.loads(raw)
-                for column, split in zip(st.columns(4), ('train', 'validation', 'test', 'quarantine')):
-                    split_label = {'train': _("训练候选", "Training Candidates"),
-                                   'validation': _("验证候选", "Validation Candidates"),
-                                   'test': _("测试候选", "Test Candidates"),
-                                   'quarantine': _("隔离 / 不合格", "Quarantined / Rejected")}[split]
-                    column.metric(split_label, report['counts'][split])
-                for warning in report['warnings']:
-                    if warning.startswith('insufficient_disjoint_groups_or_empty_holdout'):
-                        st.warning(_("独立关联组不足或验证/测试区为空，当前清单不能作为独立验证的依据。",
-                                     "Too few independent groups or an empty holdout: this manifest cannot establish independent validation."))
-                    else:
-                        st.warning(warning)
-                st.dataframe([{'file': entry['path'], 'split': entry['split'], 'eligible': entry['eligible'],
-                               'reasons': '; '.join(entry['rejection_reasons']), 'group': entry.get('group_id', '')[:12]}
-                              for entry in report['entries']], hide_index=True, **REPLAY_DATAFRAME_WIDTH)
-                audit = report.get('identity_audit')
-                if audit:
-                    st.markdown(_("#### 程序参与者关联审计", "#### Program Participant Association Audit"))
-                    st.caption(_(
-                        "模型/Bot 的稳定身份仍参与原有隔离。下列去除程序身份连边的组数仅用于诊断，不是新的划分，也不构成独立验证；真人及未知身份连边始终保留。旧清单需重新审查才能补充此报告。",
-                        "Stable model/Bot identities still participate in isolation. The hypothetical group count without program edges is diagnostic, not a new split or independent validation; human/unknown identity edges remain. Rebuild older manifests to add this audit.",
-                    ))
-                    st.json(audit)
-            except Exception as error:
-                st.error(str(error))
-        st.divider()
-        st.subheader(_("4. 专家样本只读核验（不训练）", "4. Read-only Expert Sample Verification (No Training)"))
-        st.caption(_(
-            "选取一份完整规范轨迹，重新验证整局后读取指定一侧的真实动作标签与 CPU 输入。临时张量在任务结束后删除，仅保存审查报告；不加载模型、不修改 PPO。合格不代表专家水平或已获得独立验证。",
-            "Select a complete canonical trace. Re-verify the whole duel before reading the selected seat's actual labels and CPU inputs. Temporary tensors are deleted at task exit; only a review report remains. No model or PPO changes. Eligibility proves neither expert skill nor independent validation.",
-        ))
-        expert_files = sorted(glob.glob('./replays/**/*.core.jsonl.gz', recursive=True))
-        expert_path = st.selectbox(_("专家来源规范轨迹", "Expert Source Canonical Trace"), expert_files,
-            key='expert_trace_path', help=_("原始 .link/.yrp 文件需先转换。不能直接信任旧清单的合格标记；本操作会重新核对资产、实际响应和逐项观测摘要。",
-                                           "Convert raw .link/.yrp first. Old manifest eligibility is not trusted: assets, actual responses and observation hashes are checked again."))
-        expert_seat_mode = st.selectbox(_("读取哪一侧的示范", "Demonstration Seats"), ('windbot', '0', '1', 'both'),
-            key='expert_seats', format_func=lambda value: {'windbot': _("自动：仅 WindBot", "Automatic: WindBot Only"),
-                '0': _("明确指定 P0", "Explicit P0"), '1': _("明确指定 P1", "Explicit P1"),
-                'both': _("明确指定双方", "Explicit Both Seats")}[value],
-            help=_("自动模式不模仿作为陪练的 V4 模型或 RuleBot。真人/其他来源须明确选择座位；来源身份是声明，不是认证。",
-                   "Automatic mode excludes native V4/RuleBot opponents. Select seats explicitly for human/other sources; metadata is a declaration, not authentication."))
-        if st.button(_("重放核验并生成专家样本报告", "Re-verify & Review Expert Samples"), disabled=not expert_path, key='expert_read_start',
-            help=_("独立 CPU 任务：一次 Core 重放，至多 512MiB 匿名临时张量缓存；任何整局门禁失败都不开放前缀样本。输出报告位于 replay_data/expert_reports。",
-                   "Separate CPU task: one Core replay and up to 512 MiB of anonymous temporary tensor storage. Failed whole-duel gates expose no prefix samples. Reports go to replay_data/expert_reports."),
-            **REPLAY_BUTTON_WIDTH):
-            if is_process_alive(st.session_state.running_pid, st.session_state.running_process_create_time):
-                st.error(_("请等待或停止当前托管任务。", "Wait for or stop the current managed task."))
-            else:
-                import uuid
-                output = os.path.join('./replay_data/expert_reports', f'expert_{uuid.uuid4().hex}.json')
-                command = [sys.executable, 'main.py', 'expert-read', expert_path, '--report', output]
-                for seat in (('0', '1') if expert_seat_mode == 'both' else (expert_seat_mode,)):
-                    if seat != 'windbot':
-                        command.extend(['--expert-seat', seat])
-                process = launch_managed_task(command)
-                st.success(_(f"已启动 PID {process.pid}；报告: {output}。", f"Started PID {process.pid}; report: {output}."))
-        expert_reports = sorted(glob.glob('./replay_data/expert_reports/*.json'))
-        expert_report = st.selectbox(_("专家样本报告", "Expert Sample Report"), expert_reports,
-            help=_("显示标签数、物理座位、提示类型、输入规格及少量标签预览，不包含观测张量或任何训练结果。",
-                   "Label counts, physical seats, prompt types, input specifications and a few labels; no observation tensors or training results."))
-        if st.button(_("查看专家样本报告", "View Expert Sample Report"), disabled=not expert_report,
-                     key='expert_read_show', help=_("只读打开所选报告，不重新重放或启动训练。",
-                                                   "Opens the selected report without another replay or any training."),
-                     **REPLAY_BUTTON_WIDTH):
-            try:
-                with open(expert_report, 'rb') as stream:
-                    raw = stream.read(1024 * 1024 + 1)
-                if len(raw) > 1024 * 1024:
-                    raise ValueError('expert report size limit exceeded')
-                st.json(json.loads(raw))
-            except Exception as error:
-                st.error(str(error))
-        st.divider()
-        st.subheader(_("5. 分类文件管理（查看 / 下载 / 删除）", "5. File Management by Category"))
-        st.caption(_(
-            "展开对应类别后管理文件。删除只作用于该类别的目录和后缀，不会联动删除来源录像、其他报告或模型；删除清单也不会删除其中引用的轨迹。删除前请下载备份。",
-            "Expand a category to manage files. Deletion affects only its directory/extension, not source replays, other reports or models; deleting a manifest does not delete referenced traces. Download backups first.",
-        ))
-        with st.expander(_("📡 Link 原始捕获 · 转换的输入", "📡 Link Raw Captures · Conversion Input")):
-            st.caption(_("由 Link 采集 SDK 保存的原始报文与已提交响应，不等于已通过门禁的训练数据。",
-                         "Raw messages and submitted responses saved by the Link capture SDK, not quality-approved training data."))
+        st.subheader(_("旧版分类文件管理", "Legacy File Categories"))
+        st.caption(_("以下入口仅管理各目录的指定文件，不执行转换、划分或专家重放。", "These managers only handle files; they perform no conversion, splitting or expert replay."))
+        with st.expander(_("📡 Link 原始捕获", "📡 Link Raw Captures")):
             build_file_manager('./replays/link_captures', '.link.jsonl.gz', _("Link 原始捕获", "Link Raw Captures"))
-        with st.expander(_("🎞️ 导入诊断轨迹 · 转换的输出 / 审查的输入", "🎞️ Imported Traces · Conversion Output / Audit Input")):
-            st.caption(_("由离线诊断转换生成，也可能是不完整的失败前缀；需经过第 2 区审查。原生竞技场轨迹在“读心记录”标签页管理。",
-                         "Offline conversion outputs may include incomplete failure prefixes and require section 2 audit. Native Arena traces are managed in Thought Replays."))
-            build_file_manager('./replays/imported_trajectories', '.core.jsonl.gz', _("导入诊断轨迹", "Imported Diagnostic Trajectories"))
-        with st.expander(_("📋 入口诊断报告 · 单个原始文件的转换结果", "📋 Ingress Reports · Single-File Conversion Results")):
-            st.caption(_("记录来源格式、转换成功/失败和原因、生成的轨迹及一致性验证结果；不是训练/验证/测试划分清单。",
-                         "Records source format, conversion success/failure, reasons, output trace and consistency checks, not train/validation/test splits."))
+        with st.expander(_("🎞️ 导入诊断轨迹", "🎞️ Imported Diagnostic Traces")):
+            build_file_manager('./replays/imported_trajectories', '.core.jsonl.gz', _("导入诊断轨迹", "Imported Diagnostic Traces"))
+        with st.expander(_("📋 旧入口诊断报告", "📋 Legacy Ingress Reports")):
             build_file_manager('./replay_data/ingest_reports', '.json', _("入口诊断报告", "Ingress Reports"), allow_view=True)
-        with st.expander(_("🗂️ 数据质量清单 · 批量审查与隔离划分结果", "🗂️ Dataset Manifests · Batch Audit & Split Results")):
-            st.caption(_("记录逐轨迹门禁结论、拒绝原因、关联组与划分；这里只保存文件引用，不包含轨迹本体或模型权重。",
-                         "Per-trace eligibility, rejection reasons, groups and splits; manifests contain file references, not trajectory contents or model weights."))
+        with st.expander(_("🗂️ 旧数据质量清单", "🗂️ Legacy Dataset Manifests")):
             build_file_manager('./replay_data/datasets', '.json', _("数据质量清单", "Dataset Manifests"), allow_view=True)
-        with st.expander(_("🧑‍🏫 专家样本报告 · 只读标签与输入规格", "🧑‍🏫 Expert Reports · Read-only Labels & Input Specs")):
-            st.caption(_("仅保存样本计数、来源和标签预览；删除报告不会删除原始轨迹，也不涉及模型权重。",
-                         "Sample counts, provenance and label previews only. Deletion affects neither source traces nor model weights."))
-            build_file_manager('./replay_data/expert_reports', '.json', _("专家样本报告", "Expert Sample Reports"), allow_view=True)
+        with st.expander(_("🧑‍🏫 旧专家样本报告", "🧑‍🏫 Legacy Expert Reports")):
+            build_file_manager('./replay_data/expert_reports', '.json', _("专家样本报告", "Expert Reports"), allow_view=True)
     with tab_models:
         st.markdown("### 🧬 " + _("按模型 UUID 管理制品", "Artifacts grouped by model UUID"))
         st.caption(_(
             "PTH、ONNX 主图、ONNX 外置权重和轮次清单会按同一模型 UUID 与内置轮次归档。",
             "PTH, ONNX graphs, external ONNX data and iteration manifests are grouped by embedded UUID and iteration.",
         ))
-        model_dir = os.path.abspath("./models")
+        model_dir = st.selectbox(_("模型目录（含BC与PPO分支）", "Model Directory (BC & PPO Branches)"),
+            model_repository_directories('./models'), key='storage_model_directory',
+            format_func=lambda path: os.path.relpath(path, PROJECT_ROOT),
+            help=_("自动发现模型所在子目录。BC与PPO分支按目录/UUID隔离，选择对应目录即可查看、下载、删除制品；不移动原文件。",
+                   "Discovers model subdirectories. BC/PPO branches remain isolated by directory/UUID; choose a directory to view/export/delete artifacts without moving files."))
         os.makedirs(model_dir, exist_ok=True)
 
         uploaded_models = st.file_uploader(
@@ -3342,9 +3518,10 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                 """把模型 UUID 池格式化为便于选择的前缀与轮次摘要"""
                 pool = pools[model_id]
                 iterations = sorted(pool["iterations"])
+                latest_name = pool['artifacts'][-1].get('display_name', ', '.join(pool['prefixes']))
                 return (
-                    f"{', '.join(pool['prefixes'])} | {model_id} | "
-                    f"iter {iterations[0]}–{iterations[-1]} ({len(iterations)})"
+                    f"{latest_name} | {model_id} | "
+                    f"{len(iterations)} {_('个保存版本', 'saved versions')}"
                 )
 
             selected_pool_id = st.selectbox(
@@ -3368,6 +3545,10 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                 artifact_rows.append(
                     {
                         _("轮次", "Iteration"): artifact["iteration"],
+                        _("阶段", "Stage"): artifact.get('training_stage', 'ppo'),
+                        _("完整模型名", "Model Name"): artifact.get('display_name', artifact['primary']),
+                        _("累计PPO", "Cumulative PPO"): (artifact.get('training_lineage') or {}).get('ppo_iteration', artifact['iteration']),
+                        _("累计BC", "Cumulative BC"): (artifact.get('training_lineage') or {}).get('bc_epochs', 0),
                         _("格式", "Format"): artifact["format"],
                         _("主文件", "Primary"): artifact["primary"],
                         _("完整制品文件", "Artifact files"): ", ".join(artifact["files"]),
@@ -3403,6 +3584,8 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                 _("选择要删除的完整轮次制品", "Select complete artifact iterations to delete"),
                 iteration_options,
                 key="storage_delete_model_iterations",
+                format_func=lambda value: ' / '.join(sorted({row.get('display_name', row['primary'])
+                    for row in selected_pool['iterations'][value]})),
             )
             confirm_delete_iterations = st.checkbox(
                 _("确认删除所选轮次的 PTH、ONNX、外置权重及清单", "Confirm deleting PTH, ONNX, external data and manifests for selected iterations"),
@@ -3507,16 +3690,19 @@ elif menu == _("👁️ 全息读心回放", "👁️ Holographic Replay"):
     
     log_dir = "./ai_thoughts"
     os.makedirs(log_dir, exist_ok=True)
-    json_files = sorted(glob.glob(os.path.join(log_dir, "*.json")), key=os.path.getmtime, reverse=True)
+    json_files = sorted(set(glob.glob(os.path.join(log_dir, "*.json"))
+        + glob.glob('./replay_data/imitation/**/replays/**/*.json', recursive=True)), key=os.path.getmtime, reverse=True)
     
     if not json_files:
         st.info(_("暂无录像文件。请先在竞技场生成对局。", "No replay files found."))
     else:
         c_file, c_space = st.columns([2, 1])
         with c_file:
-            sel_file = st.selectbox(_("📂 选择录像文件", "Select Replay File"), [os.path.basename(f) for f in json_files])
+            sel_file = st.selectbox(_("📂 选择录像文件", "Select Replay File"), json_files,
+                format_func=lambda path: os.path.relpath(path, PROJECT_ROOT),
+                help=_("同时列出普通竞技场与独立模仿评测录像，路径区分批次及候选/基线。", "Includes ordinary Arena and independent imitation evaluation replays, distinguished by batch and candidate/baseline path."))
         
-        with open(os.path.join(log_dir, sel_file), "r", encoding="utf-8") as f:
+        with open(sel_file, "r", encoding="utf-8") as f:
             try: replay_data = json.load(f)
             except Exception: replay_data = {}
             
@@ -4421,9 +4607,12 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
         
         with col_form:
             st.markdown("### 🔧 " + _("构建新的 .gkg 部署包", "Build new .gkg Package"))
+            package_model_dir = st.selectbox(_("待打包模型目录", "Model Directory to Package"), model_repository_directories('./models'),
+                key='deployment_model_directory', format_func=lambda path: os.path.relpath(path, PROJECT_ROOT),
+                help=_("可选择BC实验或PPO分支目录；打包仍按同一UUID校验。", "Select a BC experiment or PPO branch; packaging still enforces one UUID."))
             package_repository = load_model_repository(
-                os.path.abspath("./models"),
-                get_model_identity_signature(os.path.abspath("./models")),
+                package_model_dir,
+                get_model_identity_signature(package_model_dir),
             )
             package_pools = package_repository["pools"]
             package_pool_ids = sorted(
@@ -4561,7 +4750,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                 if inc_staples: extra_files["meta_staples.json"] = "meta_staples.json"
                                 create_deployment_package(
                                     target_zip,
-                                    "./models",
+                                    package_model_dir,
                                     sel_models,
                                     package_name=final_name,
                                     extra_files=extra_files,

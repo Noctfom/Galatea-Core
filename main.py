@@ -135,7 +135,7 @@ def run_training_command(args, parser):
             parser.error(str(error))
 
         if args.target_iteration is None and args.additional_iterations is None:
-            if args.resume:
+            if args.resume or getattr(args, 'init_from', None):
                 parser.error(
                     "恢复训练必须指定 --target-iteration 或 --additional-iterations"
                 )
@@ -143,17 +143,38 @@ def run_training_command(args, parser):
 
         resume_checkpoint = None
         current_iteration = 0
-        if args.resume:
+        source_path = args.resume or getattr(args, 'init_from', None)
+        if source_path:
             resume_checkpoint = load_training_checkpoint(
-                args.resume,
+                source_path,
                 map_location="cpu",
             )
-            current_iteration = int(resume_checkpoint['iteration'])
+            from checkpoint_utils import validate_ppo_resume_stage
+            if args.resume:
+                validate_ppo_resume_stage(resume_checkpoint)
+                current_iteration = int(resume_checkpoint['iteration'])
+            else:
+                from checkpoint_utils import get_training_lineage
+                current_iteration = get_training_lineage(resume_checkpoint)['ppo_iteration']
         resolved_target_iteration = resolve_training_target(
             current_iteration,
             target_iteration=args.target_iteration,
             additional_iterations=args.additional_iterations,
         )
+        if args.dir is None:
+            args.dir = os.path.dirname(os.path.abspath(args.resume)) if args.resume else './models'
+        training_resume_path = args.resume
+        if getattr(args, 'init_from', None):
+            from training_validation import validate_training_config
+            validate_training_config(resume_checkpoint['net_config'], update_timesteps=args.batch_size,
+                mini_batch_size=args.mini_batch, num_workers=args.workers, training_device=args.device,
+                worker_timeout=args.timeout, gamma=args.gamma, learning_rate=args.lr, entropy=args.entropy,
+                gae_lambda=args.gae_lambda, clip_eps=args.clip_eps, ppo_epochs=args.ppo_epochs, target_kl=args.target_kl)
+            from checkpoint_utils import initialize_ppo_from_weights
+            training_resume_path, resume_checkpoint = initialize_ppo_from_weights(args.init_from, args.dir,
+                learning_rate=args.lr, model_prefix=args.model_prefix, checkpoint=resume_checkpoint)
+            args.dir = os.path.dirname(training_resume_path)
+            print(f'🧬 PPO权重初始化分支: {training_resume_path}；PPO轮次从{current_iteration}继续，优化器/更新步计数重建。')
 
         net_config = {
             'd_model': args.d_model,
@@ -161,6 +182,8 @@ def run_training_command(args, parser):
             'n_layers': args.n_layers,
             'vocab_size': 20000,
         }
+        if resume_checkpoint is not None:
+            net_config = dict(resume_checkpoint['net_config'])
         print(f"🚀 启动训练模式 (保存至 {args.dir})...")
         print(f"📂 读取卡组: {args.deck_dir}")
         print(f"⚙️ 模型架构: {net_config}")
@@ -168,7 +191,7 @@ def run_training_command(args, parser):
             save_dir=args.dir,
             deck_dir=args.deck_dir,
             net_config=net_config,
-            resume_path=args.resume,
+            resume_path=training_resume_path,
             update_timesteps=args.batch_size,
             mini_batch_size=args.mini_batch,
             num_workers=args.workers,
@@ -209,6 +232,7 @@ def main():
         'replay-ingest': 'ReplayIngest',
         'dataset-build': 'DatasetQuality',
         'expert-read': 'ExpertRead',
+        'imitate': 'Imitation',
         'windbot': 'ExternalDuel',
     }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
@@ -221,7 +245,7 @@ def main():
     
     # --- 1. 训练模式 (Train) ---
     train_parser = subparsers.add_parser('train', help='开始强化学习训练')
-    train_parser.add_argument('--dir', type=str, default='./models', help='模型保存路径')
+    train_parser.add_argument('--dir', type=str, default=None, help='默认新训models；恢复沿用检查点目录；权重初始化在此目录下建立独立ppo_branches批次')
     iteration_group = train_parser.add_mutually_exclusive_group()
     iteration_group.add_argument(
         '--target-iteration',
@@ -248,7 +272,9 @@ def main():
     train_parser.add_argument("--n_heads", type=int, default=4, help="Attention heads")
     train_parser.add_argument("--n_layers", type=int, default=2, help="Transformer layers")
     # 训练参数
-    train_parser.add_argument('--resume', type=str, default=None, help='恢复训练的检查点')
+    ppo_source = train_parser.add_mutually_exclusive_group()
+    ppo_source.add_argument('--resume', type=str, default=None, help='完整恢复PPO检查点与PPO优化器')
+    ppo_source.add_argument('--init-from', type=str, default=None, help='从兼容V4/BC权重建立新PPO分支；重建PPO优化器，保留累计PPO/BC双计数')
     train_parser.add_argument('--batch_size', type=int, default=4096, help='采集总步数')
     train_parser.add_argument('--mini_batch', type=int, default=512, help='PPO 单次训练 Batch')
     train_parser.add_argument('--workers', type=int, default=4, help='CPU进程数')
@@ -430,7 +456,7 @@ def main():
     external_parser.add_argument('--native-deck', default=None, help='原生侧 YDK；默认与指定 WindBot 构筑相同')
     external_parser.add_argument('--native-deck-source', default=None, help='原生侧使用竞技场选池：weighted、physical:<池>、virtual:<池>、deck:<池>/<卡组>；与 --native-deck 互斥')
     external_parser.add_argument('--deck_dir', default='./decks', help='原生侧卡组目录，不改变 WindBot 执行器的固定构筑')
-    external_parser.add_argument('--seed', type=int, default=73, help='公开 Core uint32 种子；不控制 WindBot 自身随机数')
+    external_parser.add_argument('--seed', type=int, default=None, help='默认随机；指定后使用可复现 Core uint32 开局序列，不控制 WindBot 自身随机数')
     external_parser.add_argument('--games', type=int, default=1, help='受控局数，1～100；逐局隔离并记录不同种子')
     external_parser.add_argument('--timeout', type=float, default=600, help='单局机器会话时间预算秒数，最大3600')
     external_parser.add_argument('--response-timeout', type=float, default=30, help='单次握手/响应预算秒数')
@@ -444,6 +470,62 @@ def main():
         help='仅控制原生 V4 模型：greedy取最高Logit，training固定T=1，deployment使用指定温度；不控制WindBot')
     external_parser.add_argument('--temperature', type=float, default=0.8,
         help='仅deployment生效，范围0.05～5.0；training固定1.0，greedy不使用温度')
+
+    imitation_parser = subparsers.add_parser('imitate', help='独立模仿工作流；不加入 PPO 或真人在线学习')
+    imitation_commands = imitation_parser.add_subparsers(dest='imitation_command', required=True)
+    collect_parser = imitation_commands.add_parser('collect', help='独立 WindBot 镜像采集，直接生成专家缓存')
+    collect_parser.add_argument('--train-executor', action='append', required=True, help='训练教师执行器，可重复')
+    collect_parser.add_argument('--validation-executor', action='append', default=[], help='验证执行器，不进入学习')
+    collect_parser.add_argument('--test-executor', action='append', default=[], help='最终测试执行器，不参与选模')
+    collect_parser.add_argument('--games-per-executor', type=int, default=10)
+    collect_parser.add_argument('--families', default=None, help='可选 JSON：执行器到家族标签的显式映射，不按名字猜测')
+    collect_parser.add_argument('--split-mode', choices=('none', 'episode', 'deck', 'executor'), default=None,
+        help='默认按同一教师的不同完整对局划分；另选执行器时为executor')
+    collect_parser.add_argument('--split-seed', type=int, default=73, help='仅控制数据划分，不控制Core开局')
+    collect_parser.add_argument('--validation-fraction', type=float, default=0.1)
+    collect_parser.add_argument('--test-fraction', type=float, default=0.1)
+    prepare_parser = imitation_commands.add_parser('prepare', help='一次准备完整旧轨迹/Link捕获，训练轮次不重放')
+    prepare_parser.add_argument('source', help='完整规范轨迹、完整 Link 捕获或其目录；普通缺证据 YRP 不放行')
+    prepare_parser.add_argument('--split-mode', choices=('none', 'episode', 'deck', 'executor'), default='episode')
+    prepare_parser.add_argument('--expert-seat', action='append', type=int, choices=(0, 1), default=None)
+    prepare_parser.add_argument('--validation-executor', action='append', default=[])
+    prepare_parser.add_argument('--test-executor', action='append', default=[])
+    prepare_parser.add_argument('--validation-fraction', type=float, default=0.1)
+    prepare_parser.add_argument('--test-fraction', type=float, default=0.1)
+    bc_parser = imitation_commands.add_parser('train', help='独立行为克隆：epoch预算、专用优化器和实验检查点')
+    bc_parser.add_argument('--dataset', required=True, help='独立准备的 dataset.json')
+    bc_source = bc_parser.add_mutually_exclusive_group(required=True)
+    bc_source.add_argument('--init-from', help='兼容 V4 权重；生成新模型 UUID，不恢复来源优化器')
+    bc_source.add_argument('--resume', help='恢复本工作流的 BC 检查点，不接受 PPO 优化器')
+    bc_parser.add_argument('--epochs', type=int, default=5, help='本次追加的示范遍历轮次，不是 PPO iteration')
+    bc_parser.add_argument('--batch-size', type=int, default=64)
+    bc_parser.add_argument('--lr', type=float, default=1e-5)
+    bc_parser.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
+    bc_parser.add_argument('--model-prefix', default=None, help='默认继承来源主前缀，文件使用<前缀>_iter_<PPO轮次>_bc_<累计BC轮次>')
+    bc_parser.add_argument('--save-every', type=int, default=1)
+    bc_parser.add_argument('--cpu-threads', type=int, default=1)
+    eval_parser = imitation_commands.add_parser('evaluate', help='候选/基线固定对手与换边计划，不更新权重')
+    eval_parser.add_argument('--dataset', required=True)
+    eval_parser.add_argument('--checkpoint', required=True)
+    eval_parser.add_argument('--baseline', default=None)
+    eval_parser.add_argument('--split', choices=('validation', 'test'), default='validation')
+    eval_parser.add_argument('--executor', action='append', default=[], help='显式覆盖评测对手，属于回归测试而非自动未见声明')
+    eval_parser.add_argument('--games-per-seat', type=int, default=5)
+    eval_parser.add_argument('--policy-mode', choices=('greedy', 'training', 'deployment'), default='training')
+    eval_parser.add_argument('--temperature', type=float, default=0.8)
+    eval_parser.add_argument('--record-replay', action='store_true')
+    eval_parser.add_argument('--record-evaluations', action=argparse.BooleanOptionalAction, default=None,
+        help='录像内记录模型侧逐状态AI预测曲线；开启录像时默认启用，--no-record-evaluations可关闭')
+    for child in (collect_parser, prepare_parser, bc_parser, eval_parser):
+        child.add_argument('--output', required=child is not bc_parser,
+                           default='./models/imitation' if child is bc_parser else None)
+        child.add_argument('--seed', type=int, default=None if child in (collect_parser, eval_parser) else 73,
+            help='采集/评测默认随机Core开局；准备/训练默认为73，分别用于划分/优化随机性')
+    for child in (collect_parser, eval_parser):
+        child.add_argument('--runtime', default=None)
+        child.add_argument('--mono', default=None)
+        child.add_argument('--timeout', type=float, default=600)
+    collect_parser.add_argument('--max-decisions', type=int, default=4000)
 
     args = parser.parse_args()
     if args.command == 'duel' and (args.record_trajectory or args.record_evaluations) and args.thought_freq <= 0:
@@ -678,6 +760,41 @@ def main():
         except (ValueError, RuntimeError, OSError, KeyError, EOFError, RecursionError) as error:
             parser.exit(1, f'专家样本读取拒绝: {error}\n')
 
+    elif args.command == 'imitate':
+        import json
+        from integrations.imitation.workflow import (collect_demonstrations, prepare_demonstrations,
+                                                    train_imitation, evaluate_imitation)
+        try:
+            if args.imitation_command == 'collect':
+                from integrations.imitation.data import read_json
+                report = collect_demonstrations(args.output, train_executors=args.train_executor,
+                    validation_executors=args.validation_executor, test_executors=args.test_executor,
+                    games_per_executor=args.games_per_executor, seed=args.seed, runtime=args.runtime,
+                    mono=args.mono, timeout=args.timeout, max_decisions=args.max_decisions,
+                    families=read_json(args.families) if args.families else None,
+                    split_mode=args.split_mode, split_seed=args.split_seed,
+                    validation_fraction=args.validation_fraction, test_fraction=args.test_fraction)
+            elif args.imitation_command == 'prepare':
+                report = prepare_demonstrations(args.source, args.output, mode=args.split_mode, seed=args.seed,
+                    expert_seats=args.expert_seat, validation_executors=args.validation_executor,
+                    test_executors=args.test_executor, validation_fraction=args.validation_fraction,
+                    test_fraction=args.test_fraction)
+            elif args.imitation_command == 'train':
+                report = train_imitation(args.dataset, init_from=args.init_from, resume=args.resume,
+                    output=args.output, epochs=args.epochs, batch_size=args.batch_size, learning_rate=args.lr,
+                    device=args.device, seed=args.seed, model_prefix=args.model_prefix,
+                    save_every=args.save_every, cpu_threads=args.cpu_threads)
+            else:
+                report = evaluate_imitation(args.dataset, args.checkpoint, args.output, baseline=args.baseline,
+                    split=args.split, executors=args.executor, games_per_seat=args.games_per_seat,
+                    seed=args.seed, runtime=args.runtime, mono=args.mono, timeout=args.timeout,
+                    policy_mode=args.policy_mode, temperature=args.temperature, record_replay=args.record_replay,
+                    record_evaluations=args.record_evaluations)
+            print(json.dumps({key: value for key, value in report.items() if key not in ('entries', 'history')},
+                             ensure_ascii=False, indent=2))
+        except (ValueError, RuntimeError, OSError, KeyError, TypeError, EOFError) as error:
+            parser.exit(1, f'独立模仿工作流停止: {error}\n')
+
     elif args.command == 'windbot':
         import json
         try:
@@ -685,8 +802,11 @@ def main():
             if args.inspect:
                 print(json.dumps(inspect_runtime(args.runtime, args.mono), ensure_ascii=False, indent=2))
                 return
-            if not 1 <= args.games <= 100 or not 0 <= args.seed < 2**32 or args.seed + args.games > 2**32:
-                parser.error('受控局数必须为1～100，种子序列必须位于uint32范围')
+            if not 1 <= args.games <= 100:
+                parser.error('受控局数必须为1～100')
+            from integrations.duel_session import resolve_core_seed
+            args.seed = resolve_core_seed(args.seed, args.games)
+            print(f'[WindBot] 本批 Core 起始种子: {args.seed}')
             if args.record_evaluations and (not args.record_replay or not args.model):
                 parser.error('状态预测需要 --record-replay 和原生 --model')
             from integrations.windbot.session import run_controlled_duel

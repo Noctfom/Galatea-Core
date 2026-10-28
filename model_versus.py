@@ -292,6 +292,13 @@ class ModelArena:
         else:
             print(f"🤖 [Opponent] 使用 RuleBot (内置规则脚本)")
 
+        # Model lineage, rather than the local BC epoch or a renamed filename,
+        # identifies the model in new replays.
+        self.p0_name = getattr(self.p0_bot, 'model_metadata', {}).get('display_name', p0_name)
+        self.p1_name = (getattr(self.p1_bot, 'model_metadata', {}).get('display_name', p1_name)
+                        if self.p1_bot is not None else p1_name)
+        self.logger.player_name, self.logger.opponent_name = self.p0_name, self.p1_name
+
         self.env = GalateaEnv()
         if self.record_trajectory or self.record_evaluations:
             # 权重摘要每个竞技场实例仅计算一次，不重复读取每局检查点

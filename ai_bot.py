@@ -58,9 +58,13 @@ class AiBot:
             self.model_metadata = {
                 key: checkpoint.get(key)
                 for key in ('model_id', 'model_prefix', 'iteration', 'train_step',
-                            'checkpoint_format_version', 'model_protocol_version')
+                            'checkpoint_format_version', 'model_protocol_version', 'training_stage')
             }
             self.model_metadata['net_config'] = dict(saved_config)
+            from checkpoint_utils import get_training_lineage, checkpoint_stem
+            self.model_metadata['training_lineage'] = get_training_lineage(checkpoint)
+            self.model_metadata['display_name'] = checkpoint_stem(checkpoint)
+            self.model_metadata['training_stage'] = checkpoint.get('training_stage', 'ppo')
             print(f"✅ 网络已自动重构并加载权重。")
             return True
 

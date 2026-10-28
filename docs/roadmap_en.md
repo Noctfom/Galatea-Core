@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.2. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.3. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -17,23 +17,24 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 - [x] 3.13.4 confirms missing/empty-source generation plus key-only reuse caused collapse; source provenance, content identity and complete chunking now support isolated rebuilds without network/input/coarse-classification changes. New assets have26,092 distinct vectors and27 explicitly incomplete slots; see [asset guide](code_semantics_en.md)
 - [x] Phase7 batch3 (3.13.5): Core-side Link capture SDK, strict diagnostic YRP1/YRP2/YRP3D conversion, transitive whole-duel/exact-deck/stable-player isolation and quality manifests; no network/training changes or eligibility without evidence
 - [x] Core defines shared external-session/capture interfaces and explicit-provenance response-label contracts; Link reuses them after Core stabilizes and is not a development prerequisite
-- [ ] Historical YRP evidence, related-deck-family splits and an independent imitation learner after gates pass; accept actual Link networking separately
+- [ ] Historical YRP evidence and automatic similar-build family splits; accept actual Link networking separately
 
 ## Optional external opponents and demonstration learning
 
-WindBot belongs to this Core repository's [optional integration directory](../integrations/windbot/README.md), without requiring a Link proxy. 3.15.0 implements batch 1's controlled BO1 prototype; Link/YRP evidence extensions and imitation training remain pending.
+WindBot belongs to Core's [optional integration directory](../integrations/windbot/README.md), without a Link proxy. Controlled BO1 landed in3.15.0 and independent imitation in3.15.3; full player-only Link inference and YRP without evidence remain unsupported.
 
 - [x] Batch 1: Core session contract v1, pinned IceYGO source, explicit CLI/WebUI controlled BO1, masked views, faithful capture and independent replay. Real WindBot/RuleBot both-seat and mirror gates pass; Linux and broader executor acceptance remain pending
 - [ ] Batch 2: process full Link captures and YRP with original-message/asset evidence through the same canonical interpreter; compare observations and unique expert-action mapping, including multi-selection/cancellation, without inventing evidence
 - [x] 3.15.2: Read-only expert CPU sample API and CLI/WebUI verification for complete eligible traces; reuse strict replay, observation digests and original candidate labels. No prefix access before whole-duel acceptance, default WindBot-only selection, no optimizer
 - [x] 3.15.2: Program identity association audit reports shared identities and hypothetical group counts without program edges. Actual isolation still uses all stable identities; human/unknown handling remains conservative
-- [ ] Define program-identity isolation and similar-build families against explicit evaluation goals: within-program tests versus cross-build/executor holdouts. Never invent identities or randomly split frames to manufacture validation
+- [x] 3.15.3: Explicit duel/build/executor holdout goals. Program IDs retain provenance; human/unknown identities remain transitively grouped. Explicit family configuration is supported, not guessed automatic clustering
 - [x] WindBot-side Type15 physical-index-set label equivalence uses a Core-owned versioned interface for future Link reuse. All471 decisions in the original Albaz capture now map, with original responses/observations unchanged. Default/ordered matching, public ygocore, RuleBot packaging and training semantics are unchanged
 - [ ] Separately audit true reduced-pool coverage and other prompt-specific adapters. Design per-sample eligibility independently, without expert-answer injection or automatic whole-duel gate relaxation
 - [x] 3.15.1: Core-owned host Start/query ingress, framing, sparse attributes and diagnostic projection. WindBot reuses packet builders/filtering; queries create neither actions nor transition events and never masquerade as original Core chunks
 - [ ] Accept full V4 online inference from a single-player view separately: opponent response boundaries, Type160 hints and dynamic-attribute coverage are not fully proven by this conservative profile. Default encoding stays gated; actual Link networking is future work
-- [ ] Batch 3: build an isolated imitation learner with separate experimental checkpoints; verify action learning and fixed Arena performance. Human demonstrations reuse capture interfaces, never fabricated PPO probabilities or advantages
-- [ ] Evaluate a separate WindBot pool and small-fraction training integration only after acceptance; leave PPO, league sampling, rewards, V4 networks and public ygocore unchanged meanwhile
+- [x] 3.15.3: Independent BC optimizer, epoch budget, experimental UUID/checkpoints, one-time preparation/compressed caches, single-Core native collection and candidate/baseline fixed-build swapped-seat evaluation. Engineering closure only, not demonstrated playing-strength improvement
+- [x] 3.15.3 review: Explicit BC weight initialization for a new PPO branch, cumulative PPO/BC counters, separate UUID/directory and fresh PPO optimizer/update counters. No automatic continuation; imitation and online-human learning still require separate startup
+- [ ] 3.15.5: Only optional WindBot opponent games may join main training. Reuse Workers/central inference and learn model actions only; do not automatically mix expert imitation or online-human games
 - [x] Default paths do not require the module/runtime. Dependencies are checked only on activation; `--with-windbot` optionally packages source, licenses and an already installed runtime
 
 Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.

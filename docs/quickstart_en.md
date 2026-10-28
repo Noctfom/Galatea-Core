@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.15.2**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.15.3**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -20,6 +20,7 @@
 - [Start Training](#start-training)
 - [View Training Results](#view-training-results)
 - [Arena Model Testing](#arena-model-testing)
+- [Independent Imitation Learning (Optional)](#independent-imitation-learning-optional)
 - [[Alternate] Using Packaged Models](#alternate-using-packaged-models)
 
 ---
@@ -331,6 +332,29 @@ Normal results are viewable in **📈 Meta Dashboard**, and AI decisions in **�
 
 ---
 
+## Independent Imitation Learning (Optional)
+
+Open **Launch & Monitor Hub → Independent Imitation**. Collect teacher demonstrations, or process
+existing replays in one action covering checks, reconstruction and preparation. By default, different
+complete games from the same teachers form train/validation/test splits; separate executors are optional,
+as is training on everything. Select the dataset/V4 checkpoint, explicitly run BC epochs, then optionally
+evaluate known-teacher regression or held-out opponents. Collection/playing evaluation need WindBot
+runtime; replay preparation and BC do not start it. Core starts randomize by default with a fixed-seed
+option; split and optimizer seeds are separate.
+
+Prepared data lives under `replay_data/imitation/`, checkpoints under `models/imitation/<run_id>/`,
+and TensorBoard logs under `runs/imitation_<run_id>/`. Epochs count passes over demonstrations;
+action accuracy is not playing win rate. This workflow starts neither PPO nor online-human learning,
+and ordinary duels are not automatically demonstrations. Main training accepts BC as an explicit
+weight source via `train --init-from`, never restoring its optimizer. Filenames retain independent
+PPO/BC counters, e.g. `galatea_iter_200_bc_5.pth`. Model management/packaging list BC/PPO directories;
+evaluation replays include AI prediction curves by default and appear in Holographic Replay.
+
+See [Independent imitation learning](core_trajectories_en.md#3153-independent-imitation-workflow)
+for collection, preparation, training, resume and evaluation CLI examples.
+
+---
+
 ## [Alternate] Using Packaged Models
 
 If you received a `.gkg` packaged model:
@@ -347,7 +371,7 @@ Imported models appear in `./models/`. Jump to [Arena Testing](#arena-model-test
 ## Next Steps
 
 - 🎞️ Use [Canonical Core trajectories and state-evaluation replay](core_trajectories_en.md): enable Arena recording options, turn on evaluation curves in replay, or run read-only `trajectory-check --replay`
-- 🧪 3.13.5 external files: Storage & Logs → Trajectory Ingress & Quality. `replay-ingest` / `dataset-build` inspect, convert and split without starting training; readable YRP/partial Link data does not automatically qualify for learning
+- 🧪 Process external replays in Independent Imitation → tab1; Storage & Logs only views/downloads/cleans source and batch files. Readable YRP/partial Link data does not automatically qualify for learning
 - 🧩 Optional [WindBot controlled duels](../integrations/windbot/README.md): install separately and enable under Arena or run `python main.py windbot --inspect`; outside PPO and the league
 - 📚 Read [Feature Guide](features.md) for detailed module usage
 - 🔧 Read [Architecture](architecture.md) for framework internals

@@ -413,6 +413,8 @@ class PPOTrainer:
         self.target_kl = target_kl
 
         resume_checkpoint = None
+        self.training_lineage = None
+        self.initialization_source = None
         requested_model_prefix = (
             validate_model_prefix(model_prefix) if model_prefix is not None else None
         )
@@ -425,12 +427,16 @@ class PPOTrainer:
                 if preloaded_resume_checkpoint is not None
                 else load_training_checkpoint(resume_path, map_location="cpu")
             )
+            from checkpoint_utils import validate_ppo_resume_stage
+            validate_ppo_resume_stage(resume_checkpoint)
             # 词表合法追加后，恢复训练立即升级运行时身份；下一检查点应覆盖新卡映射
             self.net_config = apply_current_protocol_metadata(
                 resume_checkpoint['net_config']
             )
             self.model_id = resume_checkpoint['model_id']
             self.model_prefix = resume_checkpoint['model_prefix']
+            self.training_lineage = resume_checkpoint.get('training_lineage')
+            self.initialization_source = resume_checkpoint.get('initialization')
             self.resume_source_record = {
                 'model_id': self.model_id,
                 'model_prefix': self.model_prefix,
@@ -2010,6 +2016,7 @@ class PPOTrainer:
                 artifact_stem = model_artifact_stem(
                     self.model_prefix,
                     self.iteration,
+                    (self.training_lineage or {}).get('bc_epochs'),
                 )
                 path = os.path.join(self.save_dir, f"{artifact_stem}.pth")
                 assert_checkpoint_target_identity(path, self.model_id)
@@ -2038,7 +2045,12 @@ class PPOTrainer:
                     'clip_eps': self.clip_eps,
                     'ppo_epochs': self.ppo_epochs,
                     'target_kl': self.target_kl,
+                    'training_stage': 'ppo',
                 }
+                if self.training_lineage is not None:
+                    checkpoint['training_lineage'] = dict(self.training_lineage, ppo_iteration=self.iteration)
+                if self.initialization_source is not None:
+                    checkpoint['initialization'] = self.initialization_source
                 torch.save(checkpoint, path)
 
                 onnx_record = None
@@ -2052,6 +2064,7 @@ class PPOTrainer:
                         model_id=self.model_id,
                         model_prefix=self.model_prefix,
                         onnx_error="export_in_progress",
+                        training_stage='ppo', training_lineage=checkpoint.get('training_lineage'),
                     )
                     # 因为是同步的，主网络此时处于停滞状态，不需要克隆，直接传干净的字典即可
                     onnx_record, onnx_error = self._export_onnx_sync(clean_state, self.iteration)
@@ -2062,6 +2075,7 @@ class PPOTrainer:
                     model_prefix=self.model_prefix,
                     onnx_record=onnx_record,
                     onnx_error=onnx_error,
+                    training_stage='ppo', training_lineage=checkpoint.get('training_lineage'),
                 )
                 print(f"💾 Model saved: {path}")
                 print(f"🏷️ Artifact manifest saved: {artifact_manifest}")
@@ -2092,7 +2106,8 @@ class PPOTrainer:
 
     def _export_onnx_sync(self, clean_state, current_iter):
         """同步导出 ONNX，并核验所有外置权重文件均已生成"""
-        artifact_stem = model_artifact_stem(self.model_prefix, current_iter)
+        lineage = getattr(self, 'training_lineage', None)
+        artifact_stem = model_artifact_stem(self.model_prefix, current_iter, (lineage or {}).get('bc_epochs'))
         onnx_archive = os.path.join(self.save_dir, f"{artifact_stem}.onnx")
         try:
             import torch.onnx
@@ -2144,6 +2159,7 @@ class PPOTrainer:
                 model_id=self.model_id,
                 model_prefix=self.model_prefix,
                 iteration=current_iter,
+                **({'training_lineage': dict(lineage, ppo_iteration=current_iter)} if lineage else {}),
             )
             artifact_record = describe_onnx_artifact(
                 onnx_archive,

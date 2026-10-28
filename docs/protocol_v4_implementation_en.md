@@ -2,11 +2,15 @@
 
 > Status: v3.14.0 enters full V4 main-framework deployment and training validation. Main-framework/data-ingress Phases1–7 have landed; Phase8's staged long-run acceptance still requires measurement. Deck-building/BO3, imitation optimization and MCTS are not completed scope. V3 uses its independent archived runtime.
 
+3.15.3 adds a separate [imitation workflow](core_trajectories_en.md#3153-independent-imitation-workflow)
+alongside the frozen V4 specification, without changing its network or inputs. Deck-building/BO3,
+MCTS and complete single-player Link wiring remain future work.
+
 ## 1. Version boundaries
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.15.2 (expert sample reader and identity audit, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.15.3 (independent imitation workflow, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | 2 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |

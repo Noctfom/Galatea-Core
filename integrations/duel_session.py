@@ -1,11 +1,23 @@
 """Core-owned external-session contract; independent of model and transport versions."""
 from dataclasses import dataclass
 import math
+import secrets
 import uuid
 
 SESSION_CONTRACT_VERSION = 1
 MAX_RESPONSE_BYTES = 512
 WINDBOT_SELECTION_LABEL_V1 = 'windbot_select_card_set_v1'
+
+
+def resolve_core_seed(seed, games=1):
+    """Randomize a new schedule by default, or retain an explicit uint32 seed."""
+    if type(games) is not int or not 1 <= games <= 2**32:
+        raise ValueError('invalid Core seed schedule length')
+    if seed is None:
+        return secrets.randbelow(2**32 - games + 1)
+    if type(seed) is not int or not 0 <= seed <= 2**32 - games:
+        raise ValueError('Core seed schedule must stay within uint32')
+    return seed
 
 
 class SessionProtocolError(ValueError):

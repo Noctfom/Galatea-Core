@@ -161,12 +161,14 @@ def validate_deployment_package_filename(filename):
     return validate_safe_filename(filename, allowed_suffixes=(".gkg",))
 
 
-def model_artifact_stem(model_prefix, iteration):
+def model_artifact_stem(model_prefix, iteration, bc_epochs=None):
     """根据已校验前缀和轮次生成一组模型产物的公共文件名"""
     validate_model_prefix(model_prefix)
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
         raise ValueError("iteration must be a non-negative integer")
-    return f"{model_prefix}_iter_{iteration}"
+    if bc_epochs is not None and (type(bc_epochs) is not int or bc_epochs < 0):
+        raise ValueError('BC epochs must be a non-negative integer')
+    return f"{model_prefix}_iter_{iteration}" + (f"_bc_{bc_epochs}" if bc_epochs else '')
 
 
 def is_primary_model_filename(filename):
@@ -217,6 +219,7 @@ def tag_onnx_model_identity(
     model_prefix,
     iteration,
     model_protocol_version=MODEL_PROTOCOL_VERSION,
+    training_lineage=None,
 ):
     """把模型身份与模型协议版本写入 ONNX 主图并原子替换"""
     import onnx
@@ -268,6 +271,10 @@ def tag_onnx_model_identity(
             ),
         }
     )
+    if training_lineage is not None:
+        from checkpoint_utils import get_training_lineage
+        lineage = get_training_lineage({'training_lineage': training_lineage, 'iteration': iteration})
+        properties['galatea.training_lineage'] = json.dumps(lineage, sort_keys=True)
     onnx.helper.set_model_props(model, properties)
     temporary_path = graph_path.with_suffix(graph_path.suffix + ".identity.tmp")
     try:
@@ -339,6 +346,9 @@ def _read_artifact_manifest(
     iteration = payload.get("iteration")
     if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
         raise ValueError(f"artifact iteration is invalid: {marker_path.name}")
+    if payload.get('training_lineage') is not None:
+        from checkpoint_utils import get_training_lineage
+        get_training_lineage(payload)
     checkpoint = payload.get("checkpoint") or {}
     checkpoint_name = checkpoint.get("file")
     if checkpoint_name is not None:
@@ -385,6 +395,8 @@ def _validate_onnx_artifact_manifest(
         )
     if onnx_record.get("files") != record["files"]:
         raise ValueError(f"ONNX artifact file list mismatch: {marker_path.name}")
+    if payload.get('training_lineage') != record.get('training_lineage'):
+        raise ValueError(f'ONNX lineage differs from manifest: {marker_path.name}')
     for key in (
         "model_id",
         "model_prefix",
@@ -584,8 +596,13 @@ def describe_onnx_artifact(
             validate_model_artifact_file(data_path)
         files.append(os.path.relpath(data_path, graph_path.parent).replace("\\", "/"))
 
+    training_lineage = json.loads(properties['galatea.training_lineage']) if 'galatea.training_lineage' in properties else None
+    if training_lineage is not None:
+        from checkpoint_utils import get_training_lineage
+        get_training_lineage({'training_lineage': training_lineage, 'iteration': embedded_iteration})
     record = {
         "format": "onnx",
+        "training_lineage": training_lineage,
         "model_id": embedded_model_id,
         "model_prefix": embedded_model_prefix,
         "iteration": embedded_iteration,
@@ -650,6 +667,8 @@ def discover_checkpoint_artifacts(
                     "model_id": payload["model_id"],
                     "model_prefix": payload["model_prefix"],
                     "iteration": int(payload["iteration"]),
+                    "training_stage": payload.get('training_stage', 'ppo'),
+                    "training_lineage": payload.get('training_lineage'),
                     "checkpoint_format_version": payload.get(
                         "checkpoint_format_version"
                     ),
@@ -921,6 +940,9 @@ def build_package_model_records(
                             f"checkpoint internal {key} does not match "
                             f"{marker_path.name}"
                         )
+                if (checkpoint.get('training_lineage') is not None
+                        and payload.get('training_lineage') != checkpoint['training_lineage']):
+                    raise ValueError(f"checkpoint lineage does not match {marker_path.name}")
                 checkpoint_record = payload.get("checkpoint") or {}
                 if (
                     checkpoint_record.get("status") != "complete"
@@ -935,6 +957,8 @@ def build_package_model_records(
                     "model_id": checkpoint["model_id"],
                     "model_prefix": checkpoint["model_prefix"],
                     "iteration": checkpoint["iteration"],
+                    "training_stage": checkpoint.get('training_stage', 'ppo'),
+                    "training_lineage": checkpoint.get('training_lineage'),
                     "model_protocol_version": checkpoint[
                         "model_protocol_version"
                     ],
@@ -1163,6 +1187,15 @@ def discover_model_repository(model_dir):
                 if marker_path.is_file():
                     record["files"] = [*record["files"], marker_path.name]
 
+            if primary_path.suffix.casefold() == '.pth':
+                from checkpoint_utils import checkpoint_stem, get_training_lineage
+                record.update(training_stage=checkpoint.get('training_stage', 'ppo'),
+                    training_lineage=get_training_lineage(checkpoint), display_name=checkpoint_stem(checkpoint))
+                if (checkpoint.get('training_lineage') is not None and marker_path.is_file()
+                        and payload.get('training_lineage') != checkpoint['training_lineage']):
+                    raise ValueError('checkpoint lineage differs from manifest')
+            else:
+                record['display_name'] = primary_path.stem
             model_id = record["model_id"]
             iteration = record["iteration"]
             pool = result["pools"].setdefault(
@@ -1284,6 +1317,8 @@ def write_checkpoint_artifact_manifest(
     model_protocol_version=MODEL_PROTOCOL_VERSION,
     onnx_record=None,
     onnx_error=None,
+    training_stage=None,
+    training_lineage=None,
 ):
     """在保存检查点时写入同轮次产物清单，并标记 ONNX 是否完整"""
     protocol_metadata = get_current_protocol_metadata()
@@ -1331,6 +1366,11 @@ def write_checkpoint_artifact_manifest(
         },
     }
 
+    if training_stage is not None:
+        payload['training_stage'] = training_stage
+    if training_lineage is not None:
+        from checkpoint_utils import get_training_lineage
+        payload['training_lineage'] = get_training_lineage({**payload, 'training_lineage': training_lineage})
     temporary_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
     with open(temporary_path, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2)
