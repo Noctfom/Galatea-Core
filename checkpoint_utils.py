@@ -246,6 +246,7 @@ def inspect_training_checkpoint(path, map_location="cpu"):
         "run_id": checkpoint.get("run_id"),
         "net_config": checkpoint.get("net_config", {}),
         "training_stage": checkpoint.get("training_stage", "ppo"),
+        "windbot_training": checkpoint.get("windbot_training"),
     }
     for key in get_current_protocol_metadata():
         metadata[key] = checkpoint.get(key)

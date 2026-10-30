@@ -4,6 +4,23 @@
 
 ---
 
+## [v3.15.4] - 2026-10-28
+
+### Optional WindBot main-training opponents
+
+- Adds `train --windbot` and a WebUI panel, reusing Workers, central inference, model candidates and ordinary PPO. Only model actions train; Bot replies are environmental transitions. No BC, expert demonstrations or human games are mixed in.
+- Defaults to 20% Worker allocation, random model seats and mirror builds; regular model-side deck sampling is optional. Remaining Workers keep the original league. Mixed mode prefers regular AI Workers for Rule coverage; 100% uses only WindBot so small budgets are not consumed by Rule games.
+- Suggests CDB/vocabulary-compatible Normal/Easy scripts, reserving one per multi-executor level and aliases sharing identical Main/Extra builds. Side differences do not create an independent BO1 build. Lists remain editable, with unfinished/test scripts excluded by default. Holdouts constrain WindBot training opponents only, not other deck pools or BC exposure.
+- Shares each Worker's existing Core without extra GPU policies or experience pools; full replay recording stays off by default. Bots close per game. Disconnects, external Retry or parse failures roll back games without replacement opponents or invented outcomes. Forced cleanup checks registered child PID/creation time. Diagnostic-only results allocate no large merge pool and invoke no PPO.
+- Checkpoints/TensorBoard retain active/reserved rosters, builds, levels, file/runtime hashes and launch settings. Adds trustworthy-completed-game win rates, completion/failure/truncation counts, accepted model rows, reply timing and per-executor metrics. Resume requires explicit opt-in; disabled paths do not import the optional module.
+- Aligns bilingual guides, metric definitions and release entry points. Network/Protocol4/Checkpoint3/revision14, rewards and PPO remain unchanged; public Core and upstream WindBot source are unmodified.
+- Acceptance: 672 regressions and 50 subtests pass in the full run. After updating four metric-count assertions, all 147 final related tests pass; four independent semantic rebuild gates remain disabled. A real 32/4/1 CPU model completes single-Worker pure-WindBot collection and PPO updates. Disabled defaults, bilingual UI, mixed Rule coverage, build holdouts, diagnostic-only handling without merge allocation and owned-child cleanup pass. No Linux/cloud-GPU long run or strength validation across all executors was performed; these checks do not establish learning gains.
+
+See [configuration and boundaries](../integrations/windbot/README.md#optional-main-training-opponents)
+and [training-opponent metrics](tensorboard_metrics_en.md#11-windbot-main-training-opponent-metrics).
+
+---
+
 ## [v3.15.3] - 2026-10-28
 
 ### Independent imitation learning and fixed-opponent evaluation

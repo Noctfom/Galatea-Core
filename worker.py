@@ -390,6 +390,7 @@ def worker_process(
     use_onnx_p1 = False
     ort_session_p1 = None
     opp_agent = None
+    windbot_opponent = None
 
     def run_historical_onnx(tensor_dict):
         """运行历史 ONNX；首次异常时延迟加载 PyTorch 回退网络"""
@@ -484,6 +485,8 @@ def worker_process(
         }
 
         deck_records = []
+        windbot_records = []
+        reset_failures = 0
         deck_profile_registry = DeckProfileRegistry()
         forced_rule_games_remaining = max(
             0,
@@ -555,17 +558,40 @@ def worker_process(
 
             # --- Reset 环境 ---
             try:
-                res = deck_utils.get_random_deck_pair(ydk_dir=deck_dir)
+                windbot_entry = None
+                if opp_type == 'windbot':
+                    from integrations.windbot.training import choose_episode_decks, TrainingOpponent
+                    windbot_entry, res = choose_episode_decks(
+                        episode_opp_config['windbot'], random, train_p_id, deck_dir)
+                else:
+                    res = deck_utils.get_random_deck_pair(ydk_dir=deck_dir)
                 if res is None:
                     time.sleep(1)
                     continue
                 env_name, d1_name, d1, d2_name, d2 = res
                 raw_data = env.reset(d1, d2)
+                if windbot_entry is not None:
+                    windbot_opponent = TrainingOpponent(episode_opp_config['windbot'], windbot_entry,
+                        opp_p_id, env, {str(p): {'main': d.main, 'extra': d.extra, 'side': d.side}
+                                       for p, d in enumerate((d1, d2))})
+                reset_failures = 0
             except Exception as e: 
                 print(f"⚠️ [Worker {worker_id}] 环境Reset异常 (已记录并跳过): {e}")
+                if opp_type == 'windbot':
+                    reset_failures += 1
+                    windbot_records.append({'executor': (windbot_entry or {}).get('executor', 'startup'),
+                        'completed': False, 'aborted': True, 'win': False, 'model_steps': 0,
+                        'responses': 0, 'response_seconds': 0.0})
+                    if reset_failures >= 3:
+                        print(f'❌ [Worker {worker_id}] WindBot连续3次启动失败，停止本Worker且不替换对手')
+                        break
                 continue
                 
-            if not raw_data: continue
+            if not raw_data:
+                if windbot_opponent is not None:
+                    windbot_opponent.close()
+                    windbot_opponent = None
+                continue
             
             # [上帝视角] 直接读取 Deck 对象的属性
             p0_m, p0_e = d1.main, d1.extra
@@ -601,6 +627,9 @@ def worker_process(
             except Exception as e: 
                 print(f"⚠️ [Worker {worker_id}] 消息解析引发严重错误: {e}")
                 import traceback; traceback.print_exc()
+                if windbot_opponent is not None:
+                    windbot_opponent.close()
+                    windbot_opponent = None
                 try: env._close_duel() # 🌟 强行摧毁坏掉的引擎
                 except Exception: 
                     pass
@@ -617,6 +646,7 @@ def worker_process(
             winner = -1
             ep_steps = 0
             win_reason = 0
+            core_terminal_received = False
             
             # 短期记忆与 Retry 逻辑
             consecutive_retries = 0
@@ -695,6 +725,28 @@ def worker_process(
                     episode_abort_reason = f"game state update failed: {e}"
                     break
 
+                # 机器人只消费自己的可见消息，响应不写入PPO动作行
+                if windbot_opponent is not None:
+                    try:
+                        windbot_opponent.observe(msg)
+                        if (msg_type in DECISION_MSGS and not is_empty_chain_prompt(msg_type, msg[1:])
+                                and decision_player_from_message(msg_type, msg[1:]) == opp_p_id):
+                            if time.time() - worker_start_time > max_worker_uptime:
+                                ep_steps = MAX_EPISODE_STEPS
+                                break
+                            t_windbot = time.time()
+                            resp = windbot_opponent.respond(msg, env)
+                            perf_ledger['t_cpu_p1'] += time.time() - t_windbot
+                            env.send_action(resp)
+                            brain.begin_transition_event(opp_p_id, msg_type, resp)
+                            msg_queue = []
+                            last_act_time = time.time()
+                            continue
+                    except Exception as e:
+                        episode_aborted = True
+                        episode_abort_reason = f'WindBot session failed: {e}'
+                        break
+
                 # 空连锁询问没有模型选择，不计入 PPO、决策预算或转移事件
                 if is_empty_chain_prompt(msg_type, msg[1:]):
                     env.send_action(-1)
@@ -703,6 +755,7 @@ def worker_process(
                 
                 # 增加读取 reason
                 if msg_type == 5: # Win
+                    core_terminal_received = True
                     if len(msg[1:]) > 0: winner = msg[1:][0]
                     # 读取获胜原因: 0=投降, 1=LP归零, 2=卡组抽干(Deck Out), 3=超时
                     win_reason = msg[1:][1] if len(msg[1:]) > 1 else 0
@@ -1180,12 +1233,31 @@ def worker_process(
                             episode_abort_reason = f"RuleBot action failed: {e}"
                             break
 
+            # 先回收外部进程，再复用原有整局提交与异常回滚
+            if windbot_opponent is not None:
+                windbot_record = {'executor': windbot_entry['executor'],
+                    'completed': core_terminal_received, 'aborted': episode_aborted,
+                    'win': core_terminal_received and winner == train_p_id,
+                    'model_steps': len(game_buffer[train_p_id]),
+                    'responses': windbot_opponent.responses,
+                    'response_seconds': windbot_opponent.response_seconds}
+                try:
+                    windbot_opponent.close()
+                except Exception as e:
+                    episode_aborted = True
+                    episode_abort_reason = f'WindBot cleanup failed: {e}'
+                    windbot_record.update(completed=False, aborted=True, win=False)
+                windbot_records.append(windbot_record)
+                windbot_opponent = None
+
             # 未产生可信终局的退出一律视为异常局，禁止其观察行进入训练批次。
             if not episode_aborted and winner == -1 and ep_steps < MAX_EPISODE_STEPS:
                 episode_aborted = True
                 episode_abort_reason = "episode loop exited without a terminal or truncation state"
 
             if episode_aborted:
+                if windbot_entry is not None and windbot_records:
+                    windbot_records[-1].update(completed=False, aborted=True, win=False)
                 discarded_rows = rollout_cursor.write_pos - rollout_cursor.episode_start_pos
                 rollout_cursor.rollback_episode()
                 game_buffer[0].clear()
@@ -1247,6 +1319,8 @@ def worker_process(
                             win_reason=win_reason,
                         )
                     except Exception as aux_error:
+                        if windbot_entry is not None and windbot_records:
+                            windbot_records[-1].update(completed=False, aborted=True, win=False)
                         discarded_rows = (
                             rollout_cursor.write_pos
                             - rollout_cursor.episode_start_pos
@@ -1409,6 +1483,8 @@ def worker_process(
                 game_buffer[0].clear()
                 game_buffer[1].clear()
                 rollout_cursor.commit_episode(trajectory_length)
+                if windbot_entry is not None and windbot_records:
+                    windbot_records[-1]['accepted_steps'] = trajectory_length
 
                 if force_rule_episode and trajectory_length > 0:
                     forced_rule_games_remaining -= 1
@@ -1425,6 +1501,13 @@ def worker_process(
         committed_steps = rollout_cursor.committed_pos
         if 'columns' not in locals() or committed_steps < 10:
             print(f"❌ [Worker {worker_id}] 数据几乎为空 ({committed_steps}/{target_steps})，跳过保存")
+            if opp_config.get('type') == 'windbot' and windbot_records:
+                # 只上传诊断，不把失败局伪装成训练动作，也不分配主进程合并池
+                for record in windbot_records:
+                    record['accepted_steps'] = 0
+                torch.save({'action': torch.empty(0, dtype=torch.long),
+                            'windbot_records': windbot_records}, tmp_file + '.tmp')
+                os.replace(tmp_file + '.tmp', tmp_file)
             return
         if committed_steps < (target_steps * 0.6):
             print(f"⚠️ [Worker {worker_id}] 数据仅收集了 {committed_steps}/{target_steps} 步 (<60%)，但仍然保存以便训练继续")
@@ -1477,6 +1560,8 @@ def worker_process(
             batch_data[f'stats_{k}'] = torch.tensor([v], dtype=torch.int32)
 
         batch_data['deck_records'] = deck_records
+        if opp_config.get('type') == 'windbot':
+            batch_data['windbot_records'] = windbot_records
         
         # 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局
         tmp_write_file = tmp_file + ".tmp"
@@ -1502,6 +1587,11 @@ def worker_process(
         return
     
     finally:
+        if windbot_opponent is not None:
+            try:
+                windbot_opponent.close()
+            except Exception as cleanup_error:
+                print(f'⚠️ [Worker {worker_id}] WindBot回收失败: {cleanup_error}')
         flushed_audit_path = flush_protocol_v3_audit(force=True)
         if flushed_audit_path is not None:
             print(f"🧪 [Worker {worker_id}] V3 观测审计已保存: {flushed_audit_path}")

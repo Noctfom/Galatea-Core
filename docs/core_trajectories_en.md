@@ -291,7 +291,8 @@ remain separate work. Ordinary PPO incurs no extra per-step work from these tool
 WebUI: **Control & Logs → Independent Imitation**, with Collect / Prepare Replays, Independent BC Training,
 and Playing Evaluation tabs. CLI commands use `imitate`. They do not automatically join PPO,
 ordinary Arena games or online-human learning. Recording a game does not start learning. WindBot as
-an online PPO opponent remains a future integration; BC-to-PPO initialization requires explicit selection.
+an online PPO opponent is a separate explicit [training option](../integrations/windbot/README.md#optional-main-training-opponents)
+since 3.15.4; BC-to-PPO initialization also requires explicit selection.
 
 ### 1. Teacher, validation and final-test pools
 

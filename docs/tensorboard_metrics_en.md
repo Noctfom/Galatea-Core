@@ -1,10 +1,11 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.15.3 / Model Protocol V4.
+> Applies to Galatea-Core v3.15.4 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
-Main PPO contains **80 fixed scalars, 3 planning distributions and 1 configuration text**, plus `Deck_WinRates/*`.
+Default main PPO contains **80 fixed scalars, 3 planning distributions and 1 configuration text**, plus `Deck_WinRates/*`.
+Explicit WindBot opponents add 7 fixed scalars, 1 configuration text and per-executor series; see section 11.
 Independent imitation adds10 scalars in its own run without changing PPO charts. Prediction, update budget,
 expert agreement and playing strength are different quantities.
 
@@ -290,3 +291,25 @@ Per-teacher/prompt counts, CE and Top1 are in each experiment's `epoch_*.json` u
 thousands of scalar cards. `result_*.json` records parent, dataset digest, saved and best-validation
 checkpoints. Actual game outcomes, aborts and completed-game win rates are in `evaluation.json` and
 cannot be replaced by action accuracy. See [explicit workflow and cache usage](core_trajectories_en.md#3153-independent-imitation-workflow).
+
+## 11. WindBot main-training opponent metrics
+
+Explicit WindBot training writes to the ordinary PPO `runs/<prefix>_<time>/events.out.tfevents.*`.
+X is cumulative PPO iteration, not BC epoch, with one point per rollout merge. Definitions are implemented
+in [Trainer](../trainer.py) from [Worker](../worker.py) commit/rollback records.
+
+| Chart/text | Vertical axis or recording | Interpretation and limits |
+|---|---|---|
+| `League_Opponent/WindBot` | Model wins / trustworthy completed WindBot games this iteration, 0–1 | Real draws count in the denominator; failures/truncations do not. No completed games means no zero point. Changing executor/build mixes differ from a fixed benchmark |
+| `WindBot_Training/Games_Completed` | Games with a genuine Core terminal and successful processing | A count, not win rate; zero when no WindBot games complete |
+| `WindBot_Training/Games_Aborted` | Uploaded diagnostics for startup, connection, parsing or target-alignment failures | Failed games supply no training actions. Workers killed before upload are absent; also consult process logs |
+| `WindBot_Training/Games_Truncated` | Budget/long-game truncations without a genuine terminal or infrastructure failure | Original truncation/GAE rules apply without invented outcomes |
+| `WindBot_Training/Accepted_Model_Steps` | Model action rows from WindBot games actually committed to PPO | Excludes Bot replies, Pass1 queries and rolled-back rows. Sample share need not match Worker allocation probability |
+| `WindBot_Training/Bot_Responses` | Successfully received Bot replies in uploaded diagnostics | Not training steps; a selection chain may contain multiple replies |
+| `WindBot_Training/Bot_Response_Seconds` | Summed wall time for those successful replies, including refreshes/waiting | Neither pure Bot compute nor an average; compare alongside response/game counts |
+| `WindBot_Executors/<executor>/WinRate` | Model wins / trustworthy completed games against that executor, 0–1 | Written only with completed games; executor labels are not measured ratings |
+| `WindBot_Executors/<executor>/Games` | Completed-game denominator for the associated win-rate point | Check sample size before interpreting fluctuations |
+| `Configuration/WindBot` | Active/reserved rosters, fixed builds, upstream levels, file/runtime hashes, allocation and model deck mode | Text, not a scalar. Records this launch's settings; resuming does not automatically enable opponents |
+
+See [WindBot training opponents](../integrations/windbot/README.md#optional-main-training-opponents)
+for configuration, per-level holdouts and CLI examples.

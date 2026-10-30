@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.15.3 的可选受控 BO1 会话（3.15.0引入）。一个公开 Core 驱动对局，WindBot通过本地协议桥响应；另一侧可为RuleBot、V4模型或第二个WindBot。普通训练不依赖本模块，尚未接入PPO/联盟、真人客户端或BO3。
+此目录提供 Galatea-Core 3.15.4 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -9,6 +9,45 @@
 
 3.15.2可从完整合格规范轨迹读取真实专家样本，默认只选WindBot，不自动模仿陪练模型；
 仅离线CPU读取与报告，不改对局执行或启动学习。见 [专家样本CLI/API与身份审计](../../docs/core_trajectories.md#3152完整轨迹的专家样本读取)。
+
+## 3.15.4主训练对手
+
+WebUI在 **启动与监控中枢 → 发起训练 → WindBot主训练对手** 勾选启用，读取兼容执行器后
+选择训练/留出名单、Worker分配比例及模型侧卡组选法。控件附带说明；关闭时不导入可选模块，
+也不检查或启动WindBot。已有检查点仍能照常推理、继续PPO或显式作为BC后的权重来源。
+
+```bash
+# 默认20%概率给每个Worker分配WindBot，其余保留原联盟抽样
+python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --windbot-rate 0.2 --no_compile
+
+# 手动指定训练与留出执行器，模型侧可改用常规训练卡组池
+python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --windbot-executor Blue-Eyes --windbot-holdout Albaz --windbot-deck-mode training-pool --no_compile
+```
+
+- **卡组与席位**：默认每局镜像WindBot固定主/额外构筑；`training-pool`仅将模型侧改为常规
+  训练卡组抽样，WindBot构筑保持不变。模型物理席位每局随机。Side只用于外部握手与来源记录，
+  不进入单局模型观测。每个WindBot Worker按局从训练名单等概率选执行器。
+- **默认名单**：建议使用当前CDB/词表兼容的`Normal`和`Easy`执行器，每个有多个执行器的
+  层级保留一个完整执行器；相同主/额外构筑的别名跟随留出，不以Side差异伪装独立构筑。
+  `NotFinished`与`Test`默认不选，仍可手动选择。上游层级是脚本声明，不代表实测强度。
+  留出只约束WindBot训练对手，不能证明模型在其他卡组池或BC中从未见过该构筑。
+- **比例与预算**：比例是Worker分配概率，不是对局数或模型样本占比；小规模单轮可能未抽中。
+  混合模式保留RuleBot补局，优先交给普通AI Worker；比例为100%时只对WindBot，不插入Rule局。
+  不另建模型副本、GPU服务或主进程经验池。机器人启动、查询刷新和CPU决策会消耗采集时间，
+  实际吞吐取决于执行器与局长；不能保证与self/hist相同。
+- **单一学习来源**：Worker仍使用原中央推理、模型候选、log-prob、FiLM掩码、辅助标签与GAE。
+  WindBot响应直接提交同一Core，作为环境变化供模型观察；不生成教师动作标签、不调用BC，
+  不加载真人对局或重放器。普通受控对局和独立模仿工作流也不会因此自动加入PPO。
+- **异常与回收**：缺依赖或不兼容名单在启动前报错；断线、无效响应、解析失败等沿用整局回滚，
+  不替换对手、不伪造胜负。每局回收Bot与连接；Trainer强制终止Worker后按登记的PID与创建时刻
+  清理所属Bot，防止误杀复用PID。无可用动作时仅上传小型诊断，跳过PPO而不分配大型合并池。
+- **来源与恢复**：检查点和TensorBoard `Configuration/WindBot`保存本次名单、构筑、层级、
+  文件摘要、程序摘要及比例。恢复PPO不会自动启用WindBot，需再次传`--windbot`或在UI勾选；
+  会按当前本地资产重新检查。网络、模型协议4、检查点格式3及修订14不变。
+
+Bot日志仍在`system_logs/windbot/`，训练不默认写整局捕获或全息录像。查看模型对局与保留执行器
+表现时，使用原受控对局或独立评测入口显式录制。主训练新增指标见
+[TensorBoard对手统计](../../docs/tensorboard_metrics.md#11-windbot主训练对手指标)。
 
 ## 接口归属与运行边界
 
@@ -116,7 +155,35 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 
 ## English summary
 
-Galatea-Core 3.15.3 owns this optional controlled BO1 runner, introduced in3.15.0. One public Core drives a loopback WindBot client against RuleBot, V4 or another WindBot. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. PPO/league integration, human clients and BO3 remain outside this module.
+Galatea-Core 3.15.4 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
+
+### Optional main-training opponents
+
+Enable the WindBot section on the main training tab, or pass `train --windbot`. Disabled mode neither
+imports the optional module nor probes its runtime. The default Worker allocation probability is 0.2;
+remaining Workers use the original league. It is not a guaranteed game/sample share. Each external
+Worker samples its executor uniformly per game, with random model seats and mirror builds by default.
+Mixed mode retains RuleBot coverage, preferably on regular AI Workers; a 100% setting uses only WindBot.
+`--windbot-deck-mode training-pool` uses regular sampling only on the model side.
+
+Compatible Normal/Easy executors are suggested, reserving one per multi-executor level plus aliases
+with identical Main/Extra builds. Side differences do not create an independent BO1 build. Unfinished/
+Test scripts remain manual choices. Upstream levels are labels, not measured strength. Holdouts exclude
+WindBot training opponents only; the same cards/builds may appear in other pools or BC. Explicit
+`--windbot-executor` and `--windbot-holdout` lists override suggestions.
+
+Only model actions reach ordinary PPO/GAE/auxiliary targets through the existing Worker and central
+inference. Bot responses are environmental transitions, never BC labels. Side is transport/provenance
+only. No additional GPU policy, replay pass or experience pool is created. Startup, refreshes and Bot
+CPU inference consume collection time; throughput is executor-dependent.
+
+Failures roll back games without replacement opponents or fabricated outcomes. Each game closes its
+Bot/socket; forced Worker cleanup matches the registered child PID and creation time. Diagnostic-only
+results do not allocate a large merge pool or invoke PPO. Checkpoints and `Configuration/WindBot`
+retain the active roster, builds, file/runtime hashes and allocation settings. Resume requires another
+explicit opt-in and checks current local assets. Network/Protocol4/Checkpoint3/revision14 stay unchanged.
+Training writes Bot logs, not full captures/replays by default. Use controlled duels/evaluation to record
+held-out games. See [metric definitions](../../docs/tensorboard_metrics_en.md#11-windbot-main-training-opponent-metrics).
 
 The independent `../imitation/` workflow adds teacher/holdout pools, one-time preparation, a BC optimizer
 and swapped-seat fixed evaluation. Only explicit WebUI/`imitate` commands start it; ordinary games do

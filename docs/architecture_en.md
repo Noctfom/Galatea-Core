@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.15.3**, retaining Protocol4/Checkpoint3/revision14. Independent imitation provides collection, compressed caches, a BC optimizer and fixed evaluation, never automatic PPO or online-human learning. Partial player views still provide diagnostics, not complete native observations.
+> Applies to **Galatea-Core v3.15.4**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -647,6 +647,13 @@ iteration, one AI worker is selected in rotation and its first game is temporari
 RuleBot; it then resumes its original self/hist configuration. This preserves weighted randomness
 while preventing small worker pools from missing the rules baseline for several iterations. When no
 historical checkpoint exists, the hist share naturally falls back to self-play.
+
+This table describes the default league. With explicit WindBot enablement in 3.15.4, Workers first
+draw the configured external-opponent probability; the remainder retain these conditional weights.
+Mixed mode prefers regular AI Workers for Rule coverage, whereas 100% WindBot inserts no Rule games.
+Each external opponent shares its Worker's existing Core. Only model candidates, log-probabilities
+and values enter ordinary PPO/GAE; Bot replies are environmental transitions. See
+[integration and holdout rules](../integrations/windbot/README.md#optional-main-training-opponents).
 
 ### Central Batched Inference Service
 

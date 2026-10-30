@@ -372,6 +372,9 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
         if config.get("mode") == "ai"
     ]
     if not ai_worker_indexes:
+        ai_worker_indexes = [index for index, config in enumerate(worker_opp_configs)
+                             if config.get('mode') == 'external']
+    if not ai_worker_indexes:
         raise ValueError("本轮没有可承载强制 Rule 对局的 AI Worker")
 
     rotation_index = (max(1, int(iteration)) - 1) % len(ai_worker_indexes)
@@ -383,7 +386,7 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -411,6 +414,10 @@ class PPOTrainer:
         self.clip_eps = clip_eps
         self.ppo_epochs = ppo_epochs
         self.target_kl = target_kl
+        self.windbot_training = None
+        if windbot_training is not None:
+            from integrations.windbot.training import prepare_training_config
+            self.windbot_training = prepare_training_config(**windbot_training)
 
         resume_checkpoint = None
         self.training_lineage = None
@@ -634,6 +641,12 @@ class PPOTrainer:
             f"(停止阈值 {self.target_kl * TARGET_KL_STOP_MULTIPLIER:g}，0 表示关闭)"
         )
         self.run_id = time_str
+        if self.windbot_training is not None:
+            self.writer.add_text('Configuration/WindBot', json.dumps(self.windbot_training,
+                ensure_ascii=False, sort_keys=True), self.train_step)
+            print(f"🤖 [WindBot训练] Worker比例={self.windbot_training['rate']:.0%} | "
+                  f"卡组选法={self.windbot_training['deck_mode']} | "
+                  f"训练执行器={len(self.windbot_training['training'])} | 留出={len(self.windbot_training['holdouts'])}")
         os.environ['GALATEA_RUN_ID'] = self.run_id
         print(f"📊 TensorBoard 日志将保存至: ./runs/{self.model_prefix}_{time_str}")
         print(
@@ -924,6 +937,30 @@ class PPOTrainer:
         self.train_step = int(checkpoint['train_step'])
         print(f"✅ 恢复成功! Iter: {self.iteration} | Train_Step: {self.train_step}")
 
+    def _write_windbot_metrics(self, records):
+        """按可信完成局记录胜率，异常与截断分开计数"""
+        if getattr(self, 'windbot_training', None) is None:
+            return
+        completed = [row for row in records if row['completed'] and not row['aborted']]
+        if completed:
+            self.writer.add_scalar('League_Opponent/WindBot',
+                sum(row['win'] for row in completed) / len(completed), self.iteration)
+        windbot_scalars = {
+            'Games_Completed': len(completed),
+            'Games_Aborted': sum(row['aborted'] for row in records),
+            'Games_Truncated': sum(not row['completed'] and not row['aborted'] for row in records),
+            'Accepted_Model_Steps': sum(row.get('accepted_steps', 0) for row in records),
+            'Bot_Responses': sum(row['responses'] for row in records),
+            'Bot_Response_Seconds': sum(row['response_seconds'] for row in records),
+        }
+        for tag, value in windbot_scalars.items():
+            self.writer.add_scalar(f'WindBot_Training/{tag}', value, self.iteration)
+        for name in sorted({row['executor'] for row in completed}):
+            selected = [row for row in completed if row['executor'] == name]
+            self.writer.add_scalar(f'WindBot_Executors/{name}/WinRate',
+                sum(row['win'] for row in selected) / len(selected), self.iteration)
+            self.writer.add_scalar(f'WindBot_Executors/{name}/Games', len(selected), self.iteration)
+
     def collect_rollouts(self):
         if self.device.type == 'cpu':
             self._configure_cpu_threads(for_policy_update=False)
@@ -952,7 +989,14 @@ class PPOTrainer:
         historical_models = list(historical_by_path)
         
         worker_opp_configs = []
+        windbot_config = getattr(self, 'windbot_training', None)
         for i in range(self.num_workers):
+            if windbot_config is not None and random.random() < windbot_config['rate']:
+                registry = os.path.abspath(os.path.join('system_logs', 'windbot', 'processes',
+                    f'{self.run_id}_{self.iteration}_{i}_{time.time_ns()}.json'))
+                worker_opp_configs.append({'mode': 'external', 'type': 'windbot', 'path': None,
+                    'windbot': dict(windbot_config, process_registry=registry)})
+                continue
             worker_opp_configs.append(
                 select_league_opponent_config(
                     random.random(),
@@ -961,10 +1005,9 @@ class PPOTrainer:
                 )
             )
 
-        forced_rule_worker = ensure_rule_opponent_coverage(
-            worker_opp_configs,
-            self.iteration,
-        )
+        # 混合模式优先由普通AI补Rule局，100%外部对手模式不再插入其他对手
+        forced_rule_worker = (None if windbot_config is not None and windbot_config['rate'] == 1.0 else
+                             ensure_rule_opponent_coverage(worker_opp_configs, self.iteration))
         if forced_rule_worker is not None:
             print(
                 f"🎯 [Iter {self.iteration}] 本轮未抽中 Rule Worker，"
@@ -976,56 +1019,43 @@ class PPOTrainer:
         self._report_memory_status("Worker 启动前")
         self._validate_rollout_commit_headroom(steps_per_worker)
 
-        # 🚀 启动工人
+        # Worker异常或主进程取消时，也要回收其外部对手
         processes = []
-        for i in range(self.num_workers):
-            # 根据配置，决定是否把通讯管道发给工人
-            
-            p = mp.Process(target=worker_process, args=(
-                i,
-                self.iteration,
-                self.net_config,
-                self.deck_dir,
-                steps_per_worker,
-                self.zmq_port,
-                worker_opp_configs[i],
-                self.worker_timeout,
-                self.gamma,
-                self.gae_lambda,
-                self.worker_cpu_threads,
-                self.shared_buffers,  # 新增直传
-                self.shared_outputs,  
-                self.worker_events,
-                self.use_onnx,
-                self.shared_logits,
-                self.shared_response_ids,
-                self.protocol_audit,
-            ))
-            p.daemon = True
-            p.start()
-            processes.append(p)
-            
-        print(f"   ... 中央批量推理服务 ({self.device.type.upper()}) 运算中 ...")
-        
-        # 等待工人自然死亡
-        start_wait = time.time()
-        while time.time() - start_wait < self.worker_timeout:
-            all_dead = True
+        try:
+            for i in range(self.num_workers):
+                p = mp.Process(target=worker_process, args=(
+                    i, self.iteration, self.net_config, self.deck_dir, steps_per_worker,
+                    self.zmq_port, worker_opp_configs[i], self.worker_timeout, self.gamma,
+                    self.gae_lambda, self.worker_cpu_threads, self.shared_buffers,
+                    self.shared_outputs, self.worker_events, self.use_onnx,
+                    self.shared_logits, self.shared_response_ids, self.protocol_audit,
+                ))
+                p.daemon = True
+                p.start()
+                processes.append(p)
+            print(f"   ... 中央批量推理服务 ({self.device.type.upper()}) 运算中 ...")
+            start_wait = time.time()
+            while time.time() - start_wait < self.worker_timeout:
+                if not any(p.is_alive() for p in processes):
+                    break
+                time.sleep(1.0)
+        finally:
             for p in processes:
-                if p.is_alive(): all_dead = False
-            if all_dead: break
-            time.sleep(1.0)
-
-        # 时间到，执行收尸
-        for p in processes:
-            if p.is_alive():
-                print(f"⏳ [Trainer] 经过 {self.worker_timeout} 秒仍有 Worker 未完成采集。触发安全超时截断机制，终止冗余进程。")
-                p.terminate() 
-            p.join(timeout=5.0)  # 增加等待时间，让系统有足够时间回收内存
-            try: 
-                p.close() # 强制释放 Windows 进程句柄
-            except Exception as e: 
-                print(f"[trainer]⚠️ 无法关闭 Worker 进程 (可能已被系统回收): {e}")
+                if p.is_alive():
+                    print(f'⏳ [Trainer] Worker未完成采集，正在终止并回收进程')
+                    p.terminate()
+                p.join(timeout=5.0)
+                try:
+                    p.close()
+                except Exception as e:
+                    print(f'[Trainer] Worker进程句柄回收失败: {e}')
+            for config in worker_opp_configs:
+                if config.get('type') == 'windbot':
+                    from integrations.windbot.training import reap_worker_bot
+                    try:
+                        reap_worker_bot(config['windbot']['process_registry'])
+                    except Exception as error:
+                        print(f'⚠️ [Trainer] WindBot进程登记回收失败: {error}')
         
         orphan_tmps = glob.glob(f"tmp_rollout_iter_{self.iteration}_worker_*.pt.tmp")
         for f in orphan_tmps:
@@ -1084,6 +1114,7 @@ class PPOTrainer:
 
         t_deck_stats = {}
         all_match_records = []
+        windbot_records = []
 
         cursor = 0
 
@@ -1092,7 +1123,11 @@ class PPOTrainer:
             try:
                 # 1. 仅将当前 1 个 Worker 的数据加载到物理内存
                 data = torch.load(f, map_location='cpu', weights_only=True)
+                windbot_records.extend(data.get('windbot_records', []))
                 s = data['action'].shape[0]
+                if s == 0:
+                    os.remove(f)
+                    continue
                 profile_remap = self.deck_profile_catalog.merge_bundle(
                     data['deck_profiles']
                 )
@@ -1200,6 +1235,10 @@ class PPOTrainer:
             except Exception as e:
                 print(f"❌ 读取/合并文件 {f} 失败: {e}") # 拒绝静默报错
 
+        self._write_windbot_metrics(windbot_records)
+        if cursor == 0:
+            print('❌ 本轮没有可提交的模型动作，已保留外部对手诊断统计，不执行PPO更新')
+            return None
         t_cost = time.time() - t0
         avg_rew = np.mean(total_rewards) if total_rewards else 0.0
         avg_len = np.mean(total_lens) if total_lens else 0.0
@@ -2046,6 +2085,7 @@ class PPOTrainer:
                     'ppo_epochs': self.ppo_epochs,
                     'target_kl': self.target_kl,
                     'training_stage': 'ppo',
+                    'windbot_training': getattr(self, 'windbot_training', None),
                 }
                 if self.training_lineage is not None:
                     checkpoint['training_lineage'] = dict(self.training_lineage, ppo_iteration=self.iteration)

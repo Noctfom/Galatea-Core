@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.15.3**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.15.4**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -372,7 +372,7 @@ Imported models appear in `./models/`. Jump to [Arena Testing](#arena-model-test
 
 - 🎞️ Use [Canonical Core trajectories and state-evaluation replay](core_trajectories_en.md): enable Arena recording options, turn on evaluation curves in replay, or run read-only `trajectory-check --replay`
 - 🧪 Process external replays in Independent Imitation → tab1; Storage & Logs only views/downloads/cleans source and batch files. Readable YRP/partial Link data does not automatically qualify for learning
-- 🧩 Optional [WindBot controlled duels](../integrations/windbot/README.md): install separately and enable under Arena or run `python main.py windbot --inspect`; outside PPO and the league
+- 🧩 Optional [WindBot integration](../integrations/windbot/README.md): install separately for controlled Arena duels or explicitly enable WindBot opponents on the main training page. `python main.py windbot --inspect` checks executors/runtime; ordinary duels do not train automatically
 - 📚 Read [Feature Guide](features.md) for detailed module usage
 - 🔧 Read [Architecture](architecture.md) for framework internals
 - 🧬 Read [Special Handling](special_handling.md) for unique features

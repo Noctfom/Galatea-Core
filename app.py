@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.15.3"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.15.4"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -974,6 +974,63 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             ),
         )
         
+        windbot_training_options = None
+        with st.expander(_("🤖 WindBot 主训练对手（可选）", "🤖 WindBot Training Opponents (optional)")):
+            t_windbot_enabled = st.checkbox(_("启用 WindBot 对手", "Enable WindBot Opponents"),
+                key='training_windbot_enabled', value=False,
+                help=_("只学习模型自己的动作，机器人只作为环境对手。未开启时不加载此模块；恢复模型也需显式勾选，不自动启用模仿或真人学习",
+                       "Only the model's actions train PPO. Disabled mode never loads this optional module. Resume requires explicit opt-in; no imitation or human learning starts"))
+            if t_windbot_enabled:
+                st.caption(_("默认镜像构筑；上游层级是脚本分类，不代表实测强度。按层级保留执行器只隔离WindBot训练对手，不保证主模型未在其他池见过该构筑",
+                             "Mirror builds by default. Upstream levels are script labels, not measured strength. Held-out executors never train as WindBot opponents; other pools may still contain those builds"))
+                if st.button(_("读取 / 刷新兼容执行器", "Read / Refresh Compatible Executors"), key='training_windbot_refresh') or 'training_windbot_catalog' not in st.session_state:
+                    try:
+                        from integrations.windbot.training import training_catalog, suggest_training_split
+                        wb_catalog = training_catalog()
+                        wb_train, wb_holdouts = suggest_training_split(wb_catalog)
+                        st.session_state['training_windbot_catalog'] = wb_catalog
+                        st.session_state['training_windbot_defaults'] = (wb_train, wb_holdouts)
+                    except Exception as error:
+                        st.error(_(f'WindBot执行器读取失败: {error}', f'WindBot catalog failed: {error}'))
+                wb_catalog = st.session_state.get('training_windbot_catalog', {})
+                wb_train, wb_holdouts = st.session_state.get('training_windbot_defaults', ([], []))
+                wb_saved = saved_meta.get('windbot_training') or {}
+                default_train = [entry['executor'] for entry in wb_saved.get('training', [])] or wb_train
+                default_holdouts = [entry['executor'] for entry in wb_saved.get('holdouts', [])] if wb_saved else wb_holdouts
+                wb_options = sorted(wb_catalog)
+                wb_format = lambda name: f"{name} | {wb_catalog[name]['level']}"
+                wb_selected = st.multiselect(_("训练执行器", "Training Executors"), wb_options,
+                    default=[name for name in default_train if name in wb_catalog], format_func=wb_format,
+                    key=f'training_windbot_train_{t_resume}',
+                    help=_("每个WindBot Worker在每局开始时从名单等概率抽取，不按卡组数量加权。缺卡或词表不兼容的构筑不列入选项",
+                           "Each WindBot worker samples one executor uniformly per game. Decks missing cards or vocabulary support are excluded"))
+                wb_reserved = st.multiselect(_("留出评测执行器", "Held-out Evaluation Executors"), wb_options,
+                    default=[name for name in default_holdouts if name in wb_catalog], format_func=wb_format,
+                    key=f'training_windbot_holdouts_{t_resume}',
+                    help=_("不会作为WindBot训练对手。同一构筑的别名执行器须放在同一侧；这些执行器仍可在独立评测页手动选择，不会自动评测",
+                           "Never sampled as training opponents. Aliases with identical builds must stay together. Select them explicitly on the independent evaluation page; no automatic evaluation runs"))
+                wb_rate = st.number_input(_("WindBot Worker分配比例", "WindBot Worker Allocation Rate"),
+                    min_value=0.01, max_value=1.0, value=float(wb_saved.get('rate', 0.2)), step=0.05,
+                    key=f'training_windbot_rate_{t_resume}',
+                    help=_("默认20%。其余Worker保持原联盟抽样；混合模式优先由普通AI补Rule局，100%时只对WindBot。实际样本比例取决于局长、速度与超时",
+                           "Default 20%. Remaining workers use the original league; mixed mode preserves Rule coverage, preferably on regular AI workers. At 100%, only WindBot is used. Sample share depends on game length, speed and timeouts"))
+                wb_mode = st.selectbox(_("模型侧卡组选法", "Model-side Deck Selection"), ['mirror', 'training-pool'],
+                    index=0 if wb_saved.get('deck_mode', 'mirror') == 'mirror' else 1,
+                    format_func=lambda value: _("镜像WindBot固定构筑", "Mirror WindBot Build") if value == 'mirror' else _("常规训练卡组池", "Regular Training Deck Pool"),
+                    key=f'training_windbot_mode_{t_resume}',
+                    help=_("只改变WindBot场次。镜像让模型与机器人使用相同主/额外构筑；常规池沿用训练抽卡组逻辑。Side不进入单局模型认知",
+                           "Only affects WindBot games. Mirror shares Main/Extra builds; regular mode keeps training deck sampling. Side Deck is not a model input"))
+                wb_runtime = st.text_input(_("WindBot程序路径（空为默认）", "WindBot Executable (blank for default)"),
+                    value='', key='training_windbot_runtime',
+                    help=_("默认integrations/windbot/runtime/WindBot.exe。依赖仅在启用后检查，不自动下载或换成RuleBot",
+                           "Defaults to integrations/windbot/runtime/WindBot.exe. Explicit enablement checks dependencies without downloads or RuleBot substitution"))
+                wb_mono = st.text_input(_("Mono路径（仅Linux，可留空）", "Mono Path (Linux only, optional)"),
+                    value='', key='training_windbot_mono',
+                    help=_("Linux默认从PATH查找mono，Windows直接执行WindBot.exe", "Linux resolves mono on PATH by default; Windows runs WindBot.exe directly"))
+                windbot_training_options = {'executors': wb_selected, 'holdouts': wb_reserved,
+                    'rate': float(wb_rate), 'deck_mode': wb_mode,
+                    'runtime': wb_runtime.strip() or None, 'mono': wb_mono.strip() or None}
+
         if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
             if is_running:
                 st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
@@ -1000,6 +1057,11 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     if t_device == "cuda" and not torch.cuda.is_available():
                         raise RuntimeError("当前 PyTorch 环境无法使用 CUDA，请选择 auto 或 cpu")
                     validate_model_prefix(t_model_prefix)
+                    if windbot_training_options is not None:
+                        if not windbot_training_options['executors']:
+                            raise ValueError('WindBot训练执行器名单不能为空')
+                        if set(windbot_training_options['executors']) & set(windbot_training_options['holdouts']):
+                            raise ValueError('WindBot训练与留出执行器名单不能重叠')
                     if is_resume:
                         if resume_metadata_error:
                             raise ValueError(resume_metadata_error)
@@ -1067,6 +1129,17 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
                 if c_protocol_audit: cmd.append("--protocol-audit")
+                if windbot_training_options is not None:
+                    cmd.extend(['--windbot', '--windbot-rate', str(windbot_training_options['rate']),
+                                '--windbot-deck-mode', windbot_training_options['deck_mode']])
+                    for name in windbot_training_options['executors']:
+                        cmd.extend(['--windbot-executor', name])
+                    for name in windbot_training_options['holdouts']:
+                        cmd.extend(['--windbot-holdout', name])
+                    if windbot_training_options['runtime']:
+                        cmd.extend(['--windbot-runtime', windbot_training_options['runtime']])
+                    if windbot_training_options['mono']:
+                        cmd.extend(['--windbot-mono', windbot_training_options['mono']])
                 p = launch_managed_task(cmd)
                 st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
                 time.sleep(0.5)

@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.15.3**. The model protocol is V4; historical V3 audit names are retained.
+> This document applies to **Galatea-Core v3.15.4**. The model protocol is V4; historical V3 audit names are retained.
 
 ---
 

@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置。已有环境和资产时约需 **5–10 分钟**；首次下载或全量语义生成可能明显更久。
 
-> 文档适用于 **Galatea-Core v3.15.3**，Model Protocol V4 / Checkpoint Format 3。
+> 文档适用于 **Galatea-Core v3.15.4**，Model Protocol V4 / Checkpoint Format 3。
 
 > 代码语义构建/同步与质量检查见 [3.13.4 语义资产指南](code_semantics.md)。新源码、向量、索引和生成清单须成组使用；新语义身份不与旧检查点混用。
 
@@ -356,7 +356,7 @@ CLI 采集、准备、训练、续训和评测示例见 [独立模仿学习工�
 
 - 🎞️ 使用 [规范 Core 轨迹与状态预测回放](core_trajectories.md)：竞技场勾选记录选项，并在全息回放打开预测曲线；CLI 提供只读 `trajectory-check --replay`
 - 🧪 外部录像在“独立模仿学习 → 采集 / 录像一站式准备”统一处理；存储仓库只负责按来源/批次查看、下载和清理，普通YRP或单方Link不因可读取而获得学习资格
-- 🧩 可选 [WindBot 受控对局](../integrations/windbot/README.md)：独立安装后在竞技场启用，或使用 `python main.py windbot --inspect`；不加入 PPO 或联盟
+- 🧩 可选 [WindBot集成](../integrations/windbot/README.md)：安装后在竞技场运行受控对局，或在主训练页显式启用WindBot对手；`python main.py windbot --inspect`检查执行器和运行环境。普通对局不会自动学习
 - 📚 阅读 [功能详解](features.md) 了解每个模块的详细用法
 - 🔧 阅读 [架构设计](architecture.md) 深入理解框架原理
 - 🧬 阅读 [特殊处理逻辑](special_handling.md) 了解框架独特特性

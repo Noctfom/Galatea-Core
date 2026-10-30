@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.3. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean imitation learning, deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.4. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -34,7 +34,7 @@ WindBot belongs to Core's [optional integration directory](../integrations/windb
 - [ ] Accept full V4 online inference from a single-player view separately: opponent response boundaries, Type160 hints and dynamic-attribute coverage are not fully proven by this conservative profile. Default encoding stays gated; actual Link networking is future work
 - [x] 3.15.3: Independent BC optimizer, epoch budget, experimental UUID/checkpoints, one-time preparation/compressed caches, single-Core native collection and candidate/baseline fixed-build swapped-seat evaluation. Engineering closure only, not demonstrated playing-strength improvement
 - [x] 3.15.3 review: Explicit BC weight initialization for a new PPO branch, cumulative PPO/BC counters, separate UUID/directory and fresh PPO optimizer/update counters. No automatic continuation; imitation and online-human learning still require separate startup
-- [ ] 3.15.5: Only optional WindBot opponent games may join main training. Reuse Workers/central inference and learn model actions only; do not automatically mix expert imitation or online-human games
+- [x] 3.15.4: Optional WindBot training opponents reuse Workers/central inference and learn only model actions, with a configurable Worker allocation rate, mirror/regular decks, suggested per-level holdouts and frozen rosters. Expert imitation and online-human games remain separate
 - [x] Default paths do not require the module/runtime. Dependencies are checked only on activation; `--with-windbot` optionally packages source, licenses and an already installed runtime
 
 Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.

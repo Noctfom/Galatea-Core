@@ -129,6 +129,12 @@ def run_training_command(args, parser):
         parser.error(str(error))
 
     try:
+        if not getattr(args, 'windbot', False) and (
+                any(getattr(args, key, None) for key in ('windbot_executor', 'windbot_holdout', 'windbot_runtime', 'windbot_mono'))
+                or getattr(args, 'windbot_rate', 0.2) != 0.2
+                or getattr(args, 'windbot_deck_mode', 'mirror') != 'mirror'
+                or getattr(args, 'windbot_response_timeout', 10) != 10):
+            parser.error('WindBot对手参数需要同时显式指定 --windbot')
         try:
             resolve_training_device(args.device)
         except (ValueError, RuntimeError) as error:
@@ -209,6 +215,12 @@ def run_training_command(args, parser):
             model_prefix=args.model_prefix,
             preloaded_resume_checkpoint=resume_checkpoint,
             protocol_audit=args.protocol_audit,
+            **({'windbot_training': {
+                'executors': args.windbot_executor, 'holdouts': args.windbot_holdout,
+                'rate': args.windbot_rate, 'deck_mode': args.windbot_deck_mode,
+                'runtime': args.windbot_runtime, 'mono': args.windbot_mono,
+                'response_timeout': args.windbot_response_timeout,
+            }} if getattr(args, 'windbot', False) else {}),
         )
         try:
             training_lock.set_run_id(trainer.run_id)
@@ -304,6 +316,14 @@ def main():
     train_parser.add_argument('--clip_eps', type=float, default=0.2, help='单次顿悟的上限')
     train_parser.add_argument('--ppo-epochs', type=int, default=DEFAULT_PPO_EPOCHS, choices=range(1, 5), help='每轮 PPO 更新次数上限（1～4）')
     train_parser.add_argument('--target-kl', type=float, default=DEFAULT_TARGET_KL, help='目标 KL；超过 1.5 倍目标停止本轮共享更新，0 关闭')
+    train_parser.add_argument('--windbot', action='store_true', help='显式启用WindBot主训练对手，关闭时不加载可选模块')
+    train_parser.add_argument('--windbot-executor', action='append', default=None, help='可重复指定训练执行器；省略则自动按层级留出并选择兼容构筑')
+    train_parser.add_argument('--windbot-holdout', action='append', default=None, help='可重复指定保留作独立评测的执行器，不进入WindBot训练抽样')
+    train_parser.add_argument('--windbot-rate', type=float, default=0.2, help='WindBot Worker分配概率，范围(0,1]；不是保证的样本比例')
+    train_parser.add_argument('--windbot-deck-mode', choices=['mirror', 'training-pool'], default='mirror', help='模型侧使用镜像或常规训练卡组池，WindBot始终固定构筑')
+    train_parser.add_argument('--windbot-runtime', default=None, help='可选WindBot.exe路径，省略使用集成目录runtime')
+    train_parser.add_argument('--windbot-mono', default=None, help='Linux可选Mono路径')
+    train_parser.add_argument('--windbot-response-timeout', type=float, default=10, help='单次机器人响应预算秒数，范围(0,10]')
 
     # ==========================================
     

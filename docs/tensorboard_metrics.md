@@ -1,10 +1,11 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.15.3 / Model Protocol V4。
+> 适用于 Galatea-Core v3.15.4 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
-主PPO面板包含 **80 个固定标量、3 个规划分布和 1 个配置文本**，另有 `Deck_WinRates/*`。
+默认主PPO面板包含 **80 个固定标量、3 个规划分布和 1 个配置文本**，另有 `Deck_WinRates/*`。
+显式开启WindBot对手后另有7个固定标量、1个配置文本及按执行器展开的序列，见第11节。
 独立模仿工作流另有10个标量，使用独立run，不改变PPO图表。不能把预测更准、更新更多、模仿更像和对局更强混为同一指标。
 
 | 分组 | 回答的问题 |
@@ -288,3 +289,24 @@ KL 衡量策略改变的幅度，不衡量改变后的优劣；低 KL 可能表�
 不展开为大量TensorBoard卡片。`result_*.json`记录父模型、数据摘要、已保存与最佳验证检查点。
 独立实际对局的胜负/异常/完成局胜率见 `evaluation.json`，不能用动作准确率代替。
 教师池、缓存与显式启动入口见 [独立模仿工作流](core_trajectories.md#3153独立模仿学习工作流)。
+
+## 11. WindBot主训练对手指标
+
+3.15.4显式开启WindBot训练对手后，记录到原PPO的 `runs/<前缀>_<时间>/events.out.tfevents.*`。
+横轴为累计PPO iteration；每次采集合并记录一次，不是BC epoch。实现位置为
+[Trainer的对手统计](../trainer.py)，来源是 [Worker的单局提交与回滚](../worker.py)。
+
+| 图表/文本 | 纵轴与记录方式 | 解释与限制 |
+|---|---|---|
+| `League_Opponent/WindBot` | 本轮可信完成WindBot对局中的模型获胜数÷完成局数，0～1 | 真实平局计入分母；异常与截断不计。没有完成局时不写零点；卡组/执行器分布变化会影响曲线，不等于固定基准 |
+| `WindBot_Training/Games_Completed` | 本轮收到真实Core终局且处理成功的对局数 | 计数，非胜率；没有抽中WindBot时为0 |
+| `WindBot_Training/Games_Aborted` | 本轮上传诊断中启动、连接、解析或标签对齐等失败的对局数 | 失败局不进入训练动作；硬杀且未能上传的Worker不在此计数，仍需结合进程日志 |
+| `WindBot_Training/Games_Truncated` | 本轮达到训练预算或长局截断、未取得真实终局且无基础设施异常的对局数 | 继续使用原训练截断与GAE规则，不伪造胜负 |
+| `WindBot_Training/Accepted_Model_Steps` | 本轮WindBot场次实际提交给PPO的模型动作行数 | 不含WindBot响应、Pass1预查询或回滚样本；实际样本占比不一定等于配置的Worker比例 |
+| `WindBot_Training/Bot_Responses` | 已上传诊断中成功收到的WindBot响应数 | 不等于训练步数，同一次选择链可能有多个外部响应 |
+| `WindBot_Training/Bot_Response_Seconds` | 上述成功响应的累计墙钟秒数，含查询刷新与等待 | 不是纯Bot计算时间，也不是每局平均；对比时结合响应数和完成局数 |
+| `WindBot_Executors/<执行器>/WinRate` | 本轮该执行器可信完成局的模型胜率，0～1 | 只在有完成局时写点；脚本分类或执行器名不能代替实测强度 |
+| `WindBot_Executors/<执行器>/Games` | 对应胜率点的完成局分母 | 先看样本数，再解读波动 |
+| `Configuration/WindBot` | 启动时的训练/留出名单、固定构筑、层级、文件与程序摘要、比例和模型侧卡组选法 | Text面板，不是标量图；用于核对本次训练条件，恢复检查点不会自动启用对手 |
+
+开关、默认按层级留出及CLI示例见 [WindBot主训练对手](../integrations/windbot/README.md#3154主训练对手)。
