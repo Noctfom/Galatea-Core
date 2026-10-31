@@ -1,6 +1,6 @@
 #!/bin/bash
 # ========================================================
-#  Galatea-Core v3.15.5 - Linux Setup & Launch Script
+#  Galatea-Core v3.15.6 - Linux Setup & Launch Script
 # ========================================================
 #  Usage:
 #    chmod +x setup.sh
@@ -21,7 +21,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$PROJECT_DIR/venv"
 
 echo -e "${CYAN}============================================================${NC}"
-echo -e "${CYAN}     Galatea-Core v3.15.5 - Linux Environment Setup          ${NC}"
+echo -e "${CYAN}     Galatea-Core v3.15.6 - Linux Environment Setup          ${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo ""
 

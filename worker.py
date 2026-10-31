@@ -535,8 +535,9 @@ def worker_process(
                 'steps': 0,
                 't_cpp_env': 0.0,    # C++ OCGCore 执行与 ctypes 格子解包 (含 get_snapshot 内部的 sync_active_field)
                 't_encoder': 0.0,    # FeatureEncoder.encode 矩阵转换耗时
-                't_zmq_p0': 0.0,    
-                't_cpu_p1': 0.0,     
+                't_central': 0.0,
+                't_local_opponent': 0.0,
+                't_windbot': 0.0,
                 't_pass1_cpu': 0.0, 
                 't_rule_bot': 0.0    # RuleBot 穷举多选套餐与本地打分耗时
             }
@@ -580,6 +581,8 @@ def worker_process(
                 if opp_type == 'windbot':
                     reset_failures += 1
                     windbot_records.append({'executor': (windbot_entry or {}).get('executor', 'startup'),
+                        'deck_mode': episode_opp_config['windbot']['deck_mode'],
+                        'level': (windbot_entry or {}).get('level', ''), 'worker_id': worker_id,
                         'completed': False, 'aborted': True, 'win': False, 'model_steps': 0,
                         'responses': 0, 'response_seconds': 0.0})
                     if reset_failures >= 3:
@@ -736,7 +739,7 @@ def worker_process(
                                 break
                             t_windbot = time.time()
                             resp = windbot_opponent.respond(msg, env)
-                            perf_ledger['t_cpu_p1'] += time.time() - t_windbot
+                            perf_ledger['t_windbot'] += time.time() - t_windbot
                             env.send_action(resp)
                             brain.begin_transition_event(opp_p_id, msg_type, resp)
                             msg_queue = []
@@ -865,7 +868,7 @@ def worker_process(
                                             "Pass1",
                                         ).numpy()
                                         probs = torch.softmax(torch.tensor(raw_logits), dim=-1).numpy()
-                                        perf_ledger['t_zmq_p0'] += (time.time() - t_infer_p1)
+                                        perf_ledger['t_central'] += (time.time() - t_infer_p1)
                                         
                                     # 如果是历史存档老模型（P1 Hist），执行宿主本地独立剥离推演（ONNX 优先，CPU 兜底）
                                     else:
@@ -997,10 +1000,8 @@ def worker_process(
                                 infer_dict = {k: v.detach().cpu() for k, v in tensor_dict.items()}
                                 
                                 # 精细化分账统计
-                                if is_training_agent:
-                                    perf_ledger['t_zmq_p0'] += (time.time() - t_zmq_anchor)
-                                else:
-                                    perf_ledger['t_cpu_p1'] += (time.time() - t_zmq_anchor)
+                                # 自对局两侧均走中央服务，不能计入本地CPU前向
+                                perf_ledger['t_central'] += (time.time() - t_zmq_anchor)
 
                             # 历史老模型独立推演流
                             else:
@@ -1030,7 +1031,7 @@ def worker_process(
                                 value = value.detach().cpu()
                                 infer_dict = {k: v.detach().cpu() for k, v in tensor_dict.items()}
                                 
-                                perf_ledger['t_cpu_p1'] += (time.time() - t_p1_anchor) # 只记录 P1 耗时
+                                perf_ledger['t_local_opponent'] += (time.time() - t_p1_anchor) # 历史对手可位于任意物理席位
 
                             if not current_snap.valid_actions:
                                 raise RuntimeError("AI面临空选项池，主动放弃决策请求RuleBot兜底")
@@ -1236,6 +1237,14 @@ def worker_process(
             # 先回收外部进程，再复用原有整局提交与异常回滚
             if windbot_opponent is not None:
                 windbot_record = {'executor': windbot_entry['executor'],
+                    'deck_mode': episode_opp_config['windbot']['deck_mode'],
+                    'level': windbot_entry.get('level', ''), 'worker_id': worker_id,
+                    'model_seat': train_p_id, 'is_first': train_p_id == 0,
+                    'model_deck': d1_name if train_p_id == 0 else d2_name,
+                    'model_pool': env_name if episode_opp_config['windbot']['deck_mode'] != 'mirror' else '',
+                    'opponent_deck': windbot_entry['executor'],
+                    'opponent_deck_sha256': windbot_entry.get('deck_sha256', ''),
+                    'draw': core_terminal_received and winner not in (0, 1),
                     'completed': core_terminal_received, 'aborted': episode_aborted,
                     'win': core_terminal_received and winner == train_p_id,
                     'model_steps': len(game_buffer[train_p_id]),
@@ -1378,7 +1387,8 @@ def worker_process(
                                 'my_deck': my_deck, 
                                 'opp_deck': opp_deck, # <--- 记录对手是谁
                                 'is_first': (train_p_id == 0), 
-                                'is_win': True
+                                'is_win': True,
+                                'opponent_type': opp_type
                             })
                                 
                             if opp_type == "hist": 
@@ -1403,7 +1413,8 @@ def worker_process(
                                 'my_deck': my_deck, 
                                 'opp_deck': opp_deck, 
                                 'is_first': (train_p_id == 0), 
-                                'is_win': False
+                                'is_win': False,
+                                'opponent_type': opp_type
                             })
                         else:
                             stats['draws'] += 1
@@ -1421,14 +1432,15 @@ def worker_process(
                         stats['draws'] += 1
                         final_reward = 0.0
                     
-                    total_t = perf_ledger['t_cpp_env'] + perf_ledger['t_encoder'] + perf_ledger['t_zmq_p0'] + perf_ledger['t_cpu_p1'] + perf_ledger['t_pass1_cpu'] + perf_ledger['t_rule_bot']
+                    total_t = perf_ledger['t_cpp_env'] + perf_ledger['t_encoder'] + perf_ledger['t_central'] + perf_ledger['t_local_opponent'] + perf_ledger['t_pass1_cpu'] + perf_ledger['t_rule_bot'] + perf_ledger['t_windbot']
                     safe_t = max(0.0001, total_t)
                     print(f"\n📊 [Worker {worker_id} 审计报告] 单局步数: {perf_ledger['steps']} | 交互总耗时: {total_t:.2f}s")
                     print(f"对手类型: {opp_type} | 胜负结果: {'胜' if winner == train_p_id else '负' if winner == opp_p_id else '平'} | 最终奖励: {final_reward:.2f}")
                     print(f"   ├── 🧱 [环境/底盘] C++执行与解包: {perf_ledger['t_cpp_env']:.2f}s ({perf_ledger['t_cpp_env']/safe_t*100:.1f}%)")
                     print(f"   ├── 📐 [表征/特征] Encoder 矩阵生成: {perf_ledger['t_encoder']:.2f}s ({perf_ledger['t_encoder']/safe_t*100:.1f}%)")
-                    print(f"   ├── 📡 [多进程管道] ZMQ+中央推理(P0): {perf_ledger['t_zmq_p0']:.2f}s ({perf_ledger['t_zmq_p0']/safe_t*100:.1f}%)")
-                    print(f"   ├── 💻 [本地推理] P1对手CPU推演 : {perf_ledger['t_cpu_p1']:.2f}s ({perf_ledger['t_cpu_p1']/safe_t*100:.1f}%)")
+                    print(f"   ├── 📡 [多进程管道] 中央推理往返(含自对局双侧): {perf_ledger['t_central']:.2f}s ({perf_ledger['t_central']/safe_t*100:.1f}%)")
+                    print(f"   ├── 💻 [本地推理] 历史对手CPU前向 : {perf_ledger['t_local_opponent']:.2f}s ({perf_ledger['t_local_opponent']/safe_t*100:.1f}%)")
+                    print(f"   ├── 🤖 [外部对手] WindBot刷新与响应: {perf_ledger['t_windbot']:.2f}s ({perf_ledger['t_windbot']/safe_t*100:.1f}%)")
                     print(f"   ├── 👁️ [意图感知] Pass1 预查表耗时 : {perf_ledger['t_pass1_cpu']:.2f}s ({perf_ledger['t_pass1_cpu']/safe_t*100:.1f}%)")
                     print(f"   └── 🧠 [参谋部/规则] RuleBot 穷举打分: {perf_ledger['t_rule_bot']:.2f}s ({perf_ledger['t_rule_bot']/safe_t*100:.1f}%)")
 

@@ -4,6 +4,21 @@
 
 ---
 
+## [v3.15.6] - 2026-10-31
+
+### Central inference transfers and separate WindBot statistics
+
+- Pack active requests in arrival order into contiguous staging rows. Basic slicing retains pinned memory and avoids advanced-index allocations across108 fields. Transfer action/log-probability/value results together, and logits as one batch, instead of synchronizing individual Worker outputs. Request/completion IDs, sampling order and effective batch sizes remain unchanged
+- Correct audit attribution: both self-play sides use central inference; historical CPU inference and WindBot refresh/reply waiting have separate timers. Central round trips include queues, batch waiting, transfers and forward computation, not just ZMQ transport. Timer totals are not full-game wall time
+- Write WindBot games to `web_data/windbot_history_<run_id>.csv`, preserving mode, executor/level, model deck/seat, opponent build hash and genuine W/D/L. Aborts/truncations are separate. Exclude WindBot from ordinary pool rankings, matchup matrices and `Deck_WinRates`; existing CSV storage controls manage the files
+- Add separate mirror/pool dashboard charts, executor and seat denominators, and pool-deck details. TensorBoard adds `WindBot_Mirror`, `WindBot_Pool` and mode-specific executor tags. No completed games means no win-rate zero point. Overall league metrics still describe the actual opponent mixture
+- Show identifiable legacy `windbot:` mirror rows separately without inventing draws or build metadata. Legacy pool rows lacking opponent provenance cannot be reliably separated. Historical CSV/event files remain intact; appending ordinary legacy CSV preserves its column order
+- Use existing version-aware width arguments for remaining WebUI calls, removing current Streamlit deprecation warnings
+- No network, observation, reward, PPO, Protocol4, Checkpoint3 or revision14 change. No WSL build or test in this batch
+- Validation:209 and30 related checks passed in separate, overlapping batches, plus real Windows WindBot collection/PPO. All108 fields, forward outputs and fixed-seed samples match exactly on CPU/CUDA. Bilingual dashboard checks cover WindBot-only/mixed legacy data, empty filters and startup failures without pool provenance. A warmed512/8/6 synthetic6-client ZMQ probe on5070 Ti improved from about143 to173–185 requests/s; this is not full-rollout throughput, learning improvement or a cold-start comparison
+
+See [metric definitions](tensorboard_metrics_en.md#11-windbot-main-training-opponent-metrics) and [dashboard usage](features_en.md#meta-dashboard).
+
 ## [v3.15.5] - 2026-10-30
 
 ### League probabilities and cross-platform WindBot

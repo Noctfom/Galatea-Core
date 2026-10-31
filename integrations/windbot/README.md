@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.15.5 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
+此目录提供 Galatea-Core 3.15.6 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -65,6 +65,11 @@ python main.py train --resume models/galatea_iter_200.pth --additional-iteration
 Bot日志仍在`system_logs/windbot/`，训练不默认写整局捕获或全息录像。查看模型对局与保留执行器
 表现时，使用原受控对局或独立评测入口显式录制。主训练新增指标见
 [TensorBoard对手统计](../../docs/tensorboard_metrics.md#11-windbot主训练对手指标)。
+
+3.15.6起，训练结果写入独立的`web_data/windbot_history_<run_id>.csv`，在卡组生态大盘的
+“WindBot专区”查看镜像/常规池曲线、执行器与先后手分母、真实胜平负及异常/截断。
+WindBot场次不再进入普通卡池榜、克制矩阵或`Deck_WinRates`，原总体联盟仍包含其实际训练结果。
+旧普通池记录缺少对手类型时无法追溯拆分；可识别的旧镜像记录仅单独展示。无需更新现有运行包。
 
 ## 接口归属与运行边界
 
@@ -192,7 +197,7 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 
 ## English summary
 
-Galatea-Core 3.15.5 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
+Galatea-Core 3.15.6 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
 
 ### Optional main-training opponents
 
@@ -238,6 +243,12 @@ retain the active roster, builds, file/runtime hashes and allocation settings. R
 explicit opt-in and checks current local assets. Network/Protocol4/Checkpoint3/revision14 stay unchanged.
 Training writes Bot logs, not full captures/replays by default. Use controlled duels/evaluation to record
 held-out games. See [metric definitions](../../docs/tensorboard_metrics_en.md#11-windbot-main-training-opponent-metrics).
+
+From3.15.6, `web_data/windbot_history_<run_id>.csv` powers a dedicated dashboard tab with separate
+mirror/pool curves, executor/seat denominators, genuine W/D/L and abort/truncation counts. WindBot
+no longer enters ordinary pool rankings, matchup matrices or `Deck_WinRates`; overall league rates
+still include its actual training results. Legacy pool rows lack enough provenance to separate;
+identifiable legacy mirrors are shown separately. The existing runtime package remains compatible.
 
 The independent `../imitation/` workflow adds teacher/holdout pools, one-time preparation, a BC optimizer
 and swapped-seat fixed evaluation. Only explicit WebUI/`imitate` commands start it; ordinary games do

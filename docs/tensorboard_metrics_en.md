@@ -1,6 +1,6 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.15.5 / Model Protocol V4.
+> Applies to Galatea-Core v3.15.6 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
@@ -307,11 +307,49 @@ in [Trainer](../trainer.py) from [Worker](../worker.py) commit/rollback records.
 | `WindBot_Training/Accepted_Model_Steps` | Model action rows from WindBot games actually committed to PPO | Excludes Bot replies, Pass1 queries and rolled-back rows. Sample share need not match Worker allocation probability |
 | `WindBot_Training/Bot_Responses` | Successfully received Bot replies in uploaded diagnostics | Not training steps; a selection chain may contain multiple replies |
 | `WindBot_Training/Bot_Response_Seconds` | Summed wall time for those successful replies, including refreshes/waiting | Neither pure Bot compute nor an average; compare alongside response/game counts |
-| `WindBot_Executors/<executor>/WinRate` | Model wins / trustworthy completed games against that executor, 0–1 | Written only with completed games; executor labels are not measured ratings |
-| `WindBot_Executors/<executor>/Games` | Completed-game denominator for the associated win-rate point | Check sample size before interpreting fluctuations |
+| `WindBot_Mirror/WinRate` | Per-mode model wins / genuine completed games this iteration, 0–1 | Mirror and training-pool distributions remain separate; draws count, aborts/truncations do not; no point without completed games |
+| `WindBot_Mirror/DrawRate` | Genuine draws / completed games for the mode, 0–1 | Budget truncations are not draws |
+| `WindBot_Mirror/Games` | Completed games for the mode this iteration | Denominator count; zero when none complete |
+| `WindBot_Mirror/WinRate_First` | Model wins / completed games in the corresponding mode and seat, 0–1 | No point without that seat's completed games; the model is not always P0/first |
+| `WindBot_Mirror/WinRate_Second` | Model wins / completed games in the corresponding mode and seat, 0–1 | No point without that seat's completed games; the model is not always P0/first |
+| `WindBot_Mirror/Games_First` | Completed-game denominator for the corresponding seat rate | Zero does not mean a0% win rate |
+| `WindBot_Mirror/Games_Second` | Completed-game denominator for the corresponding seat rate | Zero does not mean a0% win rate |
+| `WindBot_Pool/WinRate` | Per-mode model wins / genuine completed games this iteration, 0–1 | Mirror and training-pool distributions remain separate; draws count, aborts/truncations do not; no point without completed games |
+| `WindBot_Pool/DrawRate` | Genuine draws / completed games for the mode, 0–1 | Budget truncations are not draws |
+| `WindBot_Pool/Games` | Completed games for the mode this iteration | Denominator count; zero when none complete |
+| `WindBot_Pool/WinRate_First` | Model wins / completed games in the corresponding mode and seat, 0–1 | No point without that seat's completed games; the model is not always P0/first |
+| `WindBot_Pool/WinRate_Second` | Model wins / completed games in the corresponding mode and seat, 0–1 | No point without that seat's completed games; the model is not always P0/first |
+| `WindBot_Pool/Games_First` | Completed-game denominator for the corresponding seat rate | Zero does not mean a0% win rate |
+| `WindBot_Pool/Games_Second` | Completed-game denominator for the corresponding seat rate | Zero does not mean a0% win rate |
+| `WindBot_Executors/{Mirror,Pool}/<executor>/WinRate` | Model wins / trustworthy completed games for that mode and executor, 0–1 | Written only with completed games; executor labels are not measured ratings |
+| `WindBot_Executors/{Mirror,Pool}/<executor>/Games` | Completed-game denominator for the associated win-rate point | Check sample size before interpreting fluctuations |
 | `Configuration/WindBot` | Active/reserved rosters, fixed builds, upstream levels, file/runtime hashes, allocation and model deck mode | Text, not a scalar. Records this launch's settings; resuming does not automatically enable opponents |
 
 From3.15.5, `league_weights` in the existing `Configuration/PPO` Text panel records the four absolute
 RuleBot/WindBot/history/self probabilities, not realized sample shares. No scalar tag is added.
 See [WindBot training opponents](../integrations/windbot/README.md#optional-main-training-opponents)
 for configuration, per-level holdouts and CLI examples.
+
+From3.15.6, `Deck_WinRates/*` and ordinary pool dashboards exclude WindBot. Separate
+`web_data/windbot_history_<run_id>.csv` files power the WindBot tab, with mode/executor/model-pool
+filters, genuine W/D/L, abort/truncation counts, seat denominators and per-game build hashes.
+These records are written once per collection merge; they are neither model inputs nor PPO losses.
+The storage repository's match-data controls manage both CSV families.
+
+Old `WindBot_Executors/<executor>/*` tags combine modes and are no longer extended. Existing events
+are not rewritten. `League_Opponent/WindBot` remains the combined-mode rate; `League_Overall/*`
+continues to describe the actual league mixture, including WindBot. Neither is a fixed benchmark.
+Identifiable legacy `windbot:` mirror rows are shown separately; older pool rows without opponent
+provenance cannot be reliably split. Old WindBot contributions to scalar deck rates cannot be removed
+by reverse inference.
+
+Existing denominator differences also matter: ordinary deck CSV and `Deck_WinRates` record decisive
+games only, while WindBot rates include genuine draws. The old RuleBot/Historical_AI league tags write
+zero when that opponent has no games in an iteration; this does not mean all games were lost. This
+batch does not rewrite those historical tags. Worker central round-trip timing now includes both
+self-play sides, queue/batch waits, transfers and the forward pass. It is not pure ZMQ transport time;
+historical CPU forward passes and WindBot refresh/reply waits are separate.
+
+Ordinary `Deck_WinRates` still groups by deck name rather than pool/build fingerprint, so distinct
+same-name builds across pools may share a series. Ordinary WebUI pool rankings group by pool;
+the WindBot tab retains separate provenance fields. These views have different grouping rules.

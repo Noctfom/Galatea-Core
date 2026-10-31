@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.15.5**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.15.6**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 

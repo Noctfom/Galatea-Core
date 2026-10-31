@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.15.5"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.15.6"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -471,28 +471,35 @@ elif has_patch_update:
 # ==========================================
 if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
     st.title(_("📈 实时 Meta 卡组天梯", "📈 Live Meta Tier List"))
-    if st.sidebar.button(_("🔄 刷新数据", "🔄 Refresh Data"), use_container_width=True):
+    if st.sidebar.button(_("🔄 刷新数据", "🔄 Refresh Data"), **REPLAY_BUTTON_WIDTH):
         st.rerun()
 
     data_dir = "./web_data"
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
         
-    csv_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.csv')], reverse=True)
+    csv_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.csv')],
+        key=lambda filename: os.path.getmtime(os.path.join(data_dir, filename)), reverse=True)
 
     @st.cache_data(show_spinner=False, max_entries=10)
     def load_csv_cached(filepath, mtime):
         # 参数中传入 mtime(文件最后修改时间)。只要文件没被训练进程写入新数据，就直接走内存秒读！
         temp_df = pd.read_csv(filepath)
-        run_id = os.path.basename(filepath).replace("match_history_", "").replace(".csv", "")
+        filename = os.path.basename(filepath)
+        run_id = filename.replace("match_history_", "").replace("windbot_history_", "").replace(".csv", "")
         temp_df['run_id'] = run_id
+        temp_df['dataset_kind'] = 'windbot' if filename.startswith('windbot_history_') else 'ordinary'
         return temp_df
 
     if not csv_files:
         st.info(_("数据库为空，等待训练进程写入数据...", "Database is empty. Waiting for training process..."))
     else:
         # 🌟 新增：多选数据源
-        selected_csvs = st.multiselect(_("📂 选择要分析的对局数据源 (可多选对比)", "📂 Select Match Data Sources"), csv_files, default=[csv_files[0]] if csv_files else [])
+        latest_run = csv_files[0].replace('match_history_', '').replace('windbot_history_', '')
+        default_csvs = [name for name in csv_files if name.replace('match_history_', '').replace('windbot_history_', '') == latest_run]
+        selected_csvs = st.multiselect(_("📂 选择要分析的对局数据源 (可多选对比)", "📂 Select Match Data Sources"),
+            csv_files, default=default_csvs,
+            help=_("match_history 为普通卡池，windbot_history 为 WindBot 独立数据；默认选中最近更新运行的两类文件。", "match_history contains ordinary pool games; windbot_history contains separate Bot results. Both files from the most recently updated run are selected by default."))
         
         if not selected_csvs:
             st.warning(_("请至少选择一个数据源进行分析。", "Please select at least one data source."))
@@ -523,24 +530,35 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
                             label_visibility="collapsed"
                         )
                     with c_btn:
-                        st.form_submit_button("✅ " + _("应用筛选", "Apply"), use_container_width=True)
+                        st.form_submit_button("✅ " + _("应用筛选", "Apply"), **get_stretch_width_args(st.form_submit_button))
                         
             filtered_df = df[(df['iteration'] >= selected_range[0]) & (df['iteration'] <= selected_range[1])]
             
             if filtered_df.empty:
                 st.warning(_("选定范围内无数据", "No data in selected range."))
             else:
-                main_tab_overview, main_tab_compare= st.tabs([
+                main_tab_overview, main_tab_compare, main_tab_windbot = st.tabs([
                     _("📊 综合大盘战报", "📊 Overall Dashboard"), 
-                    _("⚔️ 双卡组胜率对比", "⚔️ Deck Comparison")
+                    _("⚔️ 双卡组胜率对比", "⚔️ Deck Comparison"),
+                    _("🤖 WindBot 专区", "🤖 WindBot Matches"),
                 ])
+
+                # 旧镜像记录可按来源识别，旧常规池记录缺少对手类型时无法可靠反推
+                environments = filtered_df.get('env', pd.Series('', index=filtered_df.index)).fillna('').astype(str)
+                opponents = filtered_df.get('opponent_type', pd.Series('', index=filtered_df.index)).fillna('')
+                legacy_mirror = filtered_df[(filtered_df['dataset_kind'] == 'ordinary') & environments.str.startswith('windbot:')]
+                ordinary_df = filtered_df[(filtered_df['dataset_kind'] == 'ordinary') & ~environments.str.startswith('windbot:') & opponents.ne('windbot')]
+                windbot_df = filtered_df[filtered_df['dataset_kind'] == 'windbot']
                 
                 with main_tab_overview:
-                    env_pools = filtered_df['env'].unique().tolist()
-                    sub_tabs = st.tabs(env_pools)
+                    st.caption(_("普通卡池榜排除 WindBot；旧数据缺少对手类型时，无法追溯拆分混入的常规池 WindBot 场次。", "WindBot is excluded from ordinary pools. Legacy pool games without opponent metadata cannot be reliably separated."))
+                    env_pools = ordinary_df.get('env', pd.Series(dtype=str)).dropna().unique().tolist()
+                    if not env_pools:
+                        st.info(_("当前筛选范围没有普通卡池对局。", "No ordinary pool games in this selection."))
+                    sub_tabs = st.tabs(env_pools) if env_pools else []
                     for tab, env in zip(sub_tabs, env_pools):
                         with tab:
-                            env_df = filtered_df[filtered_df['env'] == env]
+                            env_df = ordinary_df[ordinary_df['env'] == env]
                             st.markdown(_(f"### 📊 【{env}】卡池综合战报", f"### 📊 [{env}] Pool Overview"))
                             
                             stats = env_df.groupby('my_deck').agg(
@@ -585,12 +603,12 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
                 with main_tab_compare:
                     st.markdown(_("### ⚔️ 双卡组核心指标 PK", "### ⚔️ Dual Deck PK"))
                     
-                    env_pools_compare = filtered_df['env'].unique().tolist()
+                    env_pools_compare = ordinary_df.get('env', pd.Series(dtype=str)).dropna().unique().tolist()
                     if not env_pools_compare:
                         st.info(_("无可用的环境池数据。", "No environment pools available."))
                     else:
                         selected_env = st.selectbox(_("1️⃣ 首先，选择要对比的环境池", "1️⃣ First, Select Environment Pool"), env_pools_compare, key="compare_env_select")
-                        compare_df = filtered_df[filtered_df['env'] == selected_env]
+                        compare_df = ordinary_df[ordinary_df['env'] == selected_env]
                         all_decks_in_env = sorted(compare_df['my_deck'].unique().tolist())
                         
                         if len(all_decks_in_env) >= 2:
@@ -657,6 +675,90 @@ if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
                             st.info(_("所选环境池中卡组种类不足 2 个，无法进行对比。", "Not enough deck types in this pool for comparison."))
 
 # ==========================================
+                with main_tab_windbot:
+                    st.caption(_("按模型视角统计真实胜/平/负；胜率=胜局÷真实完成局数。异常和截断单独计数，不计为负局。镜像与常规池互不合并，层级是脚本分类而非实测强度。", "Results use the model's perspective. Win rate is wins / genuine completed games, including draws. Aborts and truncations are separate. Mirror and pool matches stay separate; levels describe scripts, not measured strength."))
+                    if windbot_df.empty:
+                        st.info(_("尚无新版 WindBot 独立记录，训练后会生成 windbot_history_<运行标识>.csv，可在上方选中。", "No separate WindBot data selected. Training writes windbot_history_<run>.csv; select it above."))
+                    else:
+                        mode_tabs = st.tabs([_("镜像对局", "Mirror Matches"), _("常规训练池对局", "Training Pool Matches")])
+                        for mode_tab, mode in zip(mode_tabs, ('mirror', 'training-pool')):
+                            with mode_tab:
+                                mode_df = windbot_df[windbot_df['deck_mode'] == mode].copy()
+                                if mode_df.empty:
+                                    st.info(_("此模式暂无记录。", "No games for this mode."))
+                                    continue
+                                executors = sorted(mode_df['executor'].dropna().unique())
+                                selected_executors = st.multiselect(_("执行器筛选", "Filter Executors"), executors,
+                                    default=executors, key=f'windbot_stats_executors_{mode}',
+                                    help=_("仅筛选图表，不改变训练或留出配置。", "Filters charts only; training and holdout settings are unchanged."))
+                                mode_df = mode_df[mode_df['executor'].isin(selected_executors)]
+                                if mode == 'training-pool':
+                                    mode_df['model_pool'] = mode_df['model_pool'].fillna('').astype(str)
+                                    pools = sorted(mode_df['model_pool'].unique())
+                                    selected_pools = st.multiselect(_("模型卡池筛选", "Filter Model Pools"), pools,
+                                        default=pools, key='windbot_stats_pools',
+                                        format_func=lambda pool: pool or _("未确定卡池（如启动失败）", "Unknown Pool (e.g. Startup Failure)"))
+                                    mode_df = mode_df[mode_df['model_pool'].isin(selected_pools)]
+                                if mode_df.empty:
+                                    st.info(_("当前筛选无记录。", "No games match the filters."))
+                                    continue
+                                completed = mode_df[mode_df['outcome'].isin(['win', 'draw', 'loss'])].copy()
+                                counts = mode_df['outcome'].value_counts()
+                                columns = st.columns(5)
+                                for column, outcome, label in zip(columns, ('win', 'draw', 'loss', 'aborted', 'truncated'),
+                                        (_("胜", "Wins"), _("平", "Draws"), _("负", "Losses"), _("异常", "Aborted"), _("截断", "Truncated"))):
+                                    column.metric(label, int(counts.get(outcome, 0)))
+                                if completed.empty:
+                                    st.info(_("尚无可信完成局，暂不计算胜率。", "No genuine completed games; win rate is unavailable."))
+                                else:
+                                    completed['win'] = completed['outcome'].eq('win')
+                                    completed['draw'] = completed['outcome'].eq('draw')
+                                    completed['loss'] = completed['outcome'].eq('loss')
+                                    first = completed['is_first'].astype(str).str.lower().isin(['true', '1', '1.0'])
+                                    completed['first_games'] = first.astype(int)
+                                    completed['first_wins'] = (first & completed['win']).astype(int)
+                                    completed['second_games'] = (~first).astype(int)
+                                    completed['second_wins'] = (~first & completed['win']).astype(int)
+                                    rates = completed.groupby('iteration')[['win', 'draw', 'loss']].mean()
+                                    rates.index.name = _("训练轮次", "Iteration")
+                                    st.line_chart(rates.rename(columns={'win': _("模型胜率", "Model Win Rate"),
+                                        'draw': _("平局率", "Draw Rate"), 'loss': _("模型负率", "Model Loss Rate")}),
+                                        **get_stretch_width_args(st.line_chart))
+                                    st.caption(_("曲线按每轮完成局加权汇总，数据为训练采样结果，不是固定赛程评测。请结合各执行器样本量解读。", "Each point pools completed games within an iteration. These are training samples, not a fixed benchmark; check executor sample counts."))
+
+                                    def summarize_windbot_games(group_keys):
+                                        summary = completed.groupby(group_keys, dropna=False).agg(
+                                            games=('win', 'size'), wins=('win', 'sum'), draws=('draw', 'sum'), losses=('loss', 'sum'),
+                                            first_games=('first_games', 'sum'), first_wins=('first_wins', 'sum'),
+                                            second_games=('second_games', 'sum'), second_wins=('second_wins', 'sum')).reset_index()
+                                        summary['win_rate'] = summary['wins'] / summary['games']
+                                        for seat in ('first', 'second'):
+                                            summary[f'{seat}_rate'] = summary[f'{seat}_wins'] / summary[f'{seat}_games'].replace(0, float('nan'))
+                                        summary = summary.drop(columns=['first_wins', 'second_wins'])
+                                        return summary.rename(columns={
+                                            'executor': _("执行器", "Executor"), 'level': _("层级", "Level"),
+                                            'model_pool': _("模型卡池", "Model Pool"), 'model_deck': _("模型卡组", "Model Deck"),
+                                            'games': _("完成局", "Completed"), 'wins': _("胜", "Wins"),
+                                            'draws': _("平", "Draws"), 'losses': _("负", "Losses"),
+                                            'first_games': _("先手局", "Going First"), 'second_games': _("后手局", "Going Second"),
+                                            'win_rate': _("胜率", "Win Rate"), 'first_rate': _("先手胜率", "First Win Rate"),
+                                            'second_rate': _("后手胜率", "Second Win Rate")})
+
+                                    st.dataframe(summarize_windbot_games(['executor', 'level']), hide_index=True,
+                                        **REPLAY_DATAFRAME_WIDTH)
+                                    if mode == 'training-pool':
+                                        with st.expander(_("模型卡组对各执行器的结果", "Model Deck Results by Executor")):
+                                            st.dataframe(summarize_windbot_games(['model_pool', 'model_deck', 'executor']),
+                                                hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+                                with st.expander(_("逐局明细与构筑指纹", "Per-Game Records and Build Fingerprints")):
+                                    st.dataframe(mode_df.drop(columns=['dataset_kind'], errors='ignore'), hide_index=True,
+                                        **REPLAY_DATAFRAME_WIDTH)
+                    if not legacy_mirror.empty:
+                        with st.expander(_("旧版镜像记录（仅胜负，信息不完整）", "Legacy Mirror Records (Incomplete Metadata)")):
+                            st.caption(_("这些记录已从普通卡池榜移出；没有可靠的平局、层级与构筑指纹，不与新版曲线合并。旧常规池 WindBot 场次无法从原始 CSV 中识别。", "Removed from ordinary pool rankings. Draws, levels and build hashes are unavailable, so these rows are not merged with new curves. Legacy pool WindBot games cannot be identified from the old CSV."))
+                            st.dataframe(legacy_mirror[['iteration', 'env', 'my_deck', 'opp_deck', 'is_first', 'is_win']],
+                                hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+
 # ⚔️ 模块二：启动与监控中枢
 # ==========================================
 elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
@@ -682,7 +784,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
     
     with col_kill:
         if is_running:
-            if st.button("🛑 " + _("紧急制动", "Abort"), type="primary", use_container_width=True):
+            if st.button("🛑 " + _("紧急制动", "Abort"), type="primary", **REPLAY_BUTTON_WIDTH):
                 terminate_process(
                     st.session_state.running_pid,
                     st.session_state.running_process_create_time,
@@ -694,7 +796,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
     with col_purge:
         if st.button(
             "🧨 " + _("净化僵尸进程", "Purge Zombies"),
-            use_container_width=True,
+            **REPLAY_BUTTON_WIDTH,
             help=_(
                 "仅终止由本项目 WebUI 标记的后台任务及其子进程，不会终止其他 Python 程序或当前 WebUI。",
                 "Only stop background processes owned by this project; unrelated Python tasks and this UI are preserved.",
@@ -1091,7 +1193,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             if abs(sum(league_values.values()) - 1) > 1e-8:
                 st.error(_("四类对手的基础比例必须合计100%", "The four base probabilities must total 100%"))
 
-        if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
+        if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), **REPLAY_BUTTON_WIDTH):
             if is_running:
                 st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
             else:
@@ -1372,7 +1474,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 ),
             )
             
-            if st.form_submit_button("⚔️ " + _("在后台启动竞技场", "Start Arena Process"), use_container_width=True):
+            if st.form_submit_button("⚔️ " + _("在后台启动竞技场", "Start Arena Process"), **get_stretch_width_args(st.form_submit_button)):
                 if is_running:
                     st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
                 elif (d_record_trajectory or d_record_evaluations) and d_freq <= 0:
@@ -1921,7 +2023,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             with st.form("selfcheck_form"):
                 sc_num = st.number_input(_("极端压测局数", "Number of Games"), min_value=1, value=50, step=10)
 
-                if st.form_submit_button("🚀 " + _("启动 RuleBot 压测", "Start Self-Check"), type="primary", use_container_width=True):
+                if st.form_submit_button("🚀 " + _("启动 RuleBot 压测", "Start Self-Check"), type="primary", **get_stretch_width_args(st.form_submit_button)):
                     if is_running:
                         st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
                     else:
@@ -1941,7 +2043,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
     with col_log:
         st.subheader("📝 " + _("实时终端映射 (Live Logs)", "Live Logs"))
     with col_btn_manual:
-        if st.button("🔄 " + _("手动刷新", "Refresh"), use_container_width=True):
+        if st.button("🔄 " + _("手动刷新", "Refresh"), **REPLAY_BUTTON_WIDTH):
             pass # 点击触发 Rerun
     with col_btn_auto:
         auto_refresh = st.toggle("⏱️ " + _("自动刷新", "Auto"), value=False)
@@ -2080,7 +2182,7 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
             )
             c_force = st.checkbox(_("⚠️ 覆盖模式 (强制覆盖本地修改)", "Force Overwrite"), value=False)
             
-            if st.form_submit_button("🚀 " + _("立即开始同步", "Start Synchronization"), type="primary", use_container_width=True):
+            if st.form_submit_button("🚀 " + _("立即开始同步", "Start Synchronization"), type="primary", **get_stretch_width_args(st.form_submit_button)):
                 if not c_core and not c_data:
                     st.warning(_("请至少勾选一个同步目标！", "Please select at least one target!"))
                 else:
@@ -2135,7 +2237,7 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
             run_local_vocab = st.form_submit_button(
                 "🆔 " + _("检查并追加新卡", "Check and Append New Cards"),
                 type="primary",
-                use_container_width=True,
+                **get_stretch_width_args(st.form_submit_button),
                 disabled=not confirm_local_vocab,
             )
 
@@ -2259,7 +2361,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                 "Rules: sync only downloads; local update always continues automatically. Clear + local update without sync rebuilds from scratch; every other local-update combination continues from existing or freshly synchronized assets.",
             ))
             
-            if st.form_submit_button("🧠 " + _("开始提取卡片语义", "Start Semantic Parsing"), use_container_width=True):
+            if st.form_submit_button("🧠 " + _("开始提取卡片语义", "Start Semantic Parsing"), **get_stretch_width_args(st.form_submit_button)):
                 if not p_sync and not p_local_update:
                     st.warning(_("请至少选择远程同步或本地提取/接续。", "Select remote sync and/or local extraction/continuation."))
                 else:
@@ -2596,7 +2698,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                 placeholder="14558127",
                 help=_("输入 cards.cdb 中存在的数字卡密，无需补足 8 位。", "Use a numeric code present in cards.cdb; eight-digit padding is not required."),
             )
-            if st.button(_("添加到宣言追加池", "Add to Announcement Pool"), use_container_width=True):
+            if st.button(_("添加到宣言追加池", "Add to Announcement Pool"), **REPLAY_BUTTON_WIDTH):
                 if new_code.isdigit():
                     code_int = int(new_code)
                     if code_int in staples_list:
@@ -2619,7 +2721,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             # 构建字典供选择
             options = {code: f"{card_db_ui.get_card_name(code)} ({code})" for code in staples_list}
             to_delete = st.multiselect(_("选择要移除的卡片", "Select cards to remove"), options=list(options.keys()), format_func=lambda x: options[x])
-            if st.button(_("从宣言追加池移除", "Remove from Announcement Pool"), type="primary", use_container_width=True):
+            if st.button(_("从宣言追加池移除", "Remove from Announcement Pool"), type="primary", **REPLAY_BUTTON_WIDTH):
                 if to_delete:
                     staples_list = [c for c in staples_list if c not in to_delete]
                     with open(staples_file, 'w', encoding='utf-8') as f:
@@ -2739,7 +2841,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         with c_del_pool:
             st.write(""); st.write("")
             if sel_pool != ".":
-                if st.button("🗑️ " + _("删除环境池", "Delete Pool"), use_container_width=True, help=_("注意：将删除该文件夹下所有卡组！", "Warning: This will delete all decks in this folder!")):
+                if st.button("🗑️ " + _("删除环境池", "Delete Pool"), **REPLAY_BUTTON_WIDTH, help=_("注意：将删除该文件夹下所有卡组！", "Warning: This will delete all decks in this folder!")):
                     resolved_pool = os.path.realpath(pool_path)
                     if (
                         os.path.commonpath([deck_root_real, resolved_pool]) != deck_root_real
@@ -2756,7 +2858,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             with m1:
                 st.caption(_("新建子环境池 (文件夹)", "Create Sub-Pool Folder"))
                 new_p_name = st.text_input("Folder Name", placeholder="e.g. tier_1", label_visibility="collapsed", key="in_new_p")
-                if st.button(_("确认创建文件夹", "Confirm Create Folder"), use_container_width=True):
+                if st.button(_("确认创建文件夹", "Confirm Create Folder"), **REPLAY_BUTTON_WIDTH):
                     if new_p_name:
                         try:
                             safe_pool_name = validate_local_asset_name(new_p_name)
@@ -2768,7 +2870,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             with m2:
                 st.caption(_("在此池中新建空白卡组 (.ydk)", "Create Empty Deck in this Pool"))
                 new_d_name = st.text_input("Deck Name", placeholder="e.g. MyNewDeck", label_visibility="collapsed", key="in_new_d")
-                if st.button(_("确认创建空白卡组", "Confirm Create Deck"), use_container_width=True):
+                if st.button(_("确认创建空白卡组", "Confirm Create Deck"), **REPLAY_BUTTON_WIDTH):
                     if new_d_name:
                         try:
                             deck_filename = validate_local_asset_name(
@@ -2787,7 +2889,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             
             st.divider()
             uploaded_files = st.file_uploader(_("📤 上传本地 .ydk 文件", "📤 Upload local .ydk"), accept_multiple_files=True, type=['ydk'])
-            if uploaded_files and st.button(_("💾 执行保存", "Execute Save"), use_container_width=True):
+            if uploaded_files and st.button(_("💾 执行保存", "Execute Save"), **REPLAY_BUTTON_WIDTH):
                 try:
                     for f in uploaded_files:
                         safe_upload_name = validate_local_asset_name(
@@ -2859,15 +2961,15 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                         c_name = card_db_ui.get_card_name(int(new_code))
                         st.caption(f"✨ 识别: **{c_name}**" if c_name != "Unknown" else "❌ 未知卡片")
                         btn_c = st.columns(3)
-                        if btn_c[0].button(_("主卡", "Main"), use_container_width=True): main_list.append(new_code)
-                        if btn_c[1].button(_("额外", "Extra"), use_container_width=True): extra_list.append(new_code)
-                        if btn_c[2].button(_("副卡", "Side"), use_container_width=True): side_list.append(new_code)
+                        if btn_c[0].button(_("主卡", "Main"), **REPLAY_BUTTON_WIDTH): main_list.append(new_code)
+                        if btn_c[1].button(_("额外", "Extra"), **REPLAY_BUTTON_WIDTH): extra_list.append(new_code)
+                        if btn_c[2].button(_("副卡", "Side"), **REPLAY_BUTTON_WIDTH): side_list.append(new_code)
                         st.session_state.editor_content = f"#main\n" + "\n".join(main_list) + f"\n#extra\n" + "\n".join(extra_list) + f"\n!side\n" + "\n".join(side_list)
 
                 with op_c2:
                     st.write(_("💾 **保存修改**", "💾 **Save Config**"))
                     st.write("")
-                    if st.button("🚀 " + _("将构筑写入 .ydk 文件", "Save to YDK File"), type="primary", use_container_width=True):
+                    if st.button("🚀 " + _("将构筑写入 .ydk 文件", "Save to YDK File"), type="primary", **REPLAY_BUTTON_WIDTH):
                         with open(deck_full_path, 'w', encoding='utf-8') as f:
                             f.write(st.session_state.editor_content)
                         st.success(_("✅ 构筑已持久化保存！", "✅ Saved successfully!"))
@@ -2902,13 +3004,13 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             bm1, bm2 = st.columns(2)
             with bm1:
                 target_p = st.selectbox(_("移动到...", "Move to..."), pools, key="mv_dest")
-                if st.button(_("➡️ 执行移动", "Move Selected"), use_container_width=True) and sel_files:
+                if st.button(_("➡️ 执行移动", "Move Selected"), **REPLAY_BUTTON_WIDTH) and sel_files:
                     dest = deck_root if target_p == "." else os.path.join(deck_root, target_p)
                     for f in sel_files: shutil.move(os.path.join(pool_path, f), os.path.join(dest, f))
                     st.rerun()
             with bm2:
                 st.write(""); st.write("")
-                if st.button(_("🗑️ 批量删除选中卡组", "Delete Selected"), type="primary", use_container_width=True) and sel_files:
+                if st.button(_("🗑️ 批量删除选中卡组", "Delete Selected"), type="primary", **REPLAY_BUTTON_WIDTH) and sel_files:
                     for f in sel_files: os.remove(os.path.join(pool_path, f))
                     st.rerun()
         else:
@@ -2999,7 +3101,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
 
                 st.write("")
                 # 最终保存按钮
-                if st.form_submit_button("💾 " + _("保存并应用全局权重", "Save Global Weights"), type="primary", use_container_width=True):
+                if st.form_submit_button("💾 " + _("保存并应用全局权重", "Save Global Weights"), type="primary", **get_stretch_width_args(st.form_submit_button)):
                     with open(global_file, 'w', encoding='utf-8') as f:
                         json.dump(new_g_weights, f, indent=4)
                     st.toast(_("✅ 全局权重已更新！Worker 下局生效。", "✅ Global weights updated!"))
@@ -3024,7 +3126,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             with st.expander(_("➕ 创建新的拼装池", "Create New Mix Pool")):
                 c_name, c_btn = st.columns([3, 1])
                 new_pool_name = c_name.text_input(_("拼装池名称", "Pool Name"), placeholder="e.g. Meta_VS_Fun")
-                if c_btn.button(_("创建配方", "Create Recipe"), use_container_width=True):
+                if c_btn.button(_("创建配方", "Create Recipe"), **REPLAY_BUTTON_WIDTH):
                     if not new_pool_name.strip():
                         idx = 1
                         while f"Virtual_Mix_{idx}" in all_v_pools: idx += 1
@@ -3095,7 +3197,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
                                         new_cfg[s_name] = st.slider(f"📁 {s_name}", 0.0, 10.0, float(p_cfg.get(s_name, 0.0)), 0.1, key=f"vsld_{p_name}_{s_name}")
                         
                         st.write("")
-                        if st.button("💾 " + _("保存此混合配方", "Save Mix Recipe"), key=f"vsave_{p_name}", type="primary", use_container_width=True):
+                        if st.button("💾 " + _("保存此混合配方", "Save Mix Recipe"), key=f"vsave_{p_name}", type="primary", **REPLAY_BUTTON_WIDTH):
                             all_v_pools[p_name] = new_cfg
                             with open(v_file, 'w', encoding='utf-8') as f: json.dump(all_v_pools, f, indent=4)
                             st.toast(f"✅ 【{p_name}】 配方已保存！")
@@ -3114,7 +3216,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             source = st.selectbox(_("🔌 数据源声明 (鸣谢)", "Data Source"), ["YGOProDeck (海外最大卡组库)", "萌卡 MyCard (国内) [待开发]"], disabled=True)
         with c_test:
             st.write(""); st.write("")
-            if st.button("📡 " + _("探测数据源 API 状态", "Test Connection"), use_container_width=True):
+            if st.button("📡 " + _("探测数据源 API 状态", "Test Connection"), **REPLAY_BUTTON_WIDTH):
                 import online_fetcher
                 fetcher = online_fetcher.YGOProDeckFetcher()
                 with st.spinner("正在发送探测封包..."):
@@ -3169,7 +3271,7 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
             mode_tag = "Rand" if is_rand else "Latest"
             auto_folder_name = f"ygopd_{real_api_tag.replace(' ', '')}_{mode_tag}"
             
-            if st.button("📥 " + _(f"抓取并添加到订阅清单: {auto_folder_name}", "Fetch & Add to List"), type="primary", use_container_width=True):
+            if st.button("📥 " + _(f"抓取并添加到订阅清单: {auto_folder_name}", "Fetch & Add to List"), type="primary", **REPLAY_BUTTON_WIDTH):
                 with st.spinner("正在突破天梯拉取数据..."):
                     import online_fetcher, random
                     fetcher = online_fetcher.YGOProDeckFetcher()
@@ -3221,11 +3323,11 @@ elif menu == _("🗃️ 资产与卡组管理", "🗃️ Assets & Decks"):
         with col_btn:
             st.write(""); st.write("")
             if daemon_running:
-                if st.button("🛑 " + _("停止守护", "Stop Daemon"), type="primary", use_container_width=True):
+                if st.button("🛑 " + _("停止守护", "Stop Daemon"), type="primary", **REPLAY_BUTTON_WIDTH):
                     with open(daemon_status_file, "w", encoding="utf-8") as f: f.write("STOPPED")
                     st.rerun()
             else:
-                if st.button("⚙️ " + _("启动后台守护", "Start Daemon"), type="secondary", use_container_width=True):
+                if st.button("⚙️ " + _("启动后台守护", "Start Daemon"), type="secondary", **REPLAY_BUTTON_WIDTH):
                     with open(daemon_status_file, "w", encoding="utf-8") as f: f.write(f"RUNNING: 守护中 (全局间隔 {global_interval}H)")
                     
                     def bg_daemon_task(interval_hrs):
@@ -3690,7 +3792,7 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                         _("完整制品文件", "Artifact files"): ", ".join(artifact["files"]),
                     }
                 )
-            st.dataframe(artifact_rows, use_container_width=True, hide_index=True)
+            st.dataframe(artifact_rows, **REPLAY_DATAFRAME_WIDTH, hide_index=True)
 
             downloadable_files = sorted(pool_files, key=str.casefold)
             selected_download = st.selectbox(
@@ -3707,7 +3809,7 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                         data=download_stream.read(),
                         file_name=selected_download,
                         key="download_model_artifact",
-                        use_container_width=True,
+                        **get_stretch_width_args(st.download_button),
                     )
             else:
                 st.info(_(
@@ -3752,7 +3854,7 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                 f"⚠️ 无法归档或孤立的制品（{len(invalid_artifacts)}）",
                 f"⚠️ Invalid or orphan artifacts ({len(invalid_artifacts)})",
             )):
-                st.dataframe(invalid_artifacts, use_container_width=True, hide_index=True)
+                st.dataframe(invalid_artifacts, **REPLAY_DATAFRAME_WIDTH, hide_index=True)
                 invalid_names = [item["file"] for item in invalid_artifacts]
                 delete_invalid = st.multiselect(
                     _("选择要删除的异常文件", "Select invalid files to delete"),
@@ -3772,7 +3874,8 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                     load_model_repository.clear()
                     st.rerun()
     with tab_data: # <--- 新增
-        build_file_manager("./web_data", ".csv", _("天梯对局数据", "Match Data"), allow_view=True, allow_upload=False)
+        st.caption(_("match_history_ 为普通卡池记录，windbot_history_ 为 WindBot 独立记录；同一运行标识对应同批训练。", "match_history_ contains ordinary pool data; windbot_history_ contains WindBot data. Matching run IDs belong to the same training run."))
+        build_file_manager("./web_data", ".csv", _("训练对局数据（普通卡池与WindBot）", "Training Matches (Pools and WindBot)"), allow_view=True, allow_upload=False)
     # 🌟 修复：TensorBoard 专属多选删除与一键清空逻辑
     with tab_tb:
         st.markdown("### 📉 " + _("TensorBoard 运行记录管理", "TensorBoard Runs Management"))
@@ -4850,7 +4953,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 if st.form_submit_button(
                     "🔨 " + _("原生极速打包 (.gkg)", "Generate .gkg Fast"),
                     type="primary",
-                    use_container_width=True,
+                    **get_stretch_width_args(st.form_submit_button),
                     disabled=bool(selection_warning or prefix_warning),
                 ):
                     missing = []
@@ -4906,7 +5009,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                     f"Ignored {len(invalid_gkgs)} .gkg files with unsafe names.",
                 ))
             
-            if st.button("📂 " + _("打开本地部署包文件夹", "Open Local Folder"), use_container_width=True):
+            if st.button("📂 " + _("打开本地部署包文件夹", "Open Local Folder"), **REPLAY_BUTTON_WIDTH):
                 open_local_folder(deploy_dir)
                 
             st.divider()
@@ -4914,7 +5017,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 for gm in gkgs:
                     with st.container(border=True):
                         st.markdown(f"📦 **{gm}** `({os.path.getsize(os.path.join(deploy_dir, gm)) // (1024*1024)} MB)`")
-                        if st.button("🗑️ " + _("删除该包", "Delete"), key=f"del_{gm}", use_container_width=True):
+                        if st.button("🗑️ " + _("删除该包", "Delete"), key=f"del_{gm}", **REPLAY_BUTTON_WIDTH):
                             os.remove(os.path.join(deploy_dir, gm))
                             st.rerun()
             else:
@@ -4929,7 +5032,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
             st.markdown("### 📥 " + _("从本地读取并解压", "Read & Unpack Locally"))
             st.info("将外部获取的 `.gkg` 包拖入本地部署文件夹，然后在下方选择解压到暂存区。")
             
-            if st.button("📂 " + _("打开本地文件夹放入 .gkg 包", "Drop .gkg here"), type="secondary", use_container_width=True):
+            if st.button("📂 " + _("打开本地文件夹放入 .gkg 包", "Drop .gkg here"), type="secondary", **REPLAY_BUTTON_WIDTH):
                 open_local_folder(deploy_dir)
             
             st.write("")
@@ -4943,7 +5046,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 st.warning("⚠️ 本地仓库未检测到 `.gkg` 包。请先点击上方按钮拖入文件。")
             else:
                 sel_gkg = st.selectbox("选择要解压的本地部署包：", local_gkgs)
-                if st.button("⚡ " + _("执行本地极速解包", "Unpack Fast"), type="primary", use_container_width=True):
+                if st.button("⚡ " + _("执行本地极速解包", "Unpack Fast"), type="primary", **REPLAY_BUTTON_WIDTH):
                     with st.spinner("正在进行本地原生解构，绕过所有上传限制..."):
                         target_extract_dir = None
                         try:
@@ -5067,7 +5170,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                         selected_root_files.extend(group_files)
 
                             st.write("")
-                            if st.form_submit_button("📥 " + _("执行精准导入", "Execute Import"), type="primary", use_container_width=True):
+                            if st.form_submit_button("📥 " + _("执行精准导入", "Execute Import"), type="primary", **get_stretch_width_args(st.form_submit_button)):
                                 if not selected_stage_models and not selected_root_files:
                                     st.warning("未勾选任何文件！")
                                 elif (
@@ -5171,6 +5274,6 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     except Exception as e:
                                         st.error(f"导入中途失败: {str(e)}")
 
-                if st.button("🗑️ " + _("清空此暂存目录", "Delete this Staged Folder"), use_container_width=True):
+                if st.button("🗑️ " + _("清空此暂存目录", "Delete this Staged Folder"), **REPLAY_BUTTON_WIDTH):
                     remove_staged_package_folder(stage_path)
                     st.rerun()

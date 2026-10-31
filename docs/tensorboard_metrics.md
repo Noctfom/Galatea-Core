@@ -1,6 +1,6 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.15.5 / Model Protocol V4。
+> 适用于 Galatea-Core v3.15.6 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
@@ -305,10 +305,42 @@ KL 衡量策略改变的幅度，不衡量改变后的优劣；低 KL 可能表�
 | `WindBot_Training/Accepted_Model_Steps` | 本轮WindBot场次实际提交给PPO的模型动作行数 | 不含WindBot响应、Pass1预查询或回滚样本；实际样本占比不一定等于配置的Worker比例 |
 | `WindBot_Training/Bot_Responses` | 已上传诊断中成功收到的WindBot响应数 | 不等于训练步数，同一次选择链可能有多个外部响应 |
 | `WindBot_Training/Bot_Response_Seconds` | 上述成功响应的累计墙钟秒数，含查询刷新与等待 | 不是纯Bot计算时间，也不是每局平均；对比时结合响应数和完成局数 |
-| `WindBot_Executors/<执行器>/WinRate` | 本轮该执行器可信完成局的模型胜率，0～1 | 只在有完成局时写点；脚本分类或执行器名不能代替实测强度 |
-| `WindBot_Executors/<执行器>/Games` | 对应胜率点的完成局分母 | 先看样本数，再解读波动 |
+| `WindBot_Mirror/WinRate` | 镜像/常规池对WindBot的本轮模型胜率，胜局÷真实完成局，0～1 | 两种采样分布分别统计；真实平局计入分母，异常/截断排除；有完成局才写点 |
+| `WindBot_Mirror/DrawRate` | 相应模式平局数÷真实完成局数，0～1 | 不把预算截断当平局 |
+| `WindBot_Mirror/Games` | 相应模式的本轮真实完成局数 | 分母计数；无完成局时写0 |
+| `WindBot_Mirror/WinRate_First` | 相应模式下模型先/后手的胜局÷该席位真实完成局，0～1 | 无该席位完成局时不写点；P0先手不等于模型永远先手 |
+| `WindBot_Mirror/WinRate_Second` | 相应模式下模型先/后手的胜局÷该席位真实完成局，0～1 | 无该席位完成局时不写点；P0先手不等于模型永远先手 |
+| `WindBot_Mirror/Games_First` | 对应先/后手胜率的完成局分母 | 0不代表胜率0% |
+| `WindBot_Mirror/Games_Second` | 对应先/后手胜率的完成局分母 | 0不代表胜率0% |
+| `WindBot_Pool/WinRate` | 镜像/常规池对WindBot的本轮模型胜率，胜局÷真实完成局，0～1 | 两种采样分布分别统计；真实平局计入分母，异常/截断排除；有完成局才写点 |
+| `WindBot_Pool/DrawRate` | 相应模式平局数÷真实完成局数，0～1 | 不把预算截断当平局 |
+| `WindBot_Pool/Games` | 相应模式的本轮真实完成局数 | 分母计数；无完成局时写0 |
+| `WindBot_Pool/WinRate_First` | 相应模式下模型先/后手的胜局÷该席位真实完成局，0～1 | 无该席位完成局时不写点；P0先手不等于模型永远先手 |
+| `WindBot_Pool/WinRate_Second` | 相应模式下模型先/后手的胜局÷该席位真实完成局，0～1 | 无该席位完成局时不写点；P0先手不等于模型永远先手 |
+| `WindBot_Pool/Games_First` | 对应先/后手胜率的完成局分母 | 0不代表胜率0% |
+| `WindBot_Pool/Games_Second` | 对应先/后手胜率的完成局分母 | 0不代表胜率0% |
+| `WindBot_Executors/{Mirror,Pool}/<执行器>/WinRate` | 本轮该模式、该执行器可信完成局的模型胜率，0～1 | 只在有完成局时写点；脚本分类或执行器名不能代替实测强度 |
+| `WindBot_Executors/{Mirror,Pool}/<执行器>/Games` | 对应胜率点的完成局分母 | 先看样本数，再解读波动 |
 | `Configuration/WindBot` | 启动时的训练/留出名单、固定构筑、层级、文件与程序摘要、比例和模型侧卡组选法 | Text面板，不是标量图；用于核对本次训练条件，恢复检查点不会自动启用对手 |
 
 3.15.5起，既有Text面板`Configuration/PPO`中的`league_weights`记录四类绝对分配概率，
 顺序为RuleBot/WindBot/历史/自对局，不是本轮实际样本占比；此项不新增标量图。
 开关、默认按层级留出及CLI示例见 [WindBot主训练对手](../integrations/windbot/README.md#3154主训练对手)。
+
+3.15.6起，`Deck_WinRates/*`与普通卡组大盘排除WindBot，其数据保存在独立的
+`web_data/windbot_history_<run_id>.csv`；WebUI的“WindBot专区”按模式、执行器和模型卡池筛选，
+展示真实胜平负、异常/截断、先后手分母和逐局构筑摘要。CSV记录不参与模型输入或PPO损失，
+只在每轮合并时写出，存储仓库的对局数据入口可管理这些文件。
+
+旧版`WindBot_Executors/<执行器>/*`混合两种模式，3.15.6停止续写这些标签，不修改已有事件。
+`League_Opponent/WindBot`保留模式混合总胜率，`League_Overall/*`仍包含WindBot等实际联盟对手；
+它们不是固定对手或普通卡池专用指标。旧`windbot:`镜像CSV只单独展示，缺少对手来源的旧常规池CSV
+无法可靠拆分；旧`Deck_WinRates`中的WindBot影响同样无法从事件标量反推删除。
+
+另有既存口径需区分：普通卡组CSV及`Deck_WinRates`只记录胜负局，而WindBot的胜率分母包含真实平局；
+`League_Opponent/RuleBot`和`Historical_AI`旧实现会在本轮无该对手时写0，这不代表实际输了所有对局。
+本批未重写这些历史标签。Worker审计中的“中央推理往返”含自对局双方、排队、微批等待、
+搬运及前向，不能据其占比推断纯通讯瓶颈；“历史对手CPU前向”和“WindBot刷新与响应”另列。
+
+普通`Deck_WinRates`仍以卡组名称分组，没有用卡池/构筑指纹区分跨池同名卡组；同名但不同构筑
+可能合并到一条序列。WebUI普通池榜按卡池分组，WindBot专区保留其单独的来源字段，口径不同。

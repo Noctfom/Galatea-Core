@@ -7,7 +7,7 @@
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.15.5](https://img.shields.io/badge/Release-v3.15.5-brightgreen.svg)](docs/changelog_en.md)
+[![Release: v3.15.6](https://img.shields.io/badge/Release-v3.15.6-brightgreen.svg)](docs/changelog_en.md)
 [![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/architecture_en.md#exact-card-identity-model-protocol-v4)
 [![Python: 3.11 recommended](https://img.shields.io/badge/Python-3.11_recommended-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)

@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.5**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.6**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -50,6 +50,14 @@
 2. Use slider to select iteration range for analysis
 3. Switch between environment pools (if multiple deck folders exist)
 4. View statistics
+
+**WindBot tab**: select `windbot_history_<run>.csv` for separate mirror and training-pool sections.
+Filter executors; pool games also support model-pool filters and per-deck results. Win rate uses genuine
+completed games including draws; aborts/truncations remain separate. Tables include seat denominators.
+Curves describe training samples, not a fixed benchmark. Ordinary pool rankings/matrices exclude
+WindBot. Identifiable legacy mirror rows are separate; legacy pool rows lack enough provenance to
+split reliably. Both CSV families from the most recently updated run are selected by default and can
+be managed in the storage repository's match-data page.
 
 ![Meta Dashboard](图片/卡组生态大盘.png)
 

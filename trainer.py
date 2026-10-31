@@ -962,11 +962,50 @@ class PPOTrainer:
         }
         for tag, value in windbot_scalars.items():
             self.writer.add_scalar(f'WindBot_Training/{tag}', value, self.iteration)
-        for name in sorted({row['executor'] for row in completed}):
-            selected = [row for row in completed if row['executor'] == name]
-            self.writer.add_scalar(f'WindBot_Executors/{name}/WinRate',
-                sum(row['win'] for row in selected) / len(selected), self.iteration)
-            self.writer.add_scalar(f'WindBot_Executors/{name}/Games', len(selected), self.iteration)
+        # 镜像与常规池的对局分布不同，分开记录胜负分母与先后手
+        for mode, label in (('mirror', 'Mirror'), ('training-pool', 'Pool')):
+            selected_mode = [row for row in completed if row.get('deck_mode') == mode]
+            prefix = f'WindBot_{label}'
+            self.writer.add_scalar(f'{prefix}/Games', len(selected_mode), self.iteration)
+            if selected_mode:
+                self.writer.add_scalar(f'{prefix}/WinRate',
+                    sum(row['win'] for row in selected_mode) / len(selected_mode), self.iteration)
+                self.writer.add_scalar(f'{prefix}/DrawRate',
+                    sum(row.get('draw', False) for row in selected_mode) / len(selected_mode), self.iteration)
+            for first, seat in ((True, 'First'), (False, 'Second')):
+                seated = [row for row in selected_mode if row.get('is_first') is first]
+                self.writer.add_scalar(f'{prefix}/Games_{seat}', len(seated), self.iteration)
+                if seated:
+                    self.writer.add_scalar(f'{prefix}/WinRate_{seat}',
+                        sum(row['win'] for row in seated) / len(seated), self.iteration)
+            for name in sorted({row['executor'] for row in selected_mode}):
+                selected = [row for row in selected_mode if row['executor'] == name]
+                self.writer.add_scalar(f'WindBot_Executors/{label}/{name}/WinRate',
+                    sum(row['win'] for row in selected) / len(selected), self.iteration)
+                self.writer.add_scalar(f'WindBot_Executors/{label}/{name}/Games', len(selected), self.iteration)
+
+    def _write_windbot_history(self, records):
+        """保留独立外部对手逐局结果，供大盘分区筛选与文件管理"""
+        if records:
+            # 独立CSV保留真实结果和构筑来源，不将异常或截断当作负场
+            fields = ('iteration', 'worker_id', 'deck_mode', 'executor', 'level',
+                'model_deck', 'model_pool', 'opponent_deck', 'opponent_deck_sha256',
+                'model_seat', 'is_first', 'outcome', 'accepted_steps', 'responses', 'response_seconds')
+            rows = []
+            for record in records:
+                row = {key: record.get(key, '') for key in fields}
+                row['iteration'] = self.iteration
+                row['outcome'] = ('aborted' if record['aborted'] else
+                    'truncated' if not record['completed'] else
+                    'win' if record['win'] else 'draw' if record.get('draw') else 'loss')
+                rows.append(row)
+            os.makedirs('./web_data', exist_ok=True)
+            path = os.path.join('./web_data', f'windbot_history_{self.run_id}.csv')
+            try:
+                pd.DataFrame(rows, columns=fields).to_csv(path, index=False,
+                    mode='a', header=not os.path.exists(path), encoding='utf-8')
+            except (OSError, ValueError) as error:
+                print(f'⚠️ [WebUI] WindBot CSV写入失败: {error}')
 
     def collect_rollouts(self):
         if self.device.type == 'cpu':
@@ -1160,6 +1199,8 @@ class PPOTrainer:
 
                 # 提取卡组雷达数据并聚合
                 for record in data.get('deck_records', []):
+                    if record.get('opponent_type') == 'windbot' or str(record.get('env', '')).startswith('windbot:'):
+                        continue
                     record['iteration'] = self.iteration
                     all_match_records.append(record) # 需要在读取 file_list 前声明 all_match_records = []
                     dk = record['my_deck']
@@ -1238,6 +1279,7 @@ class PPOTrainer:
                 print(f"❌ 读取/合并文件 {f} 失败: {e}") # 拒绝静默报错
 
         self._write_windbot_metrics(windbot_records)
+        self._write_windbot_history(windbot_records)
         if cursor == 0:
             print('❌ 本轮没有可提交的模型动作，已保留外部对手诊断统计，不执行PPO更新')
             return None
@@ -1312,7 +1354,9 @@ class PPOTrainer:
                 if not os.path.exists(csv_path):
                     df_new.to_csv(csv_path, index=False, mode='w', encoding='utf-8')
                 else:
-                    df_new.to_csv(csv_path, index=False, mode='a', header=False, encoding='utf-8')
+                    # 接续旧运行时保留其列序，避免新增来源字段破坏已有CSV
+                    columns = pd.read_csv(csv_path, nrows=0).columns
+                    df_new.reindex(columns=columns).to_csv(csv_path, index=False, mode='a', header=False, encoding='utf-8')
             except Exception as e:
                 print(f"⚠️ [WebUI] CSV 数据库写入冲突: {e}")
 
@@ -1414,18 +1458,19 @@ class PPOTrainer:
                         continue
 
                     # --- 4. 中央设备微批推理 (动态切片) ---
-                    for k in self.pinned_batch_buffers.keys():
-                        for wid in requests:
-                            self.pinned_batch_buffers[k][wid].copy_(shared_buffers[wid][k])
-                    
-                    active_indices = torch.tensor(requests, dtype=torch.long)
+                    # 密集装填有效行，基础切片保留锁页属性并避免108个字段重复索引分配
+                    batch_size = len(requests)
+                    for k, staging in self.pinned_batch_buffers.items():
+                        for row, wid in enumerate(requests):
+                            staging[row].copy_(shared_buffers[wid][k])
+
                     transfer_non_blocking = getattr(
                         self,
                         'transfer_non_blocking',
                         self.device.type == 'cuda',
                     )
                     batch_obs = {
-                        k: v[active_indices].to(
+                        k: v[:batch_size].to(
                             self.device,
                             non_blocking=transfer_non_blocking,
                         ).detach()
@@ -1442,17 +1487,19 @@ class PPOTrainer:
                             actions = dist.sample()
                             log_probs = dist.log_prob(actions)
                     
-                    # 5. 精准解包回写：单次前向输出同时灌入两个共享切片
+                    # 整批回传基础结果与分数，避免按Worker逐标量同步CUDA
+                    cpu_results = torch.stack(
+                        (actions.float(), log_probs.float(), values.reshape(-1).float()), dim=1,
+                    ).cpu()
+                    cpu_logits = logits.float().cpu() if shared_logits is not None else None
                     for i, wid in enumerate(requests):
                         request_id, addr = pending_requests[wid]
                         # A. 基础槽（供 Pass 2 或 自对局决策流抽样消费）
-                        shared_outputs[wid][0] = actions[i].cpu().float()
-                        shared_outputs[wid][1] = log_probs[i].cpu().float()
-                        shared_outputs[wid][2] = values[i].squeeze(-1).cpu().float()
+                        shared_outputs[wid][:3].copy_(cpu_results[i])
                         
                         # B. [精细新增] 分数槽（供 Pass 1 意图感知大矩阵查表消费）
                         if shared_logits is not None:
-                            shared_logits[wid].copy_(logits[i].cpu().float())
+                            shared_logits[wid].copy_(cpu_logits[i])
 
                         # 最后写入完成号，再发送响应，保证 Worker 不会读取半写入结果
                         if shared_response_ids is not None:
