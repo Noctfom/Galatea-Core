@@ -13,7 +13,7 @@ from system_logger import setup_global_logger
 from checkpoint_utils import load_training_checkpoint
 from semantic_assets import DEFAULT_SEMANTIC_REPOSITORY_URL
 from training_lock import TrainerAlreadyRunningError, TrainerProcessLock
-from training_validation import resolve_training_target
+from training_validation import resolve_training_target, resolve_league_weights
 from ppo_control import DEFAULT_GAE_LAMBDA, DEFAULT_PPO_EPOCHS, DEFAULT_TARGET_KL
 from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL
 
@@ -131,11 +131,15 @@ def run_training_command(args, parser):
     try:
         if not getattr(args, 'windbot', False) and (
                 any(getattr(args, key, None) for key in ('windbot_executor', 'windbot_holdout', 'windbot_runtime', 'windbot_mono'))
-                or getattr(args, 'windbot_rate', 0.2) != 0.2
+                or getattr(args, 'windbot_rate', None) is not None
                 or getattr(args, 'windbot_deck_mode', 'mirror') != 'mirror'
                 or getattr(args, 'windbot_response_timeout', 10) != 10):
             parser.error('WindBot对手参数需要同时显式指定 --windbot')
+        requested_weights = getattr(args, 'league_weights', None)
         try:
+            weights = resolve_league_weights(
+                dict(zip(('rule', 'windbot', 'hist', 'self'), requested_weights)) if requested_weights is not None else None,
+                windbot_enabled=getattr(args, 'windbot', False), legacy_windbot_rate=getattr(args, 'windbot_rate', None))
             resolve_training_device(args.device)
         except (ValueError, RuntimeError) as error:
             parser.error(str(error))
@@ -215,12 +219,13 @@ def run_training_command(args, parser):
             model_prefix=args.model_prefix,
             preloaded_resume_checkpoint=resume_checkpoint,
             protocol_audit=args.protocol_audit,
+            league_weights=weights,
             **({'windbot_training': {
                 'executors': args.windbot_executor, 'holdouts': args.windbot_holdout,
-                'rate': args.windbot_rate, 'deck_mode': args.windbot_deck_mode,
+                'deck_mode': args.windbot_deck_mode,
                 'runtime': args.windbot_runtime, 'mono': args.windbot_mono,
                 'response_timeout': args.windbot_response_timeout,
-            }} if getattr(args, 'windbot', False) else {}),
+            }} if getattr(args, 'windbot', False) and weights['windbot'] > 0 else {}),
         )
         try:
             training_lock.set_run_id(trainer.run_id)
@@ -319,9 +324,13 @@ def main():
     train_parser.add_argument('--windbot', action='store_true', help='显式启用WindBot主训练对手，关闭时不加载可选模块')
     train_parser.add_argument('--windbot-executor', action='append', default=None, help='可重复指定训练执行器；省略则自动按层级留出并选择兼容构筑')
     train_parser.add_argument('--windbot-holdout', action='append', default=None, help='可重复指定保留作独立评测的执行器，不进入WindBot训练抽样')
-    train_parser.add_argument('--windbot-rate', type=float, default=0.2, help='WindBot Worker分配概率，范围(0,1]；不是保证的样本比例')
+    league_group = train_parser.add_mutually_exclusive_group()
+    league_group.add_argument('--league-weights', type=float, nargs=4, metavar=('RULE', 'WINDBOT', 'HIST', 'SELF'),
+        help='四类对手绝对概率，总和为1；默认0.15/0/0.25/0.6，启用WindBot后默认0/0.15/0.25/0.6')
+    league_group.add_argument('--windbot-rate', type=float, default=None,
+        help='兼容3.15.4的旧比例参数，保留按余量缩放语义；新配置建议使用--league-weights')
     train_parser.add_argument('--windbot-deck-mode', choices=['mirror', 'training-pool'], default='mirror', help='模型侧使用镜像或常规训练卡组池，WindBot始终固定构筑')
-    train_parser.add_argument('--windbot-runtime', default=None, help='可选WindBot.exe路径，省略使用集成目录runtime')
+    train_parser.add_argument('--windbot-runtime', default=None, help='可选WindBot.exe路径，省略自动选取当前平台运行文件')
     train_parser.add_argument('--windbot-mono', default=None, help='Linux可选Mono路径')
     train_parser.add_argument('--windbot-response-timeout', type=float, default=10, help='单次机器人响应预算秒数，范围(0,10]')
 
@@ -466,10 +475,10 @@ def main():
     expert_parser.add_argument('--report', default=None, help='新建只读样本审查报告 JSON，不覆盖现有文件')
 
     external_parser = subparsers.add_parser('windbot', help='可选受控 BO1 对局/完整采集，不加入 PPO 或联盟')
-    external_parser.add_argument('--inspect', action='store_true', help='仅检查源码目录和运行依赖，不启动 Bot/Core')
+    external_parser.add_argument('--inspect', action='store_true', help='自动检查当前平台源码和运行依赖，不启动Bot/Core')
     external_parser.add_argument('--executor', default='Blue-Eyes', help='上游执行器名称，--inspect 可列出')
     external_parser.add_argument('--opponent-executor', default=None, help='指定后运行两个 WindBot；默认另一侧为原生 RuleBot/模型')
-    external_parser.add_argument('--runtime', default=None, help='显式 WindBot.exe 路径；默认 integrations/windbot/runtime/WindBot.exe')
+    external_parser.add_argument('--runtime', default=None, help='显式WindBot.exe路径；省略自动选取当前平台运行文件')
     external_parser.add_argument('--mono', default=None, help='Linux Mono 可执行名称或路径；不自动安装')
     external_parser.add_argument('--windbot-seat', type=int, choices=(0, 1), default=1, help='物理座位；当前受控局 P0 固定先手')
     external_parser.add_argument('--model', default=None, help='可选原生 V4 PTH；未提供时另一侧为 RuleBot')

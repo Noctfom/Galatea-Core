@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.4. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.5. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -23,7 +23,7 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 
 WindBot belongs to Core's [optional integration directory](../integrations/windbot/README.md), without a Link proxy. Controlled BO1 landed in3.15.0 and independent imitation in3.15.3; full player-only Link inference and YRP without evidence remain unsupported.
 
-- [x] Batch 1: Core session contract v1, pinned IceYGO source, explicit CLI/WebUI controlled BO1, masked views, faithful capture and independent replay. Real WindBot/RuleBot both-seat and mirror gates pass; Linux and broader executor acceptance remain pending
+- [x] Batch 1: Core session contract v1, pinned IceYGO source, explicit CLI/WebUI controlled BO1, masked views, faithful capture and independent replay. Windows and Ubuntu/WSL2 real both-seat games and Blue-Eyes/Albaz mirrors pass; broader executor/distribution acceptance remains pending
 - [ ] Batch 2: process full Link captures and YRP with original-message/asset evidence through the same canonical interpreter; compare observations and unique expert-action mapping, including multi-selection/cancellation, without inventing evidence
 - [x] 3.15.2: Read-only expert CPU sample API and CLI/WebUI verification for complete eligible traces; reuse strict replay, observation digests and original candidate labels. No prefix access before whole-duel acceptance, default WindBot-only selection, no optimizer
 - [x] 3.15.2: Program identity association audit reports shared identities and hypothetical group counts without program edges. Actual isolation still uses all stable identities; human/unknown handling remains conservative
@@ -35,6 +35,7 @@ WindBot belongs to Core's [optional integration directory](../integrations/windb
 - [x] 3.15.3: Independent BC optimizer, epoch budget, experimental UUID/checkpoints, one-time preparation/compressed caches, single-Core native collection and candidate/baseline fixed-build swapped-seat evaluation. Engineering closure only, not demonstrated playing-strength improvement
 - [x] 3.15.3 review: Explicit BC weight initialization for a new PPO branch, cumulative PPO/BC counters, separate UUID/directory and fresh PPO optimizer/update counters. No automatic continuation; imitation and online-human learning still require separate startup
 - [x] 3.15.4: Optional WindBot training opponents reuse Workers/central inference and learn only model actions, with a configurable Worker allocation rate, mirror/regular decks, suggested per-level holdouts and frozen rosters. Expert imitation and online-human games remain separate
+- [x] 3.15.5: Optional customization of four absolute league probabilities; enabled WindBot replaces the base Rule15% while extra coverage remains. Prebuilt runtimes automatically adapt to Windows/Linux without an OS selector, user build workflow or upstream executor changes
 - [x] Default paths do not require the module/runtime. Dependencies are checked only on activation; `--with-windbot` optionally packages source, licenses and an already installed runtime
 
 Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.

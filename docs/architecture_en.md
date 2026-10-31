@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.15.4**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.15.5**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -648,9 +648,12 @@ RuleBot; it then resumes its original self/hist configuration. This preserves we
 while preventing small worker pools from missing the rules baseline for several iterations. When no
 historical checkpoint exists, the hist share naturally falls back to self-play.
 
-This table describes the default league. With explicit WindBot enablement in 3.15.4, Workers first
-draw the configured external-opponent probability; the remainder retain these conditional weights.
-Mixed mode prefers regular AI Workers for Rule coverage, whereas 100% WindBot inserts no Rule games.
+This table describes the disabled-WindBot default. Version3.15.5 exposes four absolute probabilities in
+RuleBot/WindBot/history/self order: `0.15/0/0.25/0.60`, or `0/0.15/0.25/0.60` with WindBot enabled.
+Customize in WebUI or with `--league-weights`; the total must be1 without implicit normalization.
+Each Worker draws once. Mixed mode prefers regular AI Workers for extra Rule coverage, whereas100%
+WindBot inserts no Rule games. Explicit legacy `--windbot-rate` retains remaining-share scaling and
+cannot be combined with the new argument.
 Each external opponent shares its Worker's existing Core. Only model candidates, log-probabilities
 and values enter ordinary PPO/GAE; Bot replies are environmental transitions. See
 [integration and holdout rules](../integrations/windbot/README.md#optional-main-training-opponents).

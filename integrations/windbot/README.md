@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.15.4 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
+此目录提供 Galatea-Core 3.15.5 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -13,12 +13,21 @@
 ## 3.15.4主训练对手
 
 WebUI在 **启动与监控中枢 → 发起训练 → WindBot主训练对手** 勾选启用，读取兼容执行器后
-选择训练/留出名单、Worker分配比例及模型侧卡组选法。控件附带说明；关闭时不导入可选模块，
+选择训练/留出名单及模型侧卡组选法，在下方“联盟对手配比”查看或自定义四类概率。控件附带说明；关闭时不导入可选模块，
 也不检查或启动WindBot。已有检查点仍能照常推理、继续PPO或显式作为BC后的权重来源。
 
+执行器扫描使用当前调用线程的独立卡库连接，完成后关闭，不复用WebUI旧线程的查询缓存。
+刷新会显示兼容数量和“扫描结果与跳过的构筑”；真正缺卡或词表不兼容仍不进入训练选项。
+原目录为空、修复后重新刷新时自动补回建议名单；正常刷新保留用户手动选择。
+训练/留出两侧名单即时联动：从一侧移除会转入另一侧，加入会从另一侧移除。同主/额外构筑
+的别名一起移动；默认未选的未完成/测试执行器保持未分组，可以手动加入任意一侧。
+
 ```bash
-# 默认20%概率给每个Worker分配WindBot，其余保留原联盟抽样
-python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --windbot-rate 0.2 --no_compile
+# 默认由WindBot接替RuleBot基础15%，历史25%和自对局60%不变
+python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --no_compile
+
+# 可选四项绝对概率：RuleBot / WindBot / 历史模型 / 自对局
+python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --league-weights 0.05 0.15 0.20 0.60 --no_compile
 
 # 手动指定训练与留出执行器，模型侧可改用常规训练卡组池
 python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --windbot-executor Blue-Eyes --windbot-holdout Albaz --windbot-deck-mode training-pool --no_compile
@@ -31,10 +40,16 @@ python main.py train --resume models/galatea_iter_200.pth --additional-iteration
   层级保留一个完整执行器；相同主/额外构筑的别名跟随留出，不以Side差异伪装独立构筑。
   `NotFinished`与`Test`默认不选，仍可手动选择。上游层级是脚本声明，不代表实测强度。
   留出只约束WindBot训练对手，不能证明模型在其他卡组池或BC中从未见过该构筑。
-- **比例与预算**：比例是Worker分配概率，不是对局数或模型样本占比；小规模单轮可能未抽中。
+- **比例与预算**：3.15.5统一四类绝对概率，顺序为RuleBot/WindBot/历史/自对局；未启用WindBot
+  时默认`0.15/0/0.25/0.60`，启用时默认`0/0.15/0.25/0.60`。自定义需合计1，非法值直接拒绝，
+  不隐式归一化；WindBot关闭时其权重必须为0。每个Worker只抽一次全局分类，历史池为空时
+  其份额回落到自对局。它是Worker分配概率，不是对局数或模型样本占比；小规模单轮可能未抽中。
   混合模式保留RuleBot补局，优先交给普通AI Worker；比例为100%时只对WindBot，不插入Rule局。
   不另建模型副本、GPU服务或主进程经验池。机器人启动、查询刷新和CPU决策会消耗采集时间，
   实际吞吐取决于执行器与局长；不能保证与self/hist相同。
+- **旧命令兼容**：显式传入`--windbot-rate r`仍保留3.15.4语义：WindBot=r，其他三项乘以
+  `1-r`。例如r=0.2对应`0.12/0.20/0.20/0.48`，不能同时传`--league-weights`。
+  新UI只生成四项绝对概率；仅传`--windbot`使用新版替代默认值。
 - **单一学习来源**：Worker仍使用原中央推理、模型候选、log-prob、FiLM掩码、辅助标签与GAE。
   WindBot响应直接提交同一Core，作为环境变化供模型观察；不生成教师动作标签、不调用BC，
   不加载真人对局或重放器。普通受控对局和独立模仿工作流也不会因此自动加入PPO。
@@ -43,7 +58,9 @@ python main.py train --resume models/galatea_iter_200.pth --additional-iteration
   清理所属Bot，防止误杀复用PID。无可用动作时仅上传小型诊断，跳过PPO而不分配大型合并池。
 - **来源与恢复**：检查点和TensorBoard `Configuration/WindBot`保存本次名单、构筑、层级、
   文件摘要、程序摘要及比例。恢复PPO不会自动启用WindBot，需再次传`--windbot`或在UI勾选；
-  会按当前本地资产重新检查。网络、模型协议4、检查点格式3及修订14不变。
+  会按当前本地资产重新检查。检查点可选字段`league_weights`与既有Text面板`Configuration/PPO`
+  保存四项实际配置，不增加标量卡片；UI自定义模式可读取保存值，普通默认模式仍采用上述默认。
+  网络、模型协议4、检查点格式3及修订14不变。
 
 Bot日志仍在`system_logs/windbot/`，训练不默认写整局捕获或全息录像。查看模型对局与保留执行器
 表现时，使用原受控对局或独立评测入口显式录制。主训练新增指标见
@@ -67,20 +84,26 @@ Core 会话合同 v1 位于 `../duel_session.py`，包含会话 UUID、单调请
 
 ## 源码与 Git 管理
 
-Galatea 原创的适配代码在 `bridge.py`、`runtime.py` 和 `session.py`；上游完整源码快照在 `vendor/`，不拆散到项目根目录。`UPSTREAM.json` 记录仓库、分支、提交、导入日期和原始归档摘要；上游许可证保留在 `vendor/LICENSE`，依赖原有通知随快照保留。Git 提交应区分原样源码导入、Galatea 适配和后续上游更新。
+Galatea 原创的适配代码在 `bridge.py`、`runtime.py`、`session.py` 和 `training.py`；上游完整源码快照在 `vendor/`，不拆散到项目根目录。`UPSTREAM.json` 记录仓库、分支、提交、导入日期和原始归档摘要；上游许可证保留在 `vendor/LICENSE`，依赖原有通知随快照保留。Git 提交应区分原样源码导入、Galatea 适配和后续上游更新。
 
 不提交嵌套 `.git`。源码、许可证、来源记录及可复核的必要补丁进入 Galatea 仓库；本地可执行运行目录 `runtime/`、构建目录 `build/` 和上游 `bin/obj` 产物由根 `.gitignore` 排除。若需要改动上游，单独标记补丁及理由，不把改动描述为未经修改的上游代码。
 
 一键包默认排除 `vendor/`、`runtime/` 和 `build/`，保留原创适配代码与说明；`build_portable_package.py --with-windbot` 显式携带源码、许可证和已安装的 `runtime/`，始终排除构建工作区。此选项不下载或编译组件，不改变 GKG 模型包。
+维护者构建脚本位于独立的 [windbot_build](../../windbot_build/README.md)，普通便携包始终排除
+该目录。`WindBot_Build_3.15.5.zip`自带固定源码及脚本，供维护者在实际Linux机器构建和验收；
+它与供普通用户使用的运行包分开发布，不由主项目启动流程调用。
 
-## 构建与使用
+## 运行包与使用
 
-Windows 需 MSBuild 和 .NET Framework 4.8 开发引用包；Linux 需可构建该旧式项目的 Mono/MSBuild，以及 SQLite 原生运行库。上游不是现代 .NET SDK 项目，不使用 `pip` 安装，不修改主项目的 Python 依赖。
+将配套的`WindBot_Runtime_3.15.5.zip`解压到项目根目录，运行文件按包内目录放入
+`integrations/windbot/runtime/`。可选一键包使用`--with-windbot`携带已安装运行文件；普通
+源码包不包含二进制，需要另取运行包。运行文件由项目发布方预编译，用户无需安装编译器。
 
-在项目根目录执行以下标准构建命令，将产物放入本模块的忽略目录；PowerShell 可将 `msbuild` 替换为实际 MSBuild.exe 路径。
+Windows需要.NET Framework 4.8运行时；Linux需要Mono与系统SQLite。Ubuntu可安装运行
+依赖`sudo apt-get install mono-runtime libmono-system-data4.0-cil libmono-system-web4.0-cil libmono-system-runtime-serialization4.0-cil libsqlite3-0`，不需要.NET SDK、MSBuild或`mono-devel`。
+Python训练环境与公开Core依赖仍按主项目说明安装，程序不会自动修改系统环境。
 
 ```text
-msbuild integrations/windbot/vendor/WindBot.csproj /t:Build /p:Configuration=Release /p:Platform=AnyCPU /p:OutputPath=../runtime/
 python main.py windbot --inspect
 python main.py windbot --executor Blue-Eyes --opponent-executor Blue-Eyes --verify
 python main.py windbot --executor Blue-Eyes --windbot-seat 0 --verify
@@ -90,7 +113,14 @@ python main.py windbot --executor Blue-Eyes --model models/your_v4_model.pth --r
 python main.py windbot --executor Blue-Eyes --model models/your_v4_model.pth --policy-mode deployment --temperature 0.2
 ```
 
-`--runtime` 可指定其他已构建的 WindBot.exe；Linux 可用 `--mono` 指定 Mono。必须保留 exe 同目录的配置、SQLite 运行文件与 Dialogs；单拷贝 exe 不构成完整运行包。未自定义原生侧 YDK 时，使用对应执行器的相同构筑，不从普通训练池随机换牌。
+默认读取同一份`runtime/WindBot.exe`托管程序，不分发两份平台专用程序；仅在公共文件缺失时
+兼容已有旧包的`runtime/windows/WindBot.exe`或`runtime/linux/WindBot.exe`。
+无需在WebUI/CLI选择操作系统。Windows直接执行，Linux从PATH
+寻找Mono，并在每局私有临时目录生成系统`libsqlite3`映射，保留原运行文件与Windows配置。
+`--runtime`可覆盖程序路径，`--mono`保留作命令行高级路径覆盖。整个运行目录须保留配置、
+依赖程序集与Dialogs；Windows还需原生SQLite库。Linux无需Windows SQLite DLL。
+`--inspect`只检查当前依赖和文件，不代表已通过真实对局。未自定义原生侧YDK时，使用对应
+执行器的相同构筑，不从普通训练池随机换牌。
 
 WebUI 入口在竞技场的“WindBot 可选受控对局”。点击读取/刷新后，执行器与当前兼容 V4 PTH 通过下拉列表选择；切换另一侧类型立即显示对应控件，不再等待表单提交。缺少构筑的执行器不进入列表，旧协议/资产不匹配模型列入诊断说明，不伪装为可用模型。模型最终仍由原生严格加载器验证。
 
@@ -112,7 +142,13 @@ WebUI和CLI默认随机Core开局，各局使用起始种子加局数偏移；�
 
 ## 验证范围与后续边界
 
-本批验证 Windows 实际编译、原生 RuleBot 对 WindBot 双座位、WindBot 镜像、终局原始输出/观测摘要独立重放，以及提前停止的进程回收。Linux 实际联网、全部执行器、真人客户端和 BO3 尚待验收。
+Windows及Linux（Ubuntu24.04/WSL2 x86_64、Mono6.8、Python3.12、CPU PyTorch2.9.1）已通过
+真实RuleBot/WindBot双座位、青眼/烙印镜像、原始输出与观测摘要独立重放、模型三种策略及
+异常进程回收；Linux还完成单Worker中央推理采集与PPO权重更新。此处是本地协议桥闭环，
+不代表公网Link、其他发行版/CPU架构、全部执行器、云端GPU长训、真人或BO3已验收。
+上述Linux记录对应此前分平台编译产物。本次整理为公共程序集及独立构建包后未再次执行
+Linux测试；Ubuntu22.04及选定公共程序集的Linux验收须在目标机器完成，不能沿用旧产物的
+测试结果作为新文件的验收证明。
 
 烙印 `Albaz` 镜像原先有 2 条 Type15 未映射。复审确认两处都是 8 选 2，28 个组合完整入池，不存在 120 项缩减：实际响应 `02 07 00` 对应池内 `02 00 07`，实际 `02 07 05` 对应池内 `02 05 07`。专家与池选择同一组物理卡片，却使用相反的索引排列；此前“宏池覆盖缺口”的归因应以此复审为准。通过下述 WindBot 适配器重新转换后，471 条决策均唯一映射，整局通过现有行为克隆资格门禁；原始输出逐字节一致，实际响应与所有观测摘要保持不变。这不等于已经训练模仿学习器。
 
@@ -144,7 +180,8 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 仅玩家视角的数据保持 `player_view`，不承诺从缺资产/种子/原始消息的录像恢复完整重放。
 接口、调用示例及完整性报告见 [Core玩家视角SDK](../../docs/core_trajectories.md#3151core-玩家视角接收接口)。
 
-本机标准构建遇到缺少 4.8 引用包；本地验证产物用已安装框架程序集进行临时编译，未修改上游项目目标，也未安装系统 SDK。正式构建应使用完整开发引用包；本地 smoke 不替代跨平台发行验证。
+预编译程序保留上游.NET Framework 4.8目标与固定源码提交；文件身份见运行包清单，
+不能仅凭版本名判断程序是否相同。普通运行只使用预编译文件与上述运行依赖。
 
 受控局的 P0 固定先手，交换座位不会更改这一规则。种子只控制 Core，不控制上游 Bot 的时间初始化随机数，因此该入口不等于固定竞技基准。原生模型目前使用 CPU，并沿用竞技场策略采样；宏候选采用 Core 规范重建的均匀先验，不宣称与训练 Pass1 选池完全同分布。可选全息录像不提供 WindBot 置信度，也不把显示用响应解码当作学习标签。
 
@@ -155,16 +192,33 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 
 ## English summary
 
-Galatea-Core 3.15.4 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
+Galatea-Core 3.15.5 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
 
 ### Optional main-training opponents
 
+Catalog scans own and close a database connection in the calling thread, avoiding stale cross-thread
+query caches. The UI shows compatible counts and skipped-build diagnostics. Real card/vocabulary
+incompatibilities remain excluded. Recovery from an empty catalog restores suggestions; ordinary
+refresh preserves manual selections.
+The training/holdout lists are linked: removal moves an executor to the other side, and addition removes
+it from that side. Identical Main/Extra aliases move together. Initially excluded unfinished/test scripts
+remain unassigned until selected manually.
+
 Enable the WindBot section on the main training tab, or pass `train --windbot`. Disabled mode neither
-imports the optional module nor probes its runtime. The default Worker allocation probability is 0.2;
-remaining Workers use the original league. It is not a guaranteed game/sample share. Each external
+imports the optional module nor probes its runtime. Four absolute Worker probabilities are exposed in
+RuleBot/WindBot/history/self order: disabled defaults are `0.15/0/0.25/0.60`, enabled defaults
+`0/0.15/0.25/0.60`. WindBot replaces the base RuleBot share. Custom values must sum to1, with no
+implicit normalization; WindBot must be enabled for a positive share. Each Worker draws once; empty
+history falls back to self-play. This is not a guaranteed game/sample share. Each external
 Worker samples its executor uniformly per game, with random model seats and mirror builds by default.
 Mixed mode retains RuleBot coverage, preferably on regular AI Workers; a 100% setting uses only WindBot.
 `--windbot-deck-mode training-pool` uses regular sampling only on the model side.
+
+Use `--league-weights RULE WINDBOT HIST SELF` for custom absolute probabilities. Explicit legacy
+`--windbot-rate r` retains 3.15.4's remaining-share scaling (r=0.2 gives `0.12/0.20/0.20/0.48`),
+and cannot be combined with the new argument. The UI emits only absolute probabilities. Optional
+checkpoint `league_weights` and existing `Configuration/PPO` text retain the active four values;
+UI custom mode can load them without changing ordinary launch defaults or adding scalar tags.
 
 Compatible Normal/Easy executors are suggested, reserving one per multi-executor level plus aliases
 with identical Main/Extra builds. Side differences do not create an independent BO1 build. Unfinished/
@@ -203,7 +257,20 @@ Core owns the shared session, observation, action and capture contracts. WindBot
 
 The upstream is [IceYGO/windbot](https://github.com/IceYGO/windbot). Its [MIT license](https://github.com/IceYGO/windbot/blob/master/LICENSE), copyright and dependency notices are retained in the source snapshot. `UPSTREAM.json` identifies the exact snapshot and original archive; Git excludes nested repositories and build/runtime outputs. Portable packages exclude vendor/runtime by default; `--with-windbot` includes source, licenses and an already installed runtime, without downloading or building. GKG is unchanged.
 
-Build the legacy project using MSBuild/Mono and .NET Framework 4.8 references, with `OutputPath=../runtime/`, then use `python main.py windbot --inspect` or the commands above. Keep native SQLite/configuration/Dialogs beside the exe; `--runtime` and `--mono` override paths. The Arena panel reads executor/compatible V4 checkpoint lists on request and reacts immediately to side-type changes. Native opponents can use the same Bot build or the regular weighted/physical/virtual/single-deck Arena selector (`--native-deck-source`, `--deck_dir`); WindBot always keeps its own executor deck. Raw captures are always saved; `--verify` converts/replays without learning. Independent `--record-replay` saves both sides and board events for Holographic Replay. Optional `--record-evaluations` requires a native model and adds only its state predictions, at extra CPU cost. External confidence is not fabricated; aborts do not receive terminal labels.
+Extract the provided `WindBot_Runtime_3.15.5.zip` into the project root. Optional portable packages can
+include an installed runtime via `--with-windbot`; source-only distributions need the separate runtime.
+Users need no compiler. Windows requires the .NET Framework4.8 runtime; Linux requires Mono/system
+SQLite (Ubuntu: `sudo apt-get install mono-runtime libmono-system-data4.0-cil libmono-system-web4.0-cil libmono-system-runtime-serialization4.0-cil libsqlite3-0`), not a .NET SDK/MSBuild/mono-devel.
+Python and public Core dependencies still follow the main project's installation guide.
+Maintainers use the independent [build kit](../../windbot_build/README.md), distributed separately as
+`WindBot_Build_3.15.5.zip` with pinned source and scripts. It is always excluded from portable packages.
+Runtime selection prefers one shared `runtime/WindBot.exe`; old platform subdirectories remain only
+as a fallback if the shared file is absent. Linux uses a per-process private exe/config with a system-SQLite map,
+preserving Windows files. No OS selector or automatic dependency installation is added. `--runtime`
+and optional CLI `--mono` override paths. Keep configuration/managed dependencies/Dialogs alongside the
+exe; Windows additionally needs its native SQLite library. `--inspect` is only a dependency/file check.
+
+The Arena panel reads executor/compatible V4 checkpoint lists on request and reacts immediately to side-type changes. Native opponents can use the same Bot build or the regular weighted/physical/virtual/single-deck Arena selector (`--native-deck-source`, `--deck_dir`); WindBot always keeps its own executor deck. Raw captures are always saved; `--verify` converts/replays without learning. Independent `--record-replay` saves both sides and board events for Holographic Replay. Optional `--record-evaluations` requires a native model and adds only its state predictions, at extra CPU cost. External confidence is not fabricated; aborts do not receive terminal labels.
 
 With a V4 opponent, the WebUI exposes an independent native-policy selector. The existing default `training` samples `Categorical(logits)` at fixed T=1.0; `greedy` uses argmax without a temperature; `deployment` exposes T=0.05–5.0, initially0.8. CLI equivalents are `--policy-mode` and `--temperature` for deployment. These settings affect neither WindBot nor normal Arena controls; uniform macro priors mean training-style sampling is not full Pass1 equivalence. Result JSON `native_policy` and Holographic metadata record the effective mode/temperature; non-model sessions report null.
 
@@ -211,7 +278,17 @@ The prototype rebuilds its native model/Core per controlled game rather than reu
 
 Contract v1 serializes one pending physical-player request. Legacy YGOPro cannot echo request tokens, so timeout/disconnect ends the session instead of reconnecting. Loopback peers use separate room tokens and verify deck submissions. Hidden card identities/Main Deck order are masked; Type160 is not sent externally, and unknown messages fail closed. Complete original chunks remain separate from all derived client updates.
 
-Windows real-Bot/Core smoke and replay are validated; Linux, all executors, human clients and BO3 remain pending. Local builds used installed framework assemblies because the development reference pack was missing; standard release builds require proper references. P0 always starts; Core seeds do not control Bot randomness. Native models use CPU with uniform canonical macro pools, not full training Pass1 equivalence. Complete YRP evidence and isolated imitation optimization remain pending.
+Windows and Linux (Ubuntu24.04/WSL2 x86_64, Mono6.8, Python3.12, CPU PyTorch2.9.1) pass real
+RuleBot/WindBot both-seat games, Blue-Eyes/Albaz mirrors, exact raw/observation replay, all three model
+policies and abnormal cleanup. Linux also passes central-inference single-Worker collection and PPO
+weight updates. This is a local bridge check, not public Link, every executor/distribution/architecture,
+cloud-GPU long training, human clients or BO3 acceptance. Prebuilt files retain the upstream framework
+target/source; manifests identify their bytes. P0 always starts; seeds do not control Bot randomness.
+Native CPU models use uniform canonical macro pools, not full training Pass1 equivalence. Complete
+YRP evidence remains pending.
+Those Linux results used the earlier platform-specific build. The new shared-file packaging and build
+kit have not been retested on Linux; Ubuntu22.04 and the selected common assembly need target-machine
+acceptance. Earlier binary results do not authenticate a different executable.
 
 The two Albaz Type15 misses were **response ordering, not pool truncation**: each end-phase discard prompt (hint501) has all 28 combinations of eight cards taken two at a time. Both players discard Fusion Deployment and Branded Opening. Expert bytes `02 07 00`/`02 07 05` differ from pool bytes `02 00 07`/`02 05 07`, although they refer to the same physical subsets. The public Core's hand-limit branch inserts responses into a `card_set`, and ordinary selection returns a Group set. Re-conversion now uniquely maps all 471 decisions and passes the existing behavior-cloning eligibility gates. Original response bytes, exact raw replay and every observation digest are unchanged; this is not imitation optimization.
 

@@ -1,6 +1,6 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.15.4 / Model Protocol V4.
+> Applies to Galatea-Core v3.15.5 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
@@ -311,5 +311,7 @@ in [Trainer](../trainer.py) from [Worker](../worker.py) commit/rollback records.
 | `WindBot_Executors/<executor>/Games` | Completed-game denominator for the associated win-rate point | Check sample size before interpreting fluctuations |
 | `Configuration/WindBot` | Active/reserved rosters, fixed builds, upstream levels, file/runtime hashes, allocation and model deck mode | Text, not a scalar. Records this launch's settings; resuming does not automatically enable opponents |
 
+From3.15.5, `league_weights` in the existing `Configuration/PPO` Text panel records the four absolute
+RuleBot/WindBot/history/self probabilities, not realized sample shares. No scalar tag is added.
 See [WindBot training opponents](../integrations/windbot/README.md#optional-main-training-opponents)
 for configuration, per-level holdouts and CLI examples.

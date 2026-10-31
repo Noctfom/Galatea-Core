@@ -179,7 +179,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.15.4"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.15.5"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -983,14 +983,22 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             if t_windbot_enabled:
                 st.caption(_("默认镜像构筑；上游层级是脚本分类，不代表实测强度。按层级保留执行器只隔离WindBot训练对手，不保证主模型未在其他池见过该构筑",
                              "Mirror builds by default. Upstream levels are script labels, not measured strength. Held-out executors never train as WindBot opponents; other pools may still contain those builds"))
+                wb_rescanned = False
+                wb_was_empty = not st.session_state.get('training_windbot_catalog')
                 if st.button(_("读取 / 刷新兼容执行器", "Read / Refresh Compatible Executors"), key='training_windbot_refresh') or 'training_windbot_catalog' not in st.session_state:
+                    wb_rescanned = True
                     try:
                         from integrations.windbot.training import training_catalog, suggest_training_split
-                        wb_catalog = training_catalog()
+                        wb_report = {}
+                        wb_catalog = training_catalog(diagnostics=wb_report)
                         wb_train, wb_holdouts = suggest_training_split(wb_catalog)
                         st.session_state['training_windbot_catalog'] = wb_catalog
                         st.session_state['training_windbot_defaults'] = (wb_train, wb_holdouts)
+                        st.session_state['training_windbot_report'] = wb_report
                     except Exception as error:
+                        st.session_state['training_windbot_catalog'] = {}
+                        st.session_state['training_windbot_defaults'] = ([], [])
+                        st.session_state['training_windbot_report'] = {'error': str(error)}
                         st.error(_(f'WindBot执行器读取失败: {error}', f'WindBot catalog failed: {error}'))
                 wb_catalog = st.session_state.get('training_windbot_catalog', {})
                 wb_train, wb_holdouts = st.session_state.get('training_windbot_defaults', ([], []))
@@ -999,21 +1007,49 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 default_holdouts = [entry['executor'] for entry in wb_saved.get('holdouts', [])] if wb_saved else wb_holdouts
                 wb_options = sorted(wb_catalog)
                 wb_format = lambda name: f"{name} | {wb_catalog[name]['level']}"
+                wb_train_key = f'training_windbot_train_{t_resume}'
+                wb_holdout_key = f'training_windbot_holdouts_{t_resume}'
+                # 空目录恢复后补回默认选项，正常刷新保留用户选择并剔除已失效执行器
+                for key, defaults in ((wb_train_key, default_train), (wb_holdout_key, default_holdouts)):
+                    wb_selection_initialized = key not in st.session_state or (wb_rescanned and wb_was_empty and wb_options)
+                    if wb_selection_initialized:
+                        st.session_state[key] = [name for name in defaults if name in wb_catalog]
+                    elif wb_rescanned:
+                        st.session_state[key] = [name for name in st.session_state[key] if name in wb_catalog]
+                    if wb_selection_initialized or wb_rescanned or key + '_previous' not in st.session_state:
+                        st.session_state[key + '_previous'] = list(st.session_state[key])
+                def synchronize_windbot_pools(changed_key, other_key):
+                    from integrations.windbot.training import synchronize_training_split
+                    selected, other = synchronize_training_split(
+                        st.session_state.get('training_windbot_catalog', {}),
+                        st.session_state[changed_key], st.session_state.get(changed_key + '_previous', []),
+                        st.session_state.get(other_key, []))
+                    st.session_state[changed_key] = selected
+                    st.session_state[other_key] = other
+                    st.session_state[changed_key + '_previous'] = selected
+                    st.session_state[other_key + '_previous'] = other
+                st.caption(_(f"兼容执行器: {len(wb_options)} 个", f"Compatible executors: {len(wb_options)}"))
+                if not wb_options:
+                    st.warning(_("未找到兼容构筑，请查看扫描结果中的卡库、词表与缺卡原因；修复后点击刷新",
+                                 "No compatible builds found. Check the scan report for database, vocabulary and missing-card issues, then refresh"))
+                wb_report = st.session_state.get('training_windbot_report', {})
+                with st.expander(_("扫描结果与跳过的构筑", "Scan Report and Skipped Builds")):
+                    st.json(wb_report)
                 wb_selected = st.multiselect(_("训练执行器", "Training Executors"), wb_options,
-                    default=[name for name in default_train if name in wb_catalog], format_func=wb_format,
-                    key=f'training_windbot_train_{t_resume}',
-                    help=_("每个WindBot Worker在每局开始时从名单等概率抽取，不按卡组数量加权。缺卡或词表不兼容的构筑不列入选项",
-                           "Each WindBot worker samples one executor uniformly per game. Decks missing cards or vocabulary support are excluded"))
+                    format_func=wb_format,
+                    key=wb_train_key,
+                    on_change=synchronize_windbot_pools, args=(wb_train_key, wb_holdout_key),
+                    help=_("移除后立即转入留出，加入时从留出移除；同构筑别名一起移动。每局等概率抽取训练执行器，缺卡或词表不兼容的构筑不列入选项",
+                           "Removing moves to holdouts; adding removes from holdouts. Identical-build aliases move together. Training executors are sampled uniformly per game; incompatible builds are excluded"))
                 wb_reserved = st.multiselect(_("留出评测执行器", "Held-out Evaluation Executors"), wb_options,
-                    default=[name for name in default_holdouts if name in wb_catalog], format_func=wb_format,
-                    key=f'training_windbot_holdouts_{t_resume}',
-                    help=_("不会作为WindBot训练对手。同一构筑的别名执行器须放在同一侧；这些执行器仍可在独立评测页手动选择，不会自动评测",
-                           "Never sampled as training opponents. Aliases with identical builds must stay together. Select them explicitly on the independent evaluation page; no automatic evaluation runs"))
-                wb_rate = st.number_input(_("WindBot Worker分配比例", "WindBot Worker Allocation Rate"),
-                    min_value=0.01, max_value=1.0, value=float(wb_saved.get('rate', 0.2)), step=0.05,
-                    key=f'training_windbot_rate_{t_resume}',
-                    help=_("默认20%。其余Worker保持原联盟抽样；混合模式优先由普通AI补Rule局，100%时只对WindBot。实际样本比例取决于局长、速度与超时",
-                           "Default 20%. Remaining workers use the original league; mixed mode preserves Rule coverage, preferably on regular AI workers. At 100%, only WindBot is used. Sample share depends on game length, speed and timeouts"))
+                    format_func=wb_format,
+                    key=wb_holdout_key,
+                    on_change=synchronize_windbot_pools, args=(wb_holdout_key, wb_train_key),
+                    help=_("不会作为WindBot训练对手，移除后立即转入训练，加入时从训练移除；同构筑别名一起移动。留出执行器可在独立评测页手动选择，不会自动评测",
+                           "Excluded from training; removing moves to training and adding removes from training. Identical-build aliases move together. Evaluation still requires an explicit launch"))
+                wb_unassigned = len(set(wb_options) - set(wb_selected) - set(wb_reserved))
+                st.caption(_(f"两侧名单即时联动；尚未分组 {wb_unassigned} 个（默认未选的未完成/测试执行器可手动加入）",
+                             f"Both lists update together; {wb_unassigned} unassigned (unfinished/test executors can be added manually)"))
                 wb_mode = st.selectbox(_("模型侧卡组选法", "Model-side Deck Selection"), ['mirror', 'training-pool'],
                     index=0 if wb_saved.get('deck_mode', 'mirror') == 'mirror' else 1,
                     format_func=lambda value: _("镜像WindBot固定构筑", "Mirror WindBot Build") if value == 'mirror' else _("常规训练卡组池", "Regular Training Deck Pool"),
@@ -1022,14 +1058,38 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                            "Only affects WindBot games. Mirror shares Main/Extra builds; regular mode keeps training deck sampling. Side Deck is not a model input"))
                 wb_runtime = st.text_input(_("WindBot程序路径（空为默认）", "WindBot Executable (blank for default)"),
                     value='', key='training_windbot_runtime',
-                    help=_("默认integrations/windbot/runtime/WindBot.exe。依赖仅在启用后检查，不自动下载或换成RuleBot",
-                           "Defaults to integrations/windbot/runtime/WindBot.exe. Explicit enablement checks dependencies without downloads or RuleBot substitution"))
-                wb_mono = st.text_input(_("Mono路径（仅Linux，可留空）", "Mono Path (Linux only, optional)"),
-                    value='', key='training_windbot_mono',
-                    help=_("Linux默认从PATH查找mono，Windows直接执行WindBot.exe", "Linux resolves mono on PATH by default; Windows runs WindBot.exe directly"))
+                    help=_("留空自动选取当前平台运行文件；Windows直接启动，Linux自动使用Mono与系统SQLite。依赖缺失时提示，不自动安装或换成RuleBot",
+                           "Blank selects the current platform runtime automatically: direct on Windows, Mono/system SQLite on Linux. Missing dependencies are reported without installation or RuleBot substitution"))
+                st.caption(_("Windows/Linux启动方式自动适配，无需选择平台；基础比例在下方联盟配比中显示和调整",
+                             "Windows/Linux startup adapts automatically. View or customize the base probabilities below"))
                 windbot_training_options = {'executors': wb_selected, 'holdouts': wb_reserved,
-                    'rate': float(wb_rate), 'deck_mode': wb_mode,
-                    'runtime': wb_runtime.strip() or None, 'mono': wb_mono.strip() or None}
+                    'deck_mode': wb_mode, 'runtime': wb_runtime.strip() or None}
+
+        from training_validation import resolve_league_weights
+        with st.expander(_("⚖️ 联盟对手配比（可选高级设置）", "⚖️ League Opponent Probabilities (optional)")):
+            league_custom = st.checkbox(_("自定义联盟配比", "Customize League Probabilities"),
+                value=False, key=f'league_custom_{t_resume}',
+                help=_("默认关闭：原联盟为15% RuleBot/25%历史/60%自对局；启用WindBot后由它接替基础RuleBot的15%。勾选后可逐项调整，总和必须为100%",
+                       "Defaults: 15% RuleBot, 25% history, 60% self-play. WindBot replaces the base RuleBot 15% when enabled. Customize all four probabilities with a 100% total"))
+            league_defaults = resolve_league_weights(windbot_enabled=t_windbot_enabled)
+            if league_custom and saved_meta.get('league_weights'):
+                saved_weights = saved_meta['league_weights']
+                if t_windbot_enabled or not saved_weights.get('windbot', 0):
+                    league_defaults = dict(saved_weights)
+            league_values = {}
+            for column, name, label in zip(st.columns(4), ('rule', 'windbot', 'hist', 'self'),
+                    ('RuleBot', 'WindBot', _("历史模型", "Historical Models"), _("自对局", "Self-play"))):
+                with column:
+                    league_values[name] = float(st.number_input(f'{label} (%)', min_value=0.0, max_value=100.0,
+                        value=round(league_defaults[name] * 100, 8), step=1.0, format='%.2f',
+                        key=f'league_{name}_{t_resume}_{t_windbot_enabled}_{league_custom}',
+                        disabled=not league_custom or (name == 'windbot' and not t_windbot_enabled),
+                        help=_("Worker基础分配概率，不是实际样本比例；四项合计100%，不隐式归一化",
+                               "Base Worker allocation probability, not actual sample share. Total must be 100%; no implicit normalization"))) / 100.0
+            st.caption(_(f"基础分配合计: {sum(league_values.values()):.2%}。额外RuleBot补局独立保留；只有100% WindBot时不补。历史池为空时，其份额回落到自对局",
+                         f"Total base probability: {sum(league_values.values()):.2%}. Extra RuleBot coverage is retained except at 100% WindBot. Empty history falls back to self-play"))
+            if abs(sum(league_values.values()) - 1) > 1e-8:
+                st.error(_("四类对手的基础比例必须合计100%", "The four base probabilities must total 100%"))
 
         if st.button("🔥 " + _("在后台启动训练", "Start Training Process"), use_container_width=True):
             if is_running:
@@ -1057,7 +1117,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     if t_device == "cuda" and not torch.cuda.is_available():
                         raise RuntimeError("当前 PyTorch 环境无法使用 CUDA，请选择 auto 或 cpu")
                     validate_model_prefix(t_model_prefix)
-                    if windbot_training_options is not None:
+                    resolve_league_weights(league_values, windbot_enabled=t_windbot_enabled)
+                    if windbot_training_options is not None and league_values['windbot'] > 0:
                         if not windbot_training_options['executors']:
                             raise ValueError('WindBot训练执行器名单不能为空')
                         if set(windbot_training_options['executors']) & set(windbot_training_options['holdouts']):
@@ -1129,17 +1190,15 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
                 if c_protocol_audit: cmd.append("--protocol-audit")
+                cmd.extend(['--league-weights', *(str(league_values[name]) for name in ('rule', 'windbot', 'hist', 'self'))])
                 if windbot_training_options is not None:
-                    cmd.extend(['--windbot', '--windbot-rate', str(windbot_training_options['rate']),
-                                '--windbot-deck-mode', windbot_training_options['deck_mode']])
+                    cmd.extend(['--windbot', '--windbot-deck-mode', windbot_training_options['deck_mode']])
                     for name in windbot_training_options['executors']:
                         cmd.extend(['--windbot-executor', name])
                     for name in windbot_training_options['holdouts']:
                         cmd.extend(['--windbot-holdout', name])
                     if windbot_training_options['runtime']:
                         cmd.extend(['--windbot-runtime', windbot_training_options['runtime']])
-                    if windbot_training_options['mono']:
-                        cmd.extend(['--windbot-mono', windbot_training_options['mono']])
                 p = launch_managed_task(cmd)
                 st.success(_(f"指令已发送 (PID: {p.pid})！", f"Dispatched (PID: {p.pid})!"))
                 time.sleep(0.5)
@@ -1367,9 +1426,10 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 "独立 BO1 会话，不加入 PPO 或联盟。由当前公开 Core 驱动，完整捕获用于重放校验；P0 固定先手，可交换 WindBot 座位。Core 种子不控制 WindBot 自身随机数，因此不是固定竞技场基准。",
                 "Independent BO1 sessions, outside PPO and the league. The current public Core drives faithful captures. P0 goes first; WindBot seats can be swapped. Core seeds do not control WindBot randomness, so this is not a fixed Arena benchmark.",
             ))
-            wb_runtime = st.text_input(_("WindBot.exe 路径", "WindBot.exe Path"),
-                value="integrations/windbot/runtime/WindBot.exe", key="wb_runtime",
-                help=_("需先独立构建并安装，界面不会自动下载、编译或更改系统环境。", "Build/install separately; this UI never downloads, compiles or changes the system environment."))
+            wb_runtime = st.text_input(_("WindBot运行文件（空为自动）", "WindBot Runtime (blank for automatic)"),
+                value="", key="wb_runtime",
+                help=_("留空自动选择当前Windows/Linux预编译运行文件；Linux自动使用Mono和系统SQLite。不需要编译器，界面不安装系统依赖",
+                       "Blank automatically selects the current Windows/Linux prebuilt runtime. Linux uses Mono/system SQLite. No compiler is required; the UI does not install system dependencies"))
             if st.button(_("读取/刷新执行器与 V4 模型列表", "Read/Refresh Executors and V4 Models"), key="wb_inspect"):
                 try:
                     from integrations.windbot.runtime import inspect_runtime
@@ -1476,12 +1536,14 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         st.error(_("请选择有效的原生侧卡组来源。", "Select a valid native-side deck source."))
                     elif st.session_state.get('wb_inspected_runtime') != wb_runtime:
                         st.error(_("运行路径已修改，请重新读取列表。", "Runtime path changed; refresh the lists first."))
-                    elif not os.path.isfile(wb_runtime):
+                    elif not wb_inspection.get('runtime_ready'):
                         st.error(_("WindBot 运行文件不存在，其他功能不受影响。", "WindBot runtime is missing; other features are unaffected."))
                     else:
-                        cmd = [sys.executable, "main.py", "windbot", "--runtime", wb_runtime,
+                        cmd = [sys.executable, "main.py", "windbot",
                             "--executor", wb_executor, "--windbot-seat", str(wb_seat),
                             "--games", str(wb_games), "--timeout", str(wb_timeout)]
+                        if wb_runtime.strip():
+                            cmd.extend(['--runtime', wb_runtime.strip()])
                         if wb_seed is not None:
                             cmd.extend(['--seed', str(wb_seed)])
                         if wb_other == "windbot":
@@ -1585,7 +1647,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     key='imitation_core_seed', help=_("只控制 Core 的开局序列，不是数据划分种子。", "Controls Core starts, not dataset splitting.")))
                 with st.expander(_("采集运行设置", "Collection Runtime Settings")):
                     im_runtime = st.text_input(_("WindBot 运行文件（空为默认）", "WindBot Runtime (blank for default)"), key='imitation_collect_runtime',
-                        help=_("默认 integrations/windbot/runtime/WindBot.exe；Linux 另需 Mono。", "Defaults to integrations/windbot/runtime/WindBot.exe; Linux also needs Mono."))
+                        help=_("留空自动适配当前Windows/Linux；系统运行依赖需已安装，无需另选平台",
+                               "Blank adapts automatically to Windows/Linux with installed system dependencies; no platform selection is needed"))
                     im_timeout = st.number_input(_("单局时间上限（秒）", "Time Limit per Game (seconds)"), 1, 3600, 600, key='imitation_collect_timeout',
                         help=_("超时局保留诊断，不生成示范缓存或虚构终局。", "Timed-out games keep diagnostics but produce no demonstration cache or invented terminal."))
             else:

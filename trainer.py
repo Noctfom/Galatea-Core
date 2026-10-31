@@ -114,6 +114,7 @@ from model_artifacts import (
     write_checkpoint_artifact_manifest,
 )
 from training_validation import (
+    resolve_league_weights,
     resolve_training_target,
     validate_model_prefix,
     validate_training_config,
@@ -345,11 +346,14 @@ def training_autocast(device, amp_dtype):
     return nullcontext()
 
 
-def select_league_opponent_config(roll, historical_models, model_id):
+def select_league_opponent_config(roll, historical_models, model_id, weights=None):
     """按联盟权重选择 Worker 基础对手，新模型无历史池时自动回落到 self"""
-    if roll < 0.15:
+    weights = weights or resolve_league_weights()
+    if roll < weights['rule']:
         return {"mode": "rule", "type": "rule", "path": None}
-    if roll < 0.40 and historical_models:
+    if roll < weights['rule'] + weights['windbot']:
+        return {'mode': 'external', 'type': 'windbot', 'path': None}
+    if roll < weights['rule'] + weights['windbot'] + weights['hist'] and historical_models:
         return {
             "mode": "ai",
             "type": "hist",
@@ -386,7 +390,7 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None, league_weights=None):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -415,9 +419,11 @@ class PPOTrainer:
         self.ppo_epochs = ppo_epochs
         self.target_kl = target_kl
         self.windbot_training = None
-        if windbot_training is not None:
+        self.league_weights = resolve_league_weights(league_weights, windbot_enabled=windbot_training is not None,
+            legacy_windbot_rate=(windbot_training or {}).get('rate'))
+        if self.league_weights['windbot'] > 0:
             from integrations.windbot.training import prepare_training_config
-            self.windbot_training = prepare_training_config(**windbot_training)
+            self.windbot_training = prepare_training_config(**dict(windbot_training, rate=self.league_weights['windbot']))
 
         resume_checkpoint = None
         self.training_lineage = None
@@ -632,6 +638,7 @@ class PPOTrainer:
                 'target_kl': self.target_kl,
                 'kl_stop_multiplier': TARGET_KL_STOP_MULTIPLIER,
                 'mini_batch_size': self.mini_batch_size,
+                'league_weights': self.league_weights,
             }, indent=2),
             self.train_step,
         )
@@ -990,23 +997,18 @@ class PPOTrainer:
         
         worker_opp_configs = []
         windbot_config = getattr(self, 'windbot_training', None)
+        weights = getattr(self, 'league_weights', None) or resolve_league_weights(
+            windbot_enabled=windbot_config is not None, legacy_windbot_rate=(windbot_config or {}).get('rate'))
         for i in range(self.num_workers):
-            if windbot_config is not None and random.random() < windbot_config['rate']:
+            config = select_league_opponent_config(random.random(), historical_models, self.model_id, weights)
+            if config['type'] == 'windbot':
                 registry = os.path.abspath(os.path.join('system_logs', 'windbot', 'processes',
                     f'{self.run_id}_{self.iteration}_{i}_{time.time_ns()}.json'))
-                worker_opp_configs.append({'mode': 'external', 'type': 'windbot', 'path': None,
-                    'windbot': dict(windbot_config, process_registry=registry)})
-                continue
-            worker_opp_configs.append(
-                select_league_opponent_config(
-                    random.random(),
-                    historical_models,
-                    self.model_id,
-                )
-            )
+                config['windbot'] = dict(windbot_config, process_registry=registry)
+            worker_opp_configs.append(config)
 
         # 混合模式优先由普通AI补Rule局，100%外部对手模式不再插入其他对手
-        forced_rule_worker = (None if windbot_config is not None and windbot_config['rate'] == 1.0 else
+        forced_rule_worker = (None if weights['windbot'] == 1.0 else
                              ensure_rule_opponent_coverage(worker_opp_configs, self.iteration))
         if forced_rule_worker is not None:
             print(
@@ -2086,6 +2088,7 @@ class PPOTrainer:
                     'target_kl': self.target_kl,
                     'training_stage': 'ppo',
                     'windbot_training': getattr(self, 'windbot_training', None),
+                    'league_weights': getattr(self, 'league_weights', resolve_league_weights()),
                 }
                 if self.training_lineage is not None:
                     checkpoint['training_lineage'] = dict(self.training_lineage, ppo_iteration=self.iteration)

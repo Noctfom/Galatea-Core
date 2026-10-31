@@ -12,18 +12,51 @@ from integrations.windbot.bridge import YGOProPeer, DECISIONS, prompt_actor, vis
 from integrations.windbot.runtime import executor_catalog, executable_sha256, launch_bot, load_deck
 
 
-def training_catalog():
-    """只在显式启用时检查本地构筑与当前卡库词表"""
+def training_catalog(*, diagnostics=None):
+    """在调用线程独立读取卡库，避免WebUI重运行复用其他线程的SQLite连接"""
     import deck_utils
+    from card_reader import CardReader
+    from card_vocab import get_default_card_vocabulary
+
+    entries = executor_catalog()
+    report = {'cdb_path': deck_utils.DEFAULT_CDB_PATH,
+              'vocabulary_path': deck_utils.DEFAULT_CARD_VOCAB_PATH,
+              'total': len(entries), 'compatible': 0, 'skipped': []}
+    database = CardReader(deck_utils.DEFAULT_CDB_PATH)
     result = {}
-    for name, entry in executor_catalog().items():
-        if not entry['deck_available']:
-            continue
-        path = Path(entry['deck_file'])
-        checked = deck_utils.load_deck(str(path.parent), path.stem)
-        if checked is not None and checked.main and deck_utils.is_deck_compatible(checked):
-            result[name] = dict(entry, deck=load_deck(path))
-    return result
+    try:
+        if database.conn is None:
+            raise RuntimeError(f"WindBot执行器扫描无法读取卡库: {deck_utils.DEFAULT_CDB_PATH}")
+        vocabulary = get_default_card_vocabulary(deck_utils.DEFAULT_CARD_VOCAB_PATH)
+        for name, entry in entries.items():
+            reason, unsupported = None, []
+            if not entry['deck_available']:
+                reason = 'missing_deck'
+            else:
+                path = Path(entry['deck_file'])
+                try:
+                    raw_deck = load_deck(path)
+                    checked = deck_utils.load_deck(str(path.parent), path.stem,
+                        card_database=database, vocabulary=vocabulary)
+                    if checked is None or not checked.main:
+                        reason = 'empty_deck'
+                    elif not deck_utils.is_deck_compatible(checked):
+                        reason, unsupported = 'unsupported_cards', list(checked.invalid_codes)
+                    else:
+                        result[name] = dict(entry, deck=raw_deck)
+                except (OSError, ValueError) as error:
+                    reason = 'invalid_deck'
+                    report['skipped'].append({'executor': name, 'reason': reason, 'detail': str(error)})
+                    continue
+            if reason:
+                report['skipped'].append({'executor': name, 'reason': reason, 'unsupported_codes': unsupported})
+        report['compatible'] = len(result)
+        if diagnostics is not None:
+            diagnostics.update(report)
+        return result
+    finally:
+        if database.conn is not None:
+            database.conn.close()
 
 
 def suggest_training_split(catalog):
@@ -43,7 +76,22 @@ def suggest_training_split(catalog):
     return sorted(set(eligible) - set(holdouts)), holdouts
 
 
-def prepare_training_config(*, executors=None, holdouts=None, rate=0.2, deck_mode='mirror',
+def synchronize_training_split(catalog, selected, previous, other):
+    """将本次增删同步到另一侧，同主额外构筑的别名始终一起转移"""
+    valid = set(catalog)
+    selected, previous, other = (set(values) & valid for values in (selected, previous, other))
+    def identity(name):
+        return tuple(tuple(sorted(catalog[name]['deck'][part])) for part in ('main', 'extra'))
+    added = {identity(name) for name in selected - previous}
+    removed = {identity(name) for name in previous - selected} - added
+    moved_in = {name for name in valid if identity(name) in added}
+    moved_out = {name for name in valid if identity(name) in removed}
+    selected = (selected | moved_in) - moved_out
+    other = (other | moved_out) - selected
+    return sorted(selected), sorted(other)
+
+
+def prepare_training_config(*, executors=None, holdouts=None, rate=0.15, deck_mode='mirror',
                             runtime=None, mono=None, response_timeout=10):
     """启动前冻结训练名单与构筑，恢复任务也需显式开启对手"""
     if (isinstance(rate, bool) or not isinstance(rate, (int, float))

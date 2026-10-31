@@ -1,6 +1,6 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.15.4 / Model Protocol V4。
+> 适用于 Galatea-Core v3.15.5 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
@@ -309,4 +309,6 @@ KL 衡量策略改变的幅度，不衡量改变后的优劣；低 KL 可能表�
 | `WindBot_Executors/<执行器>/Games` | 对应胜率点的完成局分母 | 先看样本数，再解读波动 |
 | `Configuration/WindBot` | 启动时的训练/留出名单、固定构筑、层级、文件与程序摘要、比例和模型侧卡组选法 | Text面板，不是标量图；用于核对本次训练条件，恢复检查点不会自动启用对手 |
 
+3.15.5起，既有Text面板`Configuration/PPO`中的`league_weights`记录四类绝对分配概率，
+顺序为RuleBot/WindBot/历史/自对局，不是本轮实际样本占比；此项不新增标量图。
 开关、默认按层级留出及CLI示例见 [WindBot主训练对手](../integrations/windbot/README.md#3154主训练对手)。

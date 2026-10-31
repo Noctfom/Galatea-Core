@@ -4,6 +4,22 @@
 
 ---
 
+## [v3.15.5] - 2026-10-30
+
+### League probabilities and cross-platform WindBot
+
+- Review adds linked training/holdout selectors: removal moves to the other side, addition removes from it, and identical-build aliases move together; initially excluded unfinished/test scripts stay unassigned. An independent `windbot_build` source kit provides maintainer recipes. Runtime distribution uses one shared managed executable, with old platform subdirectories only as fallback; portable packages always exclude the build kit. The new common binary needs Ubuntu22.04 target-machine acceptance; this batch performs no Linux builds or tests.
+- October31 review fixes false-empty WebUI executor lists: scans own and close a SQLite connection in the calling thread instead of reusing a global cross-thread connection whose failures were cached as missing cards. Recovering a formerly empty catalog restores suggested selections; ordinary refresh preserves manual choices. Scan counts and skipped-build reasons are visible without bypassing actual card/vocabulary checks or changing network/training actions. All102 related regressions pass, plus a real Windows CPU collection/PPO-update check.
+- Exposes absolute RuleBot/WindBot/history/self probabilities: default `0.15/0/0.25/0.60`, enabled WindBot `0/0.15/0.25/0.60`, replacing only the base RuleBot share. Optional UI customization or CLI `--league-weights` requires a total of1 without implicit normalization. Each Worker draws once; empty history still falls back to self-play.
+- Extra RuleBot coverage stays separate and prefers ordinary AI Workers in mixed mode; 100% WindBot adds no Rule games. Explicit legacy `--windbot-rate` retains remaining-share scaling and cannot be combined with the new argument. The UI emits only the four new values.
+- Optional checkpoint `league_weights` and existing TensorBoard `Configuration/PPO` record the configuration; UI custom mode can read it. No new scalar tags or checkpoint format changes. Resume still requires explicit WindBot enablement and current local assets.
+- Controlled games, independent imitation and main training automatically adapt to Windows/Linux without an OS selector or user build workflow. A companion prebuilt runtime package runs directly on Windows and through Mono/system SQLite on Linux. Users need no compiler; upstream project and decision sources remain unchanged.
+- Linux uses Mono/system SQLite with a private per-game native-library map, cleaned on exit without changing Windows files. Legacy common `runtime/WindBot.exe` and advanced CLI path overrides remain supported. Missing dependencies are reported without automatic installation or opponent replacement; `--inspect` checks dependencies only, not game acceptance.
+- Bilingual usage and release entries updated. Protocol4/Checkpoint3/revision14, network, rewards and PPO formulas remain unchanged; imitation and online-human learning still start independently.
+- Validation: all218 final related regressions pass; the nine real-Bot gates skipped in that run were verified separately. Windows and Ubuntu24.04/WSL2 x86_64 pass both-seat Blue-Eyes, Blue-Eyes/Albaz mirrors, raw/observation replay, three model policies and abnormal cleanup. Both platforms complete central-inference single-Worker collection and PPO weight updates. Runtime-file hashes, default/optional portable inventories, bilingual links, syntax and version boundaries pass. No acceptance of every executor, other distributions/CPU architectures or cloud-GPU long training, and no claim of learning gains.
+
+See [dependencies and runtime installation](../integrations/windbot/README.md#运行包与使用) and [metric definitions](tensorboard_metrics_en.md#11-windbot-main-training-opponent-metrics).
+
 ## [v3.15.4] - 2026-10-28
 
 ### Optional WindBot main-training opponents

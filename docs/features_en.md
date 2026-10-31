@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.4**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.5**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -787,8 +787,10 @@ Or click sync in WebUI's **🔄 Resource Sync Hub**.
 
 ## Optional WindBot controlled duels
 
-3.15.4 adds optional WindBot opponents on the main training page: default Worker allocation 20%,
-mirror fixed builds or regular model-side decks, suggested per-level holdouts and editable rosters.
+The main training page offers optional WindBot opponents. Version3.15.5 exposes absolute RuleBot/
+WindBot/history/self probabilities: `15%/0%/25%/60%` by default, `0%/15%/25%/60%` when enabled.
+Optional custom values must total100%. Windows/Linux startup adapts automatically without an OS choice.
+Mirror fixed builds or regular model-side decks, suggested per-level holdouts and editable rosters remain.
 Only model actions train PPO; imitation remains separate. Mixed mode retains Rule coverage, while
 100% means WindBot only. Checkpoints/TensorBoard retain rosters, file/runtime hashes and settings.
 Disabled by default, without new model inputs or network structure. See [usage and metrics](../integrations/windbot/README.md#optional-main-training-opponents).

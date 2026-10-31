@@ -36,6 +36,7 @@ EXCLUDED_TOP_LEVEL_DIRECTORIES = {
     "ygopro-core-master",
     "ygopro_linux_build",
     "ygopro_windows_build",
+    "windbot_build",
 }
 EXCLUDED_FILE_NAMES = {
     ".galatea_train.lock",

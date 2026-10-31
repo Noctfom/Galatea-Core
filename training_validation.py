@@ -8,6 +8,34 @@ from protocol_schema import apply_current_protocol_metadata
 from ppo_control import DEFAULT_PPO_EPOCHS, DEFAULT_TARGET_KL, MAX_PPO_EPOCHS
 
 MODEL_PREFIX_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+DEFAULT_LEAGUE_WEIGHTS = {'rule': 0.15, 'windbot': 0.0, 'hist': 0.25, 'self': 0.6}
+
+
+def resolve_league_weights(weights=None, *, windbot_enabled=False, legacy_windbot_rate=None):
+    """校验四类对手的绝对概率，默认由WindBot接替RuleBot基础份额"""
+    if weights is not None and legacy_windbot_rate is not None:
+        raise ValueError('联盟配比不能与旧版windbot-rate同时指定')
+    if weights is None:
+        weights = dict(DEFAULT_LEAGUE_WEIGHTS)
+        if legacy_windbot_rate is not None:
+            _require_finite_number('legacy_windbot_rate', legacy_windbot_rate)
+            if not windbot_enabled or not 0 < legacy_windbot_rate <= 1:
+                raise ValueError('旧版windbot-rate需要启用WindBot且位于(0,1]')
+            weights = {key: value * (1 - legacy_windbot_rate) for key, value in weights.items()}
+            weights['windbot'] = float(legacy_windbot_rate)
+        elif windbot_enabled:
+            weights['windbot'], weights['rule'] = weights['rule'], 0.0
+    if not isinstance(weights, dict) or set(weights) != set(DEFAULT_LEAGUE_WEIGHTS):
+        raise ValueError('联盟配比必须包含rule、windbot、hist、self四项')
+    for name, value in weights.items():
+        _require_finite_number(f'league.{name}', value)
+        if not 0 <= value <= 1:
+            raise ValueError(f'league.{name}必须位于[0,1]')
+    if not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-8):
+        raise ValueError('四类联盟配比之和必须等于1，不进行隐式归一化')
+    if weights['windbot'] and not windbot_enabled:
+        raise ValueError('WindBot配比大于0时必须显式启用WindBot')
+    return {key: float(weights[key]) for key in DEFAULT_LEAGUE_WEIGHTS}
 
 
 def _require_positive_integer(name, value):

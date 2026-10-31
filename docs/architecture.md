@@ -2,7 +2,7 @@
 
 > 本文档深入介绍 Galatea-Core 的技术架构与核心算法，适合想要深入了解或参与开发的用户。
 
-> 文档适用于 **Galatea-Core v3.15.4**：Model Protocol 4 / Checkpoint Format 3 / 结构修订 14 不变。独立模仿工作流与可选WindBot训练对手分开启动，前者监督示范动作，后者仅以PPO学习模型自己的动作；不自动学习真人对局。单方玩家视角接收仍仅提供诊断投影，不冒充完整原生观测。
+> 文档适用于 **Galatea-Core v3.15.5**：Model Protocol 4 / Checkpoint Format 3 / 结构修订 14 不变。独立模仿工作流与可选WindBot训练对手分开启动，前者监督示范动作，后者仅以PPO学习模型自己的动作；不自动学习真人对局。单方玩家视角接收仍仅提供诊断投影，不冒充完整原生观测。
 
 > 💡 **框架的独特处理逻辑**（语义化模块、142宣言池、多选题组块包装、记牌器、卡组权重、伪装池）请参考 [特殊处理逻辑文档](special_handling.md)。
 
@@ -591,9 +591,12 @@ Worker，将它的首局临时改为 RuleBot 对局，提交后恢复原本的 s
 加权随机性，也避免 Worker 数量较少时连续多轮缺少规则基准局。没有历史检查点时，hist
 权重会自然回落到 self。
 
-上表是默认联盟。3.15.4显式开启WindBot时，先按配置概率为Worker分配外部对手，其余
-Worker继续按上表的条件比例抽样；混合模式优先由普通AI Worker承担Rule补局，100% WindBot
-则不插入Rule局。外部对手逐局复用Worker已有Core，只有模型自己的候选动作、log-prob与
+上表是未开启WindBot的默认联盟。3.15.5将RuleBot/WindBot/历史/自对局统一为四项绝对概率，
+默认分别为`0.15/0/0.25/0.60`；显式开启WindBot后默认`0/0.15/0.25/0.60`，只替代基础Rule份额。
+WebUI可选自定义或CLI传`--league-weights`，总和必须为1，不隐式归一化。每个Worker只抽一次；
+混合模式优先由普通AI Worker承担额外Rule补局，100% WindBot不插入Rule局。显式旧参数
+`--windbot-rate`仍保留原余量缩放语义，不能与四项参数同用。外部对手逐局复用Worker已有Core，
+只有模型自己的候选动作、log-prob与
 价值进入原PPO/GAE；WindBot响应只是环境转移。接口与构筑留出说明见
 [WindBot训练对手](../integrations/windbot/README.md#3154主训练对手)。
 
