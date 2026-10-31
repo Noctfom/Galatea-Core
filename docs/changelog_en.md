@@ -4,6 +4,18 @@
 
 ---
 
+## [v3.15.8] - 2026-10-31
+
+### WindBot high-descriptor fix for Linux training Workers
+
+- Replace direct `select.select()` in the Bot idle-connection check. On Linux it only accepts descriptor numbers below1024; numerous shared tensor storages can push new Bot sockets past that range. This explains independent duels working while multi-Worker training immediately rolls games back, and is distinct from exhausting the process's descriptor limit
+- Use `selectors.DefaultSelector` for automatic backend selection, including epoll on Linux. Create/reuse one selector per connection and release it and sockets on registration failure, normal closure and errors rather than creating per-decision resources
+- Preserve zero-wait readiness checks, packet bounds, receive deadlines, disconnect/unsolicited-response rejection and whole-game rollback. Public Core, WindBot executable/executors, shared-memory layout, network, rewards and PPO remain unchanged, as do Protocol4/Checkpoint3/revision14
+- No Torch sharing-strategy switch, system-ulimit change or platform option. Existing Bot/Core artifacts and V4 checkpoints remain usable; restart training after updating
+- Validation:115 related baseline checks, two real Windows both-seat Bot games with independent replay, and one real Worker collection/PPO update passed,118 total. Coverage includes idle-control draining, unsolicited responses, partial-frame deadlines, disconnects, floods, selector reuse and registration/close failures. A real Linux socket≥1024 regression was added but skipped on this Windows host. No WSL testing or claim of cloud12-Worker acceptance
+
+See [WindBot descriptor limits](../integrations/windbot/README.md#linux-workers-and-high-descriptor-numbers).
+
 ## [v3.15.7] - 2026-10-31
 
 ### Bundled source-runtime files and Linux initialization fixes

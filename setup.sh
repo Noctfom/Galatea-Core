@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Galatea-Core v3.15.7 - Linux初始化与启动脚本
+# Galatea-Core v3.15.8 - Linux初始化与启动脚本
 # 默认复用当前Python或Conda环境，不创建虚拟环境、不编译Core或WindBot
 
 set -euo pipefail

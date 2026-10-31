@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.15.7 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
+此目录提供 Galatea-Core 3.15.8 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -70,6 +70,22 @@ Bot日志仍在`system_logs/windbot/`，训练不默认写整局捕获或全息�
 “WindBot专区”查看镜像/常规池曲线、执行器与先后手分母、真实胜平负及异常/截断。
 WindBot场次不再进入普通卡池榜、克制矩阵或`Deck_WinRates`，原总体联盟仍包含其实际训练结果。
 旧普通池记录缺少对手类型时无法追溯拆分；可识别的旧镜像记录仅单独展示。无需更新现有运行包。
+
+### Linux多Worker与高编号描述符
+
+3.15.8修正主训练中`filedescriptor out of range in select()`：旧空闲检查使用的Linux
+`select()`只能监视编号0～1023。Torch共享CPU张量通常缓存共享内存描述符，多Worker的
+输入／输出槽可能使新socket编号超过这条固定边界；即使只检查一个socket也会失败。
+独立竞技没有主训练的全部共享槽，因此可能正常。这个异常通常出现在Bot握手后的空闲检查，
+不代表Mono或程序主文件缺失，也不能仅据此判断句柄泄漏。
+
+连接层现在自动使用`selectors.DefaultSelector`，Linux选择epoll等后端，Windows保持其
+可用socket后端。选择器延迟创建、每连接复用并随连接回收；消息校验、接收超时和回滚不放宽。
+无需更换Bot／Core二进制、提高ulimit或改变Torch共享策略，保存检查点后重启训练即可应用。
+发生错误的旧场次仍按原规则回滚，不补造WindBot训练数据；该轮实际对手／样本比例可能偏离配置。
+限制与后端说明见[Linux select手册](https://man7.org/linux/man-pages/man2/select.2.html)、
+[Python selectors](https://docs.python.org/3.12/library/selectors.html)和
+[Torch共享策略](https://docs.pytorch.org/docs/2.9/multiprocessing.html#file-descriptor-file-descriptor)。
 
 ## 接口归属与运行边界
 
@@ -197,7 +213,21 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 
 ## English summary
 
-Galatea-Core 3.15.7 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
+Galatea-Core 3.15.8 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
+
+### Linux Workers and high descriptor numbers
+
+Version3.15.8 replaces the idle check's direct Linux `select()`, which accepts only descriptor numbers
+below1024. Shared tensor storages cache descriptors; training's many Worker slots can push a new
+Bot socket beyond that range even though independent duels work. This typically fails after the
+handshake and does not establish missing Mono/binaries or a descriptor leak. Automatic
+`selectors.DefaultSelector` uses epoll on Linux and an appropriate socket backend on Windows.
+The per-connection selector is lazy, reused and closed; packet limits, deadlines and rollback stay
+strict. Restart training after updating; existing Bot/Core files and checkpoints remain usable, without
+ulimit or Torch-sharing changes. Old failed games remain rolled back, so actual sampling proportions
+may differ from configured allocation. See the [Linux manual](https://man7.org/linux/man-pages/man2/select.2.html),
+[Python selectors](https://docs.python.org/3.12/library/selectors.html) and
+[Torch sharing strategy](https://docs.pytorch.org/docs/2.9/multiprocessing.html#file-descriptor-file-descriptor).
 
 ### Optional main-training opponents
 

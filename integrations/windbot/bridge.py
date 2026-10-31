@@ -4,7 +4,7 @@
     IceYGO client; no YGOSharp host source is copied into this module.
 """
 import ctypes
-import select
+import selectors
 import secrets
 import socket
 import struct
@@ -105,6 +105,7 @@ class YGOProPeer:
         self.listener.bind(('127.0.0.1', 0))
         self.listener.listen(1)
         self.connection = None
+        self._read_selector = None
         self.port = self.listener.getsockname()[1]
         self.responses = 0
         self.room_token = secrets.token_hex(8)
@@ -181,12 +182,23 @@ class YGOProPeer:
         self.game_message(encode_player_start(self.seat, decks))
 
     def check_idle(self):
-        if self.connection and select.select([self.connection], [], [], 0)[0]:
+        if self.connection is None:
+            return
+        if self._read_selector is None:
+            # Linux使用epoll等后端，避免共享张量使socket编号超过select的1023上限
+            reader = selectors.DefaultSelector()
+            try:
+                reader.register(self.connection, selectors.EVENT_READ)
+            except BaseException:
+                reader.close()
+                raise
+            self._read_selector = reader
+        if self._read_selector.select(0):
             for _ in range(32):
                 packet = self.receive(time.monotonic() + self.timeout)
                 if packet[0] not in (0x15, 0x16):
                     raise SessionProtocolError('unsolicited external packet while no response is pending')
-                if not select.select([self.connection], [], [], 0)[0]:
+                if not self._read_selector.select(0):
                     return
             raise SessionProtocolError('external idle packet flood')
 
@@ -205,7 +217,15 @@ class YGOProPeer:
         raise SessionProtocolError('external response packet flood')
 
     def close(self):
-        if self.connection:
-            self.connection.close()
-            self.connection = None
-        self.listener.close()
+        # 选择器每个连接只创建一次，正常与异常结束均释放其底层句柄
+        try:
+            if self._read_selector is not None:
+                self._read_selector.close()
+        finally:
+            self._read_selector = None
+            try:
+                if self.connection is not None:
+                    self.connection.close()
+            finally:
+                self.connection = None
+                self.listener.close()
