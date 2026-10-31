@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.6. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.7. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -46,7 +46,8 @@ Distinguish upstream sources, original licenses, pinned commits and local patche
 - [x] 3.14.0: full V4 main-framework deployment, direct CUDA semantic aggregation and bilingual documentation audit; Model Protocol4/Checkpoint3/revision14 unchanged
 - [x] 3.14.1: public-hint/announcement hotfixes, deployment labels and public metric-reference corrections, dual-view prediction cursors/coverage diagnostics; protocols and network unchanged
 - [ ] Complete50-iteration trends,100–200-iteration medium runs and long-term fixed Arena comparisons; temporary short-run stability is not acceptance
-- [ ] Select compatible PyTorch by Python/GPU/driver in the Linux helper without overwriting existing cloud environments; use documented manual installation meanwhile
+- [x] 3.15.7: Linux setup reuses current Python/Conda, constrains existing Torch and installs missing WindBot runtime prerequisites. Shared AnyCPU files ship in source without local compilation or a new Linux ZIP
+- [ ] Automatic Torch-build selection by GPU/driver on fresh machines remains pending; first installation uses requirements or an explicit wheel source without guessing compatibility
 
 ## Separable Deck-Construction Cognition
 

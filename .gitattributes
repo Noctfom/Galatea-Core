@@ -1,3 +1,5 @@
 # 保证跨平台启动脚本在检出后使用各自可执行的换行格式。
 *.bat text eol=crlf
 *.sh text eol=lf
+# 运行包按原始字节计算摘要，跨平台检出不转换其中的文本换行
+/integrations/windbot/runtime/** -text

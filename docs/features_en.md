@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.6**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.7**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 

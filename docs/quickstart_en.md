@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.15.6**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.15.7**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -55,7 +55,17 @@ without recompressing it.
 
 ### Linux Users
 
-See [README_EN.md](../README_EN.md#linux-users). On an existing cloud environment or newer GPU, manually install a compatible PyTorch build before `requirements.txt`. The GPU source in `setup.sh` is still fixed to cu121 and does not support every architecture automatically. The Windows portable runtime cannot be copied to Linux.
+See [README_EN.md](../README_EN.md#linux-users). Activate an existing Python3.10+/Conda environment and run `bash setup.sh --install-only`. No new venv is created; an existing Torch is constrained to its full version. By default the script checks the bundled WindBot program and installs missing Mono/SQLite runtime packages through apt on Ubuntu/Debian, without build tools. The Windows portable environment cannot be copied to Linux.
+
+```bash
+bash setup.sh --check                    # Read-only; no installation or resource updates
+bash setup.sh                            # Initialize and launch WebUI
+bash setup.sh --train --workers 6         # Initialize and train, retaining --no_compile
+bash setup.sh --skip-windbot --install-only  # Skip optional WindBot prerequisites
+bash setup.sh --python /path/to/python --install-only
+```
+
+`--python` or `GALATEA_PYTHON` selects an interpreter; otherwise the current PATH's `python` is preferred, preserving an activated environment. Without Torch, installation follows `requirements.txt` and the current pip source. Install a specific build manually first, or set `GALATEA_TORCH_INDEX_URL=<wheel-source> bash setup.sh --install-only`; this source applies only when Torch is absent. cu121 is no longer hardcoded. Broken existing Torch or dependency conflicts stop instead of replacing it. For distribution-managed Python, activate a writable environment; the script never uses `--break-system-packages`. Installation mode fetches missing card/script resources through the existing `main.py update --data`; read-only mode only reports missing files.
 
 ---
 

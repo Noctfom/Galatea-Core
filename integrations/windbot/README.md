@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.15.6 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
+此目录提供 Galatea-Core 3.15.7 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -91,7 +91,7 @@ Core 会话合同 v1 位于 `../duel_session.py`，包含会话 UUID、单调请
 
 Galatea 原创的适配代码在 `bridge.py`、`runtime.py`、`session.py` 和 `training.py`；上游完整源码快照在 `vendor/`，不拆散到项目根目录。`UPSTREAM.json` 记录仓库、分支、提交、导入日期和原始归档摘要；上游许可证保留在 `vendor/LICENSE`，依赖原有通知随快照保留。Git 提交应区分原样源码导入、Galatea 适配和后续上游更新。
 
-不提交嵌套 `.git`。源码、许可证、来源记录及可复核的必要补丁进入 Galatea 仓库；本地可执行运行目录 `runtime/`、构建目录 `build/` 和上游 `bin/obj` 产物由根 `.gitignore` 排除。若需要改动上游，单独标记补丁及理由，不把改动描述为未经修改的上游代码。
+不提交嵌套 `.git`。3.15.7起，`runtime/`中的公共AnyCPU程序、配置、卡组／对话、Windows SQLite原生库、许可证、来源和摘要按明确名单进入仓库；`.gitattributes`禁止转换这些文件的换行，保持摘要对应原始字节。本批沿用3.15.5构建产物，程序与上游源码提交不变，不因Core小版本更新而重编。`build/`、旧平台副本、调试文件、上游`bin/obj`和独立构建包继续排除。若修改上游，仍须单独标记补丁及理由。
 
 一键包默认排除 `vendor/`、`runtime/` 和 `build/`，保留原创适配代码与说明；`build_portable_package.py --with-windbot` 显式携带源码、许可证和已安装的 `runtime/`，始终排除构建工作区。此选项不下载或编译组件，不改变 GKG 模型包。
 维护者构建脚本位于独立的 [windbot_build](../../windbot_build/README.md)，普通便携包始终排除
@@ -100,13 +100,13 @@ Galatea 原创的适配代码在 `bridge.py`、`runtime.py`、`session.py` 和 `
 
 ## 运行包与使用
 
-将配套的`WindBot_Runtime_3.15.5.zip`解压到项目根目录，运行文件按包内目录放入
-`integrations/windbot/runtime/`。可选一键包使用`--with-windbot`携带已安装运行文件；普通
-源码包不包含二进制，需要另取运行包。运行文件由项目发布方预编译，用户无需安装编译器。
+3.15.7起，仓库检出和源码归档自带`integrations/windbot/runtime/`，无需单独下载或编译。
+旧源码归档或未携带WindBot的一键包仍可解压配套`WindBot_Runtime_3.15.5.zip`到项目根目录，
+保留目录结构。一键包的`--with-windbot`选配规则不变，本批不新增Linux ZIP。
 
 Windows需要.NET Framework 4.8运行时；Linux需要Mono与系统SQLite。Ubuntu可安装运行
 依赖`sudo apt-get install mono-runtime libmono-system-data4.0-cil libmono-system-web4.0-cil libmono-system-runtime-serialization4.0-cil libsqlite3-0`，不需要.NET SDK、MSBuild或`mono-devel`。
-Python训练环境与公开Core依赖仍按主项目说明安装，程序不会自动修改系统环境。
+显式执行`bash setup.sh --install-only`会复用当前Python环境，并在Ubuntu/Debian通过apt补齐缺少的上述运行包；非root用户需要sudo。`--check`只检查，`--skip-windbot`跳过此模块。其他发行版需自行准备等效依赖；WindBot对局入口本身不安装系统包。Python环境与公开Core依赖仍按主项目说明安装。
 
 ```text
 python main.py windbot --inspect
@@ -197,7 +197,7 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 
 ## English summary
 
-Galatea-Core 3.15.6 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
+Galatea-Core 3.15.7 owns this optional integration: controlled BO1 arrived in 3.15.0 and optional training opponents in 3.15.4. One public Core drives a loopback WindBot client. Source remains pinned to `dec0535f8669dca01457a898890a968139711b19` without upstream decision patches. Human clients and BO3 remain future work.
 
 ### Optional main-training opponents
 
@@ -266,18 +266,23 @@ See [expert CLI/API and identity audits](../../docs/core_trajectories_en.md#3152
 
 Core owns the shared session, observation, action and capture contracts. WindBot lifecycle management belongs here; Link reuses stable Core interfaces later and is not a prerequisite. Normal startup must not import, probe, download or launch this component. Its absence must not affect existing training, Arena, replay or packaging. Selecting WindBot without its dependencies must report the missing setup instead of silently substituting another opponent. Future Link player-view reconstruction needs Core's host-generated Start/query adapter; these packets are not original native Core chunks.
 
-The upstream is [IceYGO/windbot](https://github.com/IceYGO/windbot). Its [MIT license](https://github.com/IceYGO/windbot/blob/master/LICENSE), copyright and dependency notices are retained in the source snapshot. `UPSTREAM.json` identifies the exact snapshot and original archive; Git excludes nested repositories and build/runtime outputs. Portable packages exclude vendor/runtime by default; `--with-windbot` includes source, licenses and an already installed runtime, without downloading or building. GKG is unchanged.
+The upstream is [IceYGO/windbot](https://github.com/IceYGO/windbot). Its [MIT license](https://github.com/IceYGO/windbot/blob/master/LICENSE), copyright and dependency notices are retained. `UPSTREAM.json` identifies the exact snapshot. From3.15.7, Git includes an explicit allowlist of shared AnyCPU runtime files, native Windows SQLite libraries, data, notices and manifests; attributes preserve original bytes across checkouts. The existing3.15.5 build is unchanged. Nested repositories, build/debug outputs and old platform copies stay excluded. Portable packages still exclude vendor/runtime by default; `--with-windbot` includes them without downloading or building. GKG is unchanged.
 
-Extract the provided `WindBot_Runtime_3.15.5.zip` into the project root. Optional portable packages can
-include an installed runtime via `--with-windbot`; source-only distributions need the separate runtime.
+From3.15.7, repository checkouts and source archives include `integrations/windbot/runtime/`; no
+separate download or compilation is needed. Older sources or portable packages without WindBot can
+still use `WindBot_Runtime_3.15.5.zip`, extracted into the project root. Portable packaging retains
+`--with-windbot`; no Linux ZIP is added.
 Users need no compiler. Windows requires the .NET Framework4.8 runtime; Linux requires Mono/system
 SQLite (Ubuntu: `sudo apt-get install mono-runtime libmono-system-data4.0-cil libmono-system-web4.0-cil libmono-system-runtime-serialization4.0-cil libsqlite3-0`), not a .NET SDK/MSBuild/mono-devel.
-Python and public Core dependencies still follow the main project's installation guide.
+Explicit `bash setup.sh --install-only` reuses current Python and installs missing packages above
+through apt on Ubuntu/Debian, with sudo for non-root users. `--check` is read-only; `--skip-windbot`
+skips this module. Other distributions need equivalent prerequisites prepared manually. Duel entry
+points do not install system packages. Python/Core dependencies follow the main installation guide.
 Maintainers use the independent [build kit](../../windbot_build/README.md), distributed separately as
 `WindBot_Build_3.15.5.zip` with pinned source and scripts. It is always excluded from portable packages.
 Runtime selection prefers one shared `runtime/WindBot.exe`; old platform subdirectories remain only
 as a fallback if the shared file is absent. Linux uses a per-process private exe/config with a system-SQLite map,
-preserving Windows files. No OS selector or automatic dependency installation is added. `--runtime`
+preserving Windows files. Duel entry points add no OS selector or dependency installation. `--runtime`
 and optional CLI `--mono` override paths. Keep configuration/managed dependencies/Dialogs alongside the
 exe; Windows additionally needs its native SQLite library. `--inspect` is only a dependency/file check.
 

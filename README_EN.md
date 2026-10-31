@@ -7,7 +7,7 @@
 **Yu-Gi-Oh! Universal AI Training Framework based on Transformer + PPO**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.15.6](https://img.shields.io/badge/Release-v3.15.6-brightgreen.svg)](docs/changelog_en.md)
+[![Release: v3.15.7](https://img.shields.io/badge/Release-v3.15.7-brightgreen.svg)](docs/changelog_en.md)
 [![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/architecture_en.md#exact-card-identity-model-protocol-v4)
 [![Python: 3.11 recommended](https://img.shields.io/badge/Python-3.11_recommended-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
@@ -104,11 +104,12 @@ python -m streamlit run app.py
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# Existing helper (GPU installation still selects cu121; see the note below)
-chmod +x setup.sh
-./setup.sh               # Install deps & launch WebUI
-./setup.sh --train       # Install deps & launch CLI training
-./setup.sh --duel        # Install deps & launch Arena
+# Activate an existing Python/Conda environment first; no new venv is created
+bash setup.sh --install-only  # Install dependencies and WindBot prerequisites, then exit
+bash setup.sh --check         # Read-only check; no installation or resource update
+bash setup.sh                 # Initialize and launch WebUI
+bash setup.sh --train         # Initialize and launch CLI training
+bash setup.sh --duel          # Initialize and launch Arena
 
 # Or manual install
 python3 -m venv venv
@@ -121,7 +122,9 @@ python main.py parse --sync
 python -m streamlit run app.py
 ```
 
-`setup.sh` does not yet select PyTorch by GPU architecture. On an existing cloud environment or newer GPU, install a compatible PyTorch build manually, then install `requirements.txt`; avoid overwriting a validated environment with the helper. See the [official PyTorch installation guide](https://pytorch.org/get-started/locally/). The Windows runtime cannot be reused on Linux, and arbitrary newer Core binaries are not drop-in replacements for the bundled public ABI.
+`setup.sh` requires Python3.10+, reuses the current environment and constrains an installed Torch to its exact version. Without Torch it uses `requirements.txt` and the current pip source; install a specific CUDA build first using the [official guide](https://pytorch.org/get-started/locally/), or use the explicit source option in Quick Start. It no longer hardcodes cu121 or upgrades existing Torch to satisfy new dependencies; resolver conflicts stop with the pip error.
+
+Source distributions include the shared WindBot AnyCPU program, run through Mono on Linux without compilation. On Ubuntu/Debian the initializer installs missing Mono/SQLite runtime packages through apt, using sudo when needed; other distributions need equivalent prerequisites prepared manually. Use `--skip-windbot` for ordinary training/Arena without the optional module, for example `bash setup.sh --skip-windbot --install-only`. The Windows Python environment cannot be copied to Linux, and arbitrary newer Core binaries are not drop-in replacements for the bundled public ABI.
 
 📖 **Detailed Tutorial**: [Quick Start Guide](docs/quickstart_en.md)
 

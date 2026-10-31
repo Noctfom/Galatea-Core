@@ -4,6 +4,20 @@
 
 ---
 
+## [v3.15.7] - 2026-10-31
+
+### Bundled source-runtime files and Linux initialization fixes
+
+- Explicitly allowlist the shared AnyCPU WindBot program/configuration, decks/dialogs, native Windows SQLite libraries, provenance, notices and manifest in Git. Build/debug outputs and old platform copies remain excluded. Runtime attributes preserve original bytes so checkout newline conversion cannot invalidate hashes
+- Reuse the existing3.15.5 runtime and pinned upstream source without recompilation, executor changes or another private Core. Repository checkouts and source archives now contain the Bot program
+- Linux setup reuses current Python3.10+/Conda or an explicit interpreter. It creates no venv, upgrades no pip and no longer hardcodes cu121. Existing Torch is pinned to its full version during requirements installation; broken imports or dependency conflicts stop instead of replacing it
+- Ubuntu/Debian installs only missing Mono/class-library/system-SQLite runtime packages, using sudo for non-root users and no build tools. Other distributions reuse prepared prerequisites. `--skip-windbot` bypasses the optional module; training/Arena entry points never install system packages automatically
+- `--check` is read-only and `--install-only` initializes without launching. pip and launch use the same interpreter. Only installation mode fetches missing card/script resources. Core load errors retain their diagnostics without upgrading glibc or compiling replacements
+- No Linux ZIP, Windows portable-environment change or change to `--with-windbot` packaging. Bilingual setup/provenance guides updated; network, rewards, PPO, Protocol4/Checkpoint3/revision14 unchanged
+- Validation:68 related checks passed; one real-Bot case was not enabled. Git Bash syntax/command-stub checks cover read-only behavior, current/explicit interpreters, Torch retention/temporary cleanup, missing runtime prerequisites, resource updates and argument forwarding. File hashes, Git allowlists/byte-preserving attributes, bilingual links/versions and existing packaging rules pass. No WSL, actual Linux initialization, apt installation or compilation was performed; Ubuntu22.04 needs target-machine acceptance
+
+See [Linux setup](../README_EN.md#linux-users) and [Quick Start](quickstart_en.md#linux-users).
+
 ## [v3.15.6] - 2026-10-31
 
 ### Central inference transfers and separate WindBot statistics

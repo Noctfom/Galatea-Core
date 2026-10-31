@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置。已有环境和资产时约需 **5–10 分钟**；首次下载或全量语义生成可能明显更久。
 
-> 文档适用于 **Galatea-Core v3.15.6**，Model Protocol V4 / Checkpoint Format 3。
+> 文档适用于 **Galatea-Core v3.15.7**，Model Protocol V4 / Checkpoint Format 3。
 
 > 代码语义构建/同步与质量检查见 [3.13.4 语义资产指南](code_semantics.md)。新源码、向量、索引和生成清单须成组使用；新语义身份不与旧检查点混用。
 
@@ -51,7 +51,17 @@
 
 ### Linux 用户
 
-Linux 用户请参考 [README.md](../README.md#linux-用户)。已有云端环境或新显卡优先手动安装匹配的 PyTorch，再安装 `requirements.txt`；`setup.sh` 的 GPU 安装源仍固定 cu121，不保证适配所有显卡。Windows 便携环境不能直接复制到 Linux。
+Linux 用户请参考 [README.md](../README.md#linux-用户)。先激活已有 Python 3.10+／Conda 环境，再运行 `bash setup.sh --install-only`；不创建新的虚拟环境，已有 Torch 按完整版本约束保留。默认同时检查仓库携带的 WindBot 程序，Ubuntu/Debian 缺少 Mono／SQLite 时通过 apt 安装运行前置，不安装编译工具。Windows 便携环境不能直接复制到 Linux。
+
+```bash
+bash setup.sh --check                    # 只检查，不安装或更新资源
+bash setup.sh                            # 初始化并启动 WebUI
+bash setup.sh --train --workers 6         # 初始化并启动训练，沿用 --no_compile
+bash setup.sh --skip-windbot --install-only  # 不用 WindBot 时跳过其系统前置
+bash setup.sh --python /path/to/python --install-only
+```
+
+`--python`或`GALATEA_PYTHON`可指定解释器，默认优先选择当前 PATH 中的 `python`，不会绕过已激活的环境改用系统 Python。若没有 Torch，默认沿 `requirements.txt` 和现有 pip 源安装；需要特定构建时优先手动安装，也可用 `GALATEA_TORCH_INDEX_URL=<目标wheel源> bash setup.sh --install-only`，该源只用于首次安装 Torch。脚本不再硬编码 cu121；已有 Torch 损坏或依赖与其版本冲突时停止，不自动覆盖。系统 Python 若受发行版保护，请先激活可写环境；脚本不会使用 `--break-system-packages`。缺少卡库／脚本时，安装模式沿用 `main.py update --data` 补齐，只读模式仅报告缺失。
 
 
 ## 同步资源与卡库

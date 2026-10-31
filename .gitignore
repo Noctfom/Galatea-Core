@@ -45,8 +45,24 @@ Galatea_Core_V*.zip.part*
 Galatea_Core_V*.zip.sha256.txt
 Merge_Galatea_Core_V*.bat
 
-# WindBot 可选模块：保留适配代码、来源记录和上游源码，忽略本地运行/编译产物
-/integrations/windbot/runtime/
+# WindBot公共运行文件随源码发布，仅放行固定程序、数据、许可证及清单
+/integrations/windbot/runtime/**
+!/integrations/windbot/runtime/WindBot.exe
+!/integrations/windbot/runtime/WindBot.exe.config
+!/integrations/windbot/runtime/INSTALL.txt
+!/integrations/windbot/runtime/manifest.json
+!/integrations/windbot/runtime/UPSTREAM.json
+!/integrations/windbot/runtime/Decks/
+!/integrations/windbot/runtime/Decks/*.ydk
+!/integrations/windbot/runtime/Dialogs/
+!/integrations/windbot/runtime/Dialogs/*.json
+!/integrations/windbot/runtime/licenses/
+!/integrations/windbot/runtime/licenses/*.txt
+!/integrations/windbot/runtime/x64/
+!/integrations/windbot/runtime/x64/sqlite3.dll
+!/integrations/windbot/runtime/x86/
+!/integrations/windbot/runtime/x86/sqlite3.dll
+# 编译目录、调试文件及独立构建包仍不进入仓库
 /integrations/windbot/build/
 /windbot_build/
 /integrations/windbot/vendor/**/bin/

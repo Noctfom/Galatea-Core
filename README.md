@@ -7,7 +7,7 @@
 **基于 Transformer + PPO 的游戏王通用 AI 训练框架**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Release: v3.15.6](https://img.shields.io/badge/Release-v3.15.6-brightgreen.svg)](docs/changelog.md)
+[![Release: v3.15.7](https://img.shields.io/badge/Release-v3.15.7-brightgreen.svg)](docs/changelog.md)
 [![Model Protocol: V4](https://img.shields.io/badge/Model_Protocol-V4-6f42c1.svg)](docs/architecture.md#精确卡片身份model-protocol-v4)
 [![Python: 3.11 recommended](https://img.shields.io/badge/Python-3.11_recommended-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
@@ -100,11 +100,12 @@ python -m streamlit run app.py
 git clone https://github.com/Noctfom/Galatea-Core.git
 cd Galatea-Core
 
-# 现有辅助脚本（GPU 安装路径仍固定 cu121，见下方说明）
-chmod +x setup.sh
-./setup.sh               # 安装依赖 & 启动 WebUI
-./setup.sh --train       # 安装依赖 & 启动 CLI 训练
-./setup.sh --duel        # 安装依赖 & 启动竞技场
+# 先激活已有 Python/Conda 环境；脚本不会另建 venv
+bash setup.sh --install-only  # 安装依赖、补齐 WindBot 运行前置后退出
+bash setup.sh --check         # 只检查，不安装或更新资源
+bash setup.sh                 # 初始化并启动 WebUI
+bash setup.sh --train         # 初始化并启动 CLI 训练
+bash setup.sh --duel          # 初始化并启动竞技场
 
 # 或手动安装
 python3 -m venv venv
@@ -117,7 +118,9 @@ python main.py parse --sync
 python -m streamlit run app.py
 ```
 
-`setup.sh` 尚不按显卡架构选择 PyTorch 构建。已有云端环境或新显卡请优先手动安装匹配的 PyTorch，再安装 `requirements.txt`；不要让脚本覆盖已验证的环境。安装选项见 [PyTorch 官方指南](https://pytorch.org/get-started/locally/)。Windows 内置环境不用于 Linux，随包 Core 的公开 ABI 也不能用任意新版二进制直接替换。
+`setup.sh` 要求 Python 3.10+，优先复用当前环境，并用精确版本约束保留已安装的 Torch。没有 Torch 时按 `requirements.txt` 和当前 pip 源安装；需要特定 CUDA 构建时请先按 [PyTorch 官方指南](https://pytorch.org/get-started/locally/) 安装，或使用快速上手中的显式源选项。脚本不再固定 cu121，也不会升级已有 Torch 来适配新依赖；依赖冲突时停止并显示 pip 错误。
+
+源码已携带 WindBot 公共 AnyCPU 程序，Linux 由 Mono 启动，不需要编译。Ubuntu/Debian 的缺失 Mono/SQLite 运行前置由初始化脚本通过 apt 安装，普通用户需要 sudo；其他发行版需自行准备。只用原训练或竞技场时可加 `--skip-windbot`，例如 `bash setup.sh --skip-windbot --install-only`。Windows 内置环境不能复制到 Linux，随包 Core 的公开 ABI 也不能用任意新版二进制直接替换。
 
 📖 **详细教程**: [快速上手指南](docs/quickstart.md)
 

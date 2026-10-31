@@ -12,7 +12,7 @@ independent imitation still requires separate startup.
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.15.6 (optional WindBot training opponents, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.15.7 (optional WindBot training opponents, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | 2 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |

@@ -1,0 +1,15 @@
+Galatea-Core 3.15.5 WindBot runtime
+
+将本包解压到项目根目录，保留integrations/windbot/runtime目录结构
+Extract into the project root, preserving integrations/windbot/runtime
+Windows/Linux使用同一份AnyCPU托管WindBot.exe，无需选择平台或编译
+One shared managed executable; no compiler or OS selector required
+Windows: .NET Framework 4.8 runtime
+Linux: Mono + system SQLite
+Ubuntu runtime dependencies:
+sudo apt-get install mono-runtime libmono-system-data4.0-cil libmono-system-web4.0-cil libmono-system-runtime-serialization4.0-cil libsqlite3-0
+Check dependencies: python main.py windbot --inspect
+需要已有同版本主项目、vendor执行器源码/卡组及原有Python/Core运行环境
+Requires the matching project, vendor executor sources/decks and Python/Core runtime
+来源、许可证与逐文件校验见UPSTREAM.json、licenses和manifest.json
+Linux原生SQLite来自目标系统，不包含额外决斗内核或Linux专用.so
