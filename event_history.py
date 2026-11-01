@@ -214,12 +214,14 @@ class TransitionEventRecorder:
             action_code = int(getattr(action, "code", 0)) & 0x7FFFFFFF
             target_codes = (action_code,) if action_code else ()
         target_count = max(len(target_locations), len(target_codes))
+        # 保留正常事件既有占位布局，只补齐缺失身份的一侧，避免改变旧输入掩码
+        target_width = min(target_count * 2, ACTION_TARGET_SLOTS)
         target_locations = (
-            target_locations + (-1,) * target_count
-        )[:ACTION_TARGET_SLOTS]
+            target_locations + (-1,) * target_width
+        )[:target_width]
         target_codes = (
-            target_codes + (0,) * target_count
-        )[:ACTION_TARGET_SLOTS]
+            target_codes + (0,) * target_width
+        )[:target_width]
 
         result_flags = TransitionResultFlag.NONE
         if operation_id == int(ActionOperation.CANCEL):

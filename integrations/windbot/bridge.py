@@ -3,7 +3,6 @@
     Original Python implementation. Wire layouts are checked against the pinned
     IceYGO client; no YGOSharp host source is copied into this module.
 """
-import ctypes
 import selectors
 import secrets
 import socket
@@ -12,7 +11,7 @@ import time
 
 from integrations.duel_session import SessionProtocolError, finite_timeout, response_bytes
 from integrations.player_view import (
-    DECISIONS, PUBLIC_MESSAGES, encode_player_start, encode_zone_refresh, visible_core_message,
+    DECISIONS, PUBLIC_MESSAGES, encode_player_start, encode_zone_refresh, visible_core_message, public_query_updates,
 )
 
 
@@ -57,40 +56,8 @@ def visible_message(message, perspective):
 
 
 def query_updates(env, perspective):
-    """Public query_card only, at a paused prompt/chunk barrier; never deck order.
-
-    Missing rows are length=4; hidden rows are length=8/flags=0. Each side's own
-    hand/Extra is visible. Opposing face-down cards and all Main Deck rows remain
-    unknown. The returned bytes never enter the authoritative raw capture.
-    """
-    from core_query import PUBLIC_CARD_QUERY_FLAGS, QUERY_REASON_CARD
-    flags = PUBLIC_CARD_QUERY_FLAGS & ~QUERY_REASON_CARD
-    buffer = (ctypes.c_byte * 8192)()
-    for actor in (0, 1):
-        for zone in (4, 8, 2, 16, 32, 64):
-            count = (7 if zone == 4 else 8 if zone == 8 else env.query_zone_count(actor, zone))
-            if count is None or not 0 <= count <= 256:
-                raise SessionProtocolError('public Core query_field_count unavailable or invalid')
-            rows = []
-            for sequence in range(count):
-                length = env.lib.query_card(env.pduel, actor, zone, sequence, flags, buffer, 0)
-                if not 4 <= length <= ctypes.sizeof(buffer):
-                    raise SessionProtocolError('external query_card length invalid')
-                row = ctypes.string_at(ctypes.addressof(buffer), length)
-                if struct.unpack_from('<I', row)[0] != len(row):
-                    raise SessionProtocolError('external query_card length mismatch')
-                if len(row) == 4:
-                    rows.append(row)
-                    continue
-                actual = struct.unpack_from('<I', row, 4)[0]
-                if actual & 3 != 3 or len(row) < 16:
-                    raise SessionProtocolError('external query lacks code/position layout')
-                # Opposing hand is private even if the Core position says face-up.
-                public = zone == 16 or (zone != 2 and bool(row[15] & 5))
-                if actor != perspective and not public:
-                    row = struct.pack('<II', 8, 0)
-                rows.append(row)
-            yield encode_zone_refresh(actor, zone, rows)
+    """复用Core定义的原有派生查询刷新，封包字节和隐藏策略保持一致"""
+    yield from public_query_updates(env, perspective)
 
 
 class YGOProPeer:

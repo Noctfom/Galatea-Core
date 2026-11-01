@@ -75,7 +75,7 @@ def print_snapshot_inspection(snapshot: GameSnapshot, player_id: int):
     print("-" * 50)
 
 
-def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
+def run_single_game(env, deck1, deck2, name1="P0", name2="P1", *, player_view_auditor=None):
     """
     执行单局游戏
     :return: (winner_id, turn_count, error_msg)
@@ -98,6 +98,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
         )
 
         encoder = GalateaEncoder()
+        if player_view_auditor is not None:
+            player_view_auditor.start(deck1, deck2)
         
         consecutive_retries = 0
         last_action_log = ""
@@ -123,10 +125,14 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
             
             brain_0.update(msg_type, msg_payload)
             brain_1.update(msg_type, msg_payload)
+            if player_view_auditor is not None:
+                player_view_auditor.observe(msg)
 
             # 空连锁询问由引擎协议自动通过，不增加压测决策步数
             if is_empty_chain_prompt(msg_type, msg_payload):
                 env.send_action(-1)
+                if player_view_auditor is not None:
+                    player_view_auditor.submitted(decision_player_from_message(msg_type, msg_payload), -1)
                 continue
             
             # 追踪操作者
@@ -254,6 +260,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                     current_step_ignore_list = []
 
                 rule_bot.sync_valid_actions(brain.current_valid_actions)
+                if player_view_auditor is not None:
+                    player_view_auditor.before_decision(env, brain, encoder, active_player)
 
                 # [NEW] 将 ignore_actions 传入 Bot
                 resp = rule_bot.get_rule_decision(
@@ -281,6 +289,8 @@ def run_single_game(env, deck1, deck2, name1="P0", name2="P1"):
                         msg_type,
                         resp,
                     )
+                if player_view_auditor is not None:
+                    player_view_auditor.submitted(active_player, resp)
                 msg_queue = [] # 发送动作后清空队列，等待新状态
 
             else:

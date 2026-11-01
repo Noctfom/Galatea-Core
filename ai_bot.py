@@ -40,6 +40,10 @@ class AiBot:
 
         try:
             checkpoint = load_training_checkpoint(path, map_location=self.device)
+            from checkpoint_utils import checkpoint_semantic_update
+            semantic_update = checkpoint_semantic_update(checkpoint)
+            if semantic_update:
+                print(f"♻️ [语义兼容] {semantic_update['message']}")
             if (
                 expected_model_id is not None
                 and checkpoint['model_id'] != expected_model_id

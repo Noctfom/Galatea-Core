@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.15.9**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.16.1**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -258,6 +258,13 @@ Galatea-Core's training parameters are divided into three tiers:
 | Timeout | 600 |
 
 Click **🔥 Start Training Process**.
+
+To investigate central latency, temporarily enable Central Inference Timing (200 microbatches
+per iteration by default), or append `--inference-profile-batches 200` to the original training
+command. It is off by default, changes no learning parameters and adds diagnostic overhead.
+Reports appear under **Storage & Logs → Runtime Diagnostics**; see the [timing definitions](architecture_en.md#central-inference-timing-diagnostics).
+The separate RuleBot player-view comparison is also a diagnostic, not an online Link switch;
+see the [observation contract](core_trajectories_en.md#player-observation-contract-and-field-comparison).
 
 ![Launch & Monitor Hub](图片/启动与监控中枢.png)
 

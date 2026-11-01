@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.15.9**。模型协议 V4、检查点格式 3；发布版本与协议版本独立。
+> 文档适用于 **Galatea-Core v3.16.1**。模型协议 V4、检查点格式 3；发布版本与协议版本独立。
 
 ---
 
@@ -136,6 +136,12 @@ TensorBoard 会由当前一键环境中的 Python 模块启动，不要求系统
 - **禁用编译**：Windows 或编译器环境不完整时建议开启
 - **导出 ONNX**：每 10 轮保存点同步导出，供历史对手在 Worker 端使用
 - **固定内核协议**：使用随包公开 Core 的既定报文布局，不再提供“幽灵字节/标准内核”切换；更新内核时需独立验证协议迁移
+- **中央推理数据传输方式**：日常训练保留“批量传输（推荐）”；“逐字段传输（原方式）”用于性能比较或排查运行问题，CPU/CUDA均可使用。原理见[批量传输](architecture.md#按dtype连续搬运)
+- **中央推理分段诊断**：采集速度慢时开启，查看等待、传输和模型计算分别花了多少时间。默认每轮记录前200批请求，正常训练可保持关闭；报告在“存储与日志仓库 → 运行诊断”查看。字段说明见[计时说明](architecture.md#中央推理分段诊断)
+
+规则自检选择RuleBot时可开启“原生 / 玩家观测对照”，每局默认比较双方前32个决策点；
+此开关增加查询/编码开销，诊断视图不驱动模型，不开放在线推理。API与报告口径见
+[玩家观测合同](core_trajectories.md#玩家观测在线合同与字段对照)。
 
 **模型动作协议**：
 - v3.7.0 完成 Model Protocol V4 阶段 1：`card_vocab.json` 消除真实卡密碰撞；模型词表按权威映射的精确前缀兼容追加；决策者/回合者/先手分离，阶段、区域与表示使用离散类别 Embedding
@@ -309,7 +315,7 @@ WindBot 自检始终保存原始捕获到 `replays/link_captures/`，可额外�
 - **物理清空**：删除本地知识库、Hash 映射和代码语义向量，重新全量解析
 - **远程同步**：仅同步结构化知识、Hash 映射、代码向量/索引及新版生成清单，不扫描本地 Lua
 - **本地提取/接续**：核对源码、依赖、编码器与分块策略；未变槽复用，同键内容变化重新生成，旧无清单向量首次更新重建。同步与本地更新可独立执行，亦可先同步再接续
-- **模型侧静态表**：启动时把完整资产编译为按精确卡片 token 与 Lua 效果槽索引的共享缓存；旧卡语义变化会改变模型身份并阻止误加载，只追加新卡保持旧前缀可验证
+- **模型侧静态表**：启动时编译为精确卡片token/Lua效果槽缓存；3.16.1起，旧PTH在编号与向量编码器兼容时自动使用新语义并保留权重，记录内容变化。精确重放与ONNX仍核对内容，未知旧基座不猜测兼容，见[旧模型与语义更新](code_semantics.md#旧模型与语义更新)
 
 #### 🧬 特殊效果图鉴
 
@@ -345,6 +351,7 @@ WindBot 自检始终保存原始捕获到 `replays/link_captures/`，可额外�
 |--------|------|----------|
 | 系统日志 | `./system_logs/` | `.log` |
 | V3 审计报告 | `./system_logs/protocol_v3_audit/` | `.json` |
+| 运行诊断 | `./system_logs/inference_profiles/`、`./system_logs/player_view_audit/` | 两组独立的计时/观测对照JSON，分别查看、导出与删除 |
 | 读心记录 | `./ai_thoughts/` | `.json` |
 | 轨迹与模仿文件 | `./replays/`、`./replay_data/imitation/`、`./models/imitation/` 及对应TensorBoard | 原始录像、捕获、轨迹、缓存、报告、日志和BC检查点 |
 | 模型仓库 | `./models/` | `.pth`、`.onnx`、`.onnx.data`、`.artifacts.json` |
@@ -442,7 +449,7 @@ ONNX、外置权重和制品清单。
 - 先按内置 `model_id` 选择模型池，再选择该池内的 `.pth`/`.onnx` 主文件
 - ONNX 引用的 `.onnx.data` 会自动补齐，不能单独遗漏
 - 同时选择 PTH 与 ONNX 时，两种格式的内置轮次集合必须一致
-- 强制包含 `semantic_lookup_v1.npz` + `semantic_lookup_v1.json` 编译运行资产和精确词表；PTH 可直接建网，ONNX 可完成跨机器身份校验
+- 强制包含`semantic_lookup_v1.npz` + `semantic_lookup_v1.json`及精确词表；存在时自动附带`semantic_compatibility_v1.json`，导入时合并历史证据。PTH可直接建网，ONNX保留精确内容身份校验
 - 可选包含用于继续生成的语义源（`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`，新版另含 `code_embeddings_meta.json`，存在时附带 `hash_mapping_report.json`）和 142 宣言追加池 (`meta_staples.json`)
 - 语义源三件套不可拆分导入或导出；清单会交叉校验源文件、编译表、词表与模型内逻辑语义身份
 - 强制生成并校验清单文件 (`manifest.json`)
@@ -491,6 +498,8 @@ python main.py train [选项]
 | `--use_onnx` | 保存点同步导出 ONNX，并加速历史对手推理 | - |
 | `--no_compile` | 禁用编译 | - |
 | `--protocol-audit` | 生成 V3 协议与效果槽诊断报告 | 关闭 |
+| `--inference-profile-batches` | 每轮计时的中央微批数上限，1～10000；0关闭，不限制采集或PPO批量 | 0 |
+| `--inference-transport` | `packed`为日常训练推荐的批量传输；`fields`沿用原逐字段方式，供性能比较和问题排查 | packed |
 | `--gamma` | 折扣因子 | 0.998 |
 | `--lr` | 学习率 | 1e-4 |
 | `--entropy` | 熵正则系数 | 0.03 |

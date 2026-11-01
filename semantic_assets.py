@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import tempfile
+import zipfile
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -21,6 +22,7 @@ CODE_EMBEDDINGS_FILENAME = "code_embeddings.npy"
 CODE_EMBEDDINGS_INDEX_FILENAME = "code_embeddings_idx.json"
 STATIC_SEMANTIC_TABLE_FILENAME = "semantic_lookup_v1.npz"
 STATIC_SEMANTIC_CATALOG_FILENAME = "semantic_lookup_v1.json"
+SEMANTIC_COMPATIBILITY_FILENAME = "semantic_compatibility_v1.json"
 STATIC_SEMANTIC_ASSET_FILENAMES = (
     STATIC_SEMANTIC_TABLE_FILENAME,
     STATIC_SEMANTIC_CATALOG_FILENAME,
@@ -34,6 +36,7 @@ SEMANTIC_ASSET_FILENAMES = (
     HASH_MAPPING_FILENAME,
     *CODE_SEMANTIC_FILENAMES,
     CODE_EMBEDDINGS_META_FILENAME,
+    SEMANTIC_COMPATIBILITY_FILENAME,
 )
 DEFAULT_SEMANTIC_REPOSITORY_URL = "https://github.com/Noctfom/Galatea-Core.git"
 MAX_CODE_EMBEDDINGS_BYTES = 2 * 1024 * 1024 * 1024
@@ -44,6 +47,15 @@ MAX_KNOWLEDGE_BASE_BYTES = 512 * 1024 * 1024
 def invalidate_static_semantic_assets(target_directory):
     """删除可重建的静态语义编译资产，避免源文件更新后继续使用旧表"""
     root = Path(target_directory).resolve()
+    # 编译缓存可重建，稳定编号和已核验基座需跨清除保留
+    if all((root / name).is_file() for name in STATIC_SEMANTIC_ASSET_FILENAMES):
+        from semantic_lookup import load_static_semantic_assets, remember_semantic_compatibility
+        try:
+            lookup = load_static_semantic_assets(root)
+        except (OSError, ValueError, zipfile.BadZipFile):
+            lookup = None
+        if lookup is not None:
+            remember_semantic_compatibility(root, lookup)
     removed = []
     for filename in STATIC_SEMANTIC_ASSET_FILENAMES:
         path = root / filename
@@ -102,7 +114,7 @@ def clear_local_semantic_assets(
         *CODE_SEMANTIC_FILENAMES,
         CODE_EMBEDDINGS_META_FILENAME,
     }
-    removed = []
+    removed = invalidate_static_semantic_assets(root)
     for filename in filenames:
         path = root / filename
         if path.is_symlink():
@@ -110,7 +122,6 @@ def clear_local_semantic_assets(
         if path.is_file():
             path.unlink()
             removed.append(path.name)
-    removed.extend(invalidate_static_semantic_assets(root))
     return removed
 
 
@@ -448,6 +459,10 @@ def download_remote_semantic_bundle(remote_kb_url, target_directory, *, github_m
                 max_bytes=MAX_CODE_EMBEDDING_INDEX_BYTES,
                 label=HASH_MAPPING_FILENAME,
             )
+
+        if SEMANTIC_COMPATIBILITY_FILENAME in downloaded:
+            from semantic_lookup import synchronize_semantic_compatibility_registry
+            synchronize_semantic_compatibility_registry(temp_root, target_root)
 
         vector_names = set(CODE_SEMANTIC_FILENAMES)
         downloaded_vectors = vector_names.intersection(downloaded)

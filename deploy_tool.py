@@ -4,7 +4,7 @@ import zipfile
 import shutil
 import tempfile
 
-from card_vocab import synchronize_authoritative_card_vocabulary
+from card_vocab import synchronize_authoritative_card_vocabulary, load_card_vocabulary
 from checkpoint_utils import MODEL_PROTOCOL_VERSION
 
 from model_artifacts import (
@@ -190,6 +190,8 @@ def unpack_model():
             with zipfile.ZipFile(pkg_path, 'r') as gkg_zip:
                 safe_extract_zip(gkg_zip, stage_dir)
             validated = validate_deployment_package(stage_dir)
+            from semantic_lookup import synchronize_semantic_compatibility_registry
+            synchronize_semantic_compatibility_registry(stage_dir, '.')
             vocabulary_result = synchronize_authoritative_card_vocabulary(
                 os.path.join(stage_dir, "card_vocab.json"),
                 "card_vocab.json",
@@ -219,6 +221,8 @@ def unpack_model():
                     "./models",
                     primary_models,
                     expected_model_id=model_ids[0],
+                    card_vocabulary=load_card_vocabulary(os.path.join(stage_dir, 'card_vocab.json')),
+                    semantic_root=stage_dir,
                 )
                 for filename in installed["files"]:
                     print(f"  -> 提取模型产物至 ./models/: {filename}")
@@ -231,6 +235,7 @@ def unpack_model():
                     "hash_mapping_report.json",
                     "code_embeddings.npy",
                     "code_embeddings_idx.json",
+                    "code_embeddings_meta.json",
                 )
             )
             for filename in (
@@ -260,6 +265,10 @@ def unpack_model():
                         if os.path.exists(temporary_path):
                             os.remove(temporary_path)
                     
+            if (source_semantic_files and validated['manifest'].get('includes_kb')
+                    and not os.path.isfile(os.path.join(stage_dir, 'code_embeddings_meta.json'))
+                    and os.path.isfile('code_embeddings_meta.json')):
+                os.remove('code_embeddings_meta.json')
         print("\n✅ 系统环境更新完毕！模型和字典已全部就位。")
     except Exception as e:
         print(f"\n❌ 解压覆盖过程中发生错误: {e}")

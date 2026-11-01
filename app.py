@@ -284,7 +284,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.15.9"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.1"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -465,7 +465,7 @@ if st.session_state.running_pid:
 # 🌟 必须写在最外层全局，否则缓存会失效
 # ==========================================
 @st.cache_data(show_spinner=False)
-def load_model_metadata(path):
+def _load_model_metadata_cached(path, semantic_signature):
     """读取恢复训练所需的协议版本、UUID、前缀、轮次和架构信息"""
     try:
         metadata = inspect_training_checkpoint(path, map_location='cpu')
@@ -476,11 +476,20 @@ def load_model_metadata(path):
         return {'load_error': str(e), 'net_config': {}}
 
 
+def load_model_metadata(path):
+    """语义或词表更新后立即重新核验，不复用缓存中的旧错误或兼容结论"""
+    paths = [path, 'card_vocab.json', 'semantic_lookup_v1.json', 'semantic_lookup_v1.npz', 'semantic_compatibility_v1.json']
+    signature = tuple((name, stat.st_mtime_ns, stat.st_size) for name in paths if os.path.isfile(name) for stat in [os.stat(name)])
+    return _load_model_metadata_cached(path, signature)
+
+
 def get_model_identity_signature(model_dir):
     """生成模型身份相关文件的轻量缓存签名，文件变化时自动失效"""
     paths = []
     for pattern in ("*.pth", "*.onnx", "*.onnx.data", "*.artifacts.json"):
         paths.extend(glob.glob(os.path.join(model_dir, pattern)))
+    paths.extend(name for name in ('card_vocab.json', 'semantic_lookup_v1.json', 'semantic_lookup_v1.npz',
+                                  'semantic_compatibility_v1.json') if os.path.isfile(name))
     records = []
     for path in paths:
         try:
@@ -1032,6 +1041,9 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 f"无法读取检查点元数据: {resume_metadata_error}",
                 f"Unable to read checkpoint metadata: {resume_metadata_error}",
             ))
+        elif saved_meta.get('semantic_update'):
+            st.info(_("语义库已更新，这个模型可继续使用和训练，已学习的模型权重予以保留",
+                      "The semantic library has been updated. This model remains usable and can continue training with its learned weights retained"))
         elif resume_format_warning:
             st.warning(_(
                 f"⚠️ {resume_format_warning}",
@@ -1235,6 +1247,20 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 "Diagnostic only: records Core messages and effect-slot mappings per worker. Disabled by default and never changes model inputs or training results.",
             ),
         )
+        c_inference_profile = st.checkbox(
+            _("中央推理分段诊断（默认关闭）", "Central Inference Timing (off by default)"), value=False, key='training_inference_profile',
+            help=_("采集速度慢时开启，查看时间主要花在等待、数据传输还是模型计算上。报告在“存储与日志仓库 → 运行诊断”查看。诊断本身会增加少量耗时，正常训练时保持关闭即可",
+                   "Enable when rollout collection is slow to see whether time is spent waiting, transferring data, or running the model. View reports under Storage & Logs → Runtime Diagnostics. Timing adds some overhead; leave it off for normal training"))
+        t_inference_profile_batches = st.number_input(
+            _("每轮诊断微批数上限", "Maximum Timed Microbatches per Iteration"), min_value=1, max_value=10000, value=200,
+            disabled=not c_inference_profile, key='training_inference_profile_batches',
+            help=_("每轮统计前多少批推理请求，默认200批。调大可观察更多请求，也会增加诊断耗时。这里不调整训练批量或采集步数；最初几批可能包含模型预热耗时",
+                   "How many initial inference batches to measure per iteration; the default is 200. A larger value observes more requests and adds measurement overhead. This does not set the training batch size or rollout steps. Initial batches may include model warm-up"))
+        t_inference_transport = st.selectbox(_("中央推理数据传输方式", "Central Inference Data Transfer"), ['packed', 'fields'],
+            key='training_inference_transport',
+            format_func=lambda value: _("批量传输（推荐）", "Batched Transfer (recommended)") if value == 'packed' else _("逐字段传输（原方式）", "Per-field Transfer (original)"),
+            help=_("批量传输：把观测数据集中复制，减少小块传输的次数，适合正常训练；CPU和CUDA均可使用。\n\n逐字段传输：沿用原来的逐项复制方式，适合比较传输性能，或排查批量方式下的运行问题。\n\n两者使用相同的观测信息和数值精度，一般保留推荐项即可",
+                   "Batched transfer: copies observation data in larger groups to reduce small-copy overhead. Recommended for normal training on both CPU and CUDA.\n\nPer-field transfer: uses the original field-by-field copies. Select it to compare transfer performance or investigate problems with batched transfer.\n\nBoth use the same observation information and numeric precision. Keep the recommended option for routine use"))
         
         windbot_training_options = None
         with st.expander(_("🤖 WindBot 主训练对手（可选）", "🤖 WindBot Training Opponents (optional)")):
@@ -1452,6 +1478,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_nocomp: cmd.append("--no_compile")
                 if c_onnx: cmd.append("--use_onnx")
                 if c_protocol_audit: cmd.append("--protocol-audit")
+                if c_inference_profile: cmd.extend(["--inference-profile-batches", str(t_inference_profile_batches)])
+                cmd.extend(['--inference-transport', t_inference_transport])
                 cmd.extend(['--league-weights', *(str(league_values[name]) for name in ('rule', 'windbot', 'hist', 'self'))])
                 if windbot_training_options is not None:
                     cmd.extend(['--windbot', '--windbot-deck-mode', windbot_training_options['deck_mode']])
@@ -2229,6 +2257,15 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     help=_("额外重跑Core以比较原始输出与响应，耗时增加；未勾选仍保存原始捕获。", "Re-runs Core to compare raw output and responses at extra cost. Raw captures are saved either way."))
                 sc_record = st.checkbox(_("保存全息回放", "Save Holographic Replay"), key="selfcheck_record",
                     help=_("保存双方操作到ai_thoughts；规则机器人没有模型胜率预测。", "Saves both sides' actions to ai_thoughts; rule bots have no model win predictions."))
+            else:
+                sc_player_view_audit = st.checkbox(_("原生 / 玩家观测对照（默认关闭）", "Native / Player Observation Comparison (off by default)"),
+                    value=False, key="selfcheck_player_view_audit",
+                    help=_("检查玩家端收到的信息与本地训练观测有哪些差异，供在线接入排查使用。报告在“存储与日志仓库 → 运行诊断”查看。比较会使自检变慢，普通卡组或规则压测无需开启",
+                           "Checks differences between player-side information and local training observations when investigating online integration. View reports under Storage & Logs → Runtime Diagnostics. Comparisons slow down self-checks; leave this off for normal deck or rules testing"))
+                sc_player_view_checks = st.number_input(_("每局观测对照点上限", "Maximum Comparison Points per Game"),
+                    min_value=1, max_value=256, value=32, key="selfcheck_player_view_checks", disabled=not sc_player_view_audit,
+                    help=_("每局最多比较多少个决策点，双方合计，默认32个。调大可检查更长的对局过程，但自检耗时也会增加；达到数量后，对局继续进行",
+                           "Maximum decision points compared per game across both players; the default is 32. Increase it to inspect a longer portion of the game at additional cost. The game continues after this limit"))
             sc_num = st.number_input(_("极端压测局数", "Number of Games"), min_value=1,
                 max_value=100 if sc_mode == "windbot" else 100000, value=50, step=1, key=f"selfcheck_games_{sc_mode}",
                 help=_("WindBot每批1～100局，RuleBot沿用普通随机池。Core开局默认随机，实际种子记录在日志和捕获中。", "WindBot batches support 1–100 games; RuleBot uses the normal pool. Core starts are random by default and recorded in logs/captures."))
@@ -2241,6 +2278,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 else:
                     if sc_mode == "rule":
                         cmd = [sys.executable, "main.py", "play", "-n", str(sc_num)]
+                        if sc_player_view_audit:
+                            cmd.extend(["--player-view-audit", "--player-view-audit-checks", str(sc_player_view_checks)])
                     else:
                         cmd = [sys.executable, "main.py", "windbot", "--executor", sc_executor,
                             "--games", str(sc_num), "--windbot-seat", str(sc_seat), "--timeout", str(sc_timeout)]
@@ -2554,7 +2593,8 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                   "Compress Lua scripts into high-dimensional semantic features for neural networks."))
     
     semantic_view_directory = st.text_input(_("语义资产目录（查看/构建目标）", "Semantic Asset Directory (View/Build Target)"), value=".")
-    st.warning(_("重新生成代码向量会改变语义资产身份。旧模型保留原资产；新资产应从零训练。建议先构建到独立目录再检查，不要覆盖正在使用的资产。", "Regenerated vectors change semantic identity. Keep original assets for existing models and train fresh with new assets. Build and inspect in a separate directory first."))
+    st.info(_("使用下方同步或本地更新即可维护语义库。兼容的更新可供已有模型继续使用和训练；兼容性记录自动维护，无需手工编辑JSON。请先结束正在运行的训练，再更新语义资产",
+              "Use sync or local update below to maintain the semantic library. Existing models can use compatible updates and continue training. Compatibility records are maintained automatically; no manual JSON editing is needed. Finish active training before updating assets"))
     tab_exec, tab_hash, tab_card, tab_quality, tab_audit = st.tabs([
         _("⚙️ 执行中枢", "⚙️ Execution Hub"),
         _("🧬 特殊效果图鉴", "🧬 Custom Hash Explorer"),
@@ -2571,11 +2611,11 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
             st.info(_("一键扫描 `./script` 目录下的所有 Lua 脚本，利用正则与降维算法提取出所有卡片的动作条件与种类。", 
                       "Scan all Lua scripts to extract semantic requirements and categories."))
             p_clear = st.checkbox(_("🧨 物理清空本地旧数据 (--clear)", "Clear Local KB"), value=False,
-                                  help=_("彻底删除本地知识库、映射表和代码语义向量，重新全量解析。", "Delete the local KB, mapping, and code-semantic vectors before a full rebuild."))
+                                  help=_("删除本地效果知识库、Hash报告和代码向量，供全量重建使用。已有模型使用的标签编号记录会保留，无需手工恢复", "Deletes the local effect library, Hash report and code vectors for a full rebuild. Label-ID records used by existing models are retained automatically"))
             p_sync = st.checkbox(_("🌐 仅同步远程语义资产 (--sync)", "Sync Remote Semantic Assets Only"), value=False,
-                                 help=_("只下载知识库、Hash 映射、代码语义向量和索引；不会扫描本地 Lua，也不会生成向量。", "Only downloads the KB, Hash map, code-semantic matrix, and index; it does not scan local Lua or generate vectors."))
+                                 help=_("从远程仓库下载语义库及配套向量、生成记录和兼容性记录。适合直接使用已发布的语义库；不扫描本地Lua脚本", "Downloads the semantic library and its vectors, generation records and compatibility records. Use this to install a published library without scanning local Lua scripts"))
             p_local_update = st.checkbox(_("🧬 本地提取/接续语义 (--local-update)", "Extract/Continue Local Semantics"), value=False,
-                                         help=_("按源码及依赖摘要接续；新增/改动代码重新生成，无生成清单的旧向量全量重建。长代码分块覆盖，不静默截断。", "Continues by source/dependency hashes; new or changed code is regenerated, unverified legacy vectors are fully rebuilt. Long code is chunked without silent truncation."))
+                                         help=_("扫描本地Lua脚本，更新新增或改动的卡片效果，并复用没有变化的语义数据。适合更新脚本或导入自制卡后使用；缺少可复用的生成记录时会重新生成向量", "Scans local Lua scripts, updates new or changed effects and reuses unchanged semantic data. Use after script updates or custom-card imports. Vectors are regenerated when reusable generation records are missing"))
             p_url = st.text_input(
                 _("远程基座仓库 URL", "Remote Base Repository URL"),
                 value=DEFAULT_SEMANTIC_REPOSITORY_URL,
@@ -3708,9 +3748,10 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
     st.markdown(_("管理系统运行期间产生的所有日志、模型文件与 AI 心声记录。", 
                   "Manage all logs, models, and AI thoughts generated during system operation."))
     
-    tab_logs, tab_audit_logs, tab_thoughts, tab_ingress, tab_models, tab_data, tab_tb = st.tabs([
+    tab_logs, tab_audit_logs, tab_runtime_audits, tab_thoughts, tab_ingress, tab_models, tab_data, tab_tb = st.tabs([
         _("📜 系统日志", "📜 System Logs"),
         _("🛡️ V3 审计报告", "🛡️ V3 Audit Reports"),
+        _("⏱️ 运行诊断", "⏱️ Runtime Diagnostics"),
         _("🧠 读心记录", "🧠 Thought Replays"),
         _("🧪 轨迹与模仿文件", "🧪 Trajectory & Imitation Files"),
         _("🤖 模型仓库", "🤖 Model Storage"),
@@ -3821,6 +3862,12 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
             allow_view=True,
             allow_upload=False,
         )
+    with tab_runtime_audits:
+        st.caption(_("中央推理计时用于查找采集速度瓶颈；观测字段对照用于检查玩家端信息差异。在下方分别查看、导出或清理报告",
+                     "Inference timings identify collection bottlenecks; observation comparisons show player-side information differences. View, export or clean up each report group below"))
+        build_file_manager('./system_logs/inference_profiles', '.json', _("中央推理分段计时", "Central Inference Stage Timings"), allow_view=True)
+        st.divider()
+        build_file_manager('./system_logs/player_view_audit', '.json', _("原生 / 玩家观测字段对照", "Native / Player Observation Field Comparison"), allow_view=True)
     with tab_thoughts:
         build_file_manager("./ai_thoughts", ".json", _("AI 读心记录", "AI Thought Records"), allow_view=True, allow_upload=False)
         build_file_manager("./replays/core_trajectories", ".core.jsonl.gz", _("规范 Core 轨迹", "Canonical Core Trajectories"), allow_view=False, allow_upload=False)
@@ -5341,8 +5388,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                             selected_stage_models = []
                             selected_root_files = []
                             st.caption(_(
-                                "精确卡片词表与静态语义运行表是 V4 必选协议资产，将自动校验并同步，不能取消",
-                                "The exact card vocabulary and compiled static-semantic runtime table are mandatory V4 assets and are validated and synchronized automatically.",
+                                "词表和运行语义表会自动安装；包内兼容性记录会自动合并，无需单独勾选",
+                                "The vocabulary and runtime semantics are installed automatically. Any compatibility records in the package are merged without a separate selection.",
                             ))
 
                             if models_in_stage:
@@ -5417,7 +5464,9 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     ))
                                 else:
                                     try:
-                                        from card_vocab import synchronize_authoritative_card_vocabulary
+                                        from card_vocab import synchronize_authoritative_card_vocabulary, load_card_vocabulary
+                                        from semantic_lookup import synchronize_semantic_compatibility_registry
+                                        synchronize_semantic_compatibility_registry(stage_path, '.')
                                         vocabulary_result = synchronize_authoritative_card_vocabulary(
                                             os.path.join(stage_path, "card_vocab.json"),
                                             "card_vocab.json",
@@ -5448,6 +5497,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                                     if package_model_ids
                                                     else None
                                                 ),
+                                                card_vocabulary=load_card_vocabulary(os.path.join(stage_path, 'card_vocab.json')),
+                                                semantic_root=stage_path,
                                             )
                                         for filename in selected_root_files:
                                             source = os.path.join(stage_path, filename)

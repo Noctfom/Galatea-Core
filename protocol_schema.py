@@ -494,8 +494,13 @@ def apply_current_protocol_metadata(
             label="network config",
             card_vocabulary=card_vocabulary,
             semantic_root=semantic_root,
+            allow_semantic_updates=True,
         )
     normalized.update(metadata)
+    from semantic_lookup import semantic_compatibility_descriptor
+    compatibility = semantic_compatibility_descriptor(get_static_semantic_lookup(semantic_root, card_vocabulary=card_vocabulary))
+    if compatibility is not None:
+        normalized['semantic_compatibility'] = compatibility
     vocab_size = normalized.get("vocab_size", metadata["card_vocab_size"])
     if vocab_size != metadata["card_vocab_size"]:
         raise ValueError(
@@ -511,6 +516,7 @@ def validate_protocol_metadata(
     label="artifact",
     card_vocabulary=None,
     semantic_root=".",
+    allow_semantic_updates=False,
 ):
     """校验结构一致且词表是当前只追加前缀的产物"""
     if not isinstance(container, dict):
@@ -556,7 +562,13 @@ def validate_protocol_metadata(
     )
     expected_semantic_hash = semantic_lookup.prefix_hash(card_count)
     if container.get("semantic_lookup_hash") != expected_semantic_hash:
-        raise ValueError(
-            f"{label} semantic_lookup_hash does not match the current semantic prefix"
-        )
+        if not allow_semantic_updates:
+            raise ValueError(
+                f"{label} semantic_lookup_hash does not match the current semantic prefix"
+            )
+        from semantic_lookup import validate_semantic_update_compatibility
+        try:
+            validate_semantic_update_compatibility(container, semantic_lookup, directory=semantic_root)
+        except ValueError as error:
+            raise ValueError(f'{label} semantic_lookup_hash changed incompatibly: {error}') from error
     return expected

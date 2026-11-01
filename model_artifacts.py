@@ -31,12 +31,15 @@ from semantic_assets import (
     KNOWLEDGE_BASE_FILENAME,
     SEMANTIC_ASSET_FILENAMES,
     STATIC_SEMANTIC_ASSET_FILENAMES,
+    SEMANTIC_COMPATIBILITY_FILENAME,
     validate_semantic_bundle,
 )
 from semantic_lookup import (
     ensure_static_semantic_assets,
     load_static_semantic_assets,
     write_static_semantic_assets,
+    get_static_semantic_lookup,
+    semantic_compatibility_descriptor,
 )
 from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME
 
@@ -340,6 +343,7 @@ def _read_artifact_manifest(
         label=f"artifact manifest {marker_path.name}",
         card_vocabulary=card_vocabulary,
         semantic_root=semantic_root,
+        allow_semantic_updates=True,
     )
     validate_model_id(payload.get("model_id"))
     validate_model_prefix(payload.get("model_prefix"))
@@ -806,9 +810,10 @@ def assert_checkpoint_target_identity(checkpoint_path, expected_model_id):
         )
 
 
-def assert_model_artifact_target_identity(model_dir, record):
+def assert_model_artifact_target_identity(model_dir, record, *, card_vocabulary=None, semantic_root='.'):
     """导入覆盖前核验目标主文件的 UUID、前缀、轮次和格式完全一致"""
-    validate_package_model_records([record], expected_model_id=record["model_id"])
+    validate_package_model_records([record], expected_model_id=record["model_id"],
+        card_vocabulary=card_vocabulary, semantic_root=semantic_root)
     model_root = Path(model_dir).resolve()
     primary_name = validate_safe_filename(
         record["primary"], allowed_suffixes=(".pth", ".onnx")
@@ -985,6 +990,9 @@ def build_package_model_records(
                     "status": "complete",
                 }
             )
+            compatibility = checkpoint.get('semantic_compatibility') or checkpoint['net_config'].get('semantic_compatibility')
+            if compatibility is not None:
+                records[-1]['semantic_compatibility'] = compatibility
     return records
 
 
@@ -1043,6 +1051,7 @@ def validate_package_model_records(
             label="deployment model record",
             card_vocabulary=card_vocabulary,
             semantic_root=semantic_root,
+            allow_semantic_updates=record.get('format') == 'pytorch_checkpoint',
         )
     if expected_model_id is not None and model_ids and model_ids != {expected_model_id}:
         raise PermissionError("selected models do not belong to the requested model_id pool")
@@ -1236,6 +1245,8 @@ def install_model_artifact_bundle(
     *,
     expected_model_id=None,
     require_all_artifacts=False,
+    card_vocabulary=None,
+    semantic_root='.',
 ):
     """验证暂存模型制品的身份与依赖后，以临时文件原子安装到模型仓库"""
     source_root = Path(source_dir).resolve()
@@ -1248,22 +1259,26 @@ def install_model_artifact_bundle(
             path.name for path in source_root.iterdir() if is_primary_model_filename(path.name)
         )
     selected_models = list(dict.fromkeys(selected_models))
-    records = build_package_model_records(source_root, selected_models)
+    records = build_package_model_records(source_root, selected_models,
+        card_vocabulary=card_vocabulary, semantic_root=semantic_root)
     if expected_model_id is not None:
-        validate_package_model_records(records, expected_model_id=expected_model_id)
+        validate_package_model_records(records, expected_model_id=expected_model_id,
+            card_vocabulary=card_vocabulary, semantic_root=semantic_root)
     prefixes_by_model_id = {}
     for record in records:
-        validate_package_model_records([record])
+        validate_package_model_records([record], card_vocabulary=card_vocabulary, semantic_root=semantic_root)
         prefixes_by_model_id.setdefault(record["model_id"], set()).add(
             record["model_prefix"]
         )
     if any(len(prefixes) != 1 for prefixes in prefixes_by_model_id.values()):
         raise ValueError("one model_id cannot be imported with different model prefixes")
 
-    files = collect_model_artifact_files(source_root, selected_models)
+    files = collect_model_artifact_files(source_root, selected_models,
+        card_vocabulary=card_vocabulary, semantic_root=semantic_root)
     validate_model_artifact_file_set(source_root, files)
     for record in records:
-        assert_model_artifact_target_identity(target_root, record)
+        assert_model_artifact_target_identity(target_root, record,
+            card_vocabulary=card_vocabulary, semantic_root=semantic_root)
 
     if require_all_artifacts:
         staged_artifacts = {
@@ -1365,6 +1380,9 @@ def write_checkpoint_artifact_manifest(
             "error": str(onnx_error) if onnx_error else None,
         },
     }
+    compatibility = semantic_compatibility_descriptor(get_static_semantic_lookup())
+    if compatibility is not None:
+        payload['semantic_compatibility'] = compatibility
 
     if training_stage is not None:
         payload['training_stage'] = training_stage
@@ -1453,6 +1471,9 @@ def create_deployment_package(
             for filename, path in compiled_semantic_paths.items()
         }
     )
+    compatibility_path = compiled_root / SEMANTIC_COMPATIBILITY_FILENAME
+    if compatibility_path.is_file():
+        requested_extras[SEMANTIC_COMPATIBILITY_FILENAME] = str(compatibility_path)
     records = build_package_model_records(
         model_dir,
         selected_models,
@@ -1548,6 +1569,7 @@ def create_deployment_package(
                 label="deployment model record",
                 card_vocabulary=packaged_vocabulary,
                 semantic_root=semantic_root,
+                allow_semantic_updates=record.get('format') == 'pytorch_checkpoint',
             )
 
     manifest = {
@@ -1743,7 +1765,12 @@ def validate_deployment_package(stage_dir):
             label="deployment model record",
             card_vocabulary=packaged_vocabulary,
             semantic_root=staged_semantic_root,
+            allow_semantic_updates=record.get('format') == 'pytorch_checkpoint',
         )
+    if SEMANTIC_COMPATIBILITY_FILENAME in actual_names:
+        from semantic_lookup import read_semantic_compatibility_registry
+        read_semantic_compatibility_registry(stage_root)
+        expected_names.add(SEMANTIC_COMPATIBILITY_FILENAME)
     if actual_names != expected_names:
         raise ValueError(
             f"deployment package contains undeclared files: {sorted(actual_names - expected_names)}"

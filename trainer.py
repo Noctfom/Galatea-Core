@@ -99,7 +99,9 @@ from deck_trajectory import (
 from deck_protocol import MAX_DECK_PROFILE_ENTRIES
 from inference_protocol import (
     InferenceProtocolError,
-    decode_inference_request,
+    CentralInferenceDiagnostics,
+    PackedObservationLayout,
+    decode_inference_envelope,
     encode_inference_error,
     encode_inference_success,
 )
@@ -390,7 +392,7 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None, league_weights=None):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None, league_weights=None, inference_profile_batches=0, inference_transport='packed'):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -399,6 +401,12 @@ class PPOTrainer:
         self.requested_training_device = training_device
         self.use_onnx = use_onnx
         self.protocol_audit = bool(protocol_audit)
+        if type(inference_profile_batches) is not int or not 0 <= inference_profile_batches <= 10000:
+            raise ValueError('inference_profile_batches must be 0..10000')
+        self.inference_diagnostics = CentralInferenceDiagnostics(inference_profile_batches) if inference_profile_batches else None
+        if inference_transport not in ('packed', 'fields'):
+            raise ValueError('inference_transport must be packed or fields')
+        self.inference_transport = inference_transport
         self.server_stop_event = threading.Event()
         self.infer_thread = None
         self._closed = False
@@ -428,6 +436,7 @@ class PPOTrainer:
         resume_checkpoint = None
         self.training_lineage = None
         self.initialization_source = None
+        self.semantic_asset_updates = []
         requested_model_prefix = (
             validate_model_prefix(model_prefix) if model_prefix is not None else None
         )
@@ -442,6 +451,10 @@ class PPOTrainer:
             )
             from checkpoint_utils import validate_ppo_resume_stage
             validate_ppo_resume_stage(resume_checkpoint)
+            from checkpoint_utils import checkpoint_semantic_history
+            self.semantic_asset_updates = checkpoint_semantic_history(resume_checkpoint)
+            if self.semantic_asset_updates:
+                print(f"♻️ [语义兼容] {self.semantic_asset_updates[-1]['message']}")
             # 词表合法追加后，恢复训练立即升级运行时身份；下一检查点应覆盖新卡映射
             self.net_config = apply_current_protocol_metadata(
                 resume_checkpoint['net_config']
@@ -775,14 +788,19 @@ class PPOTrainer:
         self.input_specs = input_specs
 
         print("🧠 [Shared Memory] 正在开辟高带宽零拷贝多进程超导通道...")
-        for _ in range(self.num_workers):
+        self.observation_layout = PackedObservationLayout(input_specs) if self.inference_transport == 'packed' else None
+        if self.observation_layout is not None:
+            self.shared_input_blocks = self.observation_layout.allocate(self.num_workers, shared=True)
+            self.shared_buffers = self.observation_layout.worker_views(self.shared_input_blocks, self.num_workers)
+        for worker_id in range(self.num_workers):
             # 输入槽
-            buf = {}
-            for k, (shape, dtype) in input_specs.items():
-                t = torch.zeros(shape, dtype=dtype)
-                t.share_memory_() # 赋予跨进程起死回生之力
-                buf[k] = t
-            self.shared_buffers.append(buf)
+            if self.observation_layout is None:
+                buf = {}
+                for k, (shape, dtype) in input_specs.items():
+                    t = torch.zeros(shape, dtype=dtype)
+                    t.share_memory_()
+                    buf[k] = t
+                self.shared_buffers.append(buf)
             
             # 输出槽 (包含: action, log_prob, value, rnd_reward 占位)
             out_t = torch.zeros((4,), dtype=torch.float32)
@@ -804,15 +822,18 @@ class PPOTrainer:
             print("📌 [Pinned Memory] 正在创建 CUDA 锁页聚合缓冲区...")
         else:
             print("📌 [CPU Staging] 正在创建 CPU 聚合缓冲区...")
-        for k, (shape, dtype) in input_specs.items():
-            # CUDA 使用锁页内存异步搬运；CPU 使用普通内存，避免无加速器环境报错
-            staging_buffer = torch.zeros(
-                (self.num_workers, *shape),
-                dtype=dtype,
-            )
-            if self.device.type == 'cuda':
-                staging_buffer = staging_buffer.pin_memory()
-            self.pinned_batch_buffers[k] = staging_buffer
+        if self.observation_layout is not None:
+            self.packed_batch_blocks = self.observation_layout.allocate(self.num_workers, pinned=self.device.type == 'cuda')
+            self.packed_device_blocks = (self.observation_layout.allocate(self.num_workers, device=self.device)
+                                         if self.device.type == 'cuda' else None)
+            self.pinned_batch_buffers = self.observation_layout.batch_views(self.packed_batch_blocks, self.num_workers)
+        else:
+            for k, (shape, dtype) in input_specs.items():
+                staging_buffer = torch.zeros((self.num_workers, *shape), dtype=dtype)
+                if self.device.type == 'cuda':
+                    staging_buffer = staging_buffer.pin_memory()
+                self.pinned_batch_buffers[k] = staging_buffer
+        print(f'📦 [推理搬运] {self.inference_transport} | 字段 {len(input_specs)} | 搬运块 {len(self.observation_layout.widths) if self.observation_layout else len(input_specs)}')
 
         # [新增 ZMQ 配置]
         self.zmq_port = 55555  # 固定一个端口
@@ -1008,6 +1029,9 @@ class PPOTrainer:
                 print(f'⚠️ [WebUI] WindBot CSV写入失败: {error}')
 
     def collect_rollouts(self):
+        diagnostics = getattr(self, 'inference_diagnostics', None)
+        if diagnostics is not None:
+            diagnostics.start(self.iteration)
         if self.device.type == 'cpu':
             self._configure_cpu_threads(for_policy_update=False)
         print(f"📥 [Iter {self.iteration}] 唤醒 {self.num_workers} 个工人 | 目标: {self.update_timesteps} 步")
@@ -1070,6 +1094,7 @@ class PPOTrainer:
                     self.gae_lambda, self.worker_cpu_threads, self.shared_buffers,
                     self.shared_outputs, self.worker_events, self.use_onnx,
                     self.shared_logits, self.shared_response_ids, self.protocol_audit,
+                    diagnostics is not None,
                 ))
                 p.daemon = True
                 p.start()
@@ -1389,6 +1414,8 @@ class PPOTrainer:
 
         self.agent.net.eval()
         last_completed_request_ids = [-1] * self.num_workers
+        diagnostics = getattr(self, 'inference_diagnostics', None)
+        observation_layout = getattr(self, 'observation_layout', None)
 
         while not stop_event.is_set():
             try:
@@ -1396,12 +1423,13 @@ class PPOTrainer:
                 if socket in socks:
                     requests = []
                     pending_requests = {}
+                    diagnostic_received, diagnostic_metadata = {}, {}
 
                     def receive_request():
                         """接收一个请求，并在同批重复时只保留该 Worker 的最新请求"""
                         addr, empty, payload = socket.recv_multipart(flags=zmq.NOBLOCK)
                         try:
-                            wid, request_id = decode_inference_request(payload)
+                            wid, request_id, metadata = decode_inference_envelope(payload)
                         except InferenceProtocolError:
                             socket.send_multipart(
                                 [addr, b'', encode_inference_error(-1, "INVALID_REQUEST")]
@@ -1439,6 +1467,9 @@ class PPOTrainer:
                             requests.append(wid)
 
                         pending_requests[wid] = (request_id, addr)
+                        if diagnostics is not None and diagnostics.active:
+                            diagnostic_received[wid] = time.perf_counter_ns()
+                            diagnostic_metadata[wid] = metadata
 
                     while True:
                         try:
@@ -1460,38 +1491,55 @@ class PPOTrainer:
                     # --- 4. 中央设备微批推理 (动态切片) ---
                     # 密集装填有效行，基础切片保留锁页属性并避免108个字段重复索引分配
                     batch_size = len(requests)
-                    for k, staging in self.pinned_batch_buffers.items():
-                        for row, wid in enumerate(requests):
-                            staging[row].copy_(shared_buffers[wid][k])
+                    measurement = (diagnostics.begin_batch(requests, diagnostic_received, diagnostic_metadata, self.device)
+                                   if diagnostics is not None and diagnostics.active else None)
+                    if observation_layout is not None:
+                        observation_layout.gather(self.shared_input_blocks, self.packed_batch_blocks, requests)
+                    else:
+                        for k, staging in self.pinned_batch_buffers.items():
+                            for row, wid in enumerate(requests):
+                                staging[row].copy_(shared_buffers[wid][k])
+                    if measurement is not None:
+                        measurement.mark('gathered')
 
                     transfer_non_blocking = getattr(
                         self,
                         'transfer_non_blocking',
                         self.device.type == 'cuda',
                     )
-                    batch_obs = {
+                    batch_obs = (observation_layout.transfer(self.packed_batch_blocks, batch_size,
+                        self.device, non_blocking=transfer_non_blocking, device_blocks=self.packed_device_blocks)
+                        if observation_layout is not None else {
                         k: v[:batch_size].to(
                             self.device,
                             non_blocking=transfer_non_blocking,
                         ).detach()
                         for k, v in self.pinned_batch_buffers.items()
-                    }
+                    })
+                    if measurement is not None:
+                        measurement.mark('transferred')
                     
                     # 核心大一统前向前向图计算
                     with training_autocast(self.device, self.amp_dtype):
                         with torch.no_grad():
                             logits, values, v_input = self.agent.net(batch_obs)
+                            if measurement is not None:
+                                measurement.mark('forwarded')
                             
                             # 统一复刻决策采样（Action Head 模型规范）
                             dist = torch.distributions.Categorical(logits=logits)
                             actions = dist.sample()
                             log_probs = dist.log_prob(actions)
+                    if measurement is not None:
+                        measurement.mark('sampled')
                     
                     # 整批回传基础结果与分数，避免按Worker逐标量同步CUDA
                     cpu_results = torch.stack(
                         (actions.float(), log_probs.float(), values.reshape(-1).float()), dim=1,
                     ).cpu()
                     cpu_logits = logits.float().cpu() if shared_logits is not None else None
+                    if measurement is not None:
+                        measurement.mark('returned')
                     for i, wid in enumerate(requests):
                         request_id, addr = pending_requests[wid]
                         # A. 基础槽（供 Pass 2 或 自对局决策流抽样消费）
@@ -1506,6 +1554,8 @@ class PPOTrainer:
                             shared_response_ids[wid].fill_(request_id)
                         last_completed_request_ids[wid] = request_id
                         socket.send_multipart([addr, b'', encode_inference_success(request_id)])
+                    if measurement is not None:
+                        measurement.mark('published')
                     #del logits, values, v_input, batch_obs
 
             except Exception as e:
@@ -1514,6 +1564,28 @@ class PPOTrainer:
                 
         socket.close()
         context.term()
+
+    def _write_inference_profile(self, *, collection_seconds=None, total_steps=None):
+        """在采集屏障后保存有限诊断摘要，写入失败不改变训练结果"""
+        diagnostics = getattr(self, 'inference_diagnostics', None)
+        if diagnostics is None:
+            return
+        try:
+            report = diagnostics.finish()
+            if report is None:
+                return
+            report.update(run_id=self.run_id, device=str(self.device), collection_seconds=collection_seconds,
+                accepted_rollout_steps=total_steps,
+                inference_transport=getattr(self, 'inference_transport', 'fields'),
+                input_fields=len(self.input_specs), model_protocol_version=MODEL_PROTOCOL_VERSION)
+            directory = os.path.join('system_logs', 'inference_profiles')
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, f'inference_{self.run_id}_iter_{report["iteration"]}.json')
+            with open(path, 'w', encoding='utf-8') as stream:
+                json.dump(report, stream, ensure_ascii=False, indent=2)
+            print(f'⏱️ 中央推理诊断已保存: {path}')
+        except Exception as error:
+            print(f'⚠️ 中央推理诊断保存失败，不影响本轮训练: {error}')
 
     def update_policy(self, total_steps):
         """在训练模式完成 PPO 更新，并保证结束后恢复推理模式"""
@@ -2068,6 +2140,8 @@ class PPOTrainer:
             collection_start = time.time()
             total_steps = self.collect_rollouts()
             collection_seconds = time.time() - collection_start
+            if getattr(self, 'inference_diagnostics', None) is not None:
+                self._write_inference_profile(collection_seconds=collection_seconds, total_steps=total_steps)
             self.writer.add_scalar(
                 'Performance/Collection_Seconds',
                 collection_seconds,
@@ -2123,6 +2197,8 @@ class PPOTrainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scaler_state_dict': self.scaler.state_dict(),
                     'net_config': self.net_config, 
+                    'semantic_compatibility': self.net_config.get('semantic_compatibility'),
+                    'semantic_asset_updates': getattr(self, 'semantic_asset_updates', []),
                     'iteration': self.iteration,
                     'train_step': self.train_step,   # TensorBoard 的 X 轴坐标
                     'global_step': self.global_step,  # 环境交互总步数
@@ -2186,11 +2262,15 @@ class PPOTrainer:
             if self.infer_thread.is_alive():
                 print("⚠️ 中央推理线程未在 5 秒内退出，将随主进程结束。")
         if hasattr(self, 'writer') and self.writer is not None:
+            if getattr(self, 'inference_diagnostics', None) is not None:
+                self._write_inference_profile()
             self.writer.flush()
             self.writer.close()
         if hasattr(self, 'env') and self.env is not None:
             self.env._close_duel()
         self._release_merged_memory_pool()
+        if self.infer_thread is None or not self.infer_thread.is_alive():
+            self.packed_device_blocks = None
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
 

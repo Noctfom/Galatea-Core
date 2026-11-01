@@ -212,6 +212,30 @@ def safe_load_torch_checkpoint(
         ) from None
 
 
+def checkpoint_semantic_update(checkpoint, *, semantic_root='.'):
+    """区分兼容内容更新与只追加卡密，记录来源但不修改已保存的检查点"""
+    from semantic_lookup import get_static_semantic_lookup
+    lookup = get_static_semantic_lookup(semantic_root)
+    count = checkpoint.get('semantic_lookup_card_count')
+    source = checkpoint.get('semantic_lookup_hash')
+    if type(count) is not int or not 0 <= count <= lookup.card_vocabulary.card_count:
+        return None
+    if source == lookup.prefix_hash(count):
+        return None
+    return {'source_semantic_lookup_hash': source, 'runtime_semantic_lookup_hash': lookup.prefix_hash(),
+        'status': 'compatible_content_update',
+        'message': '已核验语义编号与向量编码器兼容，保留模型权重并使用更新后的语义；预测可能随新知识变化'}
+
+
+def checkpoint_semantic_history(checkpoint, *, semantic_root='.'):
+    """接续保存时保留语义资产变更来源，同一次兼容更新只记录一次"""
+    history = list(checkpoint.get('semantic_asset_updates', []))
+    update = checkpoint_semantic_update(checkpoint, semantic_root=semantic_root)
+    if update and (not history or history[-1] != update):
+        history.append(update)
+    return history
+
+
 def inspect_training_checkpoint(path, map_location="cpu"):
     """安全读取 WebUI 所需的检查点身份和架构元数据，不修改文件"""
     checkpoint = safe_load_torch_checkpoint(
@@ -224,7 +248,7 @@ def inspect_training_checkpoint(path, map_location="cpu"):
     format_warning = get_checkpoint_format_warning(checkpoint)
     model_protocol_warning = get_model_protocol_warning(checkpoint)
     if format_warning is None and model_protocol_warning is None:
-        validate_protocol_metadata(checkpoint, label="checkpoint")
+        validate_protocol_metadata(checkpoint, label="checkpoint", allow_semantic_updates=True)
         validate_model_id(checkpoint.get("model_id"))
         validate_model_prefix(checkpoint.get("model_prefix"))
         net_config = checkpoint.get("net_config")
@@ -242,6 +266,8 @@ def inspect_training_checkpoint(path, map_location="cpu"):
         "model_protocol_warning": model_protocol_warning,
         "model_id": checkpoint.get("model_id"),
         "model_prefix": checkpoint.get("model_prefix"),
+        'semantic_update': checkpoint_semantic_update(checkpoint) if format_warning is None and model_protocol_warning is None else None,
+        'semantic_compatibility': checkpoint.get('semantic_compatibility') or (checkpoint.get('net_config') or {}).get('semantic_compatibility'),
         "iteration": checkpoint.get("iteration"),
         "run_id": checkpoint.get("run_id"),
         "net_config": checkpoint.get("net_config", {}),
@@ -265,6 +291,7 @@ def validate_training_checkpoint(
     source_path=None,
     card_vocabulary=None,
     semantic_root=".",
+    allow_semantic_updates=True,
 ):
     """校验已加载检查点的协议、UUID、结构和可选文件名一致性"""
     if not isinstance(checkpoint, dict):
@@ -285,6 +312,7 @@ def validate_training_checkpoint(
         label="checkpoint",
         card_vocabulary=card_vocabulary,
         semantic_root=semantic_root,
+        allow_semantic_updates=allow_semantic_updates,
     )
 
     missing = sorted(REQUIRED_TRAINING_CHECKPOINT_KEYS.difference(checkpoint))
@@ -310,6 +338,7 @@ def validate_training_checkpoint(
         label="checkpoint net_config",
         card_vocabulary=card_vocabulary,
         semantic_root=semantic_root,
+        allow_semantic_updates=allow_semantic_updates,
     )
     for key in get_current_protocol_metadata(
         card_vocabulary,
@@ -343,10 +372,10 @@ def validate_training_checkpoint(
     return checkpoint
 
 
-def load_training_checkpoint(path, map_location="cpu"):
+def load_training_checkpoint(path, map_location="cpu", *, allow_semantic_updates=True):
     """加载并校验当前训练框架生成的完整检查点"""
     checkpoint = safe_load_torch_checkpoint(path, map_location=map_location)
-    return validate_training_checkpoint(checkpoint, source_path=path)
+    return validate_training_checkpoint(checkpoint, source_path=path, allow_semantic_updates=allow_semantic_updates)
 
 
 def validate_training_checkpoint_file(
@@ -406,6 +435,8 @@ def initialize_ppo_from_weights(source_path, output_root='./models', *, learning
     root.mkdir(parents=True, exist_ok=False)
     payload = {'checkpoint_format_version': CHECKPOINT_FORMAT_VERSION, **get_current_protocol_metadata(),
         'net_config': config, 'model_id': model_id, 'model_prefix': prefix, 'run_id': run_id,
+        'semantic_compatibility': config.get('semantic_compatibility'),
+        'semantic_asset_updates': checkpoint_semantic_history(checkpoint),
         'training_stage': 'ppo', 'training_lineage': lineage,
         'iteration': lineage['ppo_iteration'], 'train_step': 0, 'global_step': 0,
         'model_state_dict': canonical_model_state_dict(network, to_cpu=True),

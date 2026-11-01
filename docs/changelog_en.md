@@ -4,6 +4,34 @@
 
 ---
 
+## [v3.16.1] - 2026-11-01
+
+### Packed collection buffers and semantic-update compatibility (batch2)
+
+- Central inference defaults to7 original-dtype shared/pinned/reused-device blocks for108 fields, reducing per-field gathering/transfers. Worker field interfaces, request order, completion IDs, precision, candidates and sampling remain unchanged. CLI/WebUI retain `packed` and reference `fields` modes; reports record the layout
+- PTH loading separates content changes from weight compatibility. Append-only card IDs, stable category/requirement IDs and matching vector encoder/chunk policy permit automatic use of current semantics with learned weights retained and provenance recorded. New checkpoints carry descriptors; old ones need verified historical bases. Unknown provenance, renumbering and encoder changes remain rejected
+- `semantic_compatibility_v1.json` preserves stable labels and historical bases through compilation, remote sync, GKG and CLI/WebUI import, including separate compilation directories. Clearing rebuildable assets retains label evidence; model metadata caches refresh after semantic updates
+- Deterministic replay, expert data/caches and ONNX graphs with baked semantics retain exact content checks. Invalid historical ONNX follows existing PTH fallback and can be re-exported. CLI import also carries code-generation provenance; BC/PPO saves retain semantic-update history
+- Player-view Extra queries update counts/sparse caches without inserting full inventories into native V4 entities. Transition recording aligns unknown target IDs/locations while preserving existing valid-event encoding/masks. Online history/hint eligibility stays closed
+- Network structure, protocol4, checkpoint3, revision14, rewards and PPO remain unchanged. Forward remains the main observed cost; reduced transfers do not establish a cloud speedup. No local-collector backend or WSL is used
+- Verification covers exact108-field CPU/CUDA inputs, forward/fixed-seed sampling, real legacy-PTH parameter inheritance, GKG/CLI import, BC/PPO continuation, valid-event encoding and public-Core rule duels. Separate integrations cover real CUDA WindBot collection/PPO, current ONNX/ORT agreement, fresh demonstrations/BC and fixed-opponent evaluation. Old-identity traces remain rejected rather than being reported as exact replays
+
+See [packed transfers](architecture_en.md#dtype-packed-transfers), [semantic updates](code_semantics_en.md#existing-models-and-semantic-updates) and the [player observation contract](core_trajectories_en.md#player-observation-contract-and-field-comparison).
+
+## [v3.16.0] - 2026-11-01
+
+### Online observation contract and central inference diagnostics (batch1)
+
+- Core publishes `core_v4_player_observation_audit_v1`: source groups for the existing 108 inputs, query caching/invalidation and known-zero/unknown/hidden distinctions. Inference, deterministic replay and BC eligibility are separate; online encoding remains closed
+- Optional RuleBot native/player V4 encoding comparison: 32 decision points per game across both players by default, up to 256. Compares fields, layouts and values with bounded coordinate samples. State copies do not drive models or alter RuleBot decisions; failures mark the diagnostic view only
+- Core's player-view module now owns public derived queries, with WindBot delegating to it. Query bytes and visibility filtering are unchanged, without another WindBot state adapter or inference
+- Training adds `--inference-profile-batches` and an optional WebUI timing switch, off by default. Pass1/Pass2 reports separate shared-input filling, queueing, CPU gathering, transfers, forward, sampling and result delivery. CUDA events are summarized after bounded collection windows; CPU/CUDA times overlap and must not be added. Reports include no raw inputs/actions/probabilities and add no TensorBoard curves
+- Storage & Logs adds Runtime Diagnostics with separately labelled timing/comparison reports for viewing, export and cleanup. Bilingual CLI/API, source tables, timing definitions and roadmap updated
+- Network, 108-field semantics, candidate/sampling algorithms, rewards, PPO, checkpoints and semantic assets are unchanged: Protocol4/Checkpoint3/revision14. Packed buffers, local collectors and online history semantic changes are not enabled in this batch
+- Validation: 292 related checks passed, with 18 platform/real-runtime gates skipped by default; five public-Core comparisons and five real WindBot/collection/PPO checks passed separately. CPU/CUDA diagnostics preserved outputs, completion IDs and RNG; fixed-seed rules games preserved response sequences and outcomes. A 512/8/6 six-client synthetic run profiled all 108 fields without timer failures; this does not establish cloud training throughput or live Link acceptance. No WSL was used
+
+See the [player observation contract](core_trajectories_en.md#player-observation-contract-and-field-comparison) and [central timings](architecture_en.md#central-inference-timing-diagnostics).
+
 ## [v3.15.9] - 2026-11-01
 
 ### Download routes, local documentation and self-check controls

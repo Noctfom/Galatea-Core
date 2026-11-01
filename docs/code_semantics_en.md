@@ -1,6 +1,6 @@
 # 3.13.4: Code-source provenance and content-aware semantic rebuilds
 
-> Usage guidance applies to v3.14.1; dated repair and measurement evidence below remains historical.
+> Usage guidance applies to v3.16.1; dated repair and measurement evidence below remains historical.
 
 ## Scope
 
@@ -45,7 +45,35 @@ To activate a separate build or received GKG, use the deployment manager's extra
 page to import matching complete source and compiled-runtime groups. Back up originals, stop
 training/duels and restart after import. Do not replace assets in a running process.
 
-**New vectors change `semantic_lookup_hash`, not network protocol.** Existing identity validation rejects old checkpoints with new semantics. No migration is provided: fresh V4 training uses rebuilt assets; old models keep their original assets/separate packages. The staging directory is gitignored; source commits do not publish rebuilt assets automatically. Publish the GKG or complete semantic source bundle separately.
+**New vectors change `semantic_lookup_hash`, not network protocol.** From 3.16.1, compatible semantic updates can be used automatically by existing PTH weights. Content identity and weight compatibility are checked separately; see [Existing models and semantic updates](#existing-models-and-semantic-updates). Renumbered labels or a different vector encoder remain incompatible. The staging directory is gitignored; publish rebuilt assets through a GKG or complete semantic source bundle.
+
+## Existing models and semantic updates
+
+Semantic updates can add cards or revise existing effects and code vectors. Whether an existing model can use an updated library depends on compatible card/semantic-label IDs and vector encoding. The rules are:
+
+| Use | Validation and behavior |
+|---|---|
+| PTH loading, arena/deployment, PPO resume or BC weight initialization | Card IDs must retain an append-only prefix; category/requirement IDs must not be renumbered. Encoder fingerprint, revision, dimension and chunk/aggregation policy must match. Compatible updates use current semantics and preserve learned weights |
+| Deterministic trajectory replay, expert examples and prepared-data caches | Exact semantic content identity is retained. Keep original assets or prepare data again rather than substituting new observations for recorded ones |
+| Exported ONNX | Static semantics are baked into the graph, so exact content validation remains. Invalid historical graphs follow the existing PTH fallback; re-export to use updated semantics |
+
+### Automatically maintained compatibility registry
+
+The program maintains `semantic_compatibility_v1.json` automatically. **No manual JSON edits or per-update entries are needed.** Use the normal WebUI/CLI sync, continuation and packaging functions.
+
+The file stores fixed category/requirement IDs plus registered library hashes, card-vocabulary identities and vector-encoding details. Stable IDs keep learned labels attached to their meanings. Historical hashes establish compatibility for older PTHs without embedded descriptions. The file contains no card-code vectors or network weights.
+
+| Operation | Registry handling |
+|---|---|
+| Compile/rebuild static semantics | Preserve existing IDs, append new labels and register the compiled library's identity |
+| WebUI/CLI sync or local continuation | Compile and update records on completion; merge a remote registry when one is supplied |
+| Clear local semantics and rebuild | Retain the registry so regenerated labels keep their assigned IDs |
+| Export/import GKG | Include an existing registry automatically and merge historical entries on import |
+| Distribute source and semantic assets | Commit or distribute the registry with its semantic assets; receivers do not maintain it manually |
+
+Back up the file with the semantic library rather than treating it as a temporary cache. Conflicting label IDs from independent branches need reconciliation. Older remote sources without a registry can still sync. An old PTH with neither embedded compatibility details nor a historical registry entry needs its original assets for compatibility verification.
+
+New PTHs store compatibility details in `semantic_compatibility` and content-change provenance in `semantic_asset_updates`. Loading with a new library does not rewrite existing PTHs; subsequent saves record current assets. Updated knowledge can change predictions even when weights are identical. Keep original assets to reproduce old predictions, and finish active training before updating the library.
 
 ## Sync and packaging
 
@@ -68,5 +96,5 @@ Full-script comparison against the previous committed parser found no slot/categ
 
 Core-side Phase 7 batch 3 ingestion and isolation gates arrived in 3.13.5; see
 [canonical traces and external ingestion](core_trajectories_en.md). v3.14.0 enters full V4
-main-framework deployment and long-training validation. Replay imitation and the deck-building
-upper layer remain future work; passing inspection never starts training automatically.
+main-framework deployment and long-training validation. Standalone imitation learning is available
+from3.15.3; the deck-building upper layer remains future work. Passing inspection never starts training automatically.

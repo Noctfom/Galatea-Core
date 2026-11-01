@@ -2,7 +2,7 @@
 
 > Detailed explanation of modules specially built to overcome inherent framework limitations — these are the core competitive advantages of Galatea-Core.
 
-> This document applies to **Galatea-Core v3.15.9**. The model protocol is V4; historical V3 audit names are retained.
+> This document applies to **Galatea-Core v3.16.1**. The model protocol is V4; historical V3 audit names are retained.
 
 ---
 
@@ -97,7 +97,7 @@ V3 observation auditing was introduced in 3.6.1. Since 3.6.3, training and Arena
 
 Version 3.6.2 no longer treats the low four bits of `desc`, or the Stringid index, as Lua effect-creation order. Semantic generation follows a statically recognizable `SetDescription(aux.Stringid(...))` on the same `Effect.CreateEffect(c)` object and stores the complete `desc` on the corresponding code-semantic slot. Dynamic expressions, ambiguous bindings, and passive effects without descriptions are never guessed; runtime falls back to whole-card semantics and does not set a false “used this turn” bit. WebUI reports unresolved observations as `binding_missing` so static-parser coverage can be expanded safely.
 
-Version 3.9.0 builds a model-side static table aligned by exact card token × Lua effect slot on top of that mapping. Identity hashes cover each slot's actual structured fields and logical code vector, so a harmless physical `.npy` row reorder does not create a false mismatch. Pure card appends preserve older prefixes, while existing-card semantic changes are rejected before PTH/ONNX/package loading. Version 3.9.1 removes per-step expansion: scene/deck rows reuse existing tokens, while chain and recent-history rows carry compact effect-slot IDs. Unknown bindings or missing static slots retain the original whole-card fallback, so prior observation content is not lost.
+Version3.9.0 adds an exact-card-token × Lua-effect-slot static table. Identity hashes cover logical structure/vectors rather than physical `.npy` row order. Card appends preserve old prefixes; revising old cards changes content identity. From3.16.1, compatible label IDs/vector encoders permit PTH weights to use current semantics. Exact replay and ONNX retain content checks; see [semantic updates](code_semantics_en.md#existing-models-and-semantic-updates). Version3.9.1 removes per-step expansion: scene/deck rows reuse tokens and chain/history carry compact slot IDs. Unknown bindings/missing slots retain whole-card fallback without losing prior observations.
 Version 3.9.2 writes that table as validated NPZ/JSON runtime assets. Official source-semantic or authority-vocabulary update flows invalidate the previous compiled pair before a one-time rebuild. Spawn Workers read only the JSON runtime catalog instead of retaining the full numeric table merely to resolve effect slots.
 
 ---

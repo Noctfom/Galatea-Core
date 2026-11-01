@@ -25,6 +25,7 @@ from semantic_assets import (
     STATIC_SEMANTIC_ASSET_FILENAMES,
     STATIC_SEMANTIC_CATALOG_FILENAME,
     STATIC_SEMANTIC_TABLE_FILENAME,
+    SEMANTIC_COMPATIBILITY_FILENAME,
     validate_semantic_bundle,
 )
 
@@ -38,6 +39,141 @@ SEMANTIC_REQUIREMENT_CAPACITY = 128
 SEMANTIC_CATEGORY_CAPACITY = 4000
 MAX_STATIC_SEMANTIC_TABLE_BYTES = 1024 * 1024 * 1024
 MAX_STATIC_SEMANTIC_CATALOG_BYTES = 16 * 1024 * 1024
+
+
+def _semantic_json_hash(value):
+    """只对标签编号与编码器合同求指纹，不把效果内容更新视为网络结构变化"""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def _validate_semantic_labels(mapping, *, category):
+    """稳定语义编号必须连续、唯一且保持网络容量和保留槽不变"""
+    capacity = SEMANTIC_CATEGORY_CAPACITY if category else SEMANTIC_REQUIREMENT_CAPACITY
+    if not isinstance(mapping, dict) or len(mapping) > capacity:
+        raise ValueError('semantic label registry exceeds network capacity')
+    if any(not isinstance(k, str) or not k or type(v) is not int for k, v in mapping.items()):
+        raise ValueError('invalid semantic label registry')
+    if sorted(mapping.values()) != list(range(len(mapping))):
+        raise ValueError('semantic label registry must be an append-only contiguous mapping')
+    if category and (mapping.get('<PAD>') != 0 or mapping.get('<UNK>') != 1):
+        raise ValueError('semantic label registry reserved slots changed')
+
+
+def read_semantic_compatibility_registry(directory='.'):
+    """只读稳定编号和已核验历史基座，不猜测未知旧检查点的语义来源"""
+    path = Path(directory) / SEMANTIC_COMPATIBILITY_FILENAME
+    if not path.exists():
+        return None
+    if path.is_symlink() or path.stat().st_size > MAX_STATIC_SEMANTIC_CATALOG_BYTES:
+        raise ValueError('invalid semantic compatibility registry file')
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or data.get('format_version') != 1 or not isinstance(data.get('bases'), dict):
+        raise ValueError('invalid semantic compatibility registry format')
+    _validate_semantic_labels(data.get('category_to_index'), category=True)
+    _validate_semantic_labels(data.get('requirement_to_index'), category=False)
+    for identity, descriptor in data['bases'].items():
+        if not isinstance(identity, str) or len(identity) != 64 or any(c not in '0123456789abcdef' for c in identity):
+            raise ValueError('invalid historical semantic identity')
+        if not isinstance(descriptor, dict) or descriptor.get('semantic_lookup_hash') != identity:
+            raise ValueError('historical semantic identity disagrees with its descriptor')
+    return data
+
+
+def merge_semantic_compatibility_registries(existing, incoming):
+    """同步只允许同一编号前缀扩展，不合并来自独立分支的编号冲突"""
+    if existing is None:
+        return incoming
+    if incoming is None:
+        return existing
+    result = {'format_version': 1, 'bases': dict(existing['bases'])}
+    for name in ('category_to_index', 'requirement_to_index'):
+        left, right = existing[name], incoming[name]
+        shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+        if any(longer.get(label) != index for label, index in shorter.items()):
+            raise ValueError('semantic label registries have conflicting indices; cannot replace learned meanings')
+        result[name] = dict(longer)
+    for identity, descriptor in incoming['bases'].items():
+        prior = result['bases'].get(identity)
+        if prior is not None and any(prior.get(k) != descriptor.get(k) for k in
+                ('encoder', 'policy', 'card_count', 'card_vocab_hash', 'code_dimension')):
+            raise ValueError('conflicting semantic compatibility evidence')
+        result['bases'].setdefault(identity, descriptor)
+    return result
+
+
+def semantic_compatibility_descriptor(lookup):
+    """描述学习参数依赖的编号和向量坐标系，内容哈希继续单独留存"""
+    if not lookup.code_encoder or not lookup.code_policy:
+        return None
+    return {'format_version': 1, 'semantic_lookup_hash': lookup.prefix_hash(),
+        'card_vocab_hash': lookup.card_vocabulary.vocabulary_hash,
+        'card_count': lookup.card_vocabulary.card_count,
+        'category_count': len(lookup.category_to_index),
+        'category_prefix_hash': _semantic_json_hash(lookup.category_to_index),
+        'requirement_count': len(lookup.requirement_to_index),
+        'requirement_prefix_hash': _semantic_json_hash(lookup.requirement_to_index),
+        'encoder': lookup.code_encoder, 'policy': lookup.code_policy,
+        'code_dimension': int(lookup.code_dictionary.shape[1])}
+
+
+def synchronize_semantic_compatibility_registry(source_directory, target_directory='.'):
+    """导入部署包或远程基座时合并编号证据，不用来源文件覆盖本地历史"""
+    from semantic_assets import _write_json_atomically
+    existing = read_semantic_compatibility_registry(target_directory)
+    incoming = read_semantic_compatibility_registry(source_directory)
+    merged = merge_semantic_compatibility_registries(existing, incoming)
+    if incoming is not None and merged != existing:
+        _write_json_atomically(merged, Path(target_directory) / SEMANTIC_COMPATIBILITY_FILENAME)
+    return merged
+
+
+def remember_semantic_compatibility(directory, lookup):
+    """保存可跨更新保留的编号合同，既有编号和历史证据不得被覆盖"""
+    from semantic_assets import _write_json_atomically
+    registry = read_semantic_compatibility_registry(directory)
+    incoming = {'format_version': 1, 'bases': {},
+        'category_to_index': dict(lookup.category_to_index),
+        'requirement_to_index': dict(lookup.requirement_to_index)}
+    descriptor = semantic_compatibility_descriptor(lookup)
+    if descriptor is not None:
+        identity = descriptor['semantic_lookup_hash']
+        incoming['bases'][identity] = descriptor
+    registry = merge_semantic_compatibility_registries(registry, incoming)
+    target = Path(directory) / SEMANTIC_COMPATIBILITY_FILENAME
+    if not target.exists() or json.loads(target.read_text(encoding='utf-8')) != registry:
+        _write_json_atomically(registry, target)
+    return registry
+
+
+def validate_semantic_update_compatibility(container, lookup, *, directory='.'):
+    """允许内容演进，但禁止卡密、效果标签或向量编码器坐标系被静默替换"""
+    identity = container.get('semantic_lookup_hash')
+    descriptor = container.get('semantic_compatibility')
+    if descriptor is None and isinstance(container.get('net_config'), dict):
+        descriptor = container['net_config'].get('semantic_compatibility')
+    if descriptor is None:
+        registry = read_semantic_compatibility_registry(directory)
+        descriptor = registry['bases'].get(identity) if registry else None
+    if not isinstance(descriptor, dict) or descriptor.get('format_version') != 1:
+        raise ValueError('semantic content changed without verified compatibility evidence; preserve the original assets')
+    if (descriptor.get('semantic_lookup_hash') != identity
+            or descriptor.get('card_vocab_hash') != container.get('card_vocab_hash')
+            or descriptor.get('card_count') != container.get('semantic_lookup_card_count')):
+        raise ValueError('semantic compatibility descriptor does not match the checkpoint identity')
+    for group, mapping in (('category', lookup.category_to_index), ('requirement', lookup.requirement_to_index)):
+        count = descriptor.get(group + '_count')
+        if type(count) is not int or not 0 <= count <= len(mapping):
+            raise ValueError(f'semantic {group} prefix is incompatible')
+        prefix = {label: index for label, index in mapping.items() if index < count}
+        if _semantic_json_hash(prefix) != descriptor.get(group + '_prefix_hash'):
+            raise ValueError(f'semantic {group} labels have been renumbered')
+    if (not lookup.code_encoder or not lookup.code_policy
+            or descriptor.get('encoder') != lookup.code_encoder
+            or descriptor.get('policy') != lookup.code_policy
+            or descriptor.get('code_dimension') != lookup.code_dictionary.shape[1]):
+        raise ValueError('semantic vector encoder or chunk policy changed; weights require an explicit migration')
+    return descriptor
 
 RACE_MAP = {
     "RACE_WARRIOR": 0x1,
@@ -295,6 +431,8 @@ class StaticSemanticLookup:
         semantic_card_slots,
         runtime_effect_bindings,
         public_hint_bindings=None,
+        code_encoder=None,
+        code_policy=None,
     ):
         self.card_vocabulary = card_vocabulary
         self.category_to_index = dict(category_to_index)
@@ -312,6 +450,8 @@ class StaticSemanticLookup:
         self.semantic_card_slots = semantic_card_slots
         self.runtime_effect_bindings = runtime_effect_bindings
         self.public_hint_bindings = public_hint_bindings or {}
+        self.code_encoder = dict(code_encoder) if code_encoder else None
+        self.code_policy = dict(code_policy) if code_policy else None
         self._prefix_hashes = {}
 
     @property
@@ -415,10 +555,10 @@ class StaticSemanticLookup:
         return semantic_hash
 
 
-def _build_index_vocabulary(knowledge_base):
+def _build_index_vocabulary(knowledge_base, baseline=None):
     """按现有知识库稳定顺序生成分类与条件的离散编号"""
-    category_to_index = {"<PAD>": 0, "<UNK>": 1}
-    requirement_to_index = {}
+    category_to_index = dict(baseline['category_to_index']) if baseline else {"<PAD>": 0, "<UNK>": 1}
+    requirement_to_index = dict(baseline['requirement_to_index']) if baseline else {}
     for card_data in knowledge_base.values():
         for effect in card_data.get("effects", []):
             for category in effect.get("categories", []):
@@ -583,7 +723,7 @@ def build_static_semantic_lookup(
     )
     knowledge_base = validated["knowledge_base"]
     category_to_index, requirement_to_index = _build_index_vocabulary(
-        knowledge_base
+        knowledge_base, baseline=read_semantic_compatibility_registry(root),
     )
     arrays = _allocate_lookup_arrays(vocabulary.capacity)
     semantic_card_slots = {}
@@ -610,7 +750,7 @@ def build_static_semantic_lookup(
         dtype=np.float32,
     )
     code_dictionary[1:] = code_embeddings
-    return StaticSemanticLookup(
+    lookup = StaticSemanticLookup(
         card_vocabulary=vocabulary,
         category_to_index=category_to_index,
         requirement_to_index=requirement_to_index,
@@ -629,7 +769,16 @@ def build_static_semantic_lookup(
             knowledge_base
         ),
         public_hint_bindings=build_public_hint_catalog(knowledge_base),
+        code_encoder=validated['metadata']['encoder'] if validated['metadata'] else None,
+        code_policy=validated['metadata']['policy'] if validated['metadata'] else None,
     )
+    if not lookup.code_encoder:
+        registry = read_semantic_compatibility_registry(root)
+        descriptor = registry['bases'].get(lookup.prefix_hash()) if registry else None
+        if descriptor and descriptor.get('card_vocab_hash') == vocabulary.vocabulary_hash:
+            lookup.code_encoder = descriptor.get('encoder')
+            lookup.code_policy = descriptor.get('policy')
+    return lookup
 
 
 _COMPILED_ARRAY_NAMES = (
@@ -682,6 +831,17 @@ def write_static_semantic_assets(
     )
     if compiled.card_vocabulary.vocabulary_hash != vocabulary.vocabulary_hash:
         raise ValueError("compiled semantic lookup vocabulary mismatch")
+
+    # 独立打包目录同样保留历史基座，先检查编号冲突再写入数值表
+    registry = merge_semantic_compatibility_registries(
+        read_semantic_compatibility_registry(output_root),
+        read_semantic_compatibility_registry(source_root),
+    )
+    merge_semantic_compatibility_registries(registry, {
+        'format_version': 1, 'bases': {},
+        'category_to_index': compiled.category_to_index,
+        'requirement_to_index': compiled.requirement_to_index,
+    })
 
     table_path, catalog_path = _compiled_asset_paths(output_root)
     temporary_table = None
@@ -747,6 +907,7 @@ def write_static_semantic_assets(
         "source_files": source_records,
         "public_hint_binding_format": PUBLIC_HINT_BINDING_FORMAT_VERSION,
         "public_hint_bindings": serialize_public_hint_catalog(compiled.public_hint_bindings),
+        "code_encoder_contract": {'encoder': compiled.code_encoder, 'policy': compiled.code_policy},
     }
     temporary_catalog = None
     try:
@@ -766,6 +927,10 @@ def write_static_semantic_assets(
     finally:
         if temporary_catalog is not None and temporary_catalog.exists():
             temporary_catalog.unlink()
+    if registry is not None and output_root != source_root:
+        from semantic_assets import _write_json_atomically
+        _write_json_atomically(registry, output_root / SEMANTIC_COMPATIBILITY_FILENAME)
+    remember_semantic_compatibility(output_root, compiled)
     return compiled, {
         STATIC_SEMANTIC_TABLE_FILENAME: table_path,
         STATIC_SEMANTIC_CATALOG_FILENAME: catalog_path,
@@ -940,6 +1105,23 @@ def load_static_semantic_assets(
         code_dictionary
     ).all():
         raise ValueError("static semantic floating-point values must be finite")
+    contract = catalog.get('code_encoder_contract') or {}
+    if not isinstance(contract, dict) or any(
+            value is not None and not isinstance(value, dict) for value in (
+                contract.get('encoder'), contract.get('policy'))):
+        raise ValueError('invalid static semantic encoder contract')
+    if not contract.get('encoder'):
+        from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME
+        metadata_path = root / CODE_EMBEDDINGS_META_FILENAME
+        record = catalog.get('source_files', {}).get(CODE_EMBEDDINGS_META_FILENAME)
+        if record and metadata_path.is_file() and _sha256_file(metadata_path) == record.get('sha256'):
+            metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+            contract = {'encoder': metadata.get('encoder'), 'policy': metadata.get('policy')}
+    if not contract.get('encoder'):
+        registry = read_semantic_compatibility_registry(root)
+        descriptor = registry['bases'].get(catalog.get('semantic_lookup_hash')) if registry else None
+        if descriptor:
+            contract = {'encoder': descriptor.get('encoder'), 'policy': descriptor.get('policy')}
     lookup = StaticSemanticLookup(
         card_vocabulary=vocabulary,
         category_to_index=category_to_index,
@@ -957,6 +1139,8 @@ def load_static_semantic_assets(
         semantic_card_slots=semantic_card_slots,
         runtime_effect_bindings=runtime_effect_bindings,
         public_hint_bindings=public_hint_bindings,
+        code_encoder=contract.get('encoder'),
+        code_policy=contract.get('policy'),
     )
     if catalog.get("semantic_lookup_card_count") != vocabulary.card_count:
         raise ValueError("static semantic lookup card count mismatch")
@@ -1102,6 +1286,7 @@ def get_static_semantic_lookup(
         knowledge_base_filename,
         vocabulary.vocabulary_hash,
         tuple(_file_signature(path) for path in asset_paths),
+        _file_signature(root / SEMANTIC_COMPATIBILITY_FILENAME) if (root / SEMANTIC_COMPATIBILITY_FILENAME).is_file() else None,
     )
     with _LOOKUP_CACHE_LOCK:
         lookup = _LOOKUP_CACHE.get(cache_key)

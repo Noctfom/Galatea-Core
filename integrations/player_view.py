@@ -40,6 +40,123 @@ QUERY_FIELDS = {
     q.QUERY_LINK: ('link_rating', 'link_marker'),
 }
 
+# 在线接入合同独立于模型结构版本，本批只说明和审计既有输入
+PLAYER_OBSERVATION_CONTRACT = "core_v4_player_observation_audit_v1"
+V4_REQUIRED_QUERY_FLAGS = q.PUBLIC_CARD_QUERY_FLAGS & ~q.QUERY_REASON_CARD
+INPUT_SOURCE_GROUPS = {
+    "global": ("start_and_visible_events", "refresh_counts_without_hidden_identities"),
+    "cards": ("visible_events_and_declared_query_cache", "missing_dynamic_values_are_not_cdb_defaults"),
+    "deck": ("own_initial_deck_and_confirmed_movements", "no_opponent_construction_or_deck_order"),
+    "chain": ("visible_chain_messages", "no_private_choice_reconstruction"),
+    "effect_history": ("visible_activation_messages", "preserve_existing_eight_entry_semantics"),
+    "transitions": ("confirmed_responses_and_visible_events", "opponent_response_boundaries_unproven"),
+    "public_context": ("visible_hints_and_known_positions", "unsupported_delivery_is_not_an_empty_hint_list"),
+    "actions": ("current_own_prompt_and_existing_packer", "preserve_candidate_order_masks_and_response_bytes"),
+}
+
+
+def input_source_group(name):
+    """按实际模型输入名称定位来源组，不引入新张量或默认补值"""
+    if name in ('global', 'phase', 'player_context', 'field_zone_mask'):
+        return 'global'
+    if name.startswith('card_') or name == 'padding_mask':
+        return 'cards'
+    if name.startswith('deck_'):
+        return 'deck'
+    if name.startswith('c_'):
+        return 'chain'
+    if name.startswith('h_'):
+        return 'effect_history'
+    if name.startswith('event_'):
+        return 'transitions'
+    if name.startswith(('hint_', 'known_deck_')) or name == 'public_state_flags':
+        return 'public_context'
+    if name.startswith('act_'):
+        return 'actions'
+    return 'unclassified'
+
+
+def player_observation_contract():
+    """返回不依赖引擎、模型或资产加载的在线来源说明"""
+    return {'contract_id': PLAYER_OBSERVATION_CONTRACT, 'player_view_format_version': PLAYER_VIEW_FORMAT_VERSION,
+        'core_message_protocol': CORE_MESSAGE_PROTOCOL,
+        'groups': {name: {'source': source, 'rule': rule} for name, (source, rule) in INPUT_SOURCE_GROUPS.items()},
+        'availability_states': ['known', 'known_zero', 'unknown', 'hidden', 'not_applicable', 'invalidated'],
+        'query_contract': {'type6': 'replace_zone_slot_set', 'type7': 'update_one_slot',
+            'required_model_flags': V4_REQUIRED_QUERY_FLAGS,
+            'omitted_attributes': 'merge_only_with_declared_cache_and_same_instance',
+            'omitted_equip': 'zero_only_with_requested_flag_evidence',
+            'empty_row': 'length4_absent_slot', 'flags_zero_row': 'present_without_attributes'},
+        'remaining_blockers': ['opponent_response_boundaries_unavailable', 'card_hint160_not_forwarded',
+            'dynamic_attribute_coverage_unproven', 'reload162_not_supported_by_current_profile'],
+        'permissions': {'inference': False, 'deterministic_replay': False, 'behavior_clone': False},
+        'caller_can_override_readiness': False, 'changes_network_inputs': False}
+
+
+def compare_encoded_observations(expected, actual, *, sample_limit=8):
+    """只比较编码字段和差异位置，不把原始卡密、动作或输入值写入报告"""
+    import torch
+    if type(sample_limit) is not int or not 0 <= sample_limit <= 32:
+        raise ValueError('comparison sample_limit must be 0..32')
+    fields = []
+    for name in sorted(set(expected) | set(actual)):
+        item = {'field': name, 'group': input_source_group(name)}
+        if name not in expected or name not in actual:
+            item.update(equal=False, reason='missing_actual' if name not in actual else 'unexpected_actual')
+        else:
+            left, right = expected[name], actual[name]
+            if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
+                raise TypeError('encoded observations must contain tensors only')
+            item.update(shape=list(left.shape), dtype=str(left.dtype))
+            if left.shape != right.shape or left.dtype != right.dtype:
+                item.update(equal=False, reason='layout_mismatch', actual_shape=list(right.shape), actual_dtype=str(right.dtype))
+            else:
+                left, right = left.detach().cpu(), right.detach().cpu()
+                valid = (not left.is_floating_point() or bool(torch.isfinite(left).all() and torch.isfinite(right).all()))
+                equal = bool(valid and torch.equal(left, right))
+                item.update(equal=equal, reason='equal' if equal else 'value_mismatch' if valid else 'nonfinite')
+                if not equal:
+                    different = torch.nonzero(left.ne(right), as_tuple=False)
+                    item.update(different_elements=int(different.shape[0]), sample_indices=different[:sample_limit].tolist())
+        fields.append(item)
+    return {'fields': fields, 'field_count': len(fields), 'matching_fields': sum(row['equal'] for row in fields),
+        'different_fields': [row['field'] for row in fields if not row['equal']],
+        'all_fields_equal': bool(fields) and all(row['equal'] for row in fields),
+        'unclassified_fields': [row['field'] for row in fields if row['group'] == 'unclassified']}
+
+
+def public_query_updates(env, perspective):
+    """在Core暂停边界生成派生查询刷新，不发送主卡组顺序或对手隐藏身份"""
+    import ctypes
+    if type(perspective) is not int or perspective not in (0, 1):
+        raise SessionProtocolError('invalid query perspective')
+    flags = q.PUBLIC_CARD_QUERY_FLAGS & ~q.QUERY_REASON_CARD
+    buffer = (ctypes.c_byte * 8192)()
+    for actor in (0, 1):
+        for zone in (4, 8, 2, 16, 32, 64):
+            count = 7 if zone == 4 else 8 if zone == 8 else env.query_zone_count(actor, zone)
+            if count is None or not 0 <= count <= 256:
+                raise SessionProtocolError('public Core query_field_count unavailable or invalid')
+            rows = []
+            for sequence in range(count):
+                length = env.lib.query_card(env.pduel, actor, zone, sequence, flags, buffer, 0)
+                if not 4 <= length <= ctypes.sizeof(buffer):
+                    raise SessionProtocolError('external query_card length invalid')
+                row = ctypes.string_at(ctypes.addressof(buffer), length)
+                if struct.unpack_from('<I', row)[0] != len(row):
+                    raise SessionProtocolError('external query_card length mismatch')
+                if len(row) == 4:
+                    rows.append(row)
+                    continue
+                actual = struct.unpack_from('<I', row, 4)[0]
+                if actual & 3 != 3 or len(row) < 16:
+                    raise SessionProtocolError('external query lacks code/position layout')
+                public = zone == 16 or (zone != 2 and bool(row[15] & 5))
+                if actor != perspective and not public:
+                    row = struct.pack('<II', 8, 0)
+                rows.append(row)
+            yield encode_zone_refresh(actor, zone, rows)
+
 
 class IncompletePlayerViewError(SessionProtocolError):
     """The source cannot prove all of the unchanged V4 model's inputs."""
@@ -368,8 +485,8 @@ class PlayerViewAdapter:
                 self._cards.pop(key, None)
             else:
                 self._cards[key] = card
-        # Main Deck rows never become ordered card identities in DuelState.
-        if zone != 1:
+        # 主卡组不暴露牌序，额外库存只校准数量和稀疏缓存，不扩充原生V4实体序列
+        if zone not in (1, 64):
             self.brain.field_map[actor][zone] = new_zone
         if raw[0] == 6:
             self.brain._reload_counts[actor][zone] = sum(row is not None for row in rows)
@@ -513,6 +630,43 @@ class PlayerViewAdapter:
                             'single_player_visibility_not_full_core'],
             'v4_observation_complete': False, 'behavior_clone_eligible': False}
 
+    def observation_readiness(self):
+        """提供分组的接入阻塞原因，隐藏信息本身不是缺失公开属性"""
+        coverage = self.coverage()
+        reasons = []
+        if not coverage['started']:
+            reasons.append('start_missing')
+        if coverage['failed']:
+            reasons.append('session_failed')
+        if coverage['terminal']:
+            reasons.append('session_terminal')
+        if not coverage['initial_own_deck_known']:
+            reasons.append('own_stable_deck_missing')
+        missing = [dict(item, missing_flags=item['missing_flags'] & V4_REQUIRED_QUERY_FLAGS)
+                   for item in coverage['missing_card_attributes'] if item['missing_flags'] & V4_REQUIRED_QUERY_FLAGS]
+        if missing:
+            reasons.append('visible_card_attributes_missing')
+        reasons.extend(player_observation_contract()['remaining_blockers'])
+        return {'contract_id': PLAYER_OBSERVATION_CONTRACT, 'visibility': 'player_view',
+            'perspective': self.perspective, 'core_message_protocol': CORE_MESSAGE_PROTOCOL,
+            'query_mode': self.query_mode, 'requested_flags': self.requested_flags,
+            'inference_ready': False, 'deterministic_replay_ready': False, 'behavior_clone_eligible': False,
+            'blocking_reasons': reasons, 'missing_card_attributes': missing,
+            'pending_refresh_zones': coverage['pending_refresh_zones'],
+            'permissions_are_independent': True, 'observation_semantics_changed': False}
+
+    def audit_native_snapshot(self, native_snapshot, encoder, *, sample_limit=8):
+        """仅对照已有编码，不返回可供策略调用的诊断张量或提升在线资格"""
+        from protocol_schema import get_current_protocol_metadata
+        projection = self.diagnostic_projection()
+        expected = encoder.encode(native_snapshot, player_id=self.perspective)
+        actual = encoder.encode(projection.snapshot, player_id=self.perspective)
+        report = compare_encoded_observations(expected, actual, sample_limit=sample_limit)
+        report.update(contract_id=PLAYER_OBSERVATION_CONTRACT, perspective=self.perspective,
+            model_identity=get_current_protocol_metadata(encoder.card_vocabulary),
+            readiness=self.observation_readiness(), comparison_proves_online_support=False)
+        return report
+
     def diagnostic_projection(self):
         if self.failed or self.brain is None:
             raise SessionProtocolError('no valid started player view')
@@ -523,3 +677,114 @@ class PlayerViewAdapter:
     def encode_v4(self, encoder):
         """Fail closed until a later contract proves complete V4 input coverage."""
         raise IncompletePlayerViewError('player_view does not prove complete V4 history/hints/attributes; diagnostic projection only')
+
+
+class PlayerViewConformanceAudit:
+    """受控对局的有限玩家视角对照，不驱动模型或改变决策"""
+
+    def __init__(self, *, max_checks=32):
+        if type(max_checks) is not int or not 1 <= max_checks <= 256:
+            raise ValueError('player-view audit checks must be 1..256')
+        self.max_checks = max_checks
+        self.views = {}
+        self.checked = 0
+        self.skipped = 0
+        self.counts = {0: {'checks': 0, 'exact': 0}, 1: {'checks': 0, 'exact': 0}}
+        self.differences = {}
+        self.examples = []
+        self.errors = []
+        self.window_complete = False
+
+    def start(self, deck0, deck1):
+        """宿主只派生Start计数，各适配器仅持有本方稳定构筑"""
+        decks = {str(seat): {'main': list(deck.main), 'extra': list(deck.extra)}
+                 for seat, deck in enumerate((deck0, deck1))}
+        for seat in (0, 1):
+            own = decks[str(seat)]
+            try:
+                view = PlayerViewAdapter(seat, query_mode='replace', requested_flags=V4_REQUIRED_QUERY_FLAGS,
+                    own_main=own['main'], own_extra=own['extra'])
+                self.views[seat] = view
+                view.accept_game_message(encode_player_start(seat, decks))
+            except Exception as error:
+                self._error(seat, error)
+
+    def _error(self, seat, error):
+        """错误仅标记该诊断适配器，不能中断正常RuleBot对局"""
+        if seat in self.views:
+            self.views[seat].failed = True
+        if len(self.errors) < 16:
+            self.errors.append({'perspective': seat, 'type': type(error).__name__, 'message': str(error)})
+
+    def observe(self, message):
+        """只向各视图传递自身可见的消息，禁止发送对手原始响应"""
+        if self.window_complete:
+            return
+        for seat, view in self.views.items():
+            if not view.failed:
+                try:
+                    view.accept_game_message(message)
+                except Exception as error:
+                    self._error(seat, error)
+
+    def before_decision(self, env, native_brain, encoder, actor):
+        """比较副本快照，额外查询不会更新原生决策所使用的状态"""
+        if self.window_complete or self.checked >= self.max_checks:
+            self.skipped += 1
+            return
+        view = self.views.get(actor)
+        if view is None or view.failed:
+            return
+        self.checked += 1
+        try:
+            for message in public_query_updates(env, actor):
+                view.accept_game_message(message)
+            snapshot = deepcopy(native_brain).get_snapshot(env)
+            report = view.audit_native_snapshot(snapshot, encoder)
+            self.counts[actor]['checks'] += 1
+            self.counts[actor]['exact'] += int(report['all_fields_equal'])
+            for name in report['different_fields']:
+                self.differences[name] = self.differences.get(name, 0) + 1
+            if len(self.examples) < 8:
+                self.examples.append(report)
+        except Exception as error:
+            self._error(actor, error)
+
+    def submitted(self, actor, response):
+        """只登记已提交的本方响应，保持空连锁自动应答语义"""
+        if self.window_complete:
+            return
+        from integrations.duel_session import ResponseSubmission
+        view = self.views.get(actor)
+        if view is not None and not view.failed:
+            try:
+                request = view.gate.pending
+                if request is None:
+                    raise SessionProtocolError('audit response without current own prompt')
+                view.record_submitted_response(ResponseSubmission(request.session_id, request.request_id, actor, response))
+            except Exception as error:
+                self._error(actor, error)
+        if self.checked >= self.max_checks:
+            self.window_complete = True
+
+    def report(self):
+        """相等样本只是当前受控证据，不能升级为真实服务器在线资格"""
+        return {'format_version': 1, 'contract': player_observation_contract(),
+            'source': 'controlled_masked_host_projection', 'max_checks': self.max_checks,
+            'window_complete': self.window_complete,
+            'checked_decisions': self.checked, 'skipped_after_limit': self.skipped,
+            'perspectives': self.counts, 'different_field_counts': self.differences,
+            'examples': self.examples, 'errors': self.errors,
+            'readiness': {seat: view.observation_readiness() for seat, view in self.views.items()},
+            'online_support_proven': False, 'raw_inputs_included': False}
+
+    def save(self, directory='./system_logs/player_view_audit'):
+        """每局保存一次有界报告，失败不改变对局结果"""
+        import json
+        import time
+        from pathlib import Path
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f'audit_player_view_{time.time_ns()}.json'
+        path.write_text(json.dumps(self.report(), ensure_ascii=False, indent=2), encoding='utf-8')
+        return str(path)

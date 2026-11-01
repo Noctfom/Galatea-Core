@@ -610,6 +610,98 @@ copy current state and are not zero-cost per-frame operations. Limits include655
 8192-byte query rows,256 rows/zone and100000 messages. No engine is launched/advanced or PPO/example row
 created. Actual Link networking and full-view acceptance remain separate work.
 
+## Player observation contract and field comparison
+
+3.16.0 adds `player_observation_contract()`, `observation_readiness()` and
+`audit_native_snapshot()` in [`integrations/player_view.py`](../integrations/player_view.py).
+`core_v4_player_observation_audit_v1` versions ingress/diagnostics, not the model.
+Protocol4, Checkpoint3, revision14 and the existing 108 input fields are unchanged.
+
+### Sources and lifetimes
+
+| Group | Existing inputs | Required player-side evidence and update rule |
+|---|---|---|
+| `global` (4 fields) | `global`, `phase`, `player_context`, `field_zone_mask` | Start seats/LP/counts and visible turn, phase, resource and zone changes; counts do not require hidden identities |
+| `cards` (18 fields) | `card_*`, `padding_mask` | Visible events and queries with declared caching; missing dynamic ATK/level/status cannot use printed CDB values |
+| `deck` (14 fields) | `deck_*` | Own initial Main/Extra, confirmed movement and existing remaining-composition semantics; no opponent build, Side or hidden order |
+| `chain` (7 fields) | `c_*` | Visible chain card, effect slot and context; no inferred private choices |
+| `effect_history` (3 fields) | `h_*` | Existing eight-activation history, not a replay or persistent-effect tracker |
+| `transitions` (27 fields) | `event_*` | Existing 16-transition window and visible events; native boundaries use both players' responses, which a one-player client cannot invent |
+| `public_context` (15 fields) | `hint_*`, `known_deck_*`, `public_state_flags` | Hint kinds, references/clear events, public positions and shuffle invalidation; omitted160 delivery does not mean no hints |
+| `actions` (20 fields) | `act_*` | Current own prompt and packer; unchanged candidate order, masks and responses, without injected expert answers |
+
+Groups describe existing fields without new state labels or network inputs. Ingress distinguishes
+known values, known zero, unknown, hidden, not applicable and invalidated. These cannot all mean
+known zero. The sparse cache and coverage report carry this distinction; legacy defaults in a
+diagnostic projection do not confer inference eligibility.
+
+Type6 replaces a zone's slot set; Type7 updates one slot. Omitted fields retain previous values
+only in declared cached `merge` mode for the same instance. Movement, shuffle or replacement
+invalidates them; uncached `replace` omissions stay unknown. Only requested-equipment evidence
+under the declared uncached layout permits its omitted-no-equip rule. A four-byte row means no
+card; an eight-byte flags=0 row means a present slot without attributes. Required model bits in
+`V4_REQUIRED_QUERY_FLAGS` exclude unused `QUERY_REASON_CARD`. Legacy `coverage()` retains
+full-query accounting, while readiness reports the required subset separately.
+
+Core owns `public_query_updates(env, perspective)` for paused-host public queries. WindBot's
+`query_updates()` delegates with identical bytes/masking, without another view state or inference.
+A real server client must supply equivalent Start/query semantics; local queries do not prove
+what the server actually delivered.
+
+### Run a bounded comparison
+
+WebUI: **Control & Logs → Self-Check → RuleBot → Native / Player Observation Comparison**.
+Off by default; 32 points per game across both players, configurable 1–256. CLI:
+
+```bash
+python main.py play -n 1 --player-view-audit --player-view-audit-checks 32
+```
+
+Each view receives its own initial build, submitted responses and filtered messages/queries,
+never the opponent's responses. The audit snapshots a copy of native state and uses the same V4
+Encoder to compare every field's name, shape, dtype and value. RuleBot state and decisions are
+unchanged; no network forward runs. Diagnostic views stop at the limit; diagnostic parsing
+errors mark their own view without stopping normal play. Queries, copies and two encodings cost
+time; disable during long ordinary stress tests.
+
+Reports: `system_logs/player_view_audit/audit_player_view_<timestamp>.json`, managed under
+**Storage & Logs → Runtime Diagnostics → Native / Player Observation Field Comparison**.
+
+| Field | Meaning |
+|---|---|
+| `checked_decisions` / `perspectives` | Attempted points; successful and exactly matching comparisons per P0/P1 |
+| `different_field_counts` | Comparisons with differences per input field, not differing-element counts |
+| `examples` | At most 8 detailed samples: shape, dtype, reason and up to 8 differing coordinates per field, without input values |
+| `errors` | At most 16 diagnostic errors, distinct from Core failures |
+| `readiness` | Missing query bits, pending zones, blockers and three eligibility categories per physical seat |
+| `source` | `controlled_masked_host_projection`, distinct from real-server captures |
+
+API example:
+
+```python
+from integrations.player_view import player_observation_contract
+contract = player_observation_contract()       # No Core/model startup
+readiness = view.observation_readiness()       # Independent inference/replay/BC eligibility
+report = view.audit_native_snapshot(native_snapshot, encoder, sample_limit=8)
+```
+
+### Remaining online blockers
+
+3.16.1 fixes two comparison issues: full Extra Deck queries update counts/sparse cache without
+inserting the whole inventory into native V4's entity sequence; transition target arrays are aligned
+when a location is known but its card ID is not, or vice versa. Existing valid-event padding/encoding,
+full target counts and storage limits are retained. These fixes do not change native input semantics
+or establish the missing single-player history and hint delivery described below.
+
+`inference_ready`, `deterministic_replay_ready` and `behavior_clone_eligible` are separate and
+currently false; `encode_v4()` still rejects. Matching controlled samples never promote eligibility
+and callers cannot override it. Opponent response boundaries,160 delivery, actual dynamic-field
+coverage and unsupported162 recovery remain unresolved. Native two-player transitions differ
+semantically from one-player history and require a separately evidenced design. If input semantics
+must change, protocol identity and training need separate discussion, not silent substitution
+under an existing checkpoint. This batch leaves history semantics unchanged. Inference completeness
+does not itself prove deterministic replay or BC eligibility; hidden information is never fabricated.
+
 ### Earlier trajectory acceptance evidence
 
 Tests cover compression/plain data, zero/cancel bytes, framing/magic/truncation/multi-packet errors,

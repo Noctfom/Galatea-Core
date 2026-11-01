@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.9**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.16.1**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -139,6 +139,12 @@ Configure and launch AI training tasks.
 - **Disable Compile**: Recommended on Windows or when the compiler toolchain is incomplete
 - **Export ONNX**: Export synchronously at every 10-iteration checkpoint for historical opponents in workers
 - **Fixed Core protocol**: use the bundled public Core layout; the ghost-byte/standard-Core toggle is removed. Future Core upgrades require separate protocol migration checks
+- **Central Inference Data Transfer**: keep Batched Transfer (recommended) for normal CPU/CUDA training. Per-field Transfer (original) is for performance comparisons or investigating problems. See [batched transfers](architecture_en.md#dtype-packed-transfers)
+- **Central inference timing**: enable when collection is slow to inspect time spent waiting, transferring data and computing. Measures the first 200 batches per iteration by default; leave it off for normal training. Reports are under Storage & Logs → Runtime Diagnostics; see [field definitions](architecture_en.md#central-inference-timing-diagnostics)
+
+RuleBot self-check optionally compares native and player observations at the first 32 decision
+points across both players. It adds query/encoding cost, never drives a model and does not enable
+online inference. See the [player observation contract](core_trajectories_en.md#player-observation-contract-and-field-comparison).
 
 **Model Action Protocol**:
 - v3.7.0 completes Model Protocol V4 Phase 1: append-only `card_vocab.json` removes real-card collisions and supports exact-prefix compatibility; decision/turn/starting players are separate, while phase, zone, and position use categorical embeddings
@@ -312,7 +318,7 @@ Scan all Lua scripts in `script/` directory to extract semantic information.
 - **Physical Clear**: Delete the local KB, Hash map, and code-semantic vectors before a full rebuild
 - **Remote Sync**: download structured knowledge, Hash mappings, code vectors/index and modern provenance; do not scan local Lua
 - **Local Extraction/Continuation**: validate source, dependencies, encoder and chunking policy; reuse unchanged slots, regenerate changed same-key content and rebuild legacy vectors without provenance on the first update. Sync and local updates work independently or as sync-then-continuation
-- **Model-side static table**: Startup compiles the complete bundle into a shared exact-card-token/Lua-effect-slot cache. Existing-card semantic changes alter model identity and block accidental loading, while pure card appends preserve old prefixes
+- **Model-side static table**: Exact-card-token/Lua-effect-slot cache. From3.16.1, old PTHs can automatically use current semantics when IDs and vector encoders remain compatible, preserving weights and recording content changes. Exact replay and ONNX retain content validation; unknown historical bases need evidence. See [semantic updates](code_semantics_en.md#existing-models-and-semantic-updates)
 
 #### 🧬 Custom Hash Explorer
 
@@ -348,6 +354,7 @@ Enter card code to view AI-perspective semantic features.
 |-----|-----------|-----------|
 | System Logs | `./system_logs/` | `.log` |
 | V3 Audit Reports | `./system_logs/protocol_v3_audit/` | `.json` |
+| Runtime Diagnostics | `./system_logs/inference_profiles/`, `./system_logs/player_view_audit/` | Separate timing/observation JSON groups for viewing, export and deletion |
 | Thought Records | `./ai_thoughts/` | `.json` |
 | Trajectory & Imitation Files | `./replays/`, `./replay_data/imitation/`, `./models/imitation/` and matching TensorBoard | Source replays, captures, traces, caches, reports, logs and BC checkpoints |
 | Model Storage | `./models/` | `.pth`, `.onnx`, `.onnx.data`, `.artifacts.json` |
@@ -497,6 +504,8 @@ python main.py train [options]
 | `--use_onnx` | Export ONNX at checkpoints and accelerate historical opponents | - |
 | `--no_compile` | Disable compilation | - |
 | `--protocol-audit` | Generate V3 protocol and effect-slot diagnostics | Off |
+| `--inference-profile-batches` | Maximum central microbatches timed per iteration: 1–10000; 0 disables, without limiting rollout/PPO batches | 0 |
+| `--inference-transport` | `packed`: batched transfer recommended for normal training; `fields`: original per-field transfer for performance comparison or troubleshooting | packed |
 | `--gamma` | Discount factor | 0.998 |
 | `--lr` | Learning rate | 1e-4 |
 | `--entropy` | Entropy regularization coefficient | 0.03 |

@@ -562,6 +562,90 @@ WindBot只复用轻量封包和原有可见性过滤，不额外创建此状态�
 输入按65535字节网络包、8192字节查询行、256行/区域、100000条消息等边界限制；失败关闭，
 不启动Core、不推进决斗、不产生PPO或示范学习样本。
 
+## 玩家观测在线合同与字段对照
+
+3.16.0 在 [`integrations/player_view.py`](../integrations/player_view.py) 提供
+`player_observation_contract()`、`observation_readiness()` 和 `audit_native_snapshot()`。
+合同标识 `core_v4_player_observation_audit_v1` 只版本化接入/诊断规则；模型协议4、检查点3、
+修订14和原有108个输入字段保持不变。
+
+### 输入来源与生命周期
+
+| 来源组 | 当前输入范围 | 玩家端所需证据与刷新规则 |
+|---|---|---|
+| `global`（4字段） | `global`、`phase`、`player_context`、`field_zone_mask` | Start的座位/LP/数量及可见回合、阶段、资源、区域变化；不以隐藏卡密补计数 |
+| `cards`（18字段） | `card_*`、`padding_mask` | 可见消息及声明缓存模式的查询；动态ATK/等级/状态缺失时，不用CDB原值冒充当前值 |
+| `deck`（14字段） | `deck_*` | 本方开局Main/Extra稳定构筑、确认移动及既有剩余构成语义；不接收对方完整构筑、Side或隐藏牌序 |
+| `chain`（7字段） | `c_*` | 公开连锁中的卡、效果槽和上下文；不推测私有选择 |
+| `effect_history`（3字段） | `h_*` | 现有最近8次发动历史；不是完整录像或持续效果追踪器 |
+| `transitions`（27字段） | `event_*` | 现有16步转移窗口及可见事件；原生按双方已提交响应划边界，单方玩家端不能补造对手响应边界 |
+| `public_context`（15字段） | `hint_*`、`known_deck_*`、`public_state_flags` | 提示类型、引用计数/清除消息、公开位置及洗切失效规则；当前保守传输不发送160，不代表“没有提示” |
+| `actions`（20字段） | `act_*` | 当前本方交互消息及原包装器；不改变候选顺序、掩码、实际响应，不插入专家答案 |
+
+这些组只解释现有字段，不新增状态标签或模型输入。来源需区分已知值、确知为0、尚未知、
+规则隐藏、不适用和已失效，不能全部作为“已知0”。此区别保存在接入侧稀疏缓存和完整性报告，
+诊断投影的旧式默认值不因此获得在线推理资格。
+
+Type6整区刷新替换区域槽位集合，移除消失的槽；Type7只更新指定槽。只有声明缓存式`merge`
+且仍是同一卡片实例时，省略属性才可沿用旧值；移走、洗牌或换实例后失效。非缓存式`replace`
+省略属性保持未知。请求过装备字段且符合既定非缓存查询布局，才可按该布局的省略规则认定
+“无装备”。4字节空行表示不存在卡；8字节flags=0行表示槽位存在但没有属性，不能混同。
+模型所需查询位见`V4_REQUIRED_QUERY_FLAGS`，不包含未被模型消费的`QUERY_REASON_CARD`；
+旧`coverage()`仍保留全查询位统计，`observation_readiness()`另列所需位。
+
+宿主暂停时的公开查询函数现由Core统一提供：`public_query_updates(env, perspective)`。
+WindBot的`query_updates()`委托给它，字节和可见性策略不变，不创建额外玩家状态或模型推理。
+真实服务器客户端需提供相同语义的Start/query数据；本地查询产物不证明服务器已交付完整信息。
+
+### 运行有界对照
+
+WebUI：**启动与监控中枢 → 规则自检 → RuleBot → 原生 / 玩家观测对照**。默认关闭；
+每局默认比较双方合计前32个决策点，可设1～256。CLI：
+
+```bash
+python main.py play -n 1 --player-view-audit --player-view-audit-checks 32
+```
+
+各视角只持有本方开局构筑、自身实际响应和过滤后的消息/查询，不接收对手响应。
+从原生状态副本取得快照，再调用同一V4 Encoder，比较全部字段名称、形状、dtype和数值。
+不修改规则决策状态，不运行网络前向。达到上限后停止维护诊断视图；诊断解析失败只标记
+对应视图，普通自检继续。额外查询、状态复制和双份编码有开销，长程普通压测时关闭。
+
+报告位于`system_logs/player_view_audit/audit_player_view_<时间戳>.json`，可在
+**存储与日志仓库 → 运行诊断 → 原生 / 玩家观测字段对照**查看、下载和删除。
+
+| 报告字段 | 含义 |
+|---|---|
+| `checked_decisions` / `perspectives` | 尝试对照点数；P0/P1成功对照数和完全相等数 |
+| `different_field_counts` | 每字段出现差异的对照次数，不是差异元素数量 |
+| `examples` | 最多8个详细样本；形状、dtype、差异原因及每字段最多8个差异坐标，不保存输入值 |
+| `errors` | 最多16个诊断错误，不是Core对局失败统计 |
+| `readiness` | 各物理视角的缺失查询位、待刷新区域、阻塞原因和三类资格 |
+| `source` | `controlled_masked_host_projection`，区别于真实服务器抓包 |
+
+API示例：
+
+```python
+from integrations.player_view import player_observation_contract
+contract = player_observation_contract()       # 不启动Core、不加载模型
+readiness = view.observation_readiness()       # 独立报告推理/重放/BC资格
+report = view.audit_native_snapshot(native_snapshot, encoder, sample_limit=8)
+```
+
+### 当前阻塞与后续接线
+
+3.16.1修正两处受控对照问题：额外卡组整区查询继续更新数量/稀疏缓存，不把整副库存额外插入
+原生V4实体序列；事件历史在目标位置已知、卡密未知等情况下补齐两侧数组。正常事件原有
+填充和编码保持一致，目标总数仍完整保留，存储槽位上限不变。这两项修复不改变原生输入规范，
+也不把下述尚未证明的单方历史或提示交付判为完整。
+
+`inference_ready`、`deterministic_replay_ready`、`behavior_clone_eligible`分别报告，当前均为false；
+`encode_v4()`仍拒绝编码。完全相等的受控样本不自动升级资格，调用方不能用参数绕过。
+尚未完成的是对手响应边界、160提示交付、真实动态属性覆盖，以及当前profile不支持的162恢复。
+原生双方转移窗口与单方在线历史的语义差异，需要独立设计和证据；若必须改变输入语义，
+应另议协议身份和训练，不能在当前检查点上静默替换。此批没有修改历史语义。推理完整性也
+不等同于可确定性重放或可用于BC，不补造对手隐藏信息。
+
 ### 既有轨迹验收证据
 
 已验证压缩/未压缩、取消/零尾字节、YRP3D伪魔数/截断/多包、YRP2完整种子、未知模式、

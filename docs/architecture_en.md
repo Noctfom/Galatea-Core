@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.15.9**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.16.1**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -718,6 +718,78 @@ class DuelState:
 ---
 
 ## Performance Optimization Techniques
+
+### Central inference timing diagnostics
+
+3.16.0 adds optional timing, disabled by default. It locates bottlenecks and is not itself a speed
+optimization. Network, inputs, sampling, rewards, PPO and ONNX are unchanged. Append
+`--inference-profile-batches 200` to a training command, or enable Central Inference Timing in
+WebUI. Each iteration times the first up to 200 valid microbatches:1–10000 allowed, 0 disables.
+CUDA events stop at the limit; Workers continue carrying lightweight phase timestamps. Diagnostics
+add cost and may alter concurrent arrival order, so multi-Worker trajectories are not guaranteed
+to repeat action-for-action. The profiler consumes no model RNG and changes no sampling algorithm.
+
+After collection, reports go to `system_logs/inference_profiles/inference_<run_id>_iter_<iteration>.json`.
+View, export or delete them in **Storage & Logs → Runtime Diagnostics → Central Inference Stage Timings**.
+Reports contain no observations, actions, probabilities or weights, add no TensorBoard metrics and
+do not train the model.
+
+| JSON field | Unit and definition |
+|---|---|
+| `measured_batches` / `measured_requests` | Fully timed microbatches/requests; a decision may include Pass1 and Pass2, so these are not training-sample counts |
+| `incomplete_batches` / `cuda_timing_failures` | Incomplete measurements and CUDA timer creation failures, not failed learning samples |
+| `batch_size_histogram` | Microbatch counts per valid request count, showing whether batches stay small |
+| `batch_ms.cpu_gather` | CPU gathering into staging buffers: per dtype block in packed mode, per field in fields mode |
+| `cpu_h2d_submit` / `cpu_forward_submit` / `cpu_sample_submit` | CPU wall time submitting transfers, forward and distribution construction/sampling/log-probability; may include internal synchronization |
+| `cpu_result_copy` / `cpu_publish` | Batched results/logits returned to CPU; shared-result/completion writes and reply sends |
+| `batch_ms.cuda_h2d` / `cuda_forward` / `cuda_sample` / `cuda_d2h` | CUDA-only intervals on one stream; includes host launch gaps, not pure kernel time |
+| `requests.Pass1` / `Pass2` / `unlabelled` | Request counts and millisecond distributions for lookup, action and unlabelled requests |
+| `input_fill` | Worker writes encoded inputs into shared slots; excludes Encoder computation |
+| `submit_to_receive` | Before Worker send to server receive, including queueing while previous batches run, transport and scheduling |
+| `server_wait` | Receive to gathering dispatch, including the 3ms microbatch window and assembly |
+| `submit_to_reply` | Before send to all replies in the batch being sent; excludes input filling, client resumption and result clone, not an exact per-request reply timestamp |
+| `collection_seconds` / `accepted_rollout_steps` | Whole-iteration collection seconds and accepted training steps for context, not the diagnostic-window denominator |
+
+Each `batch_ms` and request `ms` entry has `count/mean/p50/p95/max` in milliseconds; missing values
+are null, not zero. CPU and CUDA measurements overlap and **must not be summed**. CUDA events are
+read after collection without forced synchronization between operators. The window includes cold
+starts, is not an unbiased whole-iteration sample, and excludes Core/Encoder/PPO. Same-host
+`perf_counter_ns` differences are used across processes; out-of-order clocks produce no cross-process latency.
+
+The Worker central-round-trip ledger already includes input filling, queueing, gathering, transfers,
+forward, sampling and result delivery. Both self players use the server; historical CPU opponents
+are accounted separately. A high percentage does not attribute all time to ZMQ. `poll(100)` wakes
+when messages arrive and does not impose a fixed 100ms delay per request. Transfer improvements
+are described below. Local collection backends remain unimplemented; current/self policies still use the central model.
+
+### Dtype-packed transfers
+
+Select Central Inference Data Transfer in the training WebUI or use the CLI:
+
+| Option | CLI value | When to use it |
+|---|---|---|
+| Batched Transfer (recommended) | `--inference-transport packed`, default | Normal CPU/CUDA training; reduces overhead from many small copies |
+| Per-field Transfer (original) | `--inference-transport fields` | Compare performance with the original method or investigate problems with batched transfer |
+
+Each observation contains 108 fields, including scene cards, action candidates and event history.
+The original method allocates shared storage per field, then gathers and transfers each field
+separately. Batched transfer puts fields of the same data type into continuous storage, currently
+seven blocks, while retaining each field's name, shape and numeric type.
+
+Workers write directly through field views. The server gathers blocks in request order, transfers
+them, and reconstructs field views by offset on the compute device. CUDA uses pinned CPU staging
+and reusable device buffers; CPU mode uses ordinary memory. Most fields remain views over the
+blocks. Floating-point fields regain contiguous layouts before network computation, with device-side
+copies where needed. Observation information and numeric precision are retained.
+
+Both methods provide the same observation information; model size does not determine the choice.
+Batching reduces shared-storage objects and copy scheduling, while observation and rollout data
+sizes stay the same. Device buffers scale with Worker count and are reused across iterations.
+The benefit depends on how much total time is spent transferring data: this option cannot remove
+the cost of network forward computation.
+
+Use the stage timings above to compare methods. Reports record `inference_transport`; keep network,
+Workers, device and decks consistent when comparing gather/transfer time and whole-rollout speed.
 
 ### 1. CUDA Mixed Precision Training
 

@@ -312,6 +312,7 @@ def worker_process(
     shared_logits=None,
     shared_response_ids=None,
     protocol_audit=False,
+    inference_profile=False,
 ):
     """在固定 CPU Worker 中运行对局采集并请求中央模型推理"""
 
@@ -353,7 +354,7 @@ def worker_process(
     # 高 32 位使用训练轮次，避免新一轮 Worker 的请求号与上一轮重复。
     next_inference_request_id = int(iteration) << 32
 
-    def request_central_result(result_slot, phase):
+    def request_central_result(result_slot, phase, input_fill_ns=0):
         """请求中心推理；连接异常时重建 Socket，并阻止读取旧共享结果"""
         nonlocal socket, socket_generation, next_inference_request_id
         next_inference_request_id += 1
@@ -369,6 +370,7 @@ def worker_process(
                 request_id,
                 response_id_slot,
                 result_slot,
+                **({'phase': phase, 'input_fill_ns': input_fill_ns} if inference_profile else {}),
             )
         except (zmq.ZMQError, InferenceProtocolError) as exc:
             print(
@@ -858,6 +860,7 @@ def worker_process(
                                         and episode_opp_config["type"] == "self"
                                     ):
                                         # 零拷贝填入超导通道
+                                        profile_fill_start = time.perf_counter_ns() if inference_profile else 0
                                         for k, v in dict_pass1.items():
                                             if k in shared_buffers[worker_id]:
                                                 shared_buffers[worker_id][k].copy_(v.squeeze(0))
@@ -866,6 +869,7 @@ def worker_process(
                                         raw_logits = request_central_result(
                                             shared_logits[worker_id],
                                             "Pass1",
+                                            time.perf_counter_ns() - profile_fill_start if inference_profile else 0,
                                         ).numpy()
                                         probs = torch.softmax(torch.tensor(raw_logits), dim=-1).numpy()
                                         perf_ledger['t_central'] += (time.time() - t_infer_p1)
@@ -986,6 +990,7 @@ def worker_process(
                                 and episode_opp_config["type"] == "self"
                             ):
                                 t_zmq_anchor = time.time()
+                                profile_fill_start = time.perf_counter_ns() if inference_profile else 0
                                 for k, v in tensor_dict.items():
                                     if k in shared_buffers[worker_id]:
                                         shared_buffers[worker_id][k].copy_(v.squeeze(0))
@@ -993,6 +998,7 @@ def worker_process(
                                 res_array = request_central_result(
                                     shared_outputs[worker_id],
                                     "Pass2",
+                                    time.perf_counter_ns() - profile_fill_start if inference_profile else 0,
                                 ).numpy()
                                 action_idx = torch.tensor(int(res_array[0]), dtype=torch.long)
                                 log_prob = torch.tensor(res_array[1], dtype=torch.float32)

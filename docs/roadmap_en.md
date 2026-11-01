@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.9. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.16.1. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -50,6 +50,16 @@ Distinguish upstream sources, original licenses, pinned commits and local patche
 - [ ] Complete50-iteration trends,100–200-iteration medium runs and long-term fixed Arena comparisons; temporary short-run stability is not acceptance
 - [x] 3.15.7: Linux setup reuses current Python/Conda, constrains existing Torch and installs missing WindBot runtime prerequisites. Shared AnyCPU files ship in source without local compilation or a new Linux ZIP
 - [ ] Automatic Torch-build selection by GPU/driver on fresh machines remains pending; first installation uses requirements or an explicit wheel source without guessing compatibility
+
+## Online ingress and collection performance
+
+- [x] 3.16.0 batch1: Core-owned V4 player sources, missing/invalidated data and separate eligibility; bounded native/player encoding comparison, CLI/WebUI controls and report management, with online encoding still closed
+- [x] 3.16.0 batch1: Optional bounded Pass1/Pass2 timing for shared-slot filling, queueing, gathering, forward/sampling and CPU/CUDA stages; network and learning unchanged
+- [x] 3.16.1 batch2: Dtype-packed shared/pinned/device buffers with a fields reference path; exact CPU/CUDA inputs, outputs and fixed-seed samples, plus real Worker/PPO regression. Target-server end-to-end gains still require comparison
+- [x] 3.16.1: Compatible content updates reuse PTH weights with stable label/encoder validation separate from content identity; exact replay and ONNX remain strict, with compatibility evidence carried by sync/GKG
+- [x] 3.16.1: Extra inventory/entity alignment and unknown-card transition target padding; valid-event encoding retained and online gate still closed
+- [ ] Compare real-server Start/query delivery,160/165 hints and162 recovery; discuss any required change to native two-player versus online one-player history semantics before changing protocol identity or training
+- [ ] Benchmark optional frozen-policy local CPU/GPU collection by resource budget, preserving iteration-boundary weight sync, stale-response rejection and trajectory identity without automatically adopting asynchronous off-policy learning
 
 ## Separable Deck-Construction Cognition
 

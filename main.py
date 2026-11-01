@@ -219,6 +219,8 @@ def run_training_command(args, parser):
             model_prefix=args.model_prefix,
             preloaded_resume_checkpoint=resume_checkpoint,
             protocol_audit=args.protocol_audit,
+            inference_profile_batches=getattr(args, 'inference_profile_batches', 0),
+            inference_transport=getattr(args, 'inference_transport', 'packed'),
             league_weights=weights,
             **({'windbot_training': {
                 'executors': args.windbot_executor, 'holdouts': args.windbot_holdout,
@@ -322,6 +324,10 @@ def main():
     train_parser.add_argument('--ppo-epochs', type=int, default=DEFAULT_PPO_EPOCHS, choices=range(1, 5), help='每轮 PPO 更新次数上限（1～4）')
     train_parser.add_argument('--target-kl', type=float, default=DEFAULT_TARGET_KL, help='目标 KL；超过 1.5 倍目标停止本轮共享更新，0 关闭')
     train_parser.add_argument('--windbot', action='store_true', help='显式启用WindBot主训练对手，关闭时不加载可选模块')
+    train_parser.add_argument('--inference-profile-batches', type=int, default=0,
+        help='每轮中央推理诊断的最大批次数，0关闭，1～10000；记录CPU分段与CUDA流区间，会增加诊断窗口开销')
+    train_parser.add_argument('--inference-transport', choices=('packed', 'fields'), default='packed',
+        help='中央推理数据传输：packed为推荐的批量传输，适合日常训练；fields为原逐字段方式，用于性能比较或排查运行问题；CPU/CUDA均可用')
     train_parser.add_argument('--windbot-executor', action='append', default=None, help='可重复指定训练执行器；省略则自动按层级留出并选择兼容构筑')
     train_parser.add_argument('--windbot-holdout', action='append', default=None, help='可重复指定保留作独立评测的执行器，不进入WindBot训练抽样')
     league_group = train_parser.add_mutually_exclusive_group()
@@ -340,6 +346,10 @@ def main():
     play_parser = subparsers.add_parser('play', help='运行自我博弈测试')
     play_parser.add_argument('-n', '--num', type=int, default=10, help='对局数量')
     play_parser.add_argument('--deck_dir', type=str, default='./decks', help='YGOPro卡组文件夹路径')
+    play_parser.add_argument('--player-view-audit', action='store_true',
+        help='开启有界的原生/玩家视角V4编码对照，不开放在线推理或改变模型输入')
+    play_parser.add_argument('--player-view-audit-checks', type=int, default=32,
+        help='每局最多比较的双方决策点总数，范围1～256，默认32')
 
 
     # --- 3. 竞技场模式 (Duel) ---
@@ -559,6 +569,10 @@ def main():
     collect_parser.add_argument('--max-decisions', type=int, default=4000)
 
     args = parser.parse_args()
+    if args.command == 'train' and not 0 <= args.inference_profile_batches <= 10000:
+        parser.error('--inference-profile-batches must be 0..10000')
+    if args.command == 'play' and not 1 <= args.player_view_audit_checks <= 256:
+        parser.error('--player-view-audit-checks must be 1..256')
     if args.command == 'duel' and (args.record_trajectory or args.record_evaluations) and args.thought_freq <= 0:
         parser.error('轨迹/预测记录需要 --thought_freq 大于 0；仅选定的录像局进行额外记录')
 
@@ -595,6 +609,8 @@ def main():
         manager = DuelManager(
             core_path,
             args.deck_dir,
+            player_view_audit=args.player_view_audit,
+            player_view_audit_checks=args.player_view_audit_checks,
         )
         manager.run_tournament(args.num)
         
@@ -667,7 +683,7 @@ def main():
                 print("⚠️ 远程代码向量不完整，已仅安装结构语义；可启用 --local-update 重建向量。")
 
         if local_update:
-            print('⚠️ 代码语义内容更新会改变语义资产身份；已有模型须保留原资产，新资产用于新训练。')
+            print('♻️ 语义内容更新后，编号和向量编码器兼容的旧模型可继承权重；精确重放仍需原语义资产。')
             print("🔍 启动本地 Lua 语义接续更新...")
             from lua_parser import YGOProLuaParser
             semantic_parser = YGOProLuaParser(script_dir=args.script_dir)

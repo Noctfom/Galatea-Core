@@ -14,8 +14,12 @@ from protocol_v3_audit import (
 )
 
 class DuelManager:
-    def __init__(self, core_dir, deck_dir):
+    def __init__(self, core_dir, deck_dir, *, player_view_audit=False, player_view_audit_checks=32):
         self.deck_dir = deck_dir
+        if type(player_view_audit_checks) is not int or not 1 <= player_view_audit_checks <= 256:
+            raise ValueError('player-view audit checks must be 1..256')
+        self.player_view_audit = player_view_audit
+        self.player_view_audit_checks = player_view_audit_checks
         configure_protocol_v3_audit("rule_selfcheck", run_label="rule_vs_rule")
 
         print(f"🔧 初始化核心环境: {core_dir}")
@@ -47,7 +51,17 @@ class DuelManager:
 
             # 2. 调用 run_self_play 执行单局
             # 这里传入名字 purely for display inside the function (if needed)
-            winner, turns, err = run_self_play.run_single_game(self.env, d1, d2, name1, name2)
+            auditor = None
+            if self.player_view_audit:
+                from integrations.player_view import PlayerViewConformanceAudit
+                auditor = PlayerViewConformanceAudit(max_checks=self.player_view_audit_checks)
+            winner, turns, err = run_self_play.run_single_game(self.env, d1, d2, name1, name2,
+                **({'player_view_auditor': auditor} if auditor is not None else {}))
+            if auditor is not None:
+                try:
+                    print(f'🛡️ 玩家观测对照已保存: {auditor.save()}')
+                except Exception as error:
+                    print(f'⚠️ 玩家观测对照保存失败，不影响自检结果: {error}')
 
             # 3. 统计结果
             stats[name1]['matches'] += 1
