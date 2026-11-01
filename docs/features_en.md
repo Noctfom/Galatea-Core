@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.15.8**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.15.9**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -188,6 +188,10 @@ Normal Arena preserves the existing default: P0 samples a range under current gl
 
 High-speed pure RuleBot battles to verify engine and script stability.
 
+**RuleBot** remains the default with the existing random deck-pool workflow. Select **WindBot**, read compatible executors, then choose two WindBots or WindBot against mirrored RuleBot. Executors retain their fixed upstream decks. Batches support 1–100 games with random Core starts; the installed optional runtime is reused without downloading or compiling components.
+
+WindBot self-check always saves raw captures under `replays/link_captures/`. Holographic recordings under `ai_thoughts/` and post-game independent replay verification are optional. Verification adds runtime cost. Failures stop the batch without replacing opponents or producing training samples. Neither rule bot produces model win predictions.
+
 #### Live Terminal Mapping
 
 Bottom of page shows real-time training/arena logs:
@@ -281,11 +285,18 @@ Create cross-pool mixing recipes, allowing decks from different physical pools t
 
 #### Advanced Options
 
+- **GitHub Download Route**: direct by default, with GH-Proxy, GHProxy or a custom HTTPS prefix. The sync and semantic hubs select routes independently without changing source URLs, remotes or global Git configuration. Git rewrites apply only to the current command; ZIP, Raw, CDB, vocabulary and complete semantic assets use the chosen route. Custom non-GitHub file sources stay direct. Third-party availability is not guaranteed; switch routes or use direct access on failure
 - **CDB file / vocabulary repository or file source**: independently configurable; one model lineage requires one append-only vocabulary, and divergent token assignments cannot be merged
 - **Script Repo Source**: Specify custom script repository URL
 - **Force Overwrite**: Override local modifications
 
 ![Resource Sync](图片/资源同步.png)
+
+On **Local/Custom Card Vocabulary**, acknowledgement immediately enables **Check and Append New Cards**; clearing it disables the button again. Acknowledgement alone never modifies the vocabulary. The existing CLI validation and append-only IDs remain in place.
+
+### Project Documentation
+
+Click **📖 Open Project README** in the sidebar to read the local `README.md` or `README_EN.md` for the current UI language. Relative Markdown links navigate inside the viewer, including section anchors, language links and local images; external URLs still open external sites. Browser back/forward navigation returns to previous documents, and missing files show an error. Viewing public documentation does not start downloads or training.
 
 ---
 

@@ -418,6 +418,7 @@ def main():
                               help='语义资产仓库 URL，也兼容旧式 knowledge_base.json Raw URL')
     parse_parser.add_argument('--local-update', action='store_true', help='解析本地 Lua 并自动接续结构语义与代码向量')
     parse_parser.add_argument('--embed', action='store_true', help=argparse.SUPPRESS)
+    parse_parser.add_argument('--github-mirror', default='direct', help='公开GitHub下载：direct、gh-proxy、ghproxy或自定义HTTPS加速前缀；不改变本地接续规则')
     semantic_check_parser = subparsers.add_parser('semantic-check', help='只读检查代码语义来源、生成清单和向量重复率')
     semantic_check_parser.add_argument('--directory', default='.', help='语义资产所在目录')
 
@@ -439,6 +440,7 @@ def main():
         help='指定词表仓库或 card_vocab.json 文件源 URL',
     )
     update_parser.add_argument('--force', action='store_true', help='覆盖更新：清空本地旧脚本，完全以远程为准')
+    update_parser.add_argument('--github-mirror', default='direct', help='公开GitHub下载：direct、gh-proxy、ghproxy或自定义HTTPS加速前缀；不修改Git源或全局配置')
 
     # --- 6. 本地精确卡片词表更新模式 (Vocabulary) ---
     vocab_parser = subparsers.add_parser('vocab', help='从本地 CDB 只追加更新精确卡片词表')
@@ -656,6 +658,7 @@ def main():
                 args.remote_url,
                 output_directory,
                 knowledge_base_filename=os.path.basename(output_path),
+                github_mirror=args.github_mirror,
             )
             if sync_result["installed_code_semantics"]:
                 print("✅ 远程结构语义、Hash 映射及代码向量已同步完成。")
@@ -711,7 +714,8 @@ def main():
             print("💡 示例: python main.py update --core --data")
         else:
             if args.core:
-                update_tools.update_core_code()
+                if not update_tools.update_core_code(github_mirror=args.github_mirror):
+                    parser.exit(1, '核心代码同步失败，请查看上方日志\n')
                 
             if args.data:
                 update_tools.update_data_and_scripts(
@@ -719,6 +723,7 @@ def main():
                     force=args.force,
                     cdb_url=args.cdb_url,
                     card_vocab_url=args.card_vocab_url,
+                    github_mirror=args.github_mirror,
                 )
 
     elif args.command == 'trajectory-check':

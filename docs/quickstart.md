@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置。已有环境和资产时约需 **5–10 分钟**；首次下载或全量语义生成可能明显更久。
 
-> 文档适用于 **Galatea-Core v3.15.8**，Model Protocol V4 / Checkpoint Format 3。
+> 文档适用于 **Galatea-Core v3.15.9**，Model Protocol V4 / Checkpoint Format 3。
 
 > 代码语义构建/同步与质量检查见 [3.13.4 语义资产指南](code_semantics.md)。新源码、向量、索引和生成清单须成组使用；新语义身份不与旧检查点混用。
 
@@ -76,6 +76,17 @@ bash setup.sh --python /path/to/python --install-only
 等待几分钟同步完成。这会更新 `cards.cdb`、官方 `script/` 和 Galatea 仓库维护的唯一 `card_vocab.json`。同步控制台的高级选项允许改用自建 CDB 文件源、词表仓库/文件源和脚本仓库。若卡库中的新卡尚未进入词表，环境仍可运行，但相关卡组会暂时退出随机池；可在“资产与卡组管理 → 卡组与环境管理 → 卡组兼容性预检”查看详情。
 
 官方环境应直接同步仓库词表。需要自制卡时，进入 **资源同步中枢 → 本地/自制卡词表**，确认警告后从本地 CDB 只追加编号；CLI 等价命令是 `python main.py vocab --cdb <自制卡库路径>`。更新后必须备份并向所有训练/部署机器分发同一 `card_vocab.json`，不同追加顺序形成的分叉无法自动合并。
+
+GitHub 访问较慢时，可在同步中枢或语义执行中枢选择 **GitHub 下载线路**。默认直连，提供 [GH-Proxy](https://gh-proxy.com/docs/quick-start)、[GHProxy](https://ghproxy.net/) 及自定义 HTTPS 前缀；仅作用于本次公开 GitHub 请求，不修改 Git 配置，不代理自建文件源，也不改变词表和语义资产校验。
+
+```bash
+python main.py update --data --github-mirror gh-proxy
+python main.py parse --sync --local-update --github-mirror ghproxy
+# 自建前缀示例
+python main.py update --core --github-mirror https://your-proxy.example/
+```
+
+第三方线路不是内容发布源，访问失败时可切换另一线路或 `direct`。本地提取/接续规则保持不变，线路不影响模型输入或资产身份。侧边栏 **📖 打开项目主文档** 可在 WebUI 内查看项目 README 及其相对文档链接。
 
 ---
 
@@ -164,6 +175,12 @@ bash setup.sh --python /path/to/python --install-only
 - 设置压测局数（建议 50-100 局）
 - 点击启动，检验引擎和脚本稳定性
 - 建议在首次训练前运行一次，确保环境无问题
+
+需要检查外部桥时，切换自检对手为 **WindBot**，读取兼容执行器后选择双 WindBot 或镜像 RuleBot，可额外保存全息回放和独立重放校验。它复用受控对局，不加入训练；CLI 等价示例：
+
+```bash
+python main.py windbot --executor Blue-Eyes --opponent-executor Blue-Eyes --games 5 --verify
+```
 
 ---
 

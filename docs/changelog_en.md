@@ -4,6 +4,20 @@
 
 ---
 
+## [v3.15.9] - 2026-11-01
+
+### Download routes, local documentation and self-check controls
+
+- Optional GitHub download routes in update and semantic sync: direct by default, with GH-Proxy, GHProxy and custom HTTPS prefixes. Routes cover this operation's Git, ZIP, Raw, CDB, exact-vocabulary and semantic downloads; custom non-GitHub sources retain their URLs. CLI uses `--github-mirror` without changing remotes or global Git settings, continuation rules, vocabulary-prefix checks or vector validation
+- Source ZIP updates now use the project's `main` branch instead of the previous `master` fallback
+- A sidebar shortcut opens the local README, with language links, relative Markdown navigation, heading anchors and local images. The viewer restricts access to public project documentation and reports missing or out-of-scope files
+- Fixed the local vocabulary acknowledgement remaining inside a form and leaving its button disabled. Acknowledgement now immediately enables the button; only clicking runs the existing append-only validation
+- Rules self-check can use WindBot against WindBot or mirrored RuleBot after reading compatible executors. Holographic recording and independent replay are optional; raw capture is retained. Reuses controlled sessions with random Core starts, without PPO, imitation, automatic dependency installation or compilation
+- Network, model inputs, rewards, PPO, public Core and WindBot executors are unchanged. Protocol4/Checkpoint3/revision14 remain unchanged; existing models need no migration
+- Validation: 193 related regression checks passed, with 10 platform/real-runtime gates skipped by default. Three separately enabled Windows games passed: both WindBot/RuleBot seats and WindBot mirrors, including captures, holographic recordings, independent replay and process cleanup. UI checks cover bilingual acknowledgement, empty-list refresh, custom routes and document query navigation. No WSL was used; local vocabulary and semantic assets were not rewritten
+
+See [sync and documentation controls](features_en.md#resource-sync-hub), [self-check](features_en.md#launch--monitor-hub) and [resource setup examples](quickstart_en.md#sync-resources--card-db).
+
 ## [v3.15.8] - 2026-10-31
 
 ### WindBot high-descriptor fix for Linux training Workers

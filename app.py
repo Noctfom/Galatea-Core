@@ -17,6 +17,7 @@ import sys
 import tempfile
 import inspect
 import html
+from pathlib import Path
 from collections import deque
 import deck_utils
 from arena_benchmark import load_benchmark_results
@@ -47,7 +48,7 @@ from training_validation import (
     validate_training_config,
 )
 from ppo_control import DEFAULT_GAE_LAMBDA, DEFAULT_PPO_EPOCHS, DEFAULT_TARGET_KL
-from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL
+from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL, GITHUB_DOWNLOAD_MIRRORS
 from semantic_assets import (
     DEFAULT_SEMANTIC_REPOSITORY_URL,
     validate_semantic_bundle,
@@ -87,6 +88,110 @@ def get_stretch_width_args(widget):
 
 REPLAY_BUTTON_WIDTH = get_stretch_width_args(st.button)
 REPLAY_DATAFRAME_WIDTH = get_stretch_width_args(st.dataframe)
+
+
+def render_github_mirror(key):
+    """在同步入口提供同一组公开 GitHub 下载线路"""
+    selected = st.selectbox(
+        _("GitHub 下载线路", "GitHub Download Route"),
+        [*GITHUB_DOWNLOAD_MIRRORS, "custom"], key=key,
+        format_func=lambda item: {
+            "direct": _("直连（默认）", "Direct (default)"),
+            "gh-proxy": "GH-Proxy · gh-proxy.org",
+            "ghproxy": "GHProxy · ghproxy.net",
+            "custom": _("自定义加速前缀", "Custom mirror prefix"),
+        }[item],
+        help=_("仅改写本次公开 GitHub 下载，覆盖 Git、ZIP、Raw、词表与语义资产；不修改仓库地址或全局 Git 配置。第三方线路的可用性可能变化，失败时可切换线路或直连。",
+               "Routes this operation's public GitHub Git/ZIP/Raw, vocabulary and semantic downloads only. Repository URLs and global Git configuration are unchanged. Third-party availability varies; switch routes or use direct access on failure."),
+    )
+    if selected == "custom":
+        return st.text_input(_("HTTPS 加速前缀", "HTTPS Mirror Prefix"), key=f"{key}_custom",
+            placeholder="https://your-proxy.example/",
+            help=_("使用前缀拼接格式：加速前缀 + 完整 GitHub HTTPS 地址；不要填写登录凭据或私有仓库令牌。",
+                   "Prefix format: mirror prefix + full GitHub HTTPS URL. Do not include credentials or private-repository tokens."))
+    return selected
+
+
+def resolve_local_document(path):
+    """只允许访问项目内的公开说明文档，拒绝越界路径和目录"""
+    from pathlib import Path
+    from urllib.parse import unquote
+    root = Path(PROJECT_ROOT).resolve()
+    target = (root / unquote(str(path))).resolve()
+    relative = target.relative_to(root)
+    allowed = (relative.as_posix() in {"README.md", "README_EN.md", "LICENSE"}
+        or (target.suffix.lower() == ".md" and relative.parts[0] in {"docs", "integrations"}
+            and not any(part.startswith(".") or part in {"vendor", "runtime"} for part in relative.parts)))
+    if not allowed or not target.is_file():
+        raise ValueError("local document is absent or outside the documentation directories")
+    return target
+
+
+def render_local_document(path):
+    """渲染本地 Markdown，将跨页链接和图片解析到当前文档位置"""
+    import base64
+    import mimetypes
+    import re
+    import unicodedata
+    from pathlib import Path
+    from urllib.parse import quote, unquote, urlencode, urlsplit
+    from markdown_it import MarkdownIt
+
+    target = resolve_local_document(path)
+    content = target.read_text(encoding="utf-8-sig")
+    if target.name == "LICENSE":
+        return "<pre>" + html.escape(content) + "</pre>"
+    root = Path(PROJECT_ROOT).resolve()
+
+    def local_url(url, image=False):
+        parts = urlsplit(html.unescape(url))
+        if parts.scheme in {"http", "https"} or (not image and parts.scheme == "mailto"):
+            return url
+        if parts.scheme or parts.netloc:
+            return ""
+        try:
+            destination = (target.parent / unquote(parts.path)).resolve() if parts.path else target
+            relative = destination.relative_to(root).as_posix()
+            if image:
+                if destination.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
+                    return ""
+                if destination.stat().st_size > 8 * 1024 * 1024:
+                    return ""
+                mime = mimetypes.guess_type(destination.name)[0] or "application/octet-stream"
+                return f"data:{mime};base64," + base64.b64encode(destination.read_bytes()).decode("ascii")
+            resolve_local_document(relative)
+            if not parts.path:
+                return "#" + quote(unquote(parts.fragment))
+            return "?" + urlencode({"doc": relative}) + ("#" + quote(unquote(parts.fragment)) if parts.fragment else "")
+        except (OSError, ValueError):
+            return ""
+
+    parser = MarkdownIt("commonmark", {"html": True}).enable(["table", "strikethrough"])
+    tokens = parser.parse(content)
+    headings = {}
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open":
+            title = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", tokens[index + 1].content).lower()
+            slug = "".join(ch for ch in title if unicodedata.category(ch)[0] in "LNM" or ch in " _-").replace(" ", "-")
+            count = headings.get(slug, 0)
+            headings[slug] = count + 1
+            token.attrSet("id", slug if count == 0 else f"{slug}-{count}")
+        for child in token.children or []:
+            if child.type == "link_open":
+                child.attrSet("href", local_url(child.attrGet("href") or ""))
+                child.attrSet("target", "_self" if (child.attrGet("href") or "").startswith(("?", "#")) else "_blank")
+            elif child.type == "image":
+                child.attrSet("src", local_url(child.attrGet("src") or "", image=True))
+                child.attrSet("style", "max-width:100%;height:auto")
+        for raw in [token, *(token.children or [])]:
+            if raw.type in {"html_block", "html_inline"}:
+                raw.content = re.sub(r'(<img\b[^>]*\bsrc=)([\"\x27])(.*?)\2',
+                    lambda match: match[1] + match[2] + html.escape(local_url(match[3], image=True), quote=True) + match[2],
+                    raw.content, flags=re.IGNORECASE)
+                raw.content = re.sub(r'(<a\b[^>]*\bhref=)([\"\x27])(.*?)\2',
+                    lambda match: match[1] + match[2] + html.escape(local_url(match[3]), quote=True) + match[2],
+                    raw.content, flags=re.IGNORECASE)
+    return parser.renderer.render(tokens, parser.options, {})
 
 st.set_page_config(page_title="Galatea 司令塔", page_icon="🤖", layout="wide")
 
@@ -179,7 +284,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.15.8"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.15.9"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -443,8 +548,17 @@ menu_options = [
     _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"), 
     _("📁 存储与日志仓库", "📁 Storage & Logs"), 
     _("👁️ 全息读心回放", "👁️ Holographic Replay"),
-    _("📦 模型部署与打包", "📦 Model Deployment")
+    _("📦 模型部署与打包", "📦 Model Deployment"),
+    _("📖 项目文档", "📖 Project Documentation"),
 ]
+
+# 文档链接通过查询参数导航，保留浏览器前进后退和同页锚点
+document_query = (dict(st.query_params) if hasattr(st, "query_params") else
+    {key: value[-1] for key, value in st.experimental_get_query_params().items()})
+document_route = document_query.get("doc")
+if document_route and document_route != st.session_state.get("last_document_route"):
+    st.session_state.main_menu_radio = _("📖 项目文档", "📖 Project Documentation")
+    st.session_state.last_document_route = document_route
 
 # 如果检测到跳转指令，强行覆盖当前菜单的 index
 if st.session_state.jump_to_update:
@@ -452,6 +566,15 @@ if st.session_state.jump_to_update:
     st.session_state.jump_to_update = False
 
 st.sidebar.title(_("🎛️ 司令塔菜单", "🎛️ Command Menu"))
+if st.sidebar.button(_("📖 打开项目主文档", "📖 Open Project README"), key="open_project_documentation",
+        help=_("在 WebUI 内查看本地 README，支持相对文档链接、章节锚点与中英文文档互跳。", "Read the local README inside WebUI, including relative document links, section anchors and language links.")):
+    document_route = "README.md" if lang == "🇨🇳 中文" else "README_EN.md"
+    if hasattr(st, "query_params"):
+        st.query_params["doc"] = document_route
+    else:
+        st.experimental_set_query_params(doc=document_route)
+    st.session_state.last_document_route = document_route
+    st.session_state.main_menu_radio = _("📖 项目文档", "📖 Project Documentation")
 # 🌟 核心：绑定 key="main_menu_radio"
 menu = st.sidebar.radio("Navigation", menu_options, key="main_menu_radio", label_visibility="collapsed")
 
@@ -469,7 +592,44 @@ elif has_patch_update:
 # ==========================================
 # 📈 模块一：卡组生态大盘 (代码保持不变)
 # ==========================================
-if menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
+if menu == _("📖 项目文档", "📖 Project Documentation"):
+    st.title(_("📖 项目文档", "📖 Project Documentation"))
+    selected_document = document_route or ("README.md" if lang == "🇨🇳 中文" else "README_EN.md")
+    try:
+        document_path = resolve_local_document(selected_document)
+        st.caption(document_path.relative_to(Path(PROJECT_ROOT).resolve()).as_posix())
+        st.markdown(render_local_document(selected_document), unsafe_allow_html=True)
+        # 跨页链接先重跑应用，等待文档挂载后再定位浏览器中的章节锚点
+        components.html("""<script>
+        let attempts = 0;
+        const timer = setInterval(() => {
+            let anchor;
+            try { anchor = decodeURIComponent(window.parent.location.hash.slice(1)); }
+            catch (_) { clearInterval(timer); return; }
+            if (!anchor) { clearInterval(timer); return; }
+            const heading = window.parent.document.getElementById(anchor);
+            if (heading) { heading.scrollIntoView(); clearInterval(timer); }
+            else if (++attempts >= 20) { clearInterval(timer); }
+        }, 100);
+        </script>""", height=0)
+        # 跨页链接先重跑应用，等待文档挂载后再定位浏览器中的章节锚点
+        components.html("""<script>
+        let attempts = 0;
+        const timer = setInterval(() => {
+            let anchor;
+            try { anchor = decodeURIComponent(window.parent.location.hash.slice(1)); }
+            catch (_) { clearInterval(timer); return; }
+            if (!anchor) { clearInterval(timer); return; }
+            const heading = window.parent.document.getElementById(anchor);
+            if (heading) { heading.scrollIntoView(); clearInterval(timer); }
+            else if (++attempts >= 20) { clearInterval(timer); }
+        }, 100);
+        </script>""", height=0)
+    except (OSError, ValueError) as error:
+        st.error(_(f"文档无法打开：{error}", f"Cannot open document: {error}"))
+        st.info(_("请通过侧边栏“打开项目主文档”返回 README。", "Use Open Project README in the sidebar to return to the README."))
+
+elif menu == _("📈 卡组生态大盘", "📈 Meta Dashboard"):
     st.title(_("📈 实时 Meta 卡组天梯", "📈 Live Meta Tier List"))
     if st.sidebar.button(_("🔄 刷新数据", "🔄 Refresh Data"), **REPLAY_BUTTON_WIDTH):
         st.rerun()
@@ -2006,9 +2166,13 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
 
     # --- 🛠️ 规则自检测试舱 ---
     with tab_selfcheck:
-        st.markdown("### 🛠️ 核心规则系统与环境压测")
-        st.info(_("通过让内置的纯规则 Bot (RuleBot) 进行超高频盲打，可以瞬间检验卡片脚本、底层 C++ 引擎以及消息解析队列是否存在死锁或崩溃 Bug。", 
-                  "Run high-speed RuleBot self-play to debug engine, Lua scripts, and message parsers without neural network overhead."))
+        st.markdown("### " + _("🛠️ 核心规则系统与环境压测", "🛠️ Core Rules & Environment Stress Test"))
+        sc_mode = st.radio(_("自检对手", "Self-Check Bots"), ["rule", "windbot"], key="selfcheck_mode",
+            horizontal=True, format_func=lambda mode: "RuleBot" if mode == "rule" else "WindBot",
+            help=_("RuleBot保持原有随机池自对决；WindBot使用上游固定构筑，检查外部协议桥和Core解析，不加载神经网络、不进行PPO或模仿学习。",
+                   "RuleBot keeps random-pool self-play. WindBot uses fixed upstream decks to check the external bridge and Core parsing, without neural models, PPO or imitation learning."))
+        st.info(_("RuleBot适合快速规则压测；WindBot可对WindBot或镜像RuleBot，逐局隔离并保存原始捕获。两种方式速度不可直接比较。",
+                  "RuleBot provides fast rules stress tests. WindBot can face another WindBot or mirrored RuleBot, with isolated sessions and raw captures. Their speeds are not directly comparable."))
         
         c_check, c_run = st.columns([1, 1])
         with c_check:
@@ -2020,18 +2184,74 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             st.write("📜 脚本目录 (`./script/`): ", "✅ 存在" if os.path.exists("./script") else "❌ 缺失")
         
         with c_run:
-            with st.form("selfcheck_form"):
-                sc_num = st.number_input(_("极端压测局数", "Number of Games"), min_value=1, value=50, step=10)
-
-                if st.form_submit_button("🚀 " + _("启动 RuleBot 压测", "Start Self-Check"), type="primary", **get_stretch_width_args(st.form_submit_button)):
-                    if is_running:
-                        st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
-                    else:
+            sc_options = []
+            sc_inspection = {}
+            if sc_mode == "windbot":
+                sc_runtime = st.text_input(_("WindBot运行文件（空为自动）", "WindBot Runtime (blank for automatic)"),
+                    key="selfcheck_runtime", help=_("自动适配Windows/Linux，复用已安装运行环境，不在测试时下载或编译。", "Uses the installed Windows/Linux runtime automatically, without downloads or compilation."))
+                if st.button(_("读取 / 刷新兼容执行器", "Read / Refresh Compatible Executors"), key="selfcheck_refresh",
+                        help=_("检查运行前置及主/额外构筑的卡库、精确词表兼容性，不启动对局。", "Checks prerequisites and main/extra deck compatibility with CDB and exact vocabulary without starting games.")):
+                    try:
+                        from integrations.windbot.runtime import inspect_runtime
+                        from integrations.windbot.training import training_catalog
+                        st.session_state.selfcheck_inspection = inspect_runtime(sc_runtime)
+                        st.session_state.selfcheck_catalog = training_catalog()
+                        st.session_state.selfcheck_checked_runtime = sc_runtime
+                    except (ImportError, OSError, RuntimeError, ValueError) as error:
+                        st.session_state.selfcheck_inspection = {}
+                        st.session_state.selfcheck_catalog = {}
+                        st.error(_(f"WindBot不可用：{error}", f"WindBot unavailable: {error}"))
+                if st.session_state.get("selfcheck_checked_runtime") == sc_runtime:
+                    sc_inspection = st.session_state.get("selfcheck_inspection", {})
+                    sc_options = sorted(st.session_state.get("selfcheck_catalog", {}))
+                if sc_inspection and not sc_inspection.get("runtime_ready"):
+                    st.error(sc_inspection.get("runtime_error", "WindBot runtime unavailable"))
+                if not sc_options:
+                    st.info(_("请先读取兼容执行器；可选组件缺失时仍可使用RuleBot自检。", "Read compatible executors first; RuleBot self-check remains available without the optional module."))
+                else:
+                    for selection_key in ("selfcheck_executor", "selfcheck_second"):
+                        if st.session_state.get(selection_key) not in sc_options:
+                            st.session_state[selection_key] = "Blue-Eyes" if "Blue-Eyes" in sc_options else sc_options[0]
+                sc_executor = st.selectbox(_("WindBot执行器", "WindBot Executor"), sc_options, key="selfcheck_executor",
+                    help=_("使用执行器配套固定卡组；不会随机替换WindBot卡组。", "Uses the executor's fixed upstream deck without random replacements."))
+                sc_other = st.radio(_("另一侧", "Other Side"), ["windbot", "rule"], key="selfcheck_other", horizontal=True,
+                    format_func=lambda kind: "WindBot" if kind == "windbot" else "RuleBot",
+                    help=_("双WindBot可分别选择执行器；RuleBot使用第一侧WindBot的镜像构筑。", "Two WindBots may use different executors; RuleBot uses a mirror of the first WindBot deck."))
+                sc_second = None
+                if sc_other == "windbot":
+                    sc_second = st.selectbox(_("另一侧WindBot执行器", "Other WindBot Executor"), sc_options, key="selfcheck_second",
+                        help=_("可选择与第一侧相同或其他兼容执行器。", "Choose the same executor as the first side or another compatible executor."))
+                sc_seat = st.selectbox(_("第一侧WindBot座位", "First WindBot Seat"), [1, 0], key="selfcheck_seat",
+                    format_func=lambda seat: f"P{seat}", help=_("当前受控Core对局P0先手，P1后手。", "Controlled Core games start with P0, followed by P1."))
+                sc_timeout = st.number_input(_("单局时间上限（秒）", "Game Timeout (seconds)"), min_value=1, max_value=3600, value=600,
+                    key="selfcheck_timeout", help=_("超时或外部协议失败会终止本批，不替换对手或伪造胜负。", "Timeouts and external protocol failures stop the batch without substituting opponents or inventing outcomes."))
+                sc_verify = st.checkbox(_("终局后独立重放校验", "Verify by Independent Replay"), key="selfcheck_verify",
+                    help=_("额外重跑Core以比较原始输出与响应，耗时增加；未勾选仍保存原始捕获。", "Re-runs Core to compare raw output and responses at extra cost. Raw captures are saved either way."))
+                sc_record = st.checkbox(_("保存全息回放", "Save Holographic Replay"), key="selfcheck_record",
+                    help=_("保存双方操作到ai_thoughts；规则机器人没有模型胜率预测。", "Saves both sides' actions to ai_thoughts; rule bots have no model win predictions."))
+            sc_num = st.number_input(_("极端压测局数", "Number of Games"), min_value=1,
+                max_value=100 if sc_mode == "windbot" else 100000, value=50, step=1, key=f"selfcheck_games_{sc_mode}",
+                help=_("WindBot每批1～100局，RuleBot沿用普通随机池。Core开局默认随机，实际种子记录在日志和捕获中。", "WindBot batches support 1–100 games; RuleBot uses the normal pool. Core starts are random by default and recorded in logs/captures."))
+            if st.button("🚀 " + _("启动自检压测", "Start Self-Check"), key="selfcheck_start", type="primary", **REPLAY_BUTTON_WIDTH):
+                if is_running:
+                    st.error(_("⚠️ 请先终止当前任务！", "⚠️ Stop current task first!"))
+                elif sc_mode == "windbot" and (not sc_executor or not sc_inspection.get("runtime_ready")
+                        or (sc_other == "windbot" and not sc_second)):
+                    st.error(_("请先读取可用运行环境与兼容执行器。", "Read a ready runtime and compatible executors first."))
+                else:
+                    if sc_mode == "rule":
                         cmd = [sys.executable, "main.py", "play", "-n", str(sc_num)]
-                        p = launch_managed_task(cmd)
-                        st.success(_(f"自检压测启动 (PID: {p.pid})！", f"Self-Check started (PID: {p.pid})!"))
-                        time.sleep(0.5)
-                        st.rerun()
+                    else:
+                        cmd = [sys.executable, "main.py", "windbot", "--executor", sc_executor,
+                            "--games", str(sc_num), "--windbot-seat", str(sc_seat), "--timeout", str(sc_timeout)]
+                        if sc_runtime: cmd.extend(["--runtime", sc_runtime])
+                        if sc_second: cmd.extend(["--opponent-executor", sc_second])
+                        if sc_verify: cmd.append("--verify")
+                        if sc_record: cmd.append("--record-replay")
+                    p = launch_managed_task(cmd)
+                    st.success(_(f"自检压测启动 (PID: {p.pid})！", f"Self-Check started (PID: {p.pid})!"))
+                    time.sleep(0.5)
+                    st.rerun()
 
     st.divider()
     
@@ -2160,6 +2380,7 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
     with tab_sync:
         st.markdown(_("从官方与萌卡仓库拉取最新的环境依赖，确保您的 AI 掌握最新的卡片效果与规则。", 
                       "Fetch latest databases and Lua scripts to keep your AI up to date."))
+        sync_mirror = render_github_mirror("sync_github_mirror")
         
         with st.form("update_form"):
             st.subheader(_("选择同步目标", "Select Sync Targets"))
@@ -2187,6 +2408,7 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
                     st.warning(_("请至少勾选一个同步目标！", "Please select at least one target!"))
                 else:
                     cmd = [sys.executable, "main.py", "update"]
+                    cmd.extend(["--github-mirror", sync_mirror])
                     if c_core: cmd.append("--core")
                     if c_data: cmd.append("--data")
                     if t_repo != "default": cmd.extend(["--repo", t_repo])
@@ -2221,7 +2443,8 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
             "⚠️ 自制卡会永久占用新的词表编号。不同机器若以不同顺序追加会形成不可自动合并的词表分叉；更新后必须备份并向训练、竞技场与部署端分发同一份 card_vocab.json。已有较短 V4 前缀模型仍可加载，但不能与分叉词表混用。",
             "⚠️ Custom cards permanently consume new vocabulary IDs. Appending in a different order on another machine creates a vocabulary fork that cannot be merged automatically. Back up and distribute the same card_vocab.json to training, Arena, and deployment systems. Existing shorter-prefix V4 models remain loadable, but forked vocabularies must never be mixed.",
         ))
-        with st.form("local_card_vocab_form"):
+        # 确认框必须即时刷新，表单内的勾选不会重新计算按钮禁用状态
+        with st.container():
             local_cdb_path = st.text_input(
                 _("本地 CDB 路径", "Local CDB Path"),
                 value=os.path.join(PROJECT_ROOT, "cards.cdb"),
@@ -2233,11 +2456,12 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
             confirm_local_vocab = st.checkbox(_(
                 "我已理解词表只追加和跨机器一致性要求",
                 "I understand the append-only and cross-machine identity requirements",
-            ))
-            run_local_vocab = st.form_submit_button(
+            ), key="local_vocab_confirm", help=_("勾选后启用追加按钮；不会自动修改词表，仍需点击按钮。", "Enables the append button without changing the vocabulary; click the button to run."))
+            run_local_vocab = st.button(
                 "🆔 " + _("检查并追加新卡", "Check and Append New Cards"),
                 type="primary",
-                **get_stretch_width_args(st.form_submit_button),
+                key="local_vocab_start",
+                **REPLAY_BUTTON_WIDTH,
                 disabled=not confirm_local_vocab,
             )
 
@@ -2342,6 +2566,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
     # --- 1. 执行中枢 ---
     with tab_exec:
         st.markdown("### " + _("扫描与构建", "Scan & Build"))
+        semantic_mirror = render_github_mirror("semantic_github_mirror")
         with st.form("parse_form"):
             st.info(_("一键扫描 `./script` 目录下的所有 Lua 脚本，利用正则与降维算法提取出所有卡片的动作条件与种类。", 
                       "Scan all Lua scripts to extract semantic requirements and categories."))
@@ -2370,6 +2595,7 @@ elif menu == _("🧠 语义知识库引擎", "🧠 Semantic KB Engine"):
                     if p_sync:
                         cmd.append("--sync")
                         if p_url: cmd.extend(["--remote_url", p_url])
+                        cmd.extend(["--github-mirror", semantic_mirror])
                     if p_local_update: cmd.append("--local-update")
 
                     with st.spinner(_("⏳ 正在执行所选语义资产操作，请耐心等待...", "⏳ Running the selected semantic asset operations...")):

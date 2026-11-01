@@ -1,5 +1,5 @@
 # ========================================================
-# Galatea-Core v3.15.8 Dependencies
+# Galatea-Core v3.15.9 Dependencies
 # ========================================================
 # Install: pip install -r requirements.txt
 # PyTorch must be installed for the target CPU/CUDA runtime before this file.
@@ -14,6 +14,8 @@ torch>=2.0.0
 
 # -- WebUI --
 streamlit>=1.28.0
+markdown-it-py>=2.2.0
+markdown-it-py>=2.2.0
 
 # -- Training Monitoring --
 tensorboard>=2.14.0

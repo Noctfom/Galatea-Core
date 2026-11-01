@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.15.8. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.15.9. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -39,6 +39,7 @@ WindBot belongs to Core's [optional integration directory](../integrations/windb
 - [x] Default paths do not require the module/runtime. Dependencies are checked only on activation; `--with-windbot` optionally packages source, licenses and an already installed runtime
 - [x] 3.15.6: Preserve pinned central-inference staging and batch result transfers; correct self-play audit attribution. Separate WindBot CSV/dashboard and mirror/pool metrics from ordinary deck statistics without network or protocol changes
 - [x] 3.15.8: Automatic idle-socket selectors remove Linux select's high-descriptor restriction while preserving deadlines, invalid-packet rejection and cleanup; the real Linux high-descriptor regression still needs target-machine execution
+- [x] 3.15.9: Public GitHub download routes, local README navigation, vocabulary acknowledgement controls and optional WindBot self-check; network and protocol unchanged
 
 Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.
 

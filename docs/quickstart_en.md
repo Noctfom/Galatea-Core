@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.15.8**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.15.9**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [3.13.4 semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Modern source/vector/index/provenance files form one bundle; changed semantic identities cannot share old checkpoints.
 
@@ -81,6 +81,17 @@ Go to **🔄 Resource Sync Hub**:
 Wait a few minutes. This updates `cards.cdb`, official `script/`, and the repository-authoritative `card_vocab.json`. Advanced options may point to a custom CDB file source, vocabulary repository/file source, and script repository. If the CDB contains cards not yet numbered by that vocabulary, the runtime remains usable while affected decks temporarily leave random pools; inspect them under Assets & Decks → Deck & Pool Manager → Deck Compatibility Preflight.
 
 Official environments should synchronize the repository vocabulary directly. For custom cards, use **Resource Sync Hub → Local/Custom Card Vocabulary** and acknowledge the warning before appending IDs from a local CDB. The CLI equivalent is `python main.py vocab --cdb <custom-cdb-path>`. Back up and distribute the resulting `card_vocab.json` to every training/deployment machine; forks created by different append orders cannot be merged automatically.
+
+For slow GitHub access, choose **GitHub Download Route** in the sync or semantic hub. Direct access is the default; [GH-Proxy](https://gh-proxy.com/docs/quick-start), [GHProxy](https://ghproxy.net/) and custom HTTPS prefixes are available. Routes apply only to this operation's public GitHub requests, without changing Git configuration, routing custom file sources, or bypassing vocabulary/semantic checks.
+
+```bash
+python main.py update --data --github-mirror gh-proxy
+python main.py parse --sync --local-update --github-mirror ghproxy
+# Example custom prefix
+python main.py update --core --github-mirror https://your-proxy.example/
+```
+
+Third-party routes are transports, not publication sources. Switch routes or use `direct` on failure. Local continuation rules, model inputs and asset identities are unchanged. **📖 Open Project README** in the sidebar opens the local README and its relative documentation links inside WebUI.
 
 ---
 
@@ -169,6 +180,12 @@ Go to **⚔️ Launch & Monitor Hub → 🛠️ Rules Self-Check**:
 - Set game count (recommend 50-100)
 - Start to verify engine & script stability
 - Run once before first training to ensure environment is healthy
+
+To check the external bridge, select **WindBot**, read compatible executors, then choose two WindBots or mirrored RuleBot. Holographic recording and independent replay verification are optional. This reuses controlled duels without training. Equivalent CLI example:
+
+```bash
+python main.py windbot --executor Blue-Eyes --opponent-executor Blue-Eyes --games 5 --verify
+```
 
 ---
 

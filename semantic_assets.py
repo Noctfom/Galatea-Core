@@ -411,8 +411,9 @@ def _replace_file_atomically(source, destination):
             temporary_path.unlink()
 
 
-def download_remote_semantic_bundle(remote_kb_url, target_directory):
+def download_remote_semantic_bundle(remote_kb_url, target_directory, *, github_mirror="direct"):
     """下载同一远程目录的完整语义基座，并安装校验通过的向量对"""
+    from update_tools import resolve_github_download_url
     target_root = Path(target_directory).resolve()
     with tempfile.TemporaryDirectory(prefix="galatea_semantic_sync_") as temp_dir:
         temp_root = Path(temp_dir)
@@ -422,7 +423,7 @@ def download_remote_semantic_bundle(remote_kb_url, target_directory):
             target = temp_root / filename
             try:
                 _download_to_path(
-                    semantic_sibling_url(remote_kb_url, filename),
+                    resolve_github_download_url(semantic_sibling_url(remote_kb_url, filename), github_mirror),
                     target,
                 )
                 downloaded[filename] = target
@@ -491,6 +492,7 @@ def synchronize_remote_semantic_bundle(
     target_directory,
     *,
     knowledge_base_filename=KNOWLEDGE_BASE_FILENAME,
+    github_mirror="direct",
 ):
     """仅同步远程语义资产，不扫描本地 Lua，也不生成新向量"""
     target_root = Path(target_directory).resolve()
@@ -499,7 +501,7 @@ def synchronize_remote_semantic_bundle(
         remote_source,
         KNOWLEDGE_BASE_FILENAME,
     )
-    bundle = download_remote_semantic_bundle(remote_kb_url, target_root)
+    bundle = download_remote_semantic_bundle(remote_kb_url, target_root, github_mirror=github_mirror)
     hash_mapping = bundle["hash_mapping"]
     rebuilt_hash_mapping = hash_mapping is None
     if rebuilt_hash_mapping:

@@ -540,6 +540,7 @@
       "15845914_E3",
       "15848542_E2",
       "15854426_E1",
+      "15866454_E2",
       "15894048_E1",
       "15894048_E2",
       "15935204_E1",
@@ -767,6 +768,7 @@
       "18511599_E1",
       "18517177_E1",
       "1855932_E2",
+      "18563744_E2",
       "18590133_E1",
       "18590133_E2",
       "18605135_E1",
@@ -2611,6 +2613,7 @@
       "40551410_E1",
       "4055337_E1",
       "40591390_E3",
+      "4059313_E2",
       "40597694_E1",
       "40619825_E2",
       "40619825_E3",
@@ -2780,6 +2783,7 @@
       "42461852_E2",
       "42461852_E3",
       "42463414_E1",
+      "42469671_E2",
       "42472002_E1",
       "42510430_E1",
       "4253484_E1",
@@ -2961,6 +2965,7 @@
       "44947065_E1",
       "44947065_E2",
       "44954628_E2",
+      "44968459_E2",
       "44968687_E1",
       "44968687_E4",
       "44968687_E5",
@@ -4722,6 +4727,7 @@
       "66235877_E1",
       "66235877_E3",
       "66235877_E4",
+      "66236707_E2",
       "66288028_E1",
       "66288028_E2",
       "66328392_E1",
@@ -5320,6 +5326,7 @@
       "7369217_E4",
       "7369217_E5",
       "73714736_E1",
+      "7373632_E2",
       "73752131_E1",
       "73776643_E1",
       "73778008_E1",
@@ -5790,6 +5797,7 @@
       "79856792_E2",
       "79861914_E1",
       "79864860_E1",
+      "79868386_E2",
       "79870141_E1",
       "79875176_E1",
       "79875176_E3",
@@ -7550,7 +7558,27 @@
       "8593259_E2",
       "89027418_E1",
       "8915275_E2",
-      "97818130_E1"
+      "97818130_E1",
+      "10884847_E2",
+      "33700664_E1",
+      "33700664_E3",
+      "46273941_E1",
+      "46983930_E1",
+      "47095439_E2",
+      "60811211_E2",
+      "60811211_E5",
+      "65195679_E1",
+      "67676619_E2",
+      "72978038_E1",
+      "72978038_E2",
+      "73090586_E1",
+      "73090586_E2",
+      "73490148_E2",
+      "7428507_E3",
+      "7428507_E4",
+      "9484285_E1",
+      "96205925_E1",
+      "96205925_E2"
     ],
     "sample_code": ""
   },
@@ -7684,7 +7712,8 @@
       "76930964_E1",
       "81254059_E1",
       "82159583_E1",
-      "96470883_E1"
+      "96470883_E1",
+      "67676619_E1"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>,<VAR>)=Duel.GetMatchingGroup(<FUNC>,<PLAYER>,<CONST>,<CONST>,nil,<PLAYER>)=Duel.SelectTribute(<PLAYER>,<VAR>,<NUM>,<NUM>,mg)<VAR>:SetMaterial(sg)Duel.Release(sg,REASON_SUMMON+REASON_MATERIAL)end"
   },
@@ -8438,7 +8467,8 @@
       "26462013_E2",
       "58707981_E1",
       "58707981_E3",
-      "77571454_E3"
+      "77571454_E3",
+      "12555008_E1"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)Duel.Hint(HINT_CARD,<NUM>,id)Duel.NegateEffect(<VAR>)end"
   },
@@ -9026,7 +9056,8 @@
       "94666032_E1",
       "97648103_E2",
       "97795930_E3",
-      "98153934_E3"
+      "98153934_E3",
+      "45151304_E2"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)Duel.Remove(<CARD>,<CONST>,REASON_EFFECT)end"
   },
@@ -13601,7 +13632,8 @@
       "38525760_E2",
       "4022819_E1",
       "51126152_E2",
-      "83274244_E1"
+      "83274244_E1",
+      "11333460_E2"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>,<VAR>)--changebaseattack=Effect.CreateEffect(<VAR>)e1:SetType(EFFECT_<CONST>)e1:SetCode(EFFECT_SET_BASE_ATTACK)e1:SetValue(<NUM>)e1:SetReset(RESET_EVENT+<HEX>)<VAR>:RegisterEffect(e1)end"
   },
@@ -16289,7 +16321,8 @@
   },
   "CUSTOM_HASH_48620F00": {
     "cards": [
-      "56818742_E2"
+      "56818742_E2",
+      "9484285_E3"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)Duel.RaiseSingleEvent(<CARD>,EVENT_CUSTOM+id,<VAR>,<NUM>,<PLAYER>,<NUM>,<NUM>)end"
   },
@@ -21888,5 +21921,23 @@
       "80843006_E1"
     ],
     "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)=Duel.GetFirstTarget()if<VAR>:IsRelateToChain()and<VAR>:IsFaceup()then=Effect.CreateEffect(<CARD>)e1:SetType(EFFECT_<CONST>)e1:SetCode(EFFECT_CHANGE_ATTRIBUTE)e1:SetProperty(EFFECT_FLAG_CANNOT_DISABLE)e1:SetValue(<VAR>:GetLabel())e1:SetReset(RESET_EVENT+RESETS_STANDARD)<VAR>:RegisterEffect(e1)endend"
+  },
+  "CUSTOM_HASH_5FCF2122": {
+    "cards": [
+      "9484285_E4"
+    ],
+    "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)<CARD>:RegisterFlagEffect(id,RESET_EVENT+RESETS_STANDARD+RESET_CHAIN,<NUM>,<NUM>)end"
+  },
+  "CUSTOM_HASH_033D86C9": {
+    "cards": [
+      "9484285_E5"
+    ],
+    "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)<CARD>:ResetFlagEffect(id)Duel.RaiseSingleEvent(<CARD>,EVENT_CUSTOM+id,<VAR>,<NUM>,<PLAYER>,<NUM>,<NUM>)end"
+  },
+  "CUSTOM_HASH_045B5304": {
+    "cards": [
+      "9484285_E6"
+    ],
+    "sample_code": "function<FUNC>(<VAR>,<PLAYER>,<VAR>,<PLAYER>,<VAR>,<VAR>,<VAR>,<PLAYER>)=<CARD>=Duel.GetDecktopGroup(<OPPO>,<NUM>)if<VAR>:IsRelateToChain()and<VAR>:GetCount()==<NUM>then=<VAR>:GetFirst()Duel.DisableShuffleCheck()if<VAR>:IsCanOverlay()thenDuel.Overlay(<VAR>,<VAR>)elseDuel.SendtoGrave(<VAR>,REASON_RULE)endendend"
   }
 }

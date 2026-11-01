@@ -294,7 +294,7 @@ class YGOProLuaParser:
         apply_public_hint_metadata(card_data, card_id)
         return card_data
 
-    def run_batch(self, output_file='knowledge_base.json', clear_existing=False, remote_url=None):
+    def run_batch(self, output_file='knowledge_base.json', clear_existing=False, remote_url=None, *, github_mirror="direct"):
         """批量处理所有脚本并导出 (支持 Github 同步、断点续传与物理清空)"""
         print(f"🚀 开始知识库构建任务...")
         knowledge_base = {}
@@ -326,6 +326,7 @@ class YGOProLuaParser:
                     bundle = download_remote_semantic_bundle(
                         remote_url,
                         output_path.parent,
+                        github_mirror=github_mirror,
                     )
                     knowledge_base = bundle["knowledge_base"]
                     remote_mapping = bundle["hash_mapping"]

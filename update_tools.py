@@ -29,6 +29,40 @@ CARD_VOCAB_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/ca
 OFFICIAL_SCRIPT_REPO = "https://github.com/Fluorohydride/ygopro-scripts.git"
 MAX_CDB_FILE_BYTES = 1024 * 1024 * 1024
 
+# 仅改写本次公开 GitHub 请求，不修改用户的 Git 配置或仓库源
+GITHUB_DOWNLOAD_MIRRORS = {
+    "direct": "",
+    "gh-proxy": "https://gh-proxy.org/",
+    "ghproxy": "https://ghproxy.net/",
+}
+
+
+def resolve_github_download_url(url, mirror="direct"):
+    """为公开 GitHub 下载选择前缀加速，自建资源保持原地址"""
+    if mirror in GITHUB_DOWNLOAD_MIRRORS:
+        prefix = GITHUB_DOWNLOAD_MIRRORS[mirror]
+    else:
+        prefix = _validate_http_url(mirror, "GitHub mirror prefix")
+        parts = urllib.parse.urlsplit(prefix)
+        if parts.scheme != "https" or parts.query or parts.fragment:
+            raise ValueError("GitHub mirror prefix must use HTTPS without query or fragment")
+        prefix = prefix.rstrip("/") + "/"
+    normalized = str(url).strip()
+    if not prefix:
+        return normalized
+    if normalized.startswith("git@github.com:"):
+        normalized = "https://github.com/" + normalized[len("git@github.com:"):]
+    elif normalized.startswith("ssh://git@github.com/"):
+        normalized = "https://github.com/" + normalized[len("ssh://git@github.com/"):]
+    parts = urllib.parse.urlsplit(normalized)
+    if parts.hostname not in {"github.com", "raw.githubusercontent.com", "codeload.github.com"}:
+        return str(url).strip()
+    if parts.scheme != "https" or parts.username or parts.password or parts.port not in (None, 443):
+        raise ValueError("accelerated GitHub URLs must use public HTTPS without credentials")
+    if parts.query:
+        raise ValueError("accelerated GitHub URLs must not contain query credentials")
+    return prefix + normalized
+
 
 def _validate_http_url(url, label):
     """校验用户提供的远程资源地址，拒绝本地协议和内嵌凭据"""
@@ -130,23 +164,30 @@ def _install_card_vocabulary_bytes(payload, target_path="card_vocab.json"):
             os.remove(temporary_path)
 
 
-def sync_authoritative_card_vocabulary(url=CARD_VOCAB_URL):
+def sync_authoritative_card_vocabulary(url=CARD_VOCAB_URL, *, github_mirror="direct"):
     """从 Galatea 仓库拉取唯一词表，避免各机器独立编号"""
-    resolved_url = resolve_card_vocabulary_url(url)
+    resolved_url = resolve_github_download_url(resolve_card_vocabulary_url(url), github_mirror)
     request = urllib.request.Request(resolved_url, headers={'User-Agent': 'Mozilla/5.0'})
     with urllib.request.urlopen(request) as response:
         payload = response.read(MAX_CARD_VOCAB_FILE_BYTES + 1)
     return _install_card_vocabulary_bytes(payload)
 
-def update_core_code():
+def update_core_code(*, github_mirror="direct"):
     """更新本地核心代码。有 .git 则 git pull，否则从 GitHub ZIP Archive 覆盖更新"""
     print("🚀 正在检查并拉取核心代码更新...")
 
     # ----- 路径 A：标准 Git 仓库 -----
     if os.path.exists(".git"):
         try:
+            command = ["git"]
+            if github_mirror != "direct":
+                origin = subprocess.run(["git", "remote", "get-url", "origin"],
+                    capture_output=True, text=True, check=True).stdout.strip()
+                mirrored = resolve_github_download_url(origin, github_mirror)
+                if mirrored != origin:
+                    command.extend(["-c", f"url.{mirrored}.insteadOf={origin}"])
             result = subprocess.run(
-                ["git", "pull", "origin", "main"],
+                [*command, "pull", "origin", "main"],
                 capture_output=True, text=True, check=True
             )
             print(f"✅ 代码更新成功:\n{result.stdout.strip()}")
@@ -159,12 +200,12 @@ def update_core_code():
         print("ℹ️  当前目录不是 Git 仓库，将使用 ZIP Archive 方式更新。")
 
     # ----- 路径 B：ZIP Archive 下载 + 覆盖（一键包 / 非 git 环境）-----
-    return _update_core_via_zip()
+    return _update_core_via_zip(github_mirror=github_mirror)
 
 
-def _update_core_via_zip():
+def _update_core_via_zip(*, github_mirror="direct"):
     """通过 GitHub ZIP Archive 下载并更新代码、文档和启动脚本"""
-    zip_url = _git_url_to_zip_url(MY_REPO_URL)
+    zip_url = resolve_github_download_url(_git_url_to_zip_url(MY_REPO_URL, branch="main"), github_mirror)
     print(f"📥 正在下载最新代码包 (ZIP Archive)...")
 
     try:
@@ -270,6 +311,7 @@ def update_data_and_scripts(
     *,
     cdb_url=MOCKA_CDB_URL,
     card_vocab_url=CARD_VOCAB_URL,
+    github_mirror="direct",
 ):
     """更新来自萌卡的 cards.cdb 和官方脚本库"""
     print(f"🌐 正在启动数据同步模块...")
@@ -280,14 +322,14 @@ def update_data_and_scripts(
     cdb_path = "cards.cdb"
     print(f"📥 正在从萌卡官方拉取最新中文数据库...")
     try:
-        _download_cdb_atomically(cdb_url, cdb_path)
+        _download_cdb_atomically(resolve_github_download_url(cdb_url, github_mirror), cdb_path)
         print("✅ 萌卡官方中文卡库下载并替换完成！")
     except Exception as e:
         print(f"❌ 卡库下载失败 (请检查网络): {e}")
         sync_errors.append(f"CDB: {e}")
 
     try:
-        sync_result = sync_authoritative_card_vocabulary(card_vocab_url)
+        sync_result = sync_authoritative_card_vocabulary(card_vocab_url, github_mirror=github_mirror)
         vocabulary = sync_result["vocabulary"]
         print(
             f"✅ Galatea 权威卡片词表同步完成："
@@ -319,7 +361,7 @@ def update_data_and_scripts(
     script_repo_url = OFFICIAL_SCRIPT_REPO if repo_type == 'default' else repo_type
     # 将 git URL 转换为 ZIP Archive 下载链接
     # 形如 https://github.com/owner/repo.git → https://github.com/owner/repo/archive/refs/heads/master.zip
-    zip_url = _git_url_to_zip_url(script_repo_url)
+    zip_url = resolve_github_download_url(_git_url_to_zip_url(script_repo_url), github_mirror)
     print(f"📥 正在拉取最新的官方 Lua 脚本库 (ZIP Archive)...")
     
     try:
@@ -364,13 +406,13 @@ def update_data_and_scripts(
         )
 
 
-def _git_url_to_zip_url(git_url):
+def _git_url_to_zip_url(git_url, *, branch="master"):
     """将 Git 仓库 URL 转为 GitHub Archive ZIP 下载链接"""
     # 匹配 https://github.com/owner/repo.git 或 https://github.com/owner/repo
     match = re.match(r'https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$', git_url)
     if match:
         owner, repo = match.groups()
-        return f"https://github.com/{owner}/{repo}/archive/refs/heads/master.zip"
+        return f"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip"
     # 如果已经是 ZIP 链接或其他格式，直接返回
     return git_url
 
