@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.16.1**。模型协议 V4、检查点格式 3；发布版本与协议版本独立。
+> 文档适用于 **Galatea-Core v3.16.2**。模型协议 V4、检查点格式 3；发布版本与协议版本独立。
 
 ---
 
@@ -500,6 +500,7 @@ python main.py train [选项]
 | `--protocol-audit` | 生成 V3 协议与效果槽诊断报告 | 关闭 |
 | `--inference-profile-batches` | 每轮计时的中央微批数上限，1～10000；0关闭，不限制采集或PPO批量 | 0 |
 | `--inference-transport` | `packed`为日常训练推荐的批量传输；`fields`沿用原逐字段方式，供性能比较和问题排查 | packed |
+| `--inference-cuda-graph` | CUDA图复用中央前向执行流程，适合小批量GPU采集；自动预热/缓存，少量增加显存，不需要模型编译，CPU或捕获失败时使用常规前向 | 关闭 |
 | `--gamma` | 折扣因子 | 0.998 |
 | `--lr` | 学习率 | 1e-4 |
 | `--entropy` | 熵正则系数 | 0.03 |

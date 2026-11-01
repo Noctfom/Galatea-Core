@@ -348,6 +348,120 @@ def training_autocast(device, amp_dtype):
     return nullcontext()
 
 
+class CentralInferenceCudaGraph:
+    """仅重放中央推理前向，采样和 PPO 仍由原流程处理"""
+
+    MAX_CACHED_BATCHES = 16
+
+    def __init__(self, device, amp_dtype):
+        self.device = torch.device(device)
+        self.amp_dtype = amp_dtype
+        self.enabled = self.device.type == 'cuda' and hasattr(torch.cuda, 'CUDAGraph')
+        self.disabled_reason = None if self.enabled else '当前设备不支持 CUDA 图，使用常规前向'
+        self.network = None
+        self._binding = None
+        self._graphs = {}
+        self.captures = self.replays = self.eager_batches = self.failures = 0
+        self.rebindings = 0
+        self.capture_ms = 0.0
+        self.last_execution = 'eager'
+
+    def prepare(self, network):
+        """采集屏障处核对参数存储，原地 PPO 更新可直接复用已捕获的图"""
+        network = getattr(network, '_orig_mod', network)
+        binding = (id(network), tuple((name, id(value), value.data_ptr(), tuple(value.shape), value.stride(),
+            value.dtype, value.device) for name, value in
+            (*network.named_parameters(), *network.named_buffers())))
+        if self._binding is not None and binding != self._binding:
+            self._graphs.clear()
+            self.rebindings += 1
+        self.network, self._binding = network, binding
+
+    @staticmethod
+    def _contiguous_inputs(observation):
+        """保持原前向的浮点布局，图内完成整理以固定地址并减少逐项调度"""
+        return {name: value.contiguous() if value.is_floating_point() else value
+                for name, value in observation.items()}
+
+    @staticmethod
+    def _input_binding(observation):
+        return tuple((name, value.data_ptr(), tuple(value.shape), value.stride(), value.dtype, value.device)
+                     for name, value in observation.items())
+
+    def _capture(self, observation):
+        """侧流预热并核对首次输出，禁用 AMP 权重缓存以读取后续 PPO 的新权重"""
+        current = torch.cuda.current_stream(self.device)
+        warmup = torch.cuda.Stream(device=self.device)
+        warmup.wait_stream(current)
+        device_index = self.device.index if self.device.index is not None else torch.cuda.current_device()
+        with torch.cuda.device(self.device), torch.random.fork_rng(devices=[device_index]), torch.no_grad(), \
+                torch.amp.autocast('cuda', dtype=self.amp_dtype, cache_enabled=False):
+            with torch.cuda.stream(warmup):
+                for _ in range(3):
+                    reference = self.network(self._contiguous_inputs(observation))
+            current.wait_stream(warmup)
+            torch.cuda.synchronize(self.device)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                outputs = self.network(self._contiguous_inputs(observation))
+            graph.replay()
+            if not all(torch.equal(left, right) for left, right in zip(reference, outputs)):
+                raise RuntimeError('CUDA 图首次输出与常规前向不一致')
+        return graph, outputs, dict(observation)
+
+    @torch.no_grad()
+    def forward(self, observation):
+        """按真实批量复用前向图，首次捕获失败后本进程回退常规前向"""
+        if self.network.training:
+            raise RuntimeError('CUDA 图中央推理要求模型处于 eval 模式')
+        self.last_execution = 'eager'
+        if self.enabled:
+            batch_size = next(iter(observation.values())).shape[0]
+            binding = self._input_binding(observation)
+            entry = self._graphs.get(batch_size)
+            if entry is not None and entry[0] != binding:
+                del self._graphs[batch_size]
+                entry = None
+                self.rebindings += 1
+            if entry is not None:
+                entry[1].replay()
+                self.replays += 1
+                self.last_execution = 'cuda_graph'
+                return entry[2]
+            if len(self._graphs) < self.MAX_CACHED_BATCHES:
+                started = time.perf_counter()
+                try:
+                    graph, outputs, inputs = self._capture(observation)
+                    self._graphs[batch_size] = (binding, graph, outputs, inputs)
+                    self.captures += 1
+                    self.last_execution = 'cuda_graph_setup'
+                    return outputs
+                except RuntimeError as error:
+                    self.enabled = False
+                    self.failures += 1
+                    self._graphs.clear()
+                    self.disabled_reason = str(error)[:240]
+                    self.last_execution = 'cuda_graph_setup_fallback'
+                    print(f'⚠️ [中央推理/CUDA图] 捕获未启用，已回退常规前向: {self.disabled_reason}')
+                finally:
+                    self.capture_ms += (time.perf_counter() - started) * 1000
+        self.eager_batches += 1
+        return self.network(self._contiguous_inputs(observation))
+
+    def summary(self):
+        """复用既有分段诊断报告，不保存输入、预测或额外模型资产"""
+        return {'requested': True, 'enabled': self.enabled, 'disabled_reason': self.disabled_reason,
+            'cached_batch_sizes': sorted(self._graphs), 'captures_total': self.captures,
+            'replays_total': self.replays, 'eager_batches_total': self.eager_batches,
+            'failures_total': self.failures, 'rebindings_total': self.rebindings,
+            'capture_ms_total': self.capture_ms, 'sampling_in_graph': False}
+
+    def close(self):
+        """推理线程结束后释放图及其固定输入输出"""
+        self._graphs.clear()
+        self.network = self._binding = None
+
+
 def select_league_opponent_config(roll, historical_models, model_id, weights=None):
     """按联盟权重选择 Worker 基础对手，新模型无历史池时自动回落到 self"""
     weights = weights or resolve_league_weights()
@@ -392,7 +506,7 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None, league_weights=None, inference_profile_batches=0, inference_transport='packed'):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None, league_weights=None, inference_profile_batches=0, inference_transport='packed', inference_cuda_graph=False):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
@@ -407,6 +521,9 @@ class PPOTrainer:
         if inference_transport not in ('packed', 'fields'):
             raise ValueError('inference_transport must be packed or fields')
         self.inference_transport = inference_transport
+        if type(inference_cuda_graph) is not bool:
+            raise ValueError('inference_cuda_graph must be bool')
+        self.inference_cuda_graph = inference_cuda_graph
         self.server_stop_event = threading.Event()
         self.infer_thread = None
         self._closed = False
@@ -833,7 +950,16 @@ class PPOTrainer:
                 if self.device.type == 'cuda':
                     staging_buffer = staging_buffer.pin_memory()
                 self.pinned_batch_buffers[k] = staging_buffer
+        self.inference_device_buffers = ({name: torch.empty_like(value, device=self.device)
+            for name, value in self.pinned_batch_buffers.items()}
+            if getattr(self, 'inference_cuda_graph', False) and self.device.type == 'cuda'
+            and self.observation_layout is None else None)
+        self.inference_graph = (CentralInferenceCudaGraph(self.device, self.amp_dtype)
+                                if getattr(self, 'inference_cuda_graph', False) else None)
         print(f'📦 [推理搬运] {self.inference_transport} | 字段 {len(input_specs)} | 搬运块 {len(self.observation_layout.widths) if self.observation_layout else len(input_specs)}')
+        if self.inference_graph is not None:
+            print('⚡ [中央推理/CUDA图] 按实际批量自动缓存前向，首次请求含预热'
+                  if self.inference_graph.enabled else f'ℹ️ [中央推理/CUDA图] {self.inference_graph.disabled_reason}')
 
         # [新增 ZMQ 配置]
         self.zmq_port = 55555  # 固定一个端口
@@ -1029,6 +1155,10 @@ class PPOTrainer:
                 print(f'⚠️ [WebUI] WindBot CSV写入失败: {error}')
 
     def collect_rollouts(self):
+        graph_runner = getattr(self, 'inference_graph', None)
+        if graph_runner is not None:
+            self.agent.net.eval()
+            graph_runner.prepare(self.agent.net)
         diagnostics = getattr(self, 'inference_diagnostics', None)
         if diagnostics is not None:
             diagnostics.start(self.iteration)
@@ -1413,6 +1543,9 @@ class PPOTrainer:
         poller.register(socket, zmq.POLLIN)
 
         self.agent.net.eval()
+        graph_runner = getattr(self, 'inference_graph', None)
+        if graph_runner is not None:
+            graph_runner.prepare(self.agent.net)
         last_completed_request_ids = [-1] * self.num_workers
         diagnostics = getattr(self, 'inference_diagnostics', None)
         observation_layout = getattr(self, 'observation_layout', None)
@@ -1507,23 +1640,29 @@ class PPOTrainer:
                         'transfer_non_blocking',
                         self.device.type == 'cuda',
                     )
-                    batch_obs = (observation_layout.transfer(self.packed_batch_blocks, batch_size,
-                        self.device, non_blocking=transfer_non_blocking, device_blocks=self.packed_device_blocks)
-                        if observation_layout is not None else {
-                        k: v[:batch_size].to(
-                            self.device,
-                            non_blocking=transfer_non_blocking,
-                        ).detach()
-                        for k, v in self.pinned_batch_buffers.items()
-                    })
+                    if observation_layout is not None:
+                        batch_obs = observation_layout.transfer(self.packed_batch_blocks, batch_size,
+                            self.device, non_blocking=transfer_non_blocking, device_blocks=self.packed_device_blocks,
+                            contiguous_floats=not (graph_runner is not None and graph_runner.enabled))
+                    elif getattr(self, 'inference_device_buffers', None) is not None:
+                        for name, destination in self.inference_device_buffers.items():
+                            destination[:batch_size].copy_(self.pinned_batch_buffers[name][:batch_size],
+                                non_blocking=transfer_non_blocking)
+                        batch_obs = {name: value[:batch_size] for name, value in self.inference_device_buffers.items()}
+                    else:
+                        batch_obs = {name: value[:batch_size].to(self.device,
+                            non_blocking=transfer_non_blocking).detach()
+                            for name, value in self.pinned_batch_buffers.items()}
                     if measurement is not None:
                         measurement.mark('transferred')
                     
                     # 核心大一统前向前向图计算
                     with training_autocast(self.device, self.amp_dtype):
                         with torch.no_grad():
-                            logits, values, v_input = self.agent.net(batch_obs)
+                            logits, values, v_input = (graph_runner.forward(batch_obs) if graph_runner is not None
+                                                      else self.agent.net(batch_obs))
                             if measurement is not None:
+                                measurement.forward_execution = graph_runner.last_execution if graph_runner is not None else 'eager'
                                 measurement.mark('forwarded')
                             
                             # 统一复刻决策采样（Action Head 模型规范）
@@ -1578,6 +1717,8 @@ class PPOTrainer:
                 accepted_rollout_steps=total_steps,
                 inference_transport=getattr(self, 'inference_transport', 'fields'),
                 input_fields=len(self.input_specs), model_protocol_version=MODEL_PROTOCOL_VERSION)
+            graph_runner = getattr(self, 'inference_graph', None)
+            report['inference_execution'] = graph_runner.summary() if graph_runner is not None else {'requested': False}
             directory = os.path.join('system_logs', 'inference_profiles')
             os.makedirs(directory, exist_ok=True)
             path = os.path.join(directory, f'inference_{self.run_id}_iter_{report["iteration"]}.json')
@@ -2270,6 +2411,10 @@ class PPOTrainer:
             self.env._close_duel()
         self._release_merged_memory_pool()
         if self.infer_thread is None or not self.infer_thread.is_alive():
+            graph_runner = getattr(self, 'inference_graph', None)
+            if graph_runner is not None:
+                graph_runner.close()
+            self.inference_device_buffers = None
             self.packed_device_blocks = None
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()

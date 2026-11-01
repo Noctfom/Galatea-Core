@@ -687,6 +687,18 @@ report = view.audit_native_snapshot(native_snapshot, encoder, sample_limit=8)
 
 ### Remaining online blockers
 
+Core owns controlled-session, observation/candidate and response-submission contracts in
+[`integrations/duel_session.py`](../integrations/duel_session.py). Link can reuse the WindBot-style
+controlled host path: the host maintains native state and invokes the existing V4 encoder, without
+reconstructing another server view or using the partial-player diagnostic adapter.
+
+Real-server layouts, forwarding and additional uses such as LLM integration belong to Link. The
+blockers below apply to rebuilding complete V4 observations from single-player server messages;
+they do not block controlled Core model calls or training optimizations. Filtering Type160 from the
+conservative transport does not mean native Core state ignores it. Link can retain/process it for
+other uses without changing model inputs. Direct V4 inference from player-only messages still
+requires adequate model information; that diagnostic entry remains restricted and is deferred.
+
 3.16.1 fixes two comparison issues: full Extra Deck queries update counts/sparse cache without
 inserting the whole inventory into native V4's entity sequence; transition target arrays are aligned
 when a location is known but its card ID is not, or vice versa. Existing valid-event padding/encoding,

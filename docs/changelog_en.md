@@ -4,11 +4,26 @@
 
 ---
 
+## [v3.16.2] - 2026-11-01
+
+### Optional CUDA Graph central inference
+
+- Training adds one checkbox, off by default, with CLI flag`--inference-cuda-graph`. Exact-batch warm-up, capture and reuse are automatic and require no Torch Compile or manually maintained caches
+- Packed transfers reuse device storage and make floating inputs contiguous inside capture; per-field mode also uses fixed device buffers. At most16 batch sizes are cached. Additional sizes, CPU or capture failure use normal forward; a capture-failure reason is logged once
+- Sampling, log-probs, completion IDs and result delivery retain the existing path. Disabling AMP weight caching in capture keeps new PPO weights visible; replacing parameter/buffer objects or storage invalidates graphs. Shutdown releases in-process caches, with no new deployment assets
+- Existing timing reports add execution counts, cumulative capture/replay details and`steady_batch_ms` excluding setup. Original timing fields and report view/export/delete controls remain available, without additional TensorBoard curves
+- Clarifies controlled Core sessions/model calls versus Link real-server wiring. Partial-player reconstruction retains its diagnostic restrictions independently of training work; native Type160 parsing is retained and no new server-conversion layer is added
+- Corrects the108-field layout description to8 dtype blocks. Release versions and bilingual instructions are synchronized; Protocol4, Checkpoint3, revision14, network parameters, rewards and PPO/auxiliary/planning objectives retain their behavior
+- Verification includes FP16/BF16 full-V4 outputs, fixed-seed sampling/RNG, varying batches/new inputs, storage replacement invalidation, capture fallback, real ZMQ row/completion integrity and new weights after successive PPO updates. Two real Core/WindBot Workers completed two collection/PPO iterations
+- On local5070Ti/Torch2.9.1+cu130 with real512/8/6 weights, controlled batch2 transfer/forward/sample/return median was about26.6→5.0ms, and two-client steady ZMQ round-trip31.6→8.8ms. These do not establish live-game or Linux iteration throughput; no WSL was used
+
+See [CUDA Graph acceleration](architecture_en.md#cuda-graph-acceleration-for-central-inference) and the [Core/player-view boundaries](core_trajectories_en.md#remaining-online-blockers).
+
 ## [v3.16.1] - 2026-11-01
 
 ### Packed collection buffers and semantic-update compatibility (batch2)
 
-- Central inference defaults to7 original-dtype shared/pinned/reused-device blocks for108 fields, reducing per-field gathering/transfers. Worker field interfaces, request order, completion IDs, precision, candidates and sampling remain unchanged. CLI/WebUI retain `packed` and reference `fields` modes; reports record the layout
+- Central inference defaults to8 original-dtype shared/pinned/reused-device blocks for108 fields, reducing per-field gathering/transfers. Worker field interfaces, request order, completion IDs, precision, candidates and sampling remain unchanged. CLI/WebUI retain `packed` and reference `fields` modes; reports record the layout
 - PTH loading separates content changes from weight compatibility. Append-only card IDs, stable category/requirement IDs and matching vector encoder/chunk policy permit automatic use of current semantics with learned weights retained and provenance recorded. New checkpoints carry descriptors; old ones need verified historical bases. Unknown provenance, renumbering and encoder changes remain rejected
 - `semantic_compatibility_v1.json` preserves stable labels and historical bases through compilation, remote sync, GKG and CLI/WebUI import, including separate compilation directories. Clearing rebuildable assets retains label evidence; model metadata caches refresh after semantic updates
 - Deterministic replay, expert data/caches and ONNX graphs with baked semantics retain exact content checks. Invalid historical ONNX follows existing PTH fallback and can be re-exported. CLI import also carries code-generation provenance; BC/PPO saves retain semantic-update history

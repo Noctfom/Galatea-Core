@@ -142,7 +142,7 @@ class PackedObservationLayout:
             for row, worker in enumerate(workers):
                 destination[row].copy_(source[dtype][worker])
 
-    def transfer(self, staging, rows, device, *, non_blocking, device_blocks=None):
+    def transfer(self, staging, rows, device, *, non_blocking, device_blocks=None, contiguous_floats=True):
         """每种dtype进行一次设备搬运，再还原原字段形状"""
         if device_blocks is None:
             blocks = {dtype: block[:rows].to(device, non_blocking=non_blocking).detach()
@@ -151,7 +151,7 @@ class PackedObservationLayout:
             for dtype, block in staging.items():
                 device_blocks[dtype][:rows].copy_(block[:rows], non_blocking=non_blocking)
             blocks = device_blocks
-        return self.batch_views(blocks, rows, contiguous_floats=True)
+        return self.batch_views(blocks, rows, contiguous_floats=contiguous_floats)
 
 
 class CentralInferenceDiagnostics:
@@ -196,13 +196,14 @@ class CentralInferenceDiagnostics:
             records, self._records = self._records, []
             iteration = self._iteration
         from collections import Counter
-        batches, requests, incomplete = [], [], 0
+        batches, requests, executions, incomplete = [], [], [], 0
         for record in records:
             if not record.complete:
                 incomplete += 1
                 continue
             batch, rows = record.summarize()
             batches.append(batch)
+            executions.append(record.forward_execution)
             requests.extend(rows)
         def summary(values):
             values = sorted(values)
@@ -222,6 +223,11 @@ class CentralInferenceDiagnostics:
             "batch_size_histogram": dict(Counter(str(batch['batch_size']) for batch in batches)),
             "batch_ms": {name: summary([batch[name] for batch in batches if name in batch])
                          for name in sorted({key for batch in batches for key in batch if key != 'batch_size'})},
+            "forward_execution_counts": dict(Counter(executions)),
+            "setup_batches": sum(mode.startswith('cuda_graph_setup') for mode in executions),
+            "steady_batch_ms": {name: summary([batch[name] for batch, mode in zip(batches, executions)
+                if name in batch and not mode.startswith('cuda_graph_setup')])
+                for name in sorted({key for batch in batches for key in batch if key != 'batch_size'})},
             "requests": {phase: {"count": len(group), "ms": {
                 name: summary([row[name] for row in group if row.get(name) is not None])
                 for name in ('input_fill', 'submit_to_receive', 'server_wait', 'submit_to_reply')}}
@@ -244,6 +250,7 @@ class _InferenceBatchMeasurement:
         self.cuda_error = None
         self.device = device
         self.complete = False
+        self.forward_execution = 'eager'
 
     def mark(self, name):
         """CPU记录提交耗时，CUDA事件仅在显式诊断窗口内创建"""

@@ -284,7 +284,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.2"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1261,6 +1261,11 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             format_func=lambda value: _("批量传输（推荐）", "Batched Transfer (recommended)") if value == 'packed' else _("逐字段传输（原方式）", "Per-field Transfer (original)"),
             help=_("批量传输：把观测数据集中复制，减少小块传输的次数，适合正常训练；CPU和CUDA均可使用。\n\n逐字段传输：沿用原来的逐项复制方式，适合比较传输性能，或排查批量方式下的运行问题。\n\n两者使用相同的观测信息和数值精度，一般保留推荐项即可",
                    "Batched transfer: copies observation data in larger groups to reduce small-copy overhead. Recommended for normal training on both CPU and CUDA.\n\nPer-field transfer: uses the original field-by-field copies. Select it to compare transfer performance or investigate problems with batched transfer.\n\nBoth use the same observation information and numeric precision. Keep the recommended option for routine use"))
+        c_inference_cuda_graph = st.checkbox(
+            _("CUDA 图加速中央推理", "Accelerate Central Inference with CUDA Graphs"),
+            value=False, key='training_inference_cuda_graph',
+            help=_("适合使用 NVIDIA 显卡、中央推理耗时较高的训练。复用 GPU 前向执行流程，减少小批量推理的调度开销；首次遇到某个批量时需要预热，并增加少量显存。无需开启模型编译，训练观测、网络与采样方式不变。CPU 或捕获失败时自动使用常规前向；可配合上方分段诊断比较耗时",
+                   "For training on NVIDIA GPUs when central inference is slow. Replays the GPU forward pass to reduce scheduling overhead for small batches. Each new batch size needs warm-up and some extra GPU memory. Does not require Torch Compile and preserves observations, the network and sampling. CPU or capture failure uses the normal forward path. Use stage timing above to compare performance"))
         
         windbot_training_options = None
         with st.expander(_("🤖 WindBot 主训练对手（可选）", "🤖 WindBot Training Opponents (optional)")):
@@ -1480,6 +1485,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_protocol_audit: cmd.append("--protocol-audit")
                 if c_inference_profile: cmd.extend(["--inference-profile-batches", str(t_inference_profile_batches)])
                 cmd.extend(['--inference-transport', t_inference_transport])
+                if c_inference_cuda_graph: cmd.append('--inference-cuda-graph')
                 cmd.extend(['--league-weights', *(str(league_values[name]) for name in ('rule', 'windbot', 'hist', 'self'))])
                 if windbot_training_options is not None:
                     cmd.extend(['--windbot', '--windbot-deck-mode', windbot_training_options['deck_mode']])

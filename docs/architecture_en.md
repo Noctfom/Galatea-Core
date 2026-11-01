@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.16.1**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.16.2**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -774,7 +774,7 @@ Select Central Inference Data Transfer in the training WebUI or use the CLI:
 Each observation contains 108 fields, including scene cards, action candidates and event history.
 The original method allocates shared storage per field, then gathers and transfers each field
 separately. Batched transfer puts fields of the same data type into continuous storage, currently
-seven blocks, while retaining each field's name, shape and numeric type.
+eight blocks, while retaining each field's name, shape and numeric type.
 
 Workers write directly through field views. The server gathers blocks in request order, transfers
 them, and reconstructs field views by offset on the compute device. CUDA uses pinned CPU staging
@@ -790,6 +790,40 @@ the cost of network forward computation.
 
 Use the stage timings above to compare methods. Reports record `inference_transport`; keep network,
 Workers, device and decks consistent when comparing gather/transfer time and whole-rollout speed.
+
+### CUDA Graph acceleration for central inference
+
+Enable **Accelerate Central Inference with CUDA Graphs** in the training UI, or append
+`--inference-cuda-graph` to the existing training command. It is off by default and targets NVIDIA
+GPU collection dominated by small-batch forward scheduling. CPU uses normal inference. It does
+not require `torch.compile`: graphs accelerate collection; the existing compile setting still controls PPO.
+
+The server automatically captures forward passes for exact batch sizes without adding dummy rows.
+Shared slots, request order and completion IDs retain their behavior. Sampling, log-prob calculation
+and result delivery stay outside graphs. Packed transfers reuse device storage and make float fields
+contiguous inside the graph; per-field transfers use fixed device buffers. At most16 batch sizes are
+cached, with normal inference for additional sizes.
+
+The first request for a batch size includes warm-up, capture and an output comparison, so it is slower
+and requires some additional GPU memory. AMP weight caching is disabled inside capture so in-place
+PPO updates remain visible on replay. Replacing parameter/buffer objects or storage invalidates graphs.
+Capture failure logs one reason and uses normal forward thereafter. Graphs live only in process memory,
+are released at shutdown, and require no new distributed assets. Observations, precision, network
+parameters, learning objectives and checkpoint format retain their meaning.
+
+Use the existing stage-timing switch and JSON reports:
+
+| Field | Meaning |
+|---|---|
+| `inference_execution` | Requested/enabled status, cached batches, cumulative captures/replays, setup time and fallback reason |
+| `forward_execution_counts` | Forward execution counts by mode within the diagnostic window |
+| `setup_batches` | Batches containing first-time setup, including setup followed by fallback |
+| `steady_batch_ms` | Stage timings excluding setup batches; original `batch_ms` still includes the full window |
+
+Keep hardware, network, Workers and opponents consistent when comparing, and include accepted rollout
+steps per second. Graphs accelerate forward only; environment, CPU historical opponents, WindBot and
+sampling still contribute to collection time. See the
+[PyTorch CUDA Graph documentation](https://docs.pytorch.org/docs/2.9/notes/cuda.html#cuda-graphs).
 
 ### 1. CUDA Mixed Precision Training
 

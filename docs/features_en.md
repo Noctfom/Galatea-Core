@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.16.1**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.16.2**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -506,6 +506,7 @@ python main.py train [options]
 | `--protocol-audit` | Generate V3 protocol and effect-slot diagnostics | Off |
 | `--inference-profile-batches` | Maximum central microbatches timed per iteration: 1–10000; 0 disables, without limiting rollout/PPO batches | 0 |
 | `--inference-transport` | `packed`: batched transfer recommended for normal training; `fields`: original per-field transfer for performance comparison or troubleshooting | packed |
+| `--inference-cuda-graph` | Replay central forward with CUDA Graphs for small GPU batches; automatic warm-up/caching, some extra GPU memory, no Torch Compile required; CPU or capture failure uses normal inference | Off |
 | `--gamma` | Discount factor | 0.998 |
 | `--lr` | Learning rate | 1e-4 |
 | `--entropy` | Entropy regularization coefficient | 0.03 |
