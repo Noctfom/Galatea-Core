@@ -1,6 +1,6 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.16.2 / Model Protocol V4。
+> 适用于 Galatea-Core v3.16.3 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
@@ -266,7 +266,11 @@ KL 衡量策略改变的幅度，不衡量改变后的优劣；低 KL 可能表�
 | `Performance/Rollout_Steps_Per_Second` | 实际合并的训练样本行数÷Collection_Seconds | 不是所有 Core 动作/秒或每 Worker 吞吐；乘回采集秒数可近似还原实际提交行数 |
 | `Configuration/PPO` | 启动时记录 gamma、lambda、请求/实际学习率、entropy、clip、epochs、target KL、multiplier、mini_batch | Text，不是标量图；恢复时看实际优化器学习率，不能只看命令行请求值 |
 
-配置文本目前**不记录** Worker 数、采集 timeout、网络层数、Core/资产指纹或逐组对局数。事件文件也不能证明 CUDA 峰值/RSS 无增长，需另看启动与内存日志。
+3.16.3起，配置文本的`runtime`补充Worker数、目标采集步数、采集timeout、设备、PyTorch/CUDA
+版本、模型编译、CUDA图及传输布局。旧事件文件没有这些字段，不能用当前默认值补推历史设置。
+网络层数、Core/资产指纹及普通联盟各组对局分母仍不在此文本内。事件文件不能证明CUDA峰值/
+RSS无增长，需另看内存日志；有界分段诊断中的`collection_phase_seconds`可定位整轮耗时阶段，
+见[CUDA图与采集计时](architecture.md#cuda图加速中央推理)。本次不新增标量图表。
 
 ## 10. 独立模仿学习指标
 

@@ -348,6 +348,26 @@ def training_autocast(device, amp_dtype):
     return nullcontext()
 
 
+@torch.no_grad()
+def central_inference_results(network, observation, device, amp_dtype, graph_runner, measurement, return_logits):
+    """只向服务循环返回CPU结果，避免跨批保留图输出及其私有池"""
+    with training_autocast(device, amp_dtype):
+        logits, values, state = graph_runner.forward(observation) if graph_runner is not None else network(observation)
+        if measurement is not None:
+            measurement.forward_execution = graph_runner.last_execution if graph_runner is not None else 'eager'
+            measurement.mark('forwarded')
+        distribution = torch.distributions.Categorical(logits=logits)
+        actions = distribution.sample()
+        log_probs = distribution.log_prob(actions)
+    if measurement is not None:
+        measurement.mark('sampled')
+    results = torch.stack((actions.float(), log_probs.float(), values.reshape(-1).float()), dim=1)
+    if return_logits:
+        combined = torch.cat((results, logits.float()), dim=1).cpu()
+        return combined[:, :3], combined[:, 3:]
+    return results.cpu(), None
+
+
 class CentralInferenceCudaGraph:
     """仅重放中央推理前向，采样和 PPO 仍由原流程处理"""
 
@@ -361,13 +381,16 @@ class CentralInferenceCudaGraph:
         self.network = None
         self._binding = None
         self._graphs = {}
+        self._capture_stream = None
         self.captures = self.replays = self.eager_batches = self.failures = 0
         self.rebindings = 0
+        self.policy_releases = 0
+        self.released_graphs = 0
         self.capture_ms = 0.0
         self.last_execution = 'eager'
 
     def prepare(self, network):
-        """采集屏障处核对参数存储，原地 PPO 更新可直接复用已捕获的图"""
+        """采集屏障处绑定当前网络，存储替换后丢弃原地址对应的图"""
         network = getattr(network, '_orig_mod', network)
         binding = (id(network), tuple((name, id(value), value.data_ptr(), tuple(value.shape), value.stride(),
             value.dtype, value.device) for name, value in
@@ -391,7 +414,9 @@ class CentralInferenceCudaGraph:
     def _capture(self, observation):
         """侧流预热并核对首次输出，禁用 AMP 权重缓存以读取后续 PPO 的新权重"""
         current = torch.cuda.current_stream(self.device)
-        warmup = torch.cuda.Stream(device=self.device)
+        if self._capture_stream is None:
+            self._capture_stream = torch.cuda.Stream(device=self.device)
+        warmup = self._capture_stream
         warmup.wait_stream(current)
         device_index = self.device.index if self.device.index is not None else torch.cuda.current_device()
         with torch.cuda.device(self.device), torch.random.fork_rng(devices=[device_index]), torch.no_grad(), \
@@ -402,7 +427,8 @@ class CentralInferenceCudaGraph:
             current.wait_stream(warmup)
             torch.cuda.synchronize(self.device)
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
+            # 预热与捕获共用同一流，避免库工作区首次分配落入图私有池
+            with torch.cuda.graph(graph, stream=warmup):
                 outputs = self.network(self._contiguous_inputs(observation))
             graph.replay()
             if not all(torch.equal(left, right) for left, right in zip(reference, outputs)):
@@ -454,12 +480,23 @@ class CentralInferenceCudaGraph:
             'cached_batch_sizes': sorted(self._graphs), 'captures_total': self.captures,
             'replays_total': self.replays, 'eager_batches_total': self.eager_batches,
             'failures_total': self.failures, 'rebindings_total': self.rebindings,
+            'policy_releases_total': self.policy_releases, 'released_graphs_total': self.released_graphs,
             'capture_ms_total': self.capture_ms, 'sampling_in_graph': False}
+
+    def release_for_policy_update(self):
+        """采集结束后释放图私有池，下一轮按当前权重自动重新捕获"""
+        count = len(self._graphs)
+        self._graphs.clear()
+        if count:
+            self.policy_releases += 1
+            self.released_graphs += count
+        return count
 
     def close(self):
         """推理线程结束后释放图及其固定输入输出"""
         self._graphs.clear()
         self.network = self._binding = None
+        self._capture_stream = None
 
 
 def select_league_opponent_config(roll, historical_models, model_id, weights=None):
@@ -525,6 +562,7 @@ class PPOTrainer:
             raise ValueError('inference_cuda_graph must be bool')
         self.inference_cuda_graph = inference_cuda_graph
         self.server_stop_event = threading.Event()
+        self.inference_lock = threading.RLock()
         self.infer_thread = None
         self._closed = False
 
@@ -769,6 +807,13 @@ class PPOTrainer:
                 'kl_stop_multiplier': TARGET_KL_STOP_MULTIPLIER,
                 'mini_batch_size': self.mini_batch_size,
                 'league_weights': self.league_weights,
+                'runtime': {
+                    'workers': self.num_workers, 'rollout_steps': self.update_timesteps,
+                    'worker_timeout': self.worker_timeout, 'device': str(self.device),
+                    'torch_version': str(torch.__version__), 'cuda_version': torch.version.cuda,
+                    'compile': self.enable_compile, 'inference_cuda_graph': self.inference_cuda_graph,
+                    'inference_transport': self.inference_transport,
+                },
             }, indent=2),
             self.train_step,
         )
@@ -1165,7 +1210,8 @@ class PPOTrainer:
         if self.device.type == 'cpu':
             self._configure_cpu_threads(for_policy_update=False)
         print(f"📥 [Iter {self.iteration}] 唤醒 {self.num_workers} 个工人 | 目标: {self.update_timesteps} 步")
-        t0 = time.time()
+        t0 = time.monotonic()
+        self.collection_phase_seconds = {'elapsed_clock': 'monotonic'}
 
         # --- 联盟训练对手选择逻辑 ---
         # 只发现同一 UUID 的历史存档，禁止同前缀异模型混入联盟池
@@ -1213,6 +1259,8 @@ class PPOTrainer:
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
         self._report_memory_status("Worker 启动前")
         self._validate_rollout_commit_headroom(steps_per_worker)
+        phase_start = time.monotonic()
+        self.collection_phase_seconds['setup'] = phase_start - t0
 
         # Worker异常或主进程取消时，也要回收其外部对手
         processes = []
@@ -1230,12 +1278,15 @@ class PPOTrainer:
                 p.start()
                 processes.append(p)
             print(f"   ... 中央批量推理服务 ({self.device.type.upper()}) 运算中 ...")
-            start_wait = time.time()
-            while time.time() - start_wait < self.worker_timeout:
+            start_wait = time.monotonic()
+            self.collection_phase_seconds['worker_startup'] = start_wait - phase_start
+            while time.monotonic() - start_wait < self.worker_timeout:
                 if not any(p.is_alive() for p in processes):
                     break
                 time.sleep(1.0)
         finally:
+            reap_start = time.monotonic()
+            self.collection_phase_seconds['worker_wait'] = reap_start - locals().get('start_wait', reap_start)
             for p in processes:
                 if p.is_alive():
                     print(f'⏳ [Trainer] Worker未完成采集，正在终止并回收进程')
@@ -1252,6 +1303,8 @@ class PPOTrainer:
                         reap_worker_bot(config['windbot']['process_registry'])
                     except Exception as error:
                         print(f'⚠️ [Trainer] WindBot进程登记回收失败: {error}')
+            phase_start = time.monotonic()
+            self.collection_phase_seconds['worker_reap'] = phase_start - reap_start
         
         orphan_tmps = glob.glob(f"tmp_rollout_iter_{self.iteration}_worker_*.pt.tmp")
         for f in orphan_tmps:
@@ -1291,6 +1344,7 @@ class PPOTrainer:
                 file_list.append(tmp_file)
 
         if not file_list:
+            self.collection_phase_seconds['merge'] = time.monotonic() - phase_start
             print("❌ 所有 Worker 均未能产出数据！")
             return None
         
@@ -1435,10 +1489,11 @@ class PPOTrainer:
 
         self._write_windbot_metrics(windbot_records)
         self._write_windbot_history(windbot_records)
+        self.collection_phase_seconds['merge'] = time.monotonic() - phase_start
         if cursor == 0:
             print('❌ 本轮没有可提交的模型动作，已保留外部对手诊断统计，不执行PPO更新')
             return None
-        t_cost = time.time() - t0
+        t_cost = time.monotonic() - t0
         avg_rew = np.mean(total_rewards) if total_rewards else 0.0
         avg_len = np.mean(total_lens) if total_lens else 0.0
         print(f"✅ 采集完成! 耗时: {t_cost:.1f}s | 样本: {cursor} | Avg Reward: {avg_rew:.2f}")
@@ -1549,6 +1604,7 @@ class PPOTrainer:
         last_completed_request_ids = [-1] * self.num_workers
         diagnostics = getattr(self, 'inference_diagnostics', None)
         observation_layout = getattr(self, 'observation_layout', None)
+        inference_lock = getattr(self, 'inference_lock', None) or threading.RLock()
 
         while not stop_event.is_set():
             try:
@@ -1610,13 +1666,20 @@ class PPOTrainer:
                         except zmq.Again:
                             break
                     
-                    start_wait = time.perf_counter()
-                    while len(requests) < self.num_workers and (time.perf_counter() - start_wait) < 0.003:
-                        if poller.poll(0):
+                    deadline = time.perf_counter() + 0.003
+                    while len(requests) < self.num_workers and not stop_event.is_set():
+                        remaining = deadline - time.perf_counter()
+                        if remaining <= 0:
+                            break
+                        # Windows短poll可能被放大到系统时钟粒度，改为无定时让出时间片
+                        ready = poller.poll(0 if os.name == 'nt' else max(1, math.ceil(remaining * 1000)))
+                        if ready:
                             try:
                                 receive_request()
                             except zmq.Again:
                                 pass
+                        elif os.name == 'nt':
+                            time.sleep(0)
                     
                     if not requests:
                         continue
@@ -1640,43 +1703,28 @@ class PPOTrainer:
                         'transfer_non_blocking',
                         self.device.type == 'cuda',
                     )
-                    if observation_layout is not None:
-                        batch_obs = observation_layout.transfer(self.packed_batch_blocks, batch_size,
-                            self.device, non_blocking=transfer_non_blocking, device_blocks=self.packed_device_blocks,
-                            contiguous_floats=not (graph_runner is not None and graph_runner.enabled))
-                    elif getattr(self, 'inference_device_buffers', None) is not None:
-                        for name, destination in self.inference_device_buffers.items():
-                            destination[:batch_size].copy_(self.pinned_batch_buffers[name][:batch_size],
-                                non_blocking=transfer_non_blocking)
-                        batch_obs = {name: value[:batch_size] for name, value in self.inference_device_buffers.items()}
-                    else:
-                        batch_obs = {name: value[:batch_size].to(self.device,
-                            non_blocking=transfer_non_blocking).detach()
-                            for name, value in self.pinned_batch_buffers.items()}
-                    if measurement is not None:
-                        measurement.mark('transferred')
-                    
-                    # 核心大一统前向前向图计算
-                    with training_autocast(self.device, self.amp_dtype):
-                        with torch.no_grad():
-                            logits, values, v_input = (graph_runner.forward(batch_obs) if graph_runner is not None
-                                                      else self.agent.net(batch_obs))
+                    with inference_lock:
+                        batch_obs = None
+                        try:
+                            if observation_layout is not None:
+                                batch_obs = observation_layout.transfer(self.packed_batch_blocks, batch_size,
+                                    self.device, non_blocking=transfer_non_blocking, device_blocks=self.packed_device_blocks,
+                                    contiguous_floats=not (graph_runner is not None and graph_runner.enabled))
+                            elif getattr(self, 'inference_device_buffers', None) is not None:
+                                for name, destination in self.inference_device_buffers.items():
+                                    destination[:batch_size].copy_(self.pinned_batch_buffers[name][:batch_size],
+                                        non_blocking=transfer_non_blocking)
+                                batch_obs = {name: value[:batch_size] for name, value in self.inference_device_buffers.items()}
+                            else:
+                                batch_obs = {name: value[:batch_size].to(self.device,
+                                    non_blocking=transfer_non_blocking).detach()
+                                    for name, value in self.pinned_batch_buffers.items()}
                             if measurement is not None:
-                                measurement.forward_execution = graph_runner.last_execution if graph_runner is not None else 'eager'
-                                measurement.mark('forwarded')
-                            
-                            # 统一复刻决策采样（Action Head 模型规范）
-                            dist = torch.distributions.Categorical(logits=logits)
-                            actions = dist.sample()
-                            log_probs = dist.log_prob(actions)
-                    if measurement is not None:
-                        measurement.mark('sampled')
-                    
-                    # 整批回传基础结果与分数，避免按Worker逐标量同步CUDA
-                    cpu_results = torch.stack(
-                        (actions.float(), log_probs.float(), values.reshape(-1).float()), dim=1,
-                    ).cpu()
-                    cpu_logits = logits.float().cpu() if shared_logits is not None else None
+                                measurement.mark('transferred')
+                            cpu_results, cpu_logits = central_inference_results(self.agent.net, batch_obs,
+                                self.device, self.amp_dtype, graph_runner, measurement, shared_logits is not None)
+                        finally:
+                            batch_obs = None
                     if measurement is not None:
                         measurement.mark('returned')
                     for i, wid in enumerate(requests):
@@ -1695,7 +1743,6 @@ class PPOTrainer:
                         socket.send_multipart([addr, b'', encode_inference_success(request_id)])
                     if measurement is not None:
                         measurement.mark('published')
-                    #del logits, values, v_input, batch_obs
 
             except Exception as e:
                 print(f"\n🚨 [Server ZeroMQ 熔断] 核心推推演异常已拦截: {e}")
@@ -1717,6 +1764,7 @@ class PPOTrainer:
                 accepted_rollout_steps=total_steps,
                 inference_transport=getattr(self, 'inference_transport', 'fields'),
                 input_fields=len(self.input_specs), model_protocol_version=MODEL_PROTOCOL_VERSION)
+            report['collection_phase_seconds'] = dict(getattr(self, 'collection_phase_seconds', {}))
             graph_runner = getattr(self, 'inference_graph', None)
             report['inference_execution'] = graph_runner.summary() if graph_runner is not None else {'requested': False}
             directory = os.path.join('system_logs', 'inference_profiles')
@@ -1733,11 +1781,18 @@ class PPOTrainer:
         if total_steps == 0:
             return
 
-        self.agent.net.train()
-        try:
-            self._update_policy_training(total_steps)
-        finally:
-            self.agent.net.eval()
+        with getattr(self, 'inference_lock', None) or nullcontext():
+            graph_runner = getattr(self, 'inference_graph', None)
+            if graph_runner is not None and graph_runner._graphs:
+                torch.cuda.synchronize(self.device)
+                released = graph_runner.release_for_policy_update()
+                torch.cuda.empty_cache()
+                print(f'♻️ [CUDA图] PPO前已释放 {released} 个采集图缓存，下一轮自动重建')
+            self.agent.net.train()
+            try:
+                self._update_policy_training(total_steps)
+            finally:
+                self.agent.net.eval()
 
     def _update_policy_training(self, total_steps):
         """
@@ -2275,12 +2330,12 @@ class PPOTrainer:
 
         while self.iteration < target_iter:
             self.iteration += 1
-            iter_start = time.time()
+            iter_start = time.monotonic()
 
             # 1. 采集 (现在返回的是总步数)
-            collection_start = time.time()
+            collection_start = time.monotonic()
             total_steps = self.collect_rollouts()
-            collection_seconds = time.time() - collection_start
+            collection_seconds = time.monotonic() - collection_start
             if getattr(self, 'inference_diagnostics', None) is not None:
                 self._write_inference_profile(collection_seconds=collection_seconds, total_steps=total_steps)
             self.writer.add_scalar(
@@ -2297,11 +2352,11 @@ class PPOTrainer:
 
             # 2. 优化 (只有当样本足够时才更新)
             if total_steps is not None and total_steps >= self.mini_batch_size:
-                policy_update_start = time.time()
+                policy_update_start = time.monotonic()
                 self.update_policy(total_steps)
                 self.writer.add_scalar(
                     'Performance/PPO_Update_Seconds',
-                    time.time() - policy_update_start,
+                    time.monotonic() - policy_update_start,
                     self.iteration,
                 )
                 # 下一轮会从索引 0 覆盖有效前缀，保留固定池可避免 Windows 反复提交/释放大块内存。
@@ -2387,7 +2442,7 @@ class PPOTrainer:
                 print(f"💾 Model saved: {path}")
                 print(f"🏷️ Artifact manifest saved: {artifact_manifest}")
             
-            dt = time.time() - iter_start
+            dt = time.monotonic() - iter_start
             print(f"⏱️ Iteration {self.iteration} finished in {dt:.1f}s")
 
         print("🏁 训练结束！")

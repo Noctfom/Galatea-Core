@@ -284,7 +284,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.2"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.3"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1264,8 +1264,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         c_inference_cuda_graph = st.checkbox(
             _("CUDA 图加速中央推理", "Accelerate Central Inference with CUDA Graphs"),
             value=False, key='training_inference_cuda_graph',
-            help=_("适合使用 NVIDIA 显卡、中央推理耗时较高的训练。复用 GPU 前向执行流程，减少小批量推理的调度开销；首次遇到某个批量时需要预热，并增加少量显存。无需开启模型编译，训练观测、网络与采样方式不变。CPU 或捕获失败时自动使用常规前向；可配合上方分段诊断比较耗时",
-                   "For training on NVIDIA GPUs when central inference is slow. Replays the GPU forward pass to reduce scheduling overhead for small batches. Each new batch size needs warm-up and some extra GPU memory. Does not require Torch Compile and preserves observations, the network and sampling. CPU or capture failure uses the normal forward path. Use stage timing above to compare performance"))
+            help=_("适合使用 NVIDIA 显卡、中央推理耗时较高的训练。每轮采集按实际批量自动预热并复用 GPU 前向；采集时增加显存占用，PPO 更新前自动释放图缓存，为训练预留显存，下一轮重新构建。无需开启模型编译，观测、网络与采样方式不变。CPU 或捕获失败时使用常规前向，可配合上方分段诊断比较耗时",
+                   "For NVIDIA GPU training with slow central inference. Automatically warms up and replays exact-batch forward passes within each collection round. Collection uses extra GPU memory; graphs are released before PPO and rebuilt next round. Does not require Torch Compile and preserves observations, the network and sampling. CPU or capture failure uses normal forward. Use stage timing above to compare performance"))
         
         windbot_training_options = None
         with st.expander(_("🤖 WindBot 主训练对手（可选）", "🤖 WindBot Training Opponents (optional)")):

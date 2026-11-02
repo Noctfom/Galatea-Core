@@ -1,6 +1,6 @@
 # 3.13.4: Code-source provenance and content-aware semantic rebuilds
 
-> Usage guidance applies to v3.16.2; dated repair and measurement evidence below remains historical.
+> Usage guidance applies to v3.16.3; dated repair and measurement evidence below remains historical.
 
 ## Scope
 

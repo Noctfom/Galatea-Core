@@ -476,8 +476,11 @@ def _load_random_compatible_deck(base_dir, names, rng=random):
     while remaining:
         name = rng.choice(remaining)
         remaining.remove(name)
-        deck = load_deck(base_dir, name)
-        if is_deck_compatible(deck):
+        try:
+            deck = load_deck(base_dir, name)
+        except (OSError, ValueError):
+            continue
+        if is_deck_compatible(deck) and deck.main:
             return name, deck
     return None
 
@@ -539,91 +542,113 @@ def audit_deck_directory(
 # --- 双通道零 IO 缓存系统 ---
 _cache_dict = {'global': {}, 'virtual': {}}
 _mtime_dict = {'global': 0, 'virtual': 0}
+_source_dict = {'global': None, 'virtual': None}
 
 def get_json_data(filepath, cache_key):
     if not os.path.exists(filepath): return {}
+    source = os.path.abspath(filepath)
     try:
         now = time.time()
         # 冷却时间：10秒内绝不重新查询硬盘文件状态
-        if now - _last_io_check[cache_key] > 10.0:
+        source_changed = _source_dict[cache_key] != source
+        if source_changed or now - _last_io_check[cache_key] > 10.0:
             mtime = os.path.getmtime(filepath)
             _last_io_check[cache_key] = now
-            if mtime != _mtime_dict[cache_key]:
+            if source_changed or mtime != _mtime_dict[cache_key]:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     _cache_dict[cache_key] = json.load(f)
                 _mtime_dict[cache_key] = mtime
+                _source_dict[cache_key] = source
         return _cache_dict[cache_key]
-    except Exception: 
-        return _cache_dict[cache_key]
+    except Exception:
+        return _cache_dict[cache_key] if _source_dict[cache_key] == source else {}
 
-def get_random_deck_pair(ydk_dir='./decks'):
-    """随机返回环境名和两副卡组；无法组成对局时统一返回空值"""
-    if not os.path.exists(ydk_dir):
+def _weighted_training_candidates(items, weights, rng, *, uniform_when_zero=False):
+    """按原权重逐次尝试，失败后只在仍启用的范围中重抽"""
+    remaining = list(zip(items, map(_safe_weight, weights)))
+    if uniform_when_zero and not any(weight > 0 for _, weight in remaining):
+        remaining = [(item, 1.0) for item, _ in remaining]
+    remaining = [(item, weight) for item, weight in remaining if weight > 0]
+    while remaining:
+        selected = rng.choices(range(len(remaining)), weights=[weight for _, weight in remaining], k=1)[0]
+        item, _ = remaining.pop(selected)
+        yield item
+
+
+def _get_random_training_decks(ydk_dir, count, rng):
+    """跳过空池与未兼容池，保留物理内战及虚拟池独立抽样的原有分布"""
+    if not os.path.isdir(ydk_dir):
         return None
     subdirs = [os.path.join(ydk_dir, d) for d in os.listdir(ydk_dir) if os.path.isdir(os.path.join(ydk_dir, d))]
 
     if not subdirs:
         names = list_decks(ydk_dir)
-        if len(names) < 2:
+        if not names:
             return None
-        first = _load_random_compatible_deck(ydk_dir, names)
-        second = _load_random_compatible_deck(ydk_dir, names)
-        if first is None or second is None:
+        picks = [_load_random_compatible_deck(ydk_dir, names, rng) for _ in range(count)]
+        if any(pick is None for pick in picks):
             return None
-        n1, d1 = first
-        n2, d2 = second
-        return "Root_Mix", n1, d1, n2, d2
+        return 'Root_Mix', picks
 
-    # 1. 分别加载全局权重与虚拟池配方
     global_file = os.path.join(ydk_dir, 'global_weights.json')
     virtual_file = os.path.join(ydk_dir, 'virtual_pools.json')
-
     global_weights = get_json_data(global_file, 'global')
     virtual_pools = get_json_data(virtual_file, 'virtual')
-
-    # 2. 候选名单 = 所有物理文件夹 + 所有虚拟池
     subdir_names = [os.path.basename(os.path.normpath(d)) for d in subdirs]
     env_choices = subdir_names + list(virtual_pools.keys())
+    weights = [global_weights.get(name, 1.0) for name in env_choices]
+    unavailable = set()
 
-    # 3. 提取全局权重 (如果没配，默认给 1.0)
-    weights = [float(global_weights.get(name, 1.0)) for name in env_choices]
-    if sum(weights) <= 0: weights = [1.0] * len(env_choices)
-
-    chosen_env = random.choices(env_choices, weights=weights, k=1)[0]
-
-    # --- 路径 A：抽中了虚拟拼装池 ---
-    if chosen_env in virtual_pools:
-        pool_cfg = virtual_pools[chosen_env]
-        # 在虚拟池内，根据配方权重重新抽取物理池
-        v_weights = [float(pool_cfg.get(name, 0.0)) for name in subdir_names]
-        if sum(v_weights) <= 0:
+    def pick_physical(directory):
+        if directory in unavailable:
             return None
+        pick = _load_random_compatible_deck(directory, list_decks(directory), rng)
+        if pick is None:
+            unavailable.add(directory)
+        return pick
 
-        c_env1 = random.choices(subdirs, weights=v_weights, k=1)[0]
-        c_env2 = random.choices(subdirs, weights=v_weights, k=1)[0]
+    for environment in _weighted_training_candidates(env_choices, weights, rng, uniform_when_zero=True):
+        if environment in virtual_pools:
+            recipe = virtual_pools[environment]
+            if not isinstance(recipe, dict):
+                continue
+            picks = []
+            for _ in range(count):
+                pick = None
+                for directory in _weighted_training_candidates(subdirs,
+                        [recipe.get(name, 0.0) for name in subdir_names], rng):
+                    pick = pick_physical(directory)
+                    if pick is not None:
+                        break
+                if pick is None:
+                    break
+                picks.append(pick)
+        else:
+            directory = os.path.join(ydk_dir, environment)
+            picks = []
+            for _ in range(count):
+                pick = pick_physical(directory)
+                if pick is None:
+                    break
+                picks.append(pick)
+        if len(picks) == count:
+            return environment, picks
+    return None
 
-        names1, names2 = list_decks(c_env1), list_decks(c_env2)
-        if not names1 or not names2:
-            return None
 
-        first = _load_random_compatible_deck(c_env1, names1)
-        second = _load_random_compatible_deck(c_env2, names2)
-        if first is None or second is None:
-            return None
-        n1, d1 = first
-        n2, d2 = second
-        return chosen_env, n1, d1, n2, d2
+def get_random_deck_pair(ydk_dir='./decks', *, rng=None):
+    """随机返回环境名和两副卡组，仅在启用范围全部不可用时返回空值"""
+    result = _get_random_training_decks(ydk_dir, 2, rng or random)
+    if result is None:
+        return None
+    environment, ((first_name, first), (second_name, second)) = result
+    return environment, first_name, first, second_name, second
 
-    # --- 路径 B：抽中了物理池 (内战) ---
-    else:
-        chosen_dir = os.path.join(ydk_dir, chosen_env)
-        names = list_decks(chosen_dir)
-        if len(names) < 1:
-            return None
-        first = _load_random_compatible_deck(chosen_dir, names)
-        second = _load_random_compatible_deck(chosen_dir, names)
-        if first is None or second is None:
-            return None
-        n1, d1 = first
-        n2, d2 = second
-        return chosen_env, n1, d1, n2, d2
+
+def get_random_training_deck(ydk_dir='./decks', *, rng=None):
+    """外部固定对手只抽模型侧一副卡组，不加载未使用的另一侧"""
+    result = _get_random_training_decks(ydk_dir, 1, rng or random)
+    if result is None:
+        return None
+    environment, ((name, deck),) = result
+    return environment, name, deck

@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.16.2**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.16.3**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -506,7 +506,7 @@ python main.py train [options]
 | `--protocol-audit` | Generate V3 protocol and effect-slot diagnostics | Off |
 | `--inference-profile-batches` | Maximum central microbatches timed per iteration: 1–10000; 0 disables, without limiting rollout/PPO batches | 0 |
 | `--inference-transport` | `packed`: batched transfer recommended for normal training; `fields`: original per-field transfer for performance comparison or troubleshooting | packed |
-| `--inference-cuda-graph` | Replay central forward with CUDA Graphs for small GPU batches; automatic warm-up/caching, some extra GPU memory, no Torch Compile required; CPU or capture failure uses normal inference | Off |
+| `--inference-cuda-graph` | Replay central forward for small GPU batches; warm up each iteration, use extra GPU memory during collection, release before PPO and rebuild next iteration; no Torch Compile required; CPU or capture failure uses normal inference | Off |
 | `--gamma` | Discount factor | 0.998 |
 | `--lr` | Learning rate | 1e-4 |
 | `--entropy` | Entropy regularization coefficient | 0.03 |
@@ -820,6 +820,11 @@ The main training page offers optional WindBot opponents. Version3.15.5 exposes 
 WindBot/history/self probabilities: `15%/0%/25%/60%` by default, `0%/15%/25%/60%` when enabled.
 Optional custom values must total100%. Windows/Linux startup adapts automatically without an OS choice.
 Mirror fixed builds or regular model-side decks, suggested per-level holdouts and editable rosters remain.
+Regular-pool mode draws only the model-side deck. Empty or currently incompatible ranges are retried
+within the remaining enabled ranges, including virtual-pool recipes. Zero-weight ranges stay disabled;
+the mode never silently switches to mirror. A game is skipped only when all enabled ranges are unusable.
+The original uniform fallback when all top-level weights are zero is retained. A nonempty Main Deck is
+required; one usable deck in the root directory is sufficient.
 Only model actions train PPO; imitation remains separate. Mixed mode retains Rule coverage, while
 100% means WindBot only. Checkpoints/TensorBoard retain rosters, file/runtime hashes and settings.
 Disabled by default, without new model inputs or network structure. See [usage and metrics](../integrations/windbot/README.md#optional-main-training-opponents).

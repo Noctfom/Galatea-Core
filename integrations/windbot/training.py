@@ -136,12 +136,12 @@ def choose_episode_decks(config, rng, train_seat, deck_dir):
         pair = (f"windbot:{entry['executor']}", entry['executor'], bot_deck, entry['executor'], bot_deck)
     else:
         import deck_utils
-        pair = deck_utils.get_random_deck_pair(ydk_dir=deck_dir)
-        if pair is None:
-            raise ValueError('常规训练池没有可用卡组')
-        environment, first_name, first, second_name, second = pair
-        pair = ((environment, first_name, first, entry['executor'], bot_deck) if train_seat == 0 else
-                (environment, entry['executor'], bot_deck, second_name, second))
+        selected = deck_utils.get_random_training_deck(ydk_dir=deck_dir, rng=rng)
+        if selected is None:
+            raise ValueError('常规训练池的启用范围内没有兼容且非空的主卡组')
+        environment, model_name, model_deck = selected
+        pair = ((environment, model_name, model_deck, entry['executor'], bot_deck) if train_seat == 0 else
+                (environment, entry['executor'], bot_deck, model_name, model_deck))
     return entry, pair
 
 

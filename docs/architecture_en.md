@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.16.2**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.16.3**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -804,21 +804,38 @@ and result delivery stay outside graphs. Packed transfers reuse device storage a
 contiguous inside the graph; per-field transfers use fixed device buffers. At most16 batch sizes are
 cached, with normal inference for additional sizes.
 
-The first request for a batch size includes warm-up, capture and an output comparison, so it is slower
-and requires some additional GPU memory. AMP weight caching is disabled inside capture so in-place
-PPO updates remain visible on replay. Replacing parameter/buffer objects or storage invalidates graphs.
-Capture failure logs one reason and uses normal forward thereafter. Graphs live only in process memory,
-are released at shutdown, and require no new distributed assets. Observations, precision, network
-parameters, learning objectives and checkpoint format retain their meaning.
+The first request for a batch size in each iteration includes warm-up, capture and an output check.
+Each batch size has a separate private pool; total GPU cost depends on the model, cached sizes and
+intermediate tensors. `memory_allocated()` alone does not measure that cost. Warm-up and capture share
+one persistent CUDA stream to avoid creating separate library workspaces for each capture. Before PPO,
+the trainer synchronizes with inference, releases all graphs and output references, and returns unused
+GPU cache. The next collection captures the updated weights again, paying setup cost each iteration.
+
+AMP weight caching is disabled inside capture. Replacing parameter/buffer objects or storage invalidates
+graphs; capture failure logs one reason and uses normal forward thereafter. Actions, log-probs, values
+and optional logits share one CPU transfer; the server does not retain the previous GPU outputs.
+The existing 3ms batching budget uses blocking waits on Linux and nonblocking checks with scheduler
+yields on Windows, avoiding short waits expanding to roughly15ms. These caches require
+no distributed or manually maintained assets. Observations, precision, network parameters, sampling,
+learning objectives and checkpoint format retain their meaning.
 
 Use the existing stage-timing switch and JSON reports:
 
 | Field | Meaning |
 |---|---|
-| `inference_execution` | Requested/enabled status, cached batches, cumulative captures/replays, setup time and fallback reason |
+| `inference_execution` | Requested/enabled status, cached batches, cumulative captures/replays and pre-PPO releases, setup time and fallback reason |
 | `forward_execution_counts` | Forward execution counts by mode within the diagnostic window |
 | `setup_batches` | Batches containing first-time setup, including setup followed by fallback |
 | `steady_batch_ms` | Stage timings excluding setup batches; original `batch_ms` still includes the full window |
+| `collection_phase_seconds` | Full-iteration setup, Worker startup, wait, reaping and merge seconds from a monotonic clock, separate from the bounded inference window |
+
+Reports are generated after collection and before PPO, so cumulative releases cover previous updates.
+The current release is printed before PPO and included in the next report. No scalar charts are added.
+
+Collection timers and Worker deadlines use a monotonic clock so wall-clock corrections cannot distort
+them. `worker_timeout` bounds waiting after all Workers start; startup, reaping and merging are separate,
+so it is not a hard limit on the whole iteration. Investigate long stalls using phase timings and Trainer/
+Worker logs; TensorBoard total duration alone cannot identify a blocking operation.
 
 Keep hardware, network, Workers and opponents consistent when comparing, and include accepted rollout
 steps per second. Graphs accelerate forward only; environment, CPU historical opponents, WindBot and

@@ -330,7 +330,7 @@ def main():
     train_parser.add_argument('--inference-transport', choices=('packed', 'fields'), default='packed',
         help='中央推理数据传输：packed为推荐的批量传输，适合日常训练；fields为原逐字段方式，用于性能比较或排查运行问题；CPU/CUDA均可用')
     train_parser.add_argument('--inference-cuda-graph', action='store_true',
-        help='使用 CUDA 图加速中央推理，适合小批量 CUDA 采集；首次请求需要预热，少量增加显存，不需要 torch.compile；CPU 或捕获失败时使用常规前向')
+        help='使用 CUDA 图加速中央推理，每轮采集自动预热/缓存，PPO前释放显存并在下轮重建；无需torch.compile，CPU或捕获失败时使用常规前向')
     train_parser.add_argument('--windbot-executor', action='append', default=None, help='可重复指定训练执行器；省略则自动按层级留出并选择兼容构筑')
     train_parser.add_argument('--windbot-holdout', action='append', default=None, help='可重复指定保留作独立评测的执行器，不进入WindBot训练抽样')
     league_group = train_parser.add_mutually_exclusive_group()

@@ -468,7 +468,7 @@ def worker_process(
         consecutive_aborted_episodes = 0
         last_episode_abort_key = None
 
-        worker_start_time = time.time()
+        worker_start_time = time.monotonic()
         # 给 Worker 留出充足的保存时间 (至少 30s)，防止 torch.save 大文件时被 p.terminate() 抢先杀掉
         max_worker_uptime = float(worker_timeout) - 30.0
         
@@ -525,7 +525,7 @@ def worker_process(
         # print(f"👷 Worker {worker_id} 启动 | 目标: {target_steps} 步")
 
         while rollout_cursor.collected_steps < target_steps:
-            if time.time() - worker_start_time > max_worker_uptime:
+            if time.monotonic() - worker_start_time > max_worker_uptime:
                 break
 
             episode_opp_config, force_rule_episode = select_episode_opponent_config(
@@ -661,14 +661,14 @@ def worker_process(
             last_decision_value = None
             last_decision_idx = None
             last_interaction_msg = None
-            last_act_time = time.time()
+            last_act_time = time.monotonic()
 
             loop_tracker = {}
 
             while ep_steps < MAX_EPISODE_STEPS:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
                 # 超时保护
-                if time.time() - last_act_time > 15.0:
+                if time.monotonic() - last_act_time > 15.0:
                     print(f"⚠️ [Worker {worker_id}] 引擎 15 秒无响应，触发超时强制结算！")
                     ep_steps = MAX_EPISODE_STEPS  # 强制拉满，骗过底下的结算条件
                     break
@@ -676,9 +676,9 @@ def worker_process(
                 # 消息泵
                 if not msg_queue:
                     try:
-                        t_start = time.time() # 计时器1
+                        t_start = time.monotonic() # 计时器1
                         raw_data = env.step()
-                        perf_ledger['t_cpp_env'] += (time.time() - t_start) # 计时器1
+                        perf_ledger['t_cpp_env'] += (time.monotonic() - t_start) # 计时器1
                         if raw_data and len(raw_data) > 500 * 1024:
                             print(f"🚨 [防爆截断] Worker {worker_id} 引擎吐出畸形海量数据({len(raw_data)/1024:.1f}KB)，强行摧毁对局防止 RAM 溢出！")
                             episode_aborted = True
@@ -716,7 +716,7 @@ def worker_process(
                         episode_abort_reason = f"message parsing failed: {e}"
                         break
                     
-                    last_act_time = time.time()
+                    last_act_time = time.monotonic()
                     continue
                 
                 msg = msg_queue.pop(0)
@@ -736,16 +736,16 @@ def worker_process(
                         windbot_opponent.observe(msg)
                         if (msg_type in DECISION_MSGS and not is_empty_chain_prompt(msg_type, msg[1:])
                                 and decision_player_from_message(msg_type, msg[1:]) == opp_p_id):
-                            if time.time() - worker_start_time > max_worker_uptime:
+                            if time.monotonic() - worker_start_time > max_worker_uptime:
                                 ep_steps = MAX_EPISODE_STEPS
                                 break
-                            t_windbot = time.time()
+                            t_windbot = time.monotonic()
                             resp = windbot_opponent.respond(msg, env)
-                            perf_ledger['t_windbot'] += time.time() - t_windbot
+                            perf_ledger['t_windbot'] += time.monotonic() - t_windbot
                             env.send_action(resp)
                             brain.begin_transition_event(opp_p_id, msg_type, resp)
                             msg_queue = []
-                            last_act_time = time.time()
+                            last_act_time = time.monotonic()
                             continue
                     except Exception as e:
                         episode_aborted = True
@@ -755,7 +755,7 @@ def worker_process(
                 # 空连锁询问没有模型选择，不计入 PPO、决策预算或转移事件
                 if is_empty_chain_prompt(msg_type, msg[1:]):
                     env.send_action(-1)
-                    last_act_time = time.time()
+                    last_act_time = time.monotonic()
                     continue
                 
                 # 增加读取 reason
@@ -808,18 +808,18 @@ def worker_process(
                     ai_handled = False
                     
                     # 每次到了能操作的阶段，检查下班时间
-                    if time.time() - worker_start_time > max_worker_uptime:
+                    if time.monotonic() - worker_start_time > max_worker_uptime:
                         print(f"⏳ [Worker {worker_id}] 达到最大服役时间上限，安全下班并上交数据...")
                         ep_steps = MAX_EPISODE_STEPS
                         break
 
                     # 获取当前行动玩家
-                    t_start = time.time()  #计时器1
+                    t_start = time.monotonic()  #计时器1
 
                     current_snap = brain.get_snapshot(env)
                     player = current_snap.global_data.to_play
 
-                    perf_ledger['t_cpp_env'] += (time.time() - t_start) # 计时器1
+                    perf_ledger['t_cpp_env'] += (time.monotonic() - t_start) # 计时器1
                     
                     # --- 通过身份判断使用哪个脑子 ---
                     is_training_agent = (player == train_p_id)
@@ -843,16 +843,16 @@ def worker_process(
                                 probs = np.ones(len(base_actions), dtype=np.float64)
                                 try:
                                     # 📍 桩点 B1：精准分离 Pass 1 的表征生成耗时
-                                    t_enc_p1 = time.time()
+                                    t_enc_p1 = time.monotonic()
                                     dict_pass1 = current_agent.encoder.encode(current_snap, player_id=player)
                                     if is_training_agent:
                                         dict_pass1['deck_film_mask'].fill_(
                                             episode_deck_film_enabled
                                         )
-                                    perf_ledger['t_encoder'] += (time.time() - t_enc_p1)
+                                    perf_ledger['t_encoder'] += (time.monotonic() - t_enc_p1)
                                     
                                     # 📍 桩点 C1：精准分离 Pass 1 的本地推理耗时
-                                    t_infer_p1 = time.time()
+                                    t_infer_p1 = time.monotonic()
                                     # 【大一统分流点 A】判断此轮推演是否具备全实时训练资格
                                     # 如果当前是主特工在操作（P0），或者是自对局模式下的对手（P1 Self），一律走 ZMQ 绑定 GPU 中枢
                                     if is_training_agent or (
@@ -872,7 +872,7 @@ def worker_process(
                                             time.perf_counter_ns() - profile_fill_start if inference_profile else 0,
                                         ).numpy()
                                         probs = torch.softmax(torch.tensor(raw_logits), dim=-1).numpy()
-                                        perf_ledger['t_central'] += (time.time() - t_infer_p1)
+                                        perf_ledger['t_central'] += (time.monotonic() - t_infer_p1)
                                         
                                     # 如果是历史存档老模型（P1 Hist），执行宿主本地独立剥离推演（ONNX 优先，CPU 兜底）
                                     else:
@@ -884,12 +884,12 @@ def worker_process(
                                                 v_input = {k: v.to(current_agent.device) for k, v in dict_pass1.items() if isinstance(v, torch.Tensor)}
                                                 action_logits, _, _ = current_agent.net(v_input)
                                                 probs = torch.softmax(action_logits, dim=-1).squeeze(0).cpu().numpy()
-                                        perf_ledger['t_pass1_cpu'] += (time.time() - t_infer_p1)
+                                        perf_ledger['t_pass1_cpu'] += (time.monotonic() - t_infer_p1)
                                         
                                 except Exception as e:
                                     print(f"⚠️ [Worker {worker_id}] 意图感知阶段发生错误，跳过打分: {e}")
 
-                                t_rule_anchor = time.time()# 计时器4
+                                t_rule_anchor = time.monotonic()# 计时器4
                                 current_macro_pool = build_macro_action_pool(
                                     msg_type,
                                     msg[1:],
@@ -903,13 +903,13 @@ def worker_process(
                                         f"消息 {msg_type} 未生成任何合法宏动作，拒绝提交不完整响应"
                                     )
 
-                                perf_ledger['t_rule_bot'] += (time.time() - t_rule_anchor) # 计时器4
+                                perf_ledger['t_rule_bot'] += (time.monotonic() - t_rule_anchor) # 计时器4
 
                                 # 宏动作中的 locs 是引擎原始位置，必须重新生成快照映射为实体索引。
                                 brain.current_valid_actions = current_macro_pool
-                                t_macro_snapshot = time.time()
+                                t_macro_snapshot = time.monotonic()
                                 current_snap = brain.get_snapshot(env)
-                                perf_ledger['t_cpp_env'] += (time.time() - t_macro_snapshot)
+                                perf_ledger['t_cpp_env'] += (time.monotonic() - t_macro_snapshot)
                             else:
                                 brain.current_valid_actions = current_macro_pool
 
@@ -918,14 +918,14 @@ def worker_process(
                         clean_ignore_idx_list = [idx for idx in current_step_ignore_idx_list if 0 <= idx < len(brain.current_valid_actions)]
                         
                         try:
-                            t_enc_anchor = time.time()# 计时器2
+                            t_enc_anchor = time.monotonic()# 计时器2
                             # 修复旧版错写成 agent.encoder 的 Bug，确保能兼容不同权重的对手
                             tensor_dict = current_agent.encoder.encode(current_snap, player_id=player)
                             if is_training_agent:
                                 tensor_dict['deck_film_mask'].fill_(
                                     episode_deck_film_enabled
                                 )
-                            perf_ledger['t_encoder'] += (time.time() - t_enc_anchor) # 计时器2
+                            perf_ledger['t_encoder'] += (time.monotonic() - t_enc_anchor) # 计时器2
                             
                             # 核心防死锁：把在错题本里的选项强制 Mask 掉，迫使 AI 在下次重试时选择“备胎”
                             for bad_idx in clean_ignore_idx_list:
@@ -982,14 +982,14 @@ def worker_process(
                             tensor_dict['act_desc'] = torch.clamp(tensor_dict['act_desc'], 0, 1023)
                             
                             # 混合推理架构
-                            t_ipc_anchor = time.time()
+                            t_ipc_anchor = time.monotonic()
                             
                             # 【大一统分流点 B】主特工回合或自对局对手，统一请求中央推理服务
                             if is_training_agent or (
                                 episode_opp_config["mode"] == "ai"
                                 and episode_opp_config["type"] == "self"
                             ):
-                                t_zmq_anchor = time.time()
+                                t_zmq_anchor = time.monotonic()
                                 profile_fill_start = time.perf_counter_ns() if inference_profile else 0
                                 for k, v in tensor_dict.items():
                                     if k in shared_buffers[worker_id]:
@@ -1007,11 +1007,11 @@ def worker_process(
                                 
                                 # 精细化分账统计
                                 # 自对局两侧均走中央服务，不能计入本地CPU前向
-                                perf_ledger['t_central'] += (time.time() - t_zmq_anchor)
+                                perf_ledger['t_central'] += (time.monotonic() - t_zmq_anchor)
 
                             # 历史老模型独立推演流
                             else:
-                                t_p1_anchor = time.time() 
+                                t_p1_anchor = time.monotonic()
                                 with torch.no_grad():
                                     ort_outs = run_historical_onnx(tensor_dict)
                                     if ort_outs is not None:
@@ -1037,7 +1037,7 @@ def worker_process(
                                 value = value.detach().cpu()
                                 infer_dict = {k: v.detach().cpu() for k, v in tensor_dict.items()}
                                 
-                                perf_ledger['t_local_opponent'] += (time.time() - t_p1_anchor) # 历史对手可位于任意物理席位
+                                perf_ledger['t_local_opponent'] += (time.monotonic() - t_p1_anchor) # 历史对手可位于任意物理席位
 
                             if not current_snap.valid_actions:
                                 raise RuntimeError("AI面临空选项池，主动放弃决策请求RuleBot兜底")
@@ -1141,7 +1141,7 @@ def worker_process(
                             
                             ep_steps += 1
                             ai_handled = True
-                            last_act_time = time.time()
+                            last_act_time = time.monotonic()
 
                             perf_ledger['steps'] += 1 #计时器总步数加一
 

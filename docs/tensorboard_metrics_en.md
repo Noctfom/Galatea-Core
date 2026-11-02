@@ -1,6 +1,6 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.16.2 / Model Protocol V4.
+> Applies to Galatea-Core v3.16.3 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
@@ -267,7 +267,13 @@ Sources: [collect_rollouts](../trainer.py#L921), [run_training_loop](../trainer.
 | `Performance/Rollout_Steps_Per_Second` | Accepted merged training rows / Collection_Seconds | Not all Core actions/sec or per-Worker throughput; multiply by duration to estimate accepted rows |
 | `Configuration/PPO` | gamma, lambda, requested/actual lr, entropy, clip, epochs, target KL, multiplier, mini_batch at launch | Text, not a scalar; actual optimizer lr matters when resuming |
 
-Configuration currently **omits** Worker count, collection timeout, layer configuration, Core/asset fingerprints, and per-group game counts. Events cannot establish CUDA peak/RSS stability; consult startup/memory logs separately.
+From3.16.3, the `runtime` object adds Worker count, target rollout rows, collection timeout, device,
+PyTorch/CUDA versions, model compilation, CUDA Graphs and transfer layout. Older event files lack these
+fields; current defaults cannot establish historical settings. Network depth, Core/asset fingerprints and
+ordinary-league game denominators remain absent. Events cannot establish stable CUDA peaks/RSS;
+inspect memory logs separately. The existing bounded report adds `collection_phase_seconds` for complete
+collection phases; see [CUDA Graphs and collection timing](architecture_en.md#cuda-graph-acceleration-for-central-inference).
+No new scalar charts are added.
 
 ## 10. Independent imitation metrics
 

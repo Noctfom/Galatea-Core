@@ -4,6 +4,23 @@
 
 ---
 
+## [v3.16.3] - 2026-11-02
+
+### Collection graph memory and deck-sampling stability
+
+- Release all collection graphs and output references before PPO, synchronizing with the inference thread and returning unused GPU cache. Rebuild automatically next iteration. Warm-up and capture share a persistent CUDA stream to avoid repeated library workspaces
+- Keep GPU outputs local to each inference call; actions, log-probs, values and optional logits share one CPU transfer, preserving fixed-seed outputs and RNG state
+- Keep the3ms batching budget with blocking waits on Linux and nonblocking checks/scheduler yields on Windows, avoiding Windows short polls expanding to roughly15ms; no new backends/settings or changes to request ordering, completion IDs, inputs, precision or sampling
+- Retry empty or currently incompatible training ranges within remaining enabled ranges, including virtual recipes. Zero-weight ranges stay disabled; the original uniform fallback when all top-level weights are zero is retained. Skip only when none are usable
+- WindBot regular-pool mode draws only the model-side deck. Require a nonempty Main Deck, allow a single root-level deck and isolate weight caches by source path
+- Use monotonic clocks for Trainer/Worker durations and deadlines; retain wall-clock log dates and game seeds. Existing inference reports add setup/startup/wait/reaping/merge phases, and `Configuration/PPO` adds runtime settings, without new scalar charts
+- Correct GPU-cost guidance: `memory_allocated()` omits private-pool reservation. A local512/8/6 probe used about2.9GiB for batch sizes1–12; private pools reached zero after graph/output release. PPO peaks still depend on batch, observations and device; long-run32GiB cloud capacity is not guaranteed
+- Protocol4, Checkpoint3, revision14, network parameters and PPO/auxiliary/planning objectives remain unchanged. Existing models need no new distributed assets. No WSL was used; Linux long-run capacity and occasional prolonged stalls still require target-environment logs
+- Validation:396 tests and7 subtests passed, with15 optional environment tests skipped; separately completed two real Core/WindBot collection/PPO rounds with two Workers,64 graph-pool release cycles, FP16/BF16 and fixed-seed output checks. A5070Ti controlled512/8/6 two-client probe measured median29.45ms eager /8.35ms graph round trips, not whole-cloud rollout throughput
+- Validation:396 tests and7 subtests passed, with15 optional environment tests skipped; separately completed two real Core/WindBot collection/PPO rounds with two Workers,64 graph-pool release cycles, FP16/BF16 and fixed-seed output checks. A5070Ti controlled512/8/6 two-client probe measured median29.45ms eager /8.35ms graph round trips, not whole-cloud rollout throughput
+
+See [CUDA Graph lifecycle and timing](architecture_en.md#cuda-graph-acceleration-for-central-inference) and [WindBot deck sampling](features_en.md#optional-windbot-controlled-duels).
+
 ## [v3.16.2] - 2026-11-01
 
 ### Optional CUDA Graph central inference
