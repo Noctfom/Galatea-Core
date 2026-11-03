@@ -4,6 +4,34 @@
 
 ---
 
+## [v3.16.5] - 2026-11-03
+
+### In-place ONNX checks and artifact asset refresh
+
+- Keep one ONNX maintenance entry in Update Manager, with independent Check and Update actions. Show prefix changes, new-card coverage, missing dependencies and missing PTH. Checking is read-only and is not mandatory before updating
+- Replace an existing same-name ONNX beside its PTH or create it when missing. No automatic GKG, runtime-asset copies or separate export tree; distribution uses the existing packager
+- Refresh outdated top-level/net_config vocabulary, semantic and compatibility metadata in PTH, retaining provenance in semantic_asset_updates. UUID, prefix, PPO/BC counters and every learned/optimizer/Scaler/RNG value remain unchanged. Current PTH metadata is not rewritten
+- Export on CPU and compare three input cases before replacing PTH, ONNX and manifest. Roll back that model on failure. New external weights use fresh filenames; retain old data referenced by other graphs. Reuse the training lock to avoid overwriting during main training
+- Historical Workers read the refreshed original path. Keep BC source iterations and cumulative PPO/BC counters aligned in repository, manifests and manual package validation. Core load restrictions stay strict; Link risk acceptance is outside this module
+- CLI supports directory Check, repeated --checkpoint selection and recursive directory maintenance. No vector regeneration or renumbering; Model Protocol4, Checkpoint3, revision14, GKG4, network and learning algorithms are unchanged
+- Verification passes399 related tests and7 subtests, with19 optional environment cases skipped. Coverage includes read-only checks, create/replace, rollback at four failure stages, shared external data, BC grouping and bilingual UI. A real512/8/6 copy preserves315 model-state tensors and307 optimizer entries, restores Adam identically and loads the original path through the historical Worker. Maximum error across four output cases is about2.4e-7. No WSL or Link changes
+
+See [ONNX engine updates](code_semantics_en.md#onnx-engine-updates).
+
+## [v3.16.4] - 2026-11-02
+
+### Leaf-first Arena retries and ONNX semantic guidance
+
+- All three decision modes in normal/fixed Arena and the native-model side of controlled WindBot duels use leaf-first retries: five closed returns to an unchanged state first avoid the deepest return choice, escalating toward parents only when current child choices are exhausted
+- First cancellations and progressing Select/Unselect sequences are not closed failures. LP, card-state, chain or public-hint changes clear old paths; P0/P1 paths are separate. Raw prompts, parent branches and response identities survive macro-pool index reordering
+- Engine Retry remains a hard rejection; exhausted soft choices retain legal responses and decision limits. No Core rewind, simulation, extra queries/forwards or inserted answers; main-training repetition penalties and sampling are unchanged
+- Benchmarks, replays and controlled results record`leaf_first_v1` and threshold5. Legacy benchmarks remain readable with their original policy identity. UI help explains filtering after protection triggers without new controls
+- Separate semantic-content mismatch errors explain that ONNX freezes runtime tables and needs re-export from its PTH to use updated semantics. Historical Workers retain compatible PTH fallback; PTH refresh and strict ONNX/replay checks remain intact. Editing metadata cannot replace graph constants
+- Release and bilingual documentation updated. Protocol4, Checkpoint3, revision14, network parameters, inputs, rewards and PPO/auxiliary/planning objectives are unchanged, without new distributed or manually maintained assets
+- Validation:377 related tests and7 subtests passed,19 optional gates skipped. Focused cases cover all modes, five-return tolerance, exhausted-child escalation, macro reordering, parent isolation, progressing/repeated non-backtracking selections, engine Retry and semantic compatibility. Four real Core/WindBot cases also passed, including recording/sampling/query-count parity and raw-trajectory replay; no WSL used
+
+See [leaf-first Arena retries](features_en.md#leaf-first-arena-retries) and [semantic asset compatibility](code_semantics_en.md).
+
 ## [v3.16.3] - 2026-11-02
 
 ### Collection graph memory and deck-sampling stability

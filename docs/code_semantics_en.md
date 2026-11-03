@@ -1,6 +1,6 @@
 # 3.13.4: Code-source provenance and content-aware semantic rebuilds
 
-> Usage guidance applies to v3.16.3; dated repair and measurement evidence below remains historical.
+> Usage guidance applies to v3.16.5; dated repair and measurement evidence below remains historical.
 
 ## Scope
 
@@ -55,7 +55,30 @@ Semantic updates can add cards or revise existing effects and code vectors. Whet
 |---|---|
 | PTH loading, arena/deployment, PPO resume or BC weight initialization | Card IDs must retain an append-only prefix; category/requirement IDs must not be renumbered. Encoder fingerprint, revision, dimension and chunk/aggregation policy must match. Compatible updates use current semantics and preserve learned weights |
 | Deterministic trajectory replay, expert examples and prepared-data caches | Exact semantic content identity is retained. Keep original assets or prepare data again rather than substituting new observations for recorded ones |
-| Exported ONNX | Static semantics are baked into the graph, so exact content validation remains. Invalid historical graphs follow the existing PTH fallback; re-export to use updated semantics |
+| Exported ONNX | Static semantics are baked into the graph. Validation checks the semantic prefix for its original card range. Pure appends preserving old semantics remain valid; changes to old semantics require PTH fallback or re-export |
+
+An appended library does **not** invalidate every old engine. The hash represents logical semantics in the old card range, not complete file equality or physical dictionary row numbers. An old graph remains usable for old cards when that prefix is unchanged. Spare vocabulary capacity does not give it new cards' static effect knowledge. This includes deck profiles, the board, actions, chains, history and public hints, rather than only cards currently on the field. Core still supplies legal candidates; missing knowledge does not mean the parser invents actions. Revised old slots, code vectors or relevant public-hint bindings can also affect old cards, so avoiding new cards is insufficient after such changes. Original matching assets can still run the original graph. Prediction quality always depends on training.
+
+### ONNX engine updates
+
+There is one WebUI entry: **Update Manager → ONNX Engine Update**. It uses current project-root vocabulary and semantics to maintain original training directories, without automatically building GKG packages or a separate model tree.
+
+- **Check**: Recursively inspect PTH/ONNX pairs, protocol, semantic prefixes and external dependencies. Results distinguish current engines, pure appends without new-card coverage, revised old semantics, missing/incomplete artifacts and outdated PTH asset metadata. ONNX-only files can be checked but need PTH for re-export. Checking neither modifies models nor generates assets
+- **Update**: Select PTH files across model pools or BC/PPO branches. Re-export original learned weights with current compatible semantics on CPU and compare three input cases. Replace an existing same-name ONNX or create it when missing. Refresh PTH/net_config asset versions and compatibility records when needed; retain previous provenance in semantic_asset_updates
+
+**Model UUID, prefix, PPO/BC counters, every learned parameter, optimizer, Scaler and RNG state remain unchanged.** Vocabulary/semantic fingerprints describe asset versions and change with those assets; they are separate from model identity. A metadata refresh can change the PTH file checksum without creating a new model or retraining. PTH files already recording current assets are not repeatedly rewritten.
+
+Maintain PTH, ONNX and the iteration manifest together in place, restoring that model's original files if replacement fails. Earlier completed models are retained. Temporary backups are removed after success and require temporary disk space. Check and Update are independent. End main training first; later Workers use the original engine path, while already-open inference sessions retain their loaded graph.
+
+```bash
+python main.py onnx-update --directory models --check
+python main.py onnx-update --checkpoint models/galatea_iter_210.pth
+python main.py onnx-update --directory models
+```
+
+This uses existing assets: **no vector regeneration, vocabulary renumbering or Hash reclassification**. Network, reward and PPO algorithms remain unchanged. Verification details use existing artifact manifests and system logs, without new manually maintained files. Distribution remains part of the existing deployment/packaging workflow.
+
+Core retains strict load validation and offers no risk-acceptance bypass for old semantic graphs. PTH can rebuild from compatible new semantics; ONNX must update actual graph constants rather than hashes alone. With only an old ONNX, retain its original assets or obtain refreshed artifacts from its publisher. Link-side risk acceptance is handled separately in Link and is not changed here.
 
 ### Automatically maintained compatibility registry
 
@@ -73,9 +96,20 @@ The file stores fixed category/requirement IDs plus registered library hashes, c
 
 Back up the file with the semantic library rather than treating it as a temporary cache. Conflicting label IDs from independent branches need reconciliation. Older remote sources without a registry can still sync. An old PTH with neither embedded compatibility details nor a historical registry entry needs its original assets for compatibility verification.
 
-New PTHs store compatibility details in `semantic_compatibility` and content-change provenance in `semantic_asset_updates`. Loading with a new library does not rewrite existing PTHs; subsequent saves record current assets. Updated knowledge can change predictions even when weights are identical. Keep original assets to reproduce old predictions, and finish active training before updating the library.
+New PTHs store compatibility details in `semantic_compatibility` and content-change provenance in `semantic_asset_updates`. Ordinary loading does not rewrite PTHs. Explicit ONNX maintenance can refresh their asset metadata while preserving identity and learning state; subsequent training saves also record current assets. Updated knowledge can change predictions even when weights are identical. Keep original assets to reproduce old predictions, and finish active training before updating the library.
 
 ## Sync and packaging
+
+ONNX freezes the code-vector dictionary, effect slots and semantic tables as graph constants. PTH
+loads learned parameters after constructing current runtime tables, which are not saved in its state.
+A runtime may still open an old graph, but relaxing the hash cannot install new tables and can disagree
+with current effect-slot bindings. The framework therefore keeps the PTH fallback and explains that
+the frozen semantics are outdated; it does not classify this as damaged learned weights.
+
+To use updated semantics for an old iteration, re-export its PTH with compatible current assets and
+regenerate external weights and the artifact manifest. Retraining is unnecessary; editing metadata
+alone is insufficient. Existing save points export the current iteration, not all historical graphs.
+This release does not automatically migrate old graphs. Original matching assets can still run them.
 
 - Sync remains download-only. Modern source bundles require KB, vectors, index and manifest; missing provenance cannot silently attach old vectors to new code. Local extraction can repair them afterward.
 - Clean remote KBs may omit `raw_code` but must preserve source hashes/block metadata and matching certified vectors. They may reuse identical sources but cannot regenerate without local Lua.

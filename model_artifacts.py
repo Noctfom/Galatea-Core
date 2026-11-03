@@ -22,7 +22,7 @@ from checkpoint_utils import (
     validate_training_checkpoint_file,
     validate_model_id,
 )
-from protocol_schema import get_current_protocol_metadata, validate_protocol_metadata
+from protocol_schema import get_current_protocol_metadata, validate_protocol_metadata, SemanticLookupMismatchError
 from training_validation import validate_model_prefix
 from semantic_assets import (
     CODE_EMBEDDINGS_FILENAME,
@@ -181,6 +181,435 @@ def is_primary_model_filename(filename):
     except ValueError:
         return False
     return name.casefold().endswith(".pth") or name.casefold().endswith(".onnx")
+
+
+def _onnx_update_examples(network):
+    """生成固定输入合同的未知卡、语义上下文和词表尾部样本，不启动决斗"""
+    import torch
+    from feature_encoder import GalateaEncoder
+    from gamestate import DuelState
+
+    empty = GalateaEncoder().encode(DuelState((), (), (), ()).get_snapshot(), player_id=0)
+    empty['card_idx'][:, 0] = 1
+    empty['padding_mask'][:, 0] = True
+    empty['act_mask'][:, 0] = True
+    lookup = get_static_semantic_lookup()
+    semantic_tokens = torch.nonzero(network.semantic_effect_mask_table.any(dim=-1)).flatten()[:12]
+    tail_tokens = torch.tensor(sorted(lookup.card_vocabulary.cards.values())[-12:], dtype=torch.long)
+    examples = [empty]
+    for tokens in (semantic_tokens, tail_tokens):
+        batch = {name: value.clone() for name, value in empty.items()}
+        if not len(tokens):
+            examples.append(batch)
+            continue
+        for key, mask in (('card_idx', 'padding_mask'), ('deck_idx', 'deck_mask'),
+                          ('c_card_idx', 'c_mask'), ('h_card_idx', 'h_mask'),
+                          ('event_card_idx', 'event_mask'), ('deck_profile_card_idx', 'deck_profile_mask')):
+            count = min(len(tokens), batch[key].shape[1])
+            batch[key][:, :count] = tokens[:count]
+            batch[mask][:, :count] = True
+        count = min(len(tokens), 12)
+        batch['deck_profile_section'][:, :count] = 1
+        batch['deck_profile_initial_count'][:, :count] = 1
+        batch['deck_profile_remaining_count'][:, :count] = 1
+        batch['act_mask'][:, :2] = True
+        batch['act_code'][:, :min(2, len(tokens))] = tokens[:2]
+        batch['deck_film_mask'].fill_(True)
+        examples.append(batch)
+    return examples
+
+
+def _export_updated_onnx(checkpoint, graph_path):
+    """以当前兼容语义和原学习权重导出，并用三组输入对照CPU输出"""
+    import numpy as np
+    import onnx
+    import onnxruntime as ort
+    import torch
+    from galatea_net import GalateaNet
+
+    class ONNXWrapper(torch.nn.Module):
+        def __init__(self, network, keys):
+            super().__init__()
+            self.net = network
+            self.keys = keys
+
+        def forward(self, *values):
+            logits, value, _ = self.net(dict(zip(self.keys, values)))
+            return logits, value
+
+    network = GalateaNet(checkpoint['net_config']).cpu().eval()
+    network.load_state_dict(checkpoint['model_state_dict'], strict=True)
+    examples = _onnx_update_examples(network)
+    keys = list(examples[0])
+    wrapper = ONNXWrapper(network, keys).eval()
+    with torch.no_grad():
+        torch.onnx.export(wrapper, tuple(examples[0][key] for key in keys), str(graph_path),
+            export_params=True, opset_version=18, do_constant_folding=True, external_data=True,
+            input_names=keys, output_names=['action_logits', 'values'], dynamo=False)
+    tag_onnx_model_identity(graph_path, model_id=checkpoint['model_id'],
+        model_prefix=checkpoint['model_prefix'], iteration=checkpoint['iteration'],
+        **({'training_lineage': checkpoint['training_lineage']} if checkpoint.get('training_lineage') else {}))
+    onnx.checker.check_model(str(graph_path))
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(str(graph_path), sess_options=options, providers=['CPUExecutionProvider'])
+    inputs = {item.name for item in session.get_inputs()}
+    if not inputs.issubset(keys) or [item.name for item in session.get_outputs()] != ['action_logits', 'values']:
+        raise ValueError('导出的ONNX输入或输出不符合当前模型推理合同')
+    errors = []
+    with torch.no_grad():
+        for case_index, batch in enumerate(examples):
+            expected = network(batch)[:2]
+            actual = session.run(None, {key: batch[key].numpy() for key in inputs})
+            case_errors = []
+            for output_index, (reference, result) in enumerate(zip(expected, actual)):
+                reference = reference.numpy()
+                if reference.shape != result.shape or not np.isfinite(result).all():
+                    raise ValueError('ONNX输出形状异常或包含非有限数值')
+                np.testing.assert_allclose(result, reference, atol=1e-4, rtol=1e-4,
+                    err_msg=f'ONNX验证样本{case_index}，输出{output_index}')
+                case_errors.append(float(np.max(np.abs(reference - result))))
+            errors.append(case_errors)
+    return {'cases': len(examples), 'input_count': len(inputs), 'output_names': ['action_logits', 'values'],
+            'max_absolute_errors': errors, 'atol': 1e-4, 'rtol': 1e-4}
+
+
+def _check_onnx_update_assets():
+    """只读核对现有运行资产，检查入口不触发编译或补写资产"""
+    root = Path('.').resolve()
+    vocabulary = load_card_vocabulary(root / CARD_VOCAB_FILENAME)
+    source_names = (KNOWLEDGE_BASE_FILENAME, CODE_EMBEDDINGS_FILENAME, CODE_EMBEDDINGS_INDEX_FILENAME)
+    load_static_semantic_assets(root, card_vocabulary=vocabulary,
+        verify_source_files=all((root / name).is_file() for name in source_names))
+    return get_current_protocol_metadata()
+
+
+def _onnx_update_target(source, metadata):
+    """读取旧图的身份和依赖供原位替换使用，不将旧图放行给推理"""
+    import onnx
+
+    graph = source.with_suffix('.onnx')
+    marker = checkpoint_artifact_manifest_path(source)
+    for path in (graph, marker):
+        if path.is_symlink() or path.exists() and not path.is_file():
+            raise ValueError(f'ONNX更新目标必须是普通文件: {path}')
+    if marker.is_file():
+        try:
+            payload = json.loads(marker.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get('model_id') not in (None, metadata['model_id']):
+            raise PermissionError(f'同名制品清单属于其他模型，不能覆盖: {marker.name}')
+    if not graph.exists():
+        return set()
+    try:
+        model = onnx.load(str(graph), load_external_data=False)
+    except Exception:
+        # 同名损坏图可从已验证PTH修复，不依赖损坏图反推权重
+        return {f'{graph.name}.data'} if graph.with_name(f'{graph.name}.data').is_file() else set()
+    properties = {item.key: item.value for item in model.metadata_props}
+    expected = {'model_id': metadata['model_id'], 'model_prefix': metadata['model_prefix'],
+                'iteration': str(metadata['training_lineage']['ppo_iteration'])}
+    for key, value in expected.items():
+        old = properties.get(ONNX_IDENTITY_KEYS[key])
+        if old is not None and old != value:
+            raise PermissionError(f'同名ONNX的{key}与PTH不一致，不能覆盖: {graph.name}')
+    files = set()
+    for tensor in _iter_onnx_tensors(model.graph):
+        location = {item.key: item.value for item in tensor.external_data}.get('location')
+        if location:
+            _safe_external_data_path(graph.parent, location)
+            if (graph.parent / location).is_symlink():
+                raise ValueError(f'旧ONNX外置权重不能是符号链接: {location}')
+            files.add(location)
+    return files
+
+
+def inspect_onnx_updates(model_directory='./models', *, checkpoint_paths=None):
+    """检查模型目录内的同名PTH与ONNX，不导出、打包或修改文件"""
+    protocol = _check_onnx_update_assets()
+    pairs = set()
+    if checkpoint_paths is None:
+        root = Path(model_directory).resolve()
+        if not root.is_dir():
+            raise FileNotFoundError(f'模型目录不存在: {root}')
+        for path in root.rglob('*'):
+            if (path.suffix.lower() in ('.pth', '.onnx') and path.is_file() and not path.is_symlink()
+                    and path.resolve().is_relative_to(root)
+                    and not any(part.startswith(('.onnx_update_', '.onnx_recovery_')) for part in path.relative_to(root).parts)):
+                pairs.add(path.with_suffix('.pth'))
+    else:
+        for path in checkpoint_paths:
+            path = Path(path)
+            if path.suffix.lower() not in ('.pth', '.onnx'):
+                raise ValueError('检查对象必须是PTH或ONNX文件')
+            pairs.add(path.absolute().with_suffix('.pth'))
+    rows = []
+    for source in sorted(pairs):
+        graph = source.with_suffix('.onnx')
+        row = {'checkpoint_path': str(source), 'onnx_path': str(graph), 'can_update': False,
+               'needs_update': False, 'status': 'missing', 'reason': ''}
+        metadata = None
+        if source.is_file():
+            try:
+                metadata = inspect_training_checkpoint(source)
+                if metadata.get('format_warning') or metadata.get('model_protocol_warning'):
+                    raise ValueError(metadata.get('format_warning') or metadata['model_protocol_warning'])
+                _onnx_update_target(source, metadata)
+                row.update(can_update=True, model_id=metadata['model_id'],
+                    ppo_iteration=metadata['training_lineage']['ppo_iteration'])
+            except Exception as error:
+                row.update(status='checkpoint_invalid', needs_update=True, reason=str(error))
+                rows.append(row)
+                continue
+        try:
+            record = describe_onnx_artifact(graph,
+                expected_model_id=metadata['model_id'] if metadata else None)
+            if record['model_id'] is None:
+                raise ValueError('ONNX缺少Core模型身份')
+            appended = record['card_vocab_card_count'] < protocol['card_vocab_card_count']
+            row.update(status='append_only' if appended else 'current', needs_update=appended,
+                reason='旧卡语义前缀一致，仍可加载；尚未包含新增卡片语义' if appended else '当前协议、语义及依赖文件一致')
+            if not appended and metadata and any(metadata.get(key) != protocol[key] for key in protocol):
+                row.update(status='checkpoint_assets_changed', needs_update=True,
+                    reason='ONNX可用，PTH记录的词表或语义版本仍较旧，可一并同步资产标记')
+        except SemanticLookupMismatchError as error:
+            row.update(status='semantic_changed', needs_update=True, reason=str(error))
+        except FileNotFoundError as error:
+            row.update(status='missing' if not graph.exists() else 'incomplete', needs_update=True, reason=str(error))
+        except Exception as error:
+            row.update(status='invalid', needs_update=True, reason=str(error))
+        if not row['can_update']:
+            row['reason'] += '；缺少同名PTH，不能在Core内重导出'
+        rows.append(row)
+    counts = {}
+    for row in rows:
+        counts[row['status']] = counts.get(row['status'], 0) + 1
+    return {'operation': 'onnx_check', **protocol, 'models': rows, 'counts': counts}
+
+
+def _prepare_onnx_update_data(graph):
+    """为新外置权重分配独立文件名，主图切换前不改动旧图引用的数据"""
+    import uuid
+    import onnx
+
+    model = onnx.load(str(graph), load_external_data=False)
+    locations = {}
+    for tensor in _iter_onnx_tensors(model.graph):
+        external = {item.key: item.value for item in tensor.external_data}
+        old = external.get('location')
+        if not old:
+            continue
+        if old not in locations:
+            source = _safe_external_data_path(graph.parent, old)
+            name = f'{graph.stem[:100]}.{uuid.uuid4().hex[:8]}.onnx.data'
+            source.rename(graph.parent / name)
+            locations[old] = name
+        for item in tensor.external_data:
+            if item.key == 'location':
+                item.value = locations[old]
+    if locations:
+        onnx.save_model(model, str(graph))
+
+
+def _refresh_checkpoint_assets(checkpoint, protocol):
+    """仅更新PTH的资产版本和来源历史，学习状态与模型身份保持原样"""
+    from protocol_schema import apply_current_protocol_metadata
+    from checkpoint_utils import checkpoint_semantic_update
+
+    changed = any(checkpoint.get(key) != value for key, value in protocol.items())
+    if not changed:
+        return checkpoint, False
+    refreshed = dict(checkpoint)
+    update = checkpoint_semantic_update(checkpoint) or {
+        'status': 'append_only_update',
+        'source_semantic_lookup_hash': checkpoint['semantic_lookup_hash'],
+        'runtime_semantic_lookup_hash': protocol['semantic_lookup_hash'],
+        'message': '保留学习权重与模型身份，同步只追加词表和语义资产版本'}
+    update = dict(update, source_card_vocab_hash=checkpoint['card_vocab_hash'],
+        source_card_vocab_card_count=checkpoint['card_vocab_card_count'],
+        runtime_card_vocab_hash=protocol['card_vocab_hash'],
+        runtime_card_vocab_card_count=protocol['card_vocab_card_count'])
+    history = list(checkpoint.get('semantic_asset_updates', []))
+    if not history or history[-1] != update:
+        history.append(update)
+    refreshed.update(protocol)
+    refreshed['net_config'] = apply_current_protocol_metadata(checkpoint['net_config'])
+    refreshed['semantic_asset_updates'] = history
+    compatibility = semantic_compatibility_descriptor(get_static_semantic_lookup())
+    if compatibility is not None:
+        refreshed['semantic_compatibility'] = compatibility
+    else:
+        refreshed.pop('semantic_compatibility', None)
+        refreshed['net_config'].pop('semantic_compatibility', None)
+    return refreshed, True
+
+
+def _build_onnx_update_manifest(source, checkpoint, record, validation):
+    """PTH与ONNX记录一致的当前资产版本，原资产来源留在更新历史中"""
+    from checkpoint_utils import checkpoint_semantic_history, get_training_lineage
+
+    payload = {'artifact_manifest_version': ARTIFACT_MANIFEST_FORMAT_VERSION,
+        'checkpoint_format_version': checkpoint['checkpoint_format_version'],
+        **{key: checkpoint[key] for key in get_current_protocol_metadata()},
+        'model_id': checkpoint['model_id'], 'model_prefix': checkpoint['model_prefix'],
+        'iteration': checkpoint['iteration'], 'training_stage': checkpoint.get('training_stage', 'ppo'),
+        'checkpoint': {'format': 'pytorch_checkpoint', 'file': source.name, 'status': 'complete'},
+        'onnx': record, 'onnx_update': {'validation': validation,
+            'semantic_asset_updates': checkpoint_semantic_history(checkpoint)}}
+    if checkpoint.get('training_lineage') is not None or checkpoint.get('training_stage') == 'imitation':
+        payload['training_lineage'] = get_training_lineage(checkpoint)
+    compatibility = checkpoint.get('semantic_compatibility') or checkpoint['net_config'].get('semantic_compatibility')
+    if compatibility is not None:
+        payload['semantic_compatibility'] = compatibility
+    if checkpoint.get('semantic_asset_updates'):
+        payload['semantic_asset_updates'] = checkpoint['semantic_asset_updates']
+    return payload
+
+
+class _OnnxUpdateRecoveryError(RuntimeError):
+    """替换回滚未完全成功时保留临时备份供恢复"""
+
+
+def _install_onnx_update(source, stage, record, payload, old_data):
+    """先记录更新中，再切换数据、主图和完成清单，失败时恢复原制品"""
+    root = source.parent
+    graph = source.with_suffix('.onnx')
+    marker = checkpoint_artifact_manifest_path(source)
+    backup = stage / 'previous'
+    backup.mkdir()
+    model_files = [*record['external_data'], graph.name]
+    if (stage / source.name).is_file():
+        model_files.append(source.name)
+    managed = [*model_files, marker.name]
+    existing = set()
+    for name in managed:
+        target = root / name
+        if name in record['external_data'] and target.exists():
+            raise FileExistsError(f'新ONNX外置权重文件名已被占用: {name}')
+        if target.is_symlink() or target.exists() and not target.is_file():
+            raise ValueError(f'ONNX更新目标不是普通文件: {target}')
+        if target.is_file():
+            shutil.copy2(target, backup / name)
+            existing.add(name)
+    pending = dict(payload, onnx={'status': 'in_progress', 'error': 'export_in_progress'})
+    pending_file = stage / 'pending.artifacts.json'
+    pending_file.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding='utf-8')
+    completed = stage / marker.name
+    completed.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    written = []
+    try:
+        os.replace(pending_file, marker)
+        written.append(marker.name)
+        for name in model_files:
+            os.replace(stage / name, root / name)
+            written.append(name)
+        os.replace(completed, marker)
+    except BaseException as error:
+        failures = []
+        for name in reversed(list(dict.fromkeys(written))):
+            try:
+                if name in existing:
+                    os.replace(backup / name, root / name)
+                else:
+                    (root / name).unlink(missing_ok=True)
+            except OSError as rollback_error:
+                failures.append(str(rollback_error))
+        if failures:
+            raise _OnnxUpdateRecoveryError(f'ONNX替换失败且未完全恢复，原制品备份保留在 {backup}: {failures}') from error
+        raise
+    # 只清理已不被其他图引用的旧外置权重，不动PTH或其他模型的数据
+    stale = old_data.difference(record['external_data'])
+    if stale:
+        import onnx
+        for other in root.glob('*.onnx'):
+            if other == graph:
+                continue
+            try:
+                model = onnx.load(str(other), load_external_data=False)
+                used = {item.value for tensor in _iter_onnx_tensors(model.graph)
+                    for item in tensor.external_data if item.key == 'location'}
+                stale.difference_update(used)
+            except Exception:
+                stale.clear()
+                break
+    for name in sorted(stale):
+        target = _safe_external_data_path(root, name)
+        try:
+            if not target.is_symlink():
+                target.unlink(missing_ok=True)
+        except OSError as error:
+            print(f'⚠️ [ONNX更新] 旧外置权重未清理 {name}: {error}')
+
+
+def update_onnx_checkpoints(checkpoint_paths):
+    """原位更新同名ONNX及PTH资产标记，学习状态和运行资产保持不变"""
+    import torch
+    from checkpoint_utils import load_training_checkpoint, get_training_lineage
+    from training_lock import TrainerProcessLock
+
+    sources = list(dict.fromkeys(Path(path).absolute() for path in checkpoint_paths))
+    if not sources or any(path.suffix.lower() != '.pth' for path in sources):
+        raise ValueError('ONNX更新需要选择对应PTH，只有ONNX时可检查但不能重导出')
+    report = {'operation': 'onnx_update', 'models': [], 'learning_state_changed': False}
+    with TrainerProcessLock():
+        protocol = _check_onnx_update_assets()
+        report.update(protocol)
+        thread_count = torch.get_num_threads()
+        mha_fastpath = torch.backends.mha.get_fastpath_enabled()
+        try:
+            torch.set_num_threads(min(thread_count, 4))
+            torch.backends.mha.set_fastpath_enabled(False)
+            with torch.random.fork_rng(devices=[]):
+                for source in sources:
+                    source_stat = source.stat()
+                    checkpoint = load_training_checkpoint(source, map_location='cpu')
+                    lineage = get_training_lineage(checkpoint)
+                    metadata = {'model_id': checkpoint['model_id'], 'model_prefix': checkpoint['model_prefix'],
+                                'training_lineage': lineage}
+                    old_data = _onnx_update_target(source, metadata)
+                    graph = source.with_suffix('.onnx')
+                    existed = graph.is_file()
+                    stage = Path(tempfile.mkdtemp(prefix='.onnx_update_', dir=source.parent))
+                    preserve = False
+                    try:
+                        print(f'⏳ [ONNX更新] {"替换" if existed else "补齐"} {graph.name}，使用CPU和当前兼容语义')
+                        refreshed, checkpoint_updated = _refresh_checkpoint_assets(checkpoint, protocol)
+                        export_checkpoint = dict(refreshed, iteration=lineage['ppo_iteration'])
+                        if checkpoint.get('training_stage') == 'imitation':
+                            export_checkpoint['training_lineage'] = lineage
+                        validation = _export_updated_onnx(export_checkpoint, stage / graph.name)
+                        _prepare_onnx_update_data(stage / graph.name)
+                        record = describe_onnx_artifact(stage / graph.name, validate_manifest=False)
+                        if checkpoint_updated:
+                            torch.save(refreshed, stage / source.name)
+                        payload = _build_onnx_update_manifest(source, refreshed, record, validation)
+                        staged_marker = stage / checkpoint_artifact_manifest_path(source).name
+                        staged_marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+                        describe_onnx_artifact(stage / graph.name, expected_model_id=checkpoint['model_id'])
+                        if get_current_protocol_metadata() != protocol:
+                            raise ValueError('导出期间语义资产发生变化，本模型未替换，请重试')
+                        current_stat = source.stat()
+                        if (current_stat.st_mtime_ns, current_stat.st_size) != (source_stat.st_mtime_ns, source_stat.st_size):
+                            raise ValueError('PTH在导出期间发生变化，本模型未替换，请结束其他写入后重试')
+                        _install_onnx_update(source, stage, record, payload, old_data)
+                        report['models'].append({'checkpoint_path': str(source), 'onnx_path': str(graph),
+                            'action': 'replaced' if existed else 'created', 'model_id': checkpoint['model_id'],
+                            'ppo_iteration': lineage['ppo_iteration'], 'bc_epochs': lineage['bc_epochs'],
+                            'checkpoint_metadata_updated': checkpoint_updated, 'validation': validation})
+                        print(f'✅ [ONNX更新] {graph.name} 已写回原目录，PTH资产标记{"已同步" if checkpoint_updated else "无需变更"}，学习状态保持不变')
+                    except _OnnxUpdateRecoveryError:
+                        preserve = True
+                        raise
+                    finally:
+                        if not preserve:
+                            shutil.rmtree(stage)
+                    del checkpoint, refreshed, export_checkpoint
+        finally:
+            torch.backends.mha.set_fastpath_enabled(mha_fastpath)
+            torch.set_num_threads(thread_count)
+    return report
 
 
 def is_artifact_manifest_filename(filename):
@@ -401,6 +830,8 @@ def _validate_onnx_artifact_manifest(
         raise ValueError(f"ONNX artifact file list mismatch: {marker_path.name}")
     if payload.get('training_lineage') != record.get('training_lineage'):
         raise ValueError(f'ONNX lineage differs from manifest: {marker_path.name}')
+    from checkpoint_utils import get_training_lineage
+    source_iteration = get_training_lineage(payload)['ppo_iteration']
     for key in (
         "model_id",
         "model_prefix",
@@ -415,14 +846,28 @@ def _validate_onnx_artifact_manifest(
         "semantic_lookup_hash",
         "semantic_lookup_card_count",
     ):
-        if onnx_record.get(key) != payload.get(key):
+        expected = source_iteration if key == 'iteration' else payload.get(key)
+        if onnx_record.get(key) != expected:
             raise ValueError(
                 f"ONNX artifact {key} mismatch: {marker_path.name}"
             )
-        if record.get(key) != payload.get(key):
+        # 主清单、PTH及图内身份一致，更新来源记录不代替当前资产校验
+        if record.get(key) != onnx_record.get(key):
             raise ValueError(
                 f"ONNX embedded {key} mismatch: {marker_path.name}"
             )
+
+
+def _validate_static_onnx_metadata(metadata, *, card_vocabulary=None, semantic_root='.'):
+    """静态图沿用导出时的语义常量，内容更新需要重导出而不是只改元数据"""
+    try:
+        validate_protocol_metadata(metadata, label='ONNX metadata',
+            card_vocabulary=card_vocabulary, semantic_root=semantic_root)
+    except SemanticLookupMismatchError as error:
+        raise SemanticLookupMismatchError(
+            f'{error}; ONNX已固化导出时的静态语义，无法直接替换为当前语义，'
+            '需用对应PTH重新导出；编号与编码器兼容的PTH仍可使用新语义'
+        ) from error
 
 
 def describe_onnx_artifact(
@@ -544,7 +989,7 @@ def describe_onnx_artifact(
             raise ValueError(
                 "ONNX embedded model protocol does not match the current protocol"
             )
-        validate_protocol_metadata(
+        _validate_static_onnx_metadata(
             {
                 "model_protocol_version": embedded_model_protocol,
                 "protocol_schema_revision": embedded_protocol_schema_revision,
@@ -556,7 +1001,6 @@ def describe_onnx_artifact(
                 "semantic_lookup_hash": embedded_semantic_lookup_hash,
                 "semantic_lookup_card_count": embedded_semantic_lookup_card_count,
             },
-            label="ONNX metadata",
             card_vocabulary=card_vocabulary,
             semantic_root=semantic_root,
         )
@@ -999,7 +1443,7 @@ def build_package_model_records(
 def get_model_iteration_mismatch(records):
     """比较同一选择中的 PTH 与 ONNX 轮次集合，并返回可展示的提示"""
     checkpoint_iterations = {
-        record["iteration"]
+        (record.get('training_lineage') or {}).get('ppo_iteration', record["iteration"])
         for record in records
         if record.get("format") == "pytorch_checkpoint"
     }
@@ -1056,7 +1500,7 @@ def validate_package_model_records(
     if expected_model_id is not None and model_ids and model_ids != {expected_model_id}:
         raise PermissionError("selected models do not belong to the requested model_id pool")
     artifact_keys = [
-        (record.get("format"), record.get("iteration")) for record in records
+        (record.get("format"), (record.get('training_lineage') or {}).get('ppo_iteration', record.get("iteration"))) for record in records
     ]
     if len(artifact_keys) != len(set(artifact_keys)):
         raise ValueError("one deployment package cannot contain duplicate format/iteration artifacts")
@@ -1205,8 +1649,12 @@ def discover_model_repository(model_dir):
                     raise ValueError('checkpoint lineage differs from manifest')
             else:
                 record['display_name'] = primary_path.stem
+                if marker_path.is_file():
+                    source_manifest = _read_artifact_manifest(marker_path)
+                    record['training_stage'] = source_manifest.get('training_stage', 'ppo')
+                    record['source_iteration'] = source_manifest['iteration']
             model_id = record["model_id"]
-            iteration = record["iteration"]
+            iteration = record.get('source_iteration', record["iteration"])
             pool = result["pools"].setdefault(
                 model_id,
                 {

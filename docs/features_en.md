@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.16.3**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.16.5**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -281,6 +281,8 @@ Create cross-pool mixing recipes, allowing decks from different physical pools t
 
 ### Resource Sync Hub
 
+**ONNX Engine Update** is available only here. Check versions/dependencies or replace/create same-name ONNX files in original training directories, refreshing PTH asset metadata while preserving identity and learning state. No automatic packaging. See [ONNX engine updates](code_semantics_en.md#onnx-engine-updates).
+
 **Overview**: Sync latest card data and scripts from official repositories.
 
 #### Sync Targets
@@ -307,6 +309,8 @@ Click **📖 Open Project README** in the sidebar to read the local `README.md` 
 ---
 
 ### Semantic Knowledge Engine
+
+
 
 **Overview**: Parse Lua scripts to extract semantic features for AI learning.
 
@@ -571,17 +575,30 @@ python main.py duel [options]
 | `--benchmark-name` | Name for a new benchmark | baseline |
 | `--benchmark-plan` | Reuse a plan JSON; its game count overrides `--num` | - |
 
-Arena loads the architecture embedded in each P0/P1 checkpoint and does not allow external
-architecture overrides. Loop protection uses a complete state key covering the board, acting
-player, Select/Unselect semantics, and target entities. Engine retries are hard bans, while repeated
-choices are soft bans that cannot exhaust the candidate pool by themselves. If an abnormal loop
-pushes every candidate past the threshold, Arena explores the least-visited legal choice in that
-state instead of permanently disabling protection or reporting finite scores as numerical failures.
+#### Leaf-first Arena retries
+
+Arena loads each P0/P1 checkpoint's embedded architecture without external overrides. All three modes
+use **leaf-first retries**: after five complete returns from an entry to the same unchanged state,
+avoid the deepest choice that caused the return. Move toward parent entries only after that node's
+currently encodable choices have been tried. Repeated “special summon → material selection → cancel”
+therefore tries another material-layer choice before abandoning the summon entry.
+
+First cancellations and progressing Select/Unselect sequences are not failures by themselves; the
+engine must actually return to the same prompt. Board, LP, card-state or public-hint changes reset
+the records. Raw prompts, parent branches and response identities are retained, then remapped to
+current indices after macro-pool reordering. No answers are inserted. Engine Retry remains a hard
+rejection; exhausted soft restrictions retain the least-visited legal choice. This orders attempts
+in the actual duel without rewinding Core, simulating futures or adding queries/model forwards.
+The decision limit remains in place.
 
 `greedy` selects the highest filtered logit for deterministic stress checks. `training` samples from
 the same `Categorical(logits)` distribution used during training at fixed T=1.0. `deployment` uses
 an adjustable temperature: lower values approach greedy behavior while higher values explore more.
 All modes share the same encoder, masks, macro pool, and response packer and never modify the model.
+“Training distribution” describes the base T=1 sampler. Once protection triggers, sampling uses the
+remaining choices, so a protected Arena sequence is not an exact main-training action replay.
+Controlled WindBot duels share this guard on the native model side, without controlling WindBot.
+Main training, rewards and imitation optimizers remain unchanged.
 
 Deck-source syntax is `weighted`, `physical:<pool>`, `virtual:<pool>`, or
 `deck:<physical-pool>/<deck-name>`. P1 also accepts `same_range` and `same_deck`.
@@ -592,7 +609,9 @@ Benchmark mode saves the per-game decks and hashes, duel seeds, and alternating-
 play. Results include model hashes, per-game outcomes, abort rate, seat splits, inference policy and
 temperature, and a 95% Wilson
 interval for P0 win rate. Plans are under `arena_benchmarks/plans/` and results under
-`arena_benchmarks/results/`; changed deck contents invalidate an old plan. The seed fixes the
+`arena_benchmarks/results/`; changed deck contents invalidate an old plan.
+New results also record `loop_policy=leaf_first_v1` and threshold5. Older results lack these fields;
+keep retry policies separate when comparing. The seed fixes the
 schedule and framework RNG sources, but different hardware or inference backends may still have
 low-level numerical nondeterminism.
 

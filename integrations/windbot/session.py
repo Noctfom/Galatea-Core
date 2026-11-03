@@ -34,10 +34,11 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     from gamestate import DuelState
     from core_message_protocol import is_empty_chain_prompt
     from trajectory_ingest import LinkCaptureWriter, prepare_canonical_decision_snapshot
-    from model_versus import resolve_arena_policy, select_arena_action_index
+    from model_versus import (ArenaBranchRetry, resolve_arena_policy, select_arena_action_index,
+                              report_arena_branch_retry)
     import numpy as np
     import rule_bot
-    from action_candidates import MODEL_ACTION_MSGS
+    from action_candidates import MODEL_ACTION_MSGS, build_action_state_key
 
     timeout = finite_timeout(timeout)
     if session_purpose not in ('controlled', 'imitation_collection', 'imitation_evaluation'):
@@ -60,6 +61,8 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     if windbot_deck and opponent_executor:
         raise ValueError('a WindBot deck override applies only to a single external opponent')
     policy_mode, temperature = resolve_arena_policy(policy_mode, temperature)
+    retry_policy = ArenaBranchRetry()
+    loop_counts = {}
     catalog = executor_catalog()
     if executor not in catalog or (opponent_executor and opponent_executor not in catalog):
         raise ValueError('unknown executor; use --inspect to list exact upstream names')
@@ -111,7 +114,8 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         'core_terminal': False, 'error': None, 'bot_logs': {}, 'capture_path': None,
         'deck_paths': {str(actor): str(path) for actor, path in deck_paths.items()},
         'native_deck_source': native_deck_source, 'replay_path': None,
-        'native_policy': {'policy_mode': policy_mode, 'temperature': temperature} if model else None}
+        'native_policy': {'policy_mode': policy_mode, 'temperature': temperature,
+                          **ArenaBranchRetry.metadata()} if model else None}
     try:
         print('🏟️ [WindBot/对局] 初始化本局 Core 与脚本；此阶段运行实际对局。')
         env = GalateaEnv()
@@ -153,7 +157,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                 logger.set_decklists(decks['0']['main'], decks['0']['extra'],
                     decks['1']['main'], decks['1']['extra'],
                     p0_name=Path(deck_paths[0]).stem, p1_name=Path(deck_paths[1]).stem)
-                policy = {'policy_mode': policy_mode, 'temperature': temperature}
+                policy = {'policy_mode': policy_mode, 'temperature': temperature, **ArenaBranchRetry.metadata()}
                 replay_models = {seat: {'kind': info['kind']} for seat, info in participants.items()}
                 if model:
                     replay_models[str(native_actor)].update(bot.model_metadata)
@@ -209,8 +213,17 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                             observation = bot.encoder.encode(snapshot, player_id=actor)
                             with torch.no_grad():
                                 logits, _, _ = bot.net(observation)
-                            selected, _ = select_arena_action_index(logits[0], set(), set(),
+                            state_key = build_action_state_key(snapshot, kind)
+                            report_arena_branch_retry(retry_policy.enter(state_key, snapshot, payload=message[1:]))
+                            count = min(len(snapshot.valid_actions), logits.shape[-1])
+                            selected, exhausted = select_arena_action_index(logits[0, :count], set(),
+                                retry_policy.bans.get(state_key, set()),
+                                loop_counts={index: loop_counts.get((state_key, index), 0) for index in range(count)},
                                 policy_mode=policy_mode, temperature=temperature)
+                            if exhausted:
+                                retry_policy.release_current(state_key, snapshot)
+                            loop_counts[state_key, selected] = loop_counts.get((state_key, selected), 0) + 1
+                            retry_policy.record(state_key, snapshot, selected, logits[0, :count])
                             if logger:
                                 probabilities = torch.softmax(logits[0] / (temperature or 1.0), dim=-1).cpu()
                             response = bot._pack_response(snapshot.valid_actions[selected], kind, message[1:])

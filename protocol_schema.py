@@ -70,6 +70,10 @@ from semantic_lookup import (
 )
 
 
+class SemanticLookupMismatchError(ValueError):
+    """区分语义内容身份变化，避免将其与协议结构或模型文件损坏混淆"""
+
+
 MODEL_PROTOCOL_VERSION = 4
 PROTOCOL_SCHEMA_REVISION = 14
 
@@ -563,7 +567,7 @@ def validate_protocol_metadata(
     expected_semantic_hash = semantic_lookup.prefix_hash(card_count)
     if container.get("semantic_lookup_hash") != expected_semantic_hash:
         if not allow_semantic_updates:
-            raise ValueError(
+            raise SemanticLookupMismatchError(
                 f"{label} semantic_lookup_hash does not match the current semantic prefix"
             )
         from semantic_lookup import validate_semantic_update_compatibility

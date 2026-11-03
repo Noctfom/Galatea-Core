@@ -2,9 +2,9 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置。已有环境和资产时约需 **5–10 分钟**；首次下载或全量语义生成可能明显更久。
 
-> 文档适用于 **Galatea-Core v3.16.3**，Model Protocol V4 / Checkpoint Format 3。
+> 文档适用于 **Galatea-Core v3.16.5**，Model Protocol V4 / Checkpoint Format 3。
 
-> 代码语义构建/同步与质量检查见 [3.13.4 语义资产指南](code_semantics.md)。新源码、向量、索引和生成清单须成组使用；新语义身份不与旧检查点混用。
+> 代码语义构建/同步与质量检查见 [语义资产指南](code_semantics.md)。源码、向量、索引和生成清单须成组使用；编号与编码器兼容时旧PTH可使用新语义。旧ONNX的可用边界及重导出见[ONNX引擎更新](code_semantics.md#onnx引擎更新)。
 
 ---
 

@@ -32,6 +32,7 @@ from auxiliary_targets import (
 )
 from inference_protocol import InferenceProtocolError, request_shared_inference_result
 from model_artifacts import describe_onnx_artifact
+from protocol_schema import SemanticLookupMismatchError
 from data_types import ActionOperation, DECK_FILM_DROPOUT
 import deck_utils
 import rule_bot
@@ -434,10 +435,14 @@ def worker_process(
                     f"({os.path.basename(hist_onnx_path)}) 挂载成功！"
                 )
             except Exception as onnx_error:
-                print(
-                    f"⚠️ [Worker {worker_id}] 历史对手 ONNX 加载失败，"
-                    f"已回退到 PyTorch: {onnx_error}"
-                )
+                if isinstance(onnx_error, SemanticLookupMismatchError):
+                    print(f'ℹ️ [Worker {worker_id}] 历史ONNX固化语义已过期，改用支持新语义的PTH；'
+                          '保留历史权重，更新ONNX需从对应PTH重新导出')
+                else:
+                    print(
+                        f"⚠️ [Worker {worker_id}] 历史对手 ONNX 加载失败，"
+                        f"已回退到 PyTorch: {onnx_error}"
+                    )
 
         # ONNX 正常时只创建轻量历史控制器；缺失或关闭时仍加载原 PTH 网络
         opp_agent = create_worker_opponent_agent(

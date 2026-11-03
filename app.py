@@ -284,7 +284,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.3"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.5"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -526,6 +526,85 @@ def load_model_repository(model_dir, file_signature):
     """缓存按 UUID 和轮次整理的模型仓库视图，避免重复解析大文件"""
     del file_signature
     return discover_model_repository(model_dir)
+
+
+def render_onnx_updates():
+    """在资源同步中枢检查并维护原训练目录内的ONNX引擎"""
+    from model_artifacts import inspect_onnx_updates
+
+    st.subheader(_("🔁 ONNX 引擎更新", "🔁 ONNX Engine Update"))
+    st.info(_(
+        "检查原训练目录中的ONNX是否匹配当前语义和依赖文件；更新时从对应PTH重导出，直接替换同名旧ONNX，没有则补齐。只使用CPU，不启动训练，也不自动生成GKG",
+        "Check training-directory ONNX engines against current semantics and dependencies. Update re-exports the corresponding PTH, replacing its same-name ONNX or creating it when missing. Runs on CPU without training or automatic GKG packaging"))
+    st.caption(_(
+        "使用项目根目录当前词表与语义资产，需要时同步PTH的资产标记并保留旧来源；模型UUID、已学权重、优化器状态和PPO/BC计数不变。请先结束主训练；后续Worker直接加载原路径的新引擎。检查可单独使用，不必先检查才能更新",
+        "Uses current project-root assets and refreshes PTH asset metadata when needed, retaining provenance. Model UUID, learned weights, optimizer state and PPO/BC counters stay unchanged. End main training first; later Workers use the original engine path. Checking is independent and is not required before an update"))
+    root = st.text_input(_("模型目录", "Model Directory"), './models', key='onnx_update_source',
+        help=_("递归检查目录内PTH和ONNX，包括独立BC/PPO分支。仅有ONNX时可检查可用性，但更新需要同名PTH",
+               "Recursively checks PTH and ONNX files, including BC/PPO branches. ONNX-only files can be checked; updating requires a same-name PTH"))
+    directory = Path(root).resolve()
+    paths = sorted(str(path.relative_to(directory)) for path in directory.glob('**/*.pth')
+        if path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(directory)
+        and not any(part.startswith(('.onnx_update_', '.onnx_recovery_')) for part in path.relative_to(directory).parts)) if directory.is_dir() else []
+    if st.session_state.get('onnx_update_checked_source') != str(directory):
+        st.session_state.onnx_update_report = None
+        st.session_state.onnx_update_selection = []
+        st.session_state.onnx_update_checked_source = str(directory)
+    if st.button(_("检查 ONNX 引擎", "Check ONNX Engines"), key='onnx_update_check',
+                 disabled=not directory.is_dir(), help=_(
+                     "只检查协议、语义前缀、同轮次身份和外置文件，不导出或修改模型；检查后会推荐勾选缺失或待更新且有PTH的条目",
+                     "Checks protocol, semantic prefixes, iteration identity and external files without exporting or modifying models. Recommends missing or outdated entries that have a PTH"), **REPLAY_BUTTON_WIDTH):
+        try:
+            report = inspect_onnx_updates(str(directory))
+            st.session_state.onnx_update_report = report
+            if not st.session_state.get('onnx_update_selection'):
+                st.session_state.onnx_update_selection = [str(Path(row['checkpoint_path']).relative_to(directory))
+                    for row in report['models'] if row['can_update'] and row['needs_update']]
+        except Exception as error:
+            st.session_state.onnx_update_report = None
+            st.error(_(f"检查失败: {error}", f"Check failed: {error}"))
+    selected = st.multiselect(_("选择要替换或补齐 ONNX 的 PTH", "PTH Files to Replace or Create ONNX"),
+        paths, key='onnx_update_selection', help=_(
+            "可跨模型或BC/PPO分支选择，每项更新同名ONNX与清单，需要时一并刷新PTH内的资产版本，不修改学习状态",
+            "Select across model pools or BC/PPO branches. Updates each same-name ONNX and manifest, refreshing PTH asset versions when needed without changing learning state"))
+    if not paths:
+        st.info(_("目录内没有PTH，可检查已有ONNX；需要更新时请补充对应PTH",
+                  "No PTH files found. Existing ONNX files can be checked; add corresponding PTH files to update them"))
+    if st.button(_("更新所选 ONNX（替换 / 补齐）", "Update Selected ONNX (Replace / Create)"),
+                 key='onnx_update_start', disabled=not selected, help=_(
+                     "通过CPU输出对照后，PTH资产标记、ONNX和清单一并写回原目录，失败时恢复该模型旧制品。需要临时磁盘空间，不生成部署包",
+                     "After CPU output comparison, writes PTH asset metadata, ONNX and its manifest back together, restoring that model's artifacts if replacement fails. Requires temporary disk space; no deployment package is created"), **REPLAY_BUTTON_WIDTH):
+        command = [sys.executable, os.path.join(PROJECT_ROOT, 'main.py'), 'onnx-update']
+        for name in selected:
+            command.extend(['--checkpoint', str(directory / name)])
+        with st.spinner(_("正在CPU导出、校验并写回原模型目录", "Exporting on CPU, validating and updating original model directories")):
+            try:
+                environment = os.environ.copy()
+                environment['PYTHONIOENCODING'] = 'utf-8'
+                result = subprocess.run(command, cwd=PROJECT_ROOT, env=environment,
+                    capture_output=True, text=True, encoding='utf-8', errors='replace', check=False)
+                if result.returncode == 0:
+                    st.success(_("所选ONNX已在原目录替换或补齐，PTH资产标记已同步，模型身份与学习状态不变", "ONNX files replaced or created in place and PTH asset metadata synchronized; model identity and learning state are unchanged"))
+                else:
+                    st.error(_("更新中断，已完成条目保留；失败条目的恢复情况见日志", "Update interrupted. Completed items are retained; see the log for recovery of the failed item"))
+                st.code(result.stdout + '\n' + result.stderr, language='text')
+                st.session_state.onnx_update_report = inspect_onnx_updates(str(directory))
+            except Exception as error:
+                st.error(_(f"导出或复查失败: {error}", f"Export or recheck failed: {error}"))
+    report = st.session_state.get('onnx_update_report')
+    if report is not None:
+        labels = {'current': _("当前可用", "Current"), 'append_only': _("可用，未覆盖新增卡", "Usable; added cards not covered"),
+            'checkpoint_assets_changed': _("PTH资产标记待同步", "PTH asset metadata outdated"),
+            'semantic_changed': _("旧卡语义已变化", "Old semantics changed"), 'missing': _("缺少ONNX", "ONNX missing"),
+            'incomplete': _("制品不完整", "Incomplete artifacts"), 'invalid': _("ONNX校验失败", "ONNX validation failed"),
+            'checkpoint_invalid': _("PTH或同名身份异常", "PTH or target identity invalid")}
+        rows = [{_('PTH', 'PTH'): str(Path(row['checkpoint_path']).relative_to(directory)),
+                 _('状态', 'Status'): labels[row['status']], _('可更新', 'Can Update'): row['can_update'],
+                 _('说明', 'Details'): row['reason']} for row in report['models']]
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+        else:
+            st.info(_("目录内没有PTH或ONNX", "No PTH or ONNX files in this directory"))
 
 # ==========================================
 # 🎨 前端 CSS 魔法
@@ -1597,8 +1676,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             horizontal=True,
             key="arena_policy_mode",
             help=_(
-                "只改变竞技场从合法 Logit 中选择动作的方式，不改变模型、观测、动作包装或训练。",
-                "Only changes how Arena selects from legal logits; models, observations, action packing, and training remain unchanged.",
+                "贪心取最高分，训练式采样固定T=1，部署采样可调温度。三种模式都在同场面闭合回退5次后优先尝试末端其他候选，再逐层换上层入口；正常首次取消与推进中的多选保留，不修改主训练。",
+                "Greedy takes the highest logit; training-style sampling fixes T=1; deployment has adjustable temperature. All modes try other deepest choices after five returns to the same unchanged state, then move toward parent entries. First cancellations and progressing multi-selects remain available; main training is unchanged.",
             ),
         )
         d_policy_temperature = 0.8
@@ -1617,8 +1696,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
             )
         elif d_policy_mode == "training":
             st.caption(_(
-                "按训练时的 Categorical(Logits) 分布采样，温度固定为 1.0，适合观察真实训练策略。",
-                "Samples from the same Categorical(logits) distribution used in training at fixed temperature 1.0.",
+                "按训练时的 Categorical(Logits) 形式采样，温度固定为1.0；反复回退触发竞技场防循环后，会在剩余候选内重新采样。",
+                "Samples Categorical(logits) at fixed T=1.0; after repeated backtracking triggers Arena protection, sampling uses the remaining candidates.",
             ))
 
         with st.form("duel_form"):
@@ -1781,8 +1860,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                             'training': _("训练式采样（T=1.0）", "Training-style sampling (T=1.0)"),
                             'deployment': _("部署温度采样", "Deployment temperature sampling"),
                         }[mode],
-                        help=_("只改变原生 V4 模型的动作采样，不控制 WindBot，不修改权重或训练。与普通竞技场的策略设置相互独立。",
-                            "Changes only native V4 action selection, not WindBot, weights or training. Independent of normal Arena policy settings."))
+                        help=_("只控制原生V4模型，不控制WindBot或主训练。三种模式均在同场面闭合回退5次后，从末端优先换选项，耗尽后再换上层入口；与普通竞技场策略设置独立。",
+                            "Controls only native V4, not WindBot or main training. All modes try other deepest choices after five returns to an unchanged state, moving toward parent entries when exhausted. Independent of normal Arena policy settings."))
                     if wb_policy_mode == 'deployment':
                         wb_policy_temperature = st.number_input(
                             _("原生模型采样温度", "Native model sampling temperature"),
@@ -2416,12 +2495,16 @@ elif menu == _("🔄 资源同步中枢", "🔄 Update Manager"):
 
     st.write("")
     
-    tab_sync, tab_vocab, tab_changelog = st.tabs([
+    tab_sync, tab_vocab, tab_onnx_update, tab_changelog = st.tabs([
         _("🔄 同步控制台", "🔄 Sync Dashboard"),
         _("🆔 本地/自制卡词表", "🆔 Local/Custom Card Vocabulary"),
+        _("🔁 ONNX 引擎更新", "🔁 ONNX Engine Update"),
         _("📜 更新日志", "📜 Changelog")
     ])
     
+    with tab_onnx_update:
+        render_onnx_updates()
+
     with tab_sync:
         st.markdown(_("从官方与萌卡仓库拉取最新的环境依赖，确保您的 AI 掌握最新的卡片效果与规则。", 
                       "Fetch latest databases and Lua scripts to keep your AI up to date."))
@@ -4061,7 +4144,7 @@ elif menu == _("📁 存储与日志仓库", "📁 Storage & Logs"):
                 pool_files.update(artifact["files"])
                 artifact_rows.append(
                     {
-                        _("轮次", "Iteration"): artifact["iteration"],
+                        _("轮次", "Iteration"): artifact.get('source_iteration', artifact["iteration"]),
                         _("阶段", "Stage"): artifact.get('training_stage', 'ppo'),
                         _("完整模型名", "Model Name"): artifact.get('display_name', artifact['primary']),
                         _("累计PPO", "Cumulative PPO"): (artifact.get('training_lineage') or {}).get('ppo_iteration', artifact['iteration']),

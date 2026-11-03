@@ -28,8 +28,15 @@ def normalize_benchmark_inference(inference=None):
         raise ValueError("竞技场基准推理策略必须是对象")
     policy_mode = inference.get("policy_mode")
     temperature = inference.get("temperature")
+    retry_policy = {}
+    if 'loop_policy' in inference or 'loop_repeat_threshold' in inference:
+        if (inference.get('loop_policy') != 'leaf_first_v1'
+                or type(inference.get('loop_repeat_threshold')) is not int
+                or inference['loop_repeat_threshold'] != 5):
+            raise ValueError('竞技场防循环策略或阈值无效')
+        retry_policy = {'loop_policy': inference['loop_policy'], 'loop_repeat_threshold': 5}
     if policy_mode == "greedy" and temperature is None:
-        return {"policy_mode": policy_mode, "temperature": None}
+        return {"policy_mode": policy_mode, "temperature": None, **retry_policy}
     if (
         policy_mode == "training"
         and isinstance(temperature, (int, float))
@@ -37,7 +44,7 @@ def normalize_benchmark_inference(inference=None):
         and math.isfinite(temperature)
         and float(temperature) == 1.0
     ):
-        return {"policy_mode": policy_mode, "temperature": 1.0}
+        return {"policy_mode": policy_mode, "temperature": 1.0, **retry_policy}
     if (
         policy_mode == "deployment"
         and isinstance(temperature, (int, float))
@@ -45,7 +52,7 @@ def normalize_benchmark_inference(inference=None):
         and math.isfinite(temperature)
         and 0.05 <= float(temperature) <= 5.0
     ):
-        return {"policy_mode": policy_mode, "temperature": float(temperature)}
+        return {"policy_mode": policy_mode, "temperature": float(temperature), **retry_policy}
     raise ValueError("竞技场基准推理策略或温度无效")
 
 

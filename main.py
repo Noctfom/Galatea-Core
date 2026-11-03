@@ -247,6 +247,7 @@ def main():
         'duel': 'Arena',
         'play': 'SelfCheck',
         'parse': 'Parser',
+        'onnx-update': 'OnnxUpdate',
         'update': 'Updater',
         'vocab': 'Vocabulary',
         'replay-ingest': 'ReplayIngest',
@@ -257,7 +258,8 @@ def main():
     }
     log_prefix = prefix_mapping.get(cmd_name, 'System')
     
-    if cmd_name not in {'trajectory-check', 'semantic-check'} and '--inspect' not in sys.argv:
+    if (cmd_name not in {'trajectory-check', 'semantic-check'} and '--inspect' not in sys.argv
+            and not (cmd_name == 'onnx-update' and '--check' in sys.argv)):
         setup_global_logger(prefix=log_prefix)
     
     parser = argparse.ArgumentParser(description="Galatea AI 主控程序")
@@ -432,6 +434,11 @@ def main():
     parse_parser.add_argument('--local-update', action='store_true', help='解析本地 Lua 并自动接续结构语义与代码向量')
     parse_parser.add_argument('--embed', action='store_true', help=argparse.SUPPRESS)
     parse_parser.add_argument('--github-mirror', default='direct', help='公开GitHub下载：direct、gh-proxy、ghproxy或自定义HTTPS加速前缀；不改变本地接续规则')
+    onnx_update_parser = subparsers.add_parser('onnx-update', help='检查ONNX，或在原训练目录替换/补齐同名引擎，不启动训练或打包')
+    onnx_selection = onnx_update_parser.add_mutually_exclusive_group(required=True)
+    onnx_selection.add_argument('--checkpoint', action='append', help='对应PTH路径，可重复选择；更新直接写回其同名ONNX')
+    onnx_selection.add_argument('--directory', help='递归扫描模型目录，更新时只处理待更新且具备PTH的条目')
+    onnx_update_parser.add_argument('--check', action='store_true', help='仅检查协议、语义与依赖，不修改文件')
     semantic_check_parser = subparsers.add_parser('semantic-check', help='只读检查代码语义来源、生成清单和向量重复率')
     semantic_check_parser.add_argument('--directory', default='.', help='语义资产所在目录')
 
@@ -645,6 +652,28 @@ def main():
         )
         arena.run_tournament(n_games=args.num)
         
+    elif args.command == 'onnx-update':
+        import json
+        from model_artifacts import inspect_onnx_updates, update_onnx_checkpoints
+        try:
+            skipped = []
+            if args.check or args.directory:
+                report = inspect_onnx_updates(args.directory, checkpoint_paths=args.checkpoint)
+            if not args.check:
+                if args.directory:
+                    skipped = [row for row in report['models'] if row['needs_update'] and not row['can_update']]
+                sources = args.checkpoint if args.checkpoint else [row['checkpoint_path'] for row in report['models']
+                    if row['can_update'] and row['needs_update']]
+                report = update_onnx_checkpoints(sources) if sources else {'operation': 'onnx_update', 'models': [], 'learning_state_changed': False}
+                report['skipped'] = skipped
+        except Exception as error:
+            parser.exit(1, f'ONNX操作中断，已完成条目保留；失败原因及恢复信息: {error}\n')
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if not args.check:
+            print(f"✅ 已维护 {len(report['models'])} 个ONNX，模型身份与学习状态不变")
+            if report['skipped']:
+                print(f"⚠️ 仍有 {len(report['skipped'])} 项因缺少PTH或不兼容未处理，原因见上方检查结果")
+
     elif args.command == 'semantic-check':
         from semantic_assets import audit_code_semantic_quality
         import json

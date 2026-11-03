@@ -1,6 +1,6 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.16.3 / Model Protocol V4.
+> Applies to Galatea-Core v3.16.5 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 

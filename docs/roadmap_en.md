@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.16.3. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.16.5. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -40,6 +40,8 @@ WindBot belongs to Core's [optional integration directory](../integrations/windb
 - [x] 3.15.6: Preserve pinned central-inference staging and batch result transfers; correct self-play audit attribution. Separate WindBot CSV/dashboard and mirror/pool metrics from ordinary deck statistics without network or protocol changes
 - [x] 3.15.8: Automatic idle-socket selectors remove Linux select's high-descriptor restriction while preserving deadlines, invalid-packet rejection and cleanup; the real Linux high-descriptor regression still needs target-machine execution
 - [x] 3.15.9: Public GitHub download routes, local README navigation, vocabulary acknowledgement controls and optional WindBot self-check; network and protocol unchanged
+- [x] 3.16.4: All Arena modes and controlled native-model duels use leaf-first closed-return retries, matching response identities across macro-pool reordering; main training unchanged
+- [ ] Mix WindBot mirror builds and regular model-side training pools by a configurable probability, preserving statistics by actual mode
 
 Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.
 
@@ -50,6 +52,7 @@ Distinguish upstream sources, original licenses, pinned commits and local patche
 - [ ] Complete50-iteration trends,100–200-iteration medium runs and long-term fixed Arena comparisons; temporary short-run stability is not acceptance
 - [x] 3.15.7: Linux setup reuses current Python/Conda, constrains existing Torch and installs missing WindBot runtime prerequisites. Shared AnyCPU files ship in source without local compilation or a new Linux ZIP
 - [ ] Automatic Torch-build selection by GPU/driver on fresh machines remains pending; first installation uses requirements or an explicit wheel source without guessing compatibility
+- [ ] Optional GKG decks, replays, model-author documentation and presets, separate from required model assets
 
 ## Online ingress and collection performance
 
@@ -64,6 +67,7 @@ player observations is accepted separately and does not block collection perform
 - [x] 3.16.1: Extra inventory/entity alignment and unknown-card transition target padding; valid-event encoding retained and online gate still closed
 - [x] 3.16.2: Optional exact-batch CUDA Graph forward, sampling outside capture, updated PPO weights and capture-failure fallback; existing reports separate setup from steady execution
 - [x] 3.16.3: Release graphs/GPU outputs before PPO, reuse capture streams, combine result transfers and adapt batching waits by platform; retry training ranges, draw only model-side WindBot decks, and add monotonic collection-phase diagnostics
+- [x] 3.16.5: Check/replace/create ONNX in original training directories, refresh PTH asset metadata without changing identity or learning state, roll back failures and retain Core load restrictions
 - [ ] Validate long-run CUDA Graph/PPO peaks and prolonged collection stalls on the target Linux server with complete Trainer/Worker logs
 - [ ] Compare real-server Start/query delivery,160/165 hints and162 recovery; discuss any required change to native two-player versus online one-player history semantics before changing protocol identity or training
 - [ ] Benchmark optional frozen-policy local CPU/GPU collection by resource budget, preserving iteration-boundary weight sync, stale-response rejection and trajectory identity without automatically adopting asynchronous off-policy learning
