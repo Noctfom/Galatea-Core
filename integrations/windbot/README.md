@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.16.6 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
+此目录提供 Galatea-Core 3.16.8 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -160,7 +160,7 @@ WebUI和CLI默认随机Core开局，各局使用起始种子加局数偏移；�
 取消“随机Core开局”或传入 `--seed 73` 可固定序列。该种子不控制WindBot自身随机性。
 同样的随机/固定选项也用于独立模仿采集和评测，数据划分种子与Core开局独立。
 
-选择 V4 模型后，可独立设置“原生模型决策策略”：默认 `training` 按 `Categorical(logits)` 采样，温度固定1.0；`greedy` 取最高 Logit，不使用温度；`deployment` 使用0.05～5.0的可调温度，初始值0.8。对应 CLI 为 `--policy-mode` 和仅部署采样使用的 `--temperature`。这些设置不沿用普通竞技场控件，也不控制 WindBot。本入口宏池仍使用均匀先验，因此训练式采样不表示完全复现训练 Pass1。结果 JSON 的 `native_policy` 和全息录像元数据保存实际生效策略/温度；非模型对局的 `native_policy` 为 null。
+选择 V4 模型后，可独立设置“原生模型决策策略”：默认 `training` 按 `Categorical(logits)` 采样，温度固定1.0；`greedy` 取最高 Logit，不使用温度；`deployment` 使用0.05～5.0的可调温度，初始值0.8。对应 CLI 为 `--policy-mode` 和仅部署采样使用的 `--temperature`。这些设置不沿用普通竞技场控件，也不控制 WindBot。3.16.8起模型侧宏池先用同一模型进行Pass1打分，再复用训练构建器；只有宏提示增加这一次CPU前向，普通提示不增加前向。结果JSON的 `native_policy` 和全息录像元数据保存策略、温度及 `candidate_proposal=model_pass1_v1`；非模型对局的 `native_policy` 为null。此处对齐候选生成方式，不保证CPU/GPU数值、随机序列、训练正则掩码或最终对局完全一致。
 
 原生侧默认使用该 WindBot 的相同构筑，也可以关闭此选项，复用普通竞技场的权重区间、物理池、虚拟池或单卡组选择器。CLI 对应 `--native-deck-source` 与 `--deck_dir`；每局用本局种子在所选范围抽取，兼容性规则与普通竞技场相同，不能与旧式 `--native-deck` 同时使用。只改变原生 RuleBot/V4 模型的卡组，WindBot 始终使用其执行器绑定的构筑；双 WindBot 模式没有原生选池。
 
@@ -196,7 +196,7 @@ Linux测试；Ubuntu22.04及选定公共程序集的Linux验收须在目标机�
 
 `canonical_response`、默认匹配、RuleBot 包装、训练、网络和公开 ygocore 均不改语义；Type21/25 排序与 Type20/23/26 等其他响应保持原有顺序敏感比较。旧规范轨迹未声明合同时继续使用旧字节规则，既有文件不自动改写。需要修复旧 WindBot 标签时，在 WebUI“轨迹与数据门禁”重新转换原始 `*.link.jsonl.gz`，或执行 `python main.py replay-ingest PATH --source link`；新建规范文件后重新生成质量/划分清单，不沿用旧审查结果。
 
-响应顺序问题与实际池覆盖是不同问题。后者仍可能来自 5000 组合枚举上限、等价副本合并或超过 120 项的抽样；届时应分别检查生成前候选、缩减后候选和专家响应。即使某条专家响应合法，也不能静默塞入池里制造表面上的训练/部署同分布。整局资格还是逐样本资格、确定性候选还是分解动作，是后续数据批次的设计选择。
+响应顺序问题与实际池覆盖是不同问题。后者仍可能来自5000组合枚举上限、等价副本合并或超过120项的抽样；应分别检查生成前候选、缩减后候选和专家响应。即使某条专家响应合法，也不能静默塞入池里制造表面上的训练/部署同分布。原生示范工作流已可丢弃未映射专家标签；旧规范轨迹仍校验完整性。专家候选继续使用固定均匀先验，与3.16.8模型侧的Pass1候选分开，不用当前模型重写历史专家候选。
 
 ### Link 玩家视角中的派生查询接口
 
@@ -215,7 +215,7 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 预编译程序保留上游.NET Framework 4.8目标与固定源码提交；文件身份见运行包清单，
 不能仅凭版本名判断程序是否相同。普通运行只使用预编译文件与上述运行依赖。
 
-受控局的 P0 固定先手，交换座位不会更改这一规则。种子只控制 Core，不控制上游 Bot 的时间初始化随机数，因此该入口不等于固定竞技基准。原生模型目前使用 CPU，并沿用竞技场策略采样；宏候选采用 Core 规范重建的均匀先验，不宣称与训练 Pass1 选池完全同分布。可选全息录像不提供 WindBot 置信度，也不把显示用响应解码当作学习标签。
+受控局的 P0 固定先手，交换座位不会更改这一规则。种子只控制 Core，不控制上游 Bot 的时间初始化随机数，因此该入口不等于固定竞技基准。原生模型目前使用CPU，宏候选自3.16.8使用模型Pass1先验；专家离线池仍使用均匀先验。可选全息录像不提供WindBot置信度，也不把显示用响应解码当作学习标签。
 
 普通 `--verify` 和旧质量清单仍按严格整局门禁运行。独立 `imitate collect` 在原生实际对局中
 直接准备样本；`imitate prepare` 对旧完整Link只重建一次并同步产样，不重复调用Core。
@@ -329,7 +329,7 @@ exe; Windows additionally needs its native SQLite library. `--inspect` is only a
 
 The Arena panel reads executor/compatible V4 checkpoint lists on request and reacts immediately to side-type changes. Native opponents can use the same Bot build or the regular weighted/physical/virtual/single-deck Arena selector (`--native-deck-source`, `--deck_dir`); WindBot always keeps its own executor deck. Raw captures are always saved; `--verify` converts/replays without learning. Independent `--record-replay` saves both sides and board events for Holographic Replay. Optional `--record-evaluations` requires a native model and adds only its state predictions, at extra CPU cost. External confidence is not fabricated; aborts do not receive terminal labels.
 
-With a V4 opponent, the WebUI exposes an independent native-policy selector. The existing default `training` samples `Categorical(logits)` at fixed T=1.0; `greedy` uses argmax without a temperature; `deployment` exposes T=0.05–5.0, initially0.8. CLI equivalents are `--policy-mode` and `--temperature` for deployment. These settings affect neither WindBot nor normal Arena controls; uniform macro priors mean training-style sampling is not full Pass1 equivalence. Result JSON `native_policy` and Holographic metadata record the effective mode/temperature; non-model sessions report null.
+With a V4 opponent, the WebUI exposes an independent native-policy selector. The existing default `training` samples `Categorical(logits)` at fixed T=1.0; `greedy` uses argmax without a temperature; `deployment` exposes T=0.05–5.0, initially0.8. CLI equivalents are `--policy-mode` and `--temperature` for deployment. These settings affect neither WindBot nor normal Arena controls. From3.16.8 model-side macro proposals use the same model's Pass1 probabilities and the training builder, adding one CPU forward only for macro prompts. Result JSON `native_policy` and Holographic metadata record mode/temperature and `candidate_proposal=model_pass1_v1`; non-model sessions report null. This aligns proposal generation, not CPU/GPU numerics, RNG sequences, training regularization or entire games.
 
 The prototype rebuilds its native model/Core per controlled game rather than reusing a normal Arena instance. With successful terminal verification, each game loads scripts three times: actual play, offline conversion and independent replay. Five games therefore produce fifteen preload pairs, not fifteen games. Verification neither loads a policy network nor reruns WindBot; Core instances are created/closed sequentially. `[WindBot/对局]` and `[WindBot/校验]` identify these stages. Existing `seconds` measures the controlled session excluding initial model loading and terminal verification; `verification_seconds` separately measures conversion/replay. To watch games without immediate checks, disable terminal verification or omit `--verify`: one Core initialization per game, with raw captures/selected Holographic Replay still saved. Verify later using `replay-ingest --source link`; unverified captures are not accepted learning data.
 
@@ -341,7 +341,7 @@ policies and abnormal cleanup. Linux also passes central-inference single-Worker
 weight updates. This is a local bridge check, not public Link, every executor/distribution/architecture,
 cloud-GPU long training, human clients or BO3 acceptance. Prebuilt files retain the upstream framework
 target/source; manifests identify their bytes. P0 always starts; seeds do not control Bot randomness.
-Native CPU models use uniform canonical macro pools, not full training Pass1 equivalence. Complete
+Native CPU models use model Pass1 proposals from3.16.8; offline experts retain uniform canonical pools. Complete
 YRP evidence remains pending.
 Those Linux results used the earlier platform-specific build. The new shared-file packaging and build
 kit have not been retested on Linux; Ubuntu22.04 and the selected common assembly need target-machine

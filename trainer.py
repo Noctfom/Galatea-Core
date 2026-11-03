@@ -349,8 +349,43 @@ def training_autocast(device, amp_dtype):
 
 
 @torch.no_grad()
-def central_inference_results(network, observation, device, amp_dtype, graph_runner, measurement, return_logits):
+def central_inference_results(network, observation, device, amp_dtype, graph_runner, measurement, return_logits,
+                              *, value_only_rows=()):
     """只向服务循环返回CPU结果，避免跨批保留图输出及其私有池"""
+    if value_only_rows:
+        batch_size = next(iter(observation.values())).shape[0]
+        value_rows = sorted(set(value_only_rows))
+        if any(type(row) is not int or not 0 <= row < batch_size for row in value_rows):
+            raise ValueError('invalid value-only inference row')
+        action_rows = [row for row in range(batch_size) if row not in value_rows]
+        results = torch.zeros((batch_size, 3), device=device)
+        logits = torch.zeros((batch_size, 120), device=device)
+        with training_autocast(device, amp_dtype):
+            value_index = torch.tensor(value_rows, device=device)
+            value_obs = {name: value.index_select(0, value_index) for name, value in observation.items()}
+            values, _, _ = network.evaluate_state(value_obs)
+            results[value_index, 2] = values.reshape(-1).float()
+            if action_rows:
+                action_index = torch.tensor(action_rows, device=device)
+                action_obs = {name: value.index_select(0, action_index) for name, value in observation.items()}
+                scores, values, _ = (graph_runner.forward(action_obs) if graph_runner is not None
+                                    else network(action_obs))
+                logits[action_index] = scores.float()
+            if measurement is not None:
+                measurement.forward_execution = ('mixed_bootstrap' if action_rows else 'eager_bootstrap')
+                measurement.mark('forwarded')
+            # 截断取值不采样动作，也不消耗采样随机数或创建动作图缓存
+            if action_rows:
+                distribution = torch.distributions.Categorical(logits=scores)
+                actions = distribution.sample()
+                results[action_index] = torch.stack((actions.float(), distribution.log_prob(actions).float(),
+                                                     values.reshape(-1).float()), dim=1)
+        if measurement is not None:
+            measurement.mark('sampled')
+        if return_logits:
+            combined = torch.cat((results, logits), dim=1).cpu()
+            return combined[:, :3], combined[:, 3:]
+        return results.cpu(), None
     with training_autocast(device, amp_dtype):
         logits, values, state = graph_runner.forward(observation) if graph_runner is not None else network(observation)
         if measurement is not None:
@@ -1360,7 +1395,8 @@ class PPOTrainer:
         t_stats = {k: 0 for k in [
             'wins_all_first', 'games_all_first', 'wins_all_second', 'games_all_second',
             'wins_self_first', 'games_self_first', 'wins_self_second', 'games_self_second',
-            'wins_hist', 'games_hist', 'wins_rule', 'games_rule','deadlocks', 'timeouts', 'draws'
+            'wins_hist', 'games_hist', 'wins_rule', 'games_rule','deadlocks', 'timeouts', 'draws',
+            'truncated_step_limit', 'truncated_worker_budget',
         ]}
 
         t_deck_stats = {}
@@ -1498,6 +1534,9 @@ class PPOTrainer:
         avg_rew = np.mean(total_rewards) if total_rewards else 0.0
         avg_len = np.mean(total_lens) if total_lens else 0.0
         print(f"✅ 采集完成! 耗时: {t_cost:.1f}s | 样本: {cursor} | Avg Reward: {avg_rew:.2f}")
+        if t_stats['timeouts']:
+            print(f"⏳ 截断对局: 步数上限 {t_stats['truncated_step_limit']} | "
+                  f"Worker预算 {t_stats['truncated_worker_budget']} | 每局仅计一次")
         
         # 计算并写入胜率图表
         # 绘图面板分类排版
@@ -1614,6 +1653,7 @@ class PPOTrainer:
                     requests = []
                     pending_requests = {}
                     diagnostic_received, diagnostic_metadata = {}, {}
+                    value_only_requests = set()
 
                     def receive_request():
                         """接收一个请求，并在同批重复时只保留该 Worker 的最新请求"""
@@ -1657,6 +1697,9 @@ class PPOTrainer:
                             requests.append(wid)
 
                         pending_requests[wid] = (request_id, addr)
+                        value_only_requests.discard(wid)
+                        if metadata and metadata.get('value_only'):
+                            value_only_requests.add(wid)
                         if diagnostics is not None and diagnostics.active:
                             diagnostic_received[wid] = time.perf_counter_ns()
                             diagnostic_metadata[wid] = metadata
@@ -1723,7 +1766,8 @@ class PPOTrainer:
                             if measurement is not None:
                                 measurement.mark('transferred')
                             cpu_results, cpu_logits = central_inference_results(self.agent.net, batch_obs,
-                                self.device, self.amp_dtype, graph_runner, measurement, shared_logits is not None)
+                                self.device, self.amp_dtype, graph_runner, measurement, shared_logits is not None,
+                                value_only_rows=tuple(i for i, wid in enumerate(requests) if wid in value_only_requests))
                         finally:
                             batch_obs = None
                     if measurement is not None:

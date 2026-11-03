@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.16.8] - 2026-11-03
+
+### Effect-question decoding and rollout completion
+
+- Read Type12's full position field before its description in the bundled public Core's fixed13-byte payload, correcting effect slots and history references. Yes/No remains1/0; no Core variant switch or upstream Core/Link changes
+- Distinguish real terminals, decision limits, Worker budgets and failures while retaining actual decisions. After a limit, advance only to the training player's next trustworthy decision or a true terminal, checking a15-second grace period; roll back games without a trustworthy successor
+- Bootstrap trusted truncations with the existing successor-state value head and episode deck-FiLM mask; true terminals use zero. Internal value-only requests reuse shared slots/completion IDs without sampling, action graphs or learning rows. Existing checkpoints remain usable; restart Trainer and Workers together
+- Count each truncation once and distinguish decision-limit/Worker-budget reasons in collection logs. Stalled pumps and Retry before truncation are no longer fabricated zero-reward truncations. Pre3.16.8 Timeout_Rate and fabricated1500-step lengths are not directly comparable
+- Controlled WindBot native models use their own Pass1 priors for macro candidates, matching the training/ordinary-Arena construction method. Results/replays record the proposal version. Only macro prompts add a CPU forward; expert offline pools retain independent uniform priors without answer injection
+- Update bilingual architecture, metric, trajectory and roadmap guidance, including stale imitation status. Rebuild old Type12-shifted traces/expert caches from full raw captures rather than bypassing digest checks. No vocabulary or semantic rebuild is required
+- Framework3.16.8 retains Model Protocol4, Checkpoint3, revision14, static semantics1, trajectory2, GKG4/5 and network parameter shapes. Reward values, GAE settings, PPO controls and later learning/architecture plans are unchanged; truncation targets are intentionally corrected
+- Validation:957 tests and50 subtests pass,48 optional-environment cases skip. Two additional real-Core CPU/CUDA truncation→PPO checks and two WindBot CPU/CUDA collection→PPO checks pass, as do controlled-model smoke checks for all three Arena policies. All20 Link read-only-Core prompt-encoding comparisons pass, including both formerly expected Type12 failures. Bounded local checks do not replace target-Linux long-run acceptance; no WSL was used
+
 ## [v3.16.7] - 2026-11-03
 
 ### GKG shared content and default graph acceleration

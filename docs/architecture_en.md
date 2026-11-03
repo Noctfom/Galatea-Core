@@ -556,6 +556,10 @@ effective optimizer rates. Resume uses current launch controls rather than treat
 audit values as command-line overrides. `train_step` counts actual optimizer updates; FP16
 GradScaler skips no longer advance the auxiliary ramp. Network/protocol contracts remain unchanged.
 
+From3.16.8, collection distinguishes true terminals, decision limits, Worker budgets and failures. Once a limit is reached, no new training-player action starts. Consume messages/opponent replies until that player's next decision or a true terminal, checking a15-second boundary grace period; roll back games without a trustworthy boundary. Terminal GAE bootstraps with zero; trusted truncation evaluates the successor state from the training player's perspective rather than reusing the last pre-action value. Preserve the episode's deck-FiLM mask. The existing value head produces no action, log-prob or learning row for this request. An internal value-only ZMQ request reuses shared slots/completion IDs; ordinary action inference and V4 tensor shapes stay unchanged. Restart Trainer and Workers together.
+
+Count each truncation once, retaining actual decision counts and separate decision-limit/Worker-budget reasons in logs. Stalled pumps, rejected responses and failed evaluations are not fabricated zero-reward truncations. Outcome rewards, long-game/repetition penalties, GAE settings and PPO objectives retain their values; corrected truncation targets intentionally differ from the old erroneous implementation.
+
 ### Interpreting KL early stopping
 
 KL measures drift from the rollout-collection policy, not win rate, percentage loss or knowledge learned.

@@ -5,8 +5,17 @@ class InferenceProtocolError(RuntimeError):
     """表示中心推理响应或共享结果与当前请求不匹配"""
 
 
-def encode_inference_request(worker_id, request_id, *, phase=None, submitted_ns=None, input_fill_ns=0):
+def encode_inference_request(worker_id, request_id, *, phase=None, submitted_ns=None, input_fill_ns=0, value_only=False):
     """将 Worker 编号和请求号编码为服务端可解析的字节串"""
+    if value_only:
+        if phase not in (None, 'Bootstrap'):
+            raise InferenceProtocolError('invalid value-only inference phase')
+        suffix = ''
+        if phase is not None:
+            if type(submitted_ns) is not int or submitted_ns <= 0 or type(input_fill_ns) is not int or input_fill_ns < 0:
+                raise InferenceProtocolError('invalid inference diagnostic metadata')
+            suffix = f':{submitted_ns}:{input_fill_ns}'
+        return f'V1:{int(worker_id)}:{int(request_id)}{suffix}'.encode('ascii')
     if phase is not None:
         if phase not in ("Pass1", "Pass2") or type(submitted_ns) is not int or submitted_ns <= 0 or type(input_fill_ns) is not int or input_fill_ns < 0:
             raise InferenceProtocolError("invalid inference diagnostic metadata")
@@ -25,7 +34,15 @@ def decode_inference_envelope(payload):
     try:
         fields = payload.decode("ascii").split(":")
         metadata = None
-        if fields[0] == "D1" and len(fields) == 6:
+        if fields[0] == 'V1' and len(fields) in (3, 5):
+            _, worker_text, request_text = fields[:3]
+            metadata = {'value_only': True, 'phase': 'Bootstrap'}
+            if len(fields) == 5:
+                submitted_ns, input_fill_ns = map(int, fields[3:])
+                if submitted_ns <= 0 or input_fill_ns < 0:
+                    raise ValueError('invalid diagnostic metadata')
+                metadata.update(submitted_ns=submitted_ns, input_fill_ns=input_fill_ns)
+        elif fields[0] == "D1" and len(fields) == 6:
             _, worker_text, request_text, phase, submitted, filled = fields
             submitted_ns, input_fill_ns = int(submitted), int(filled)
             if phase not in ("Pass1", "Pass2") or submitted_ns <= 0 or input_fill_ns < 0:
@@ -73,19 +90,39 @@ def request_shared_inference_result(
     *,
     phase=None,
     input_fill_ns=0,
+    value_only=False,
+    deadline=None,
 ):
     """请求中心推理，并仅在响应号和共享槽完成号一致时复制结果"""
     if response_id_slot is None:
         raise InferenceProtocolError("missing shared inference response id slot")
 
     if phase is None:
-        payload = encode_inference_request(worker_id, request_id)
+        payload = encode_inference_request(worker_id, request_id, value_only=value_only)
     else:
         import time
         payload = encode_inference_request(worker_id, request_id, phase=phase,
-            submitted_ns=time.perf_counter_ns(), input_fill_ns=input_fill_ns)
-    socket.send(payload)
-    reply = socket.recv()
+            submitted_ns=time.perf_counter_ns(), input_fill_ns=input_fill_ns, value_only=value_only)
+    if deadline is None:
+        socket.send(payload)
+        reply = socket.recv()
+    else:
+        import time
+        import zmq
+        original_send = socket.getsockopt(zmq.SNDTIMEO)
+        original_receive = socket.getsockopt(zmq.RCVTIMEO)
+        try:
+            # 同一个绝对截止时间覆盖发送与接收，截断宽限不被旧的 60 秒等待放大
+            for option, operation in ((zmq.SNDTIMEO, lambda: socket.send(payload)),
+                                      (zmq.RCVTIMEO, socket.recv)):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InferenceProtocolError('inference request deadline expired')
+                socket.setsockopt(option, max(1, int(remaining * 1000)))
+                reply = operation()
+        finally:
+            socket.setsockopt(zmq.SNDTIMEO, original_send)
+            socket.setsockopt(zmq.RCVTIMEO, original_receive)
     validate_inference_success(reply, request_id)
 
     completed_request_id = int(response_id_slot.item())
@@ -231,7 +268,7 @@ class CentralInferenceDiagnostics:
             "requests": {phase: {"count": len(group), "ms": {
                 name: summary([row[name] for row in group if row.get(name) is not None])
                 for name in ('input_fill', 'submit_to_receive', 'server_wait', 'submit_to_reply')}}
-                for phase in ('Pass1', 'Pass2', 'unlabelled')
+                for phase in ('Pass1', 'Pass2', 'Bootstrap', 'unlabelled')
                 for group in [[row for row in requests if row['phase'] == phase]]},
             "measurement": {"clock": "same_host_perf_counter_ns",
                 "cpu": "host_stage_wall_time", "cuda": "stream_intervals_including_launch_gaps",

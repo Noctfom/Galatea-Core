@@ -14,6 +14,26 @@ from integrations.windbot.bridge import DECISIONS, YGOProPeer, prompt_actor, vis
 from integrations.windbot.runtime import ROOT, executor_catalog, executable_sha256, launch_bot, load_deck
 
 
+def prepare_model_decision_snapshot(interpreter, env, message, rng, bot, actor):
+    """模型侧复用主训练的 Pass1 先验，专家离线候选仍使用独立的均匀重建合同"""
+    import torch
+    from action_candidates import MACRO_ACTION_MSGS, build_macro_action_pool
+    snapshot = interpreter.snapshot(env)
+    if message[0] not in MACRO_ACTION_MSGS:
+        return snapshot
+    base_actions = list(interpreter.brain.current_valid_actions)
+    observation = bot.encoder.encode(snapshot, player_id=actor)
+    with torch.no_grad():
+        logits, _, _ = bot.net(observation)
+        probabilities = torch.softmax(logits[0], dim=-1).cpu().numpy()
+    candidates = build_macro_action_pool(message[0], message[1:], interpreter.brain,
+        base_actions, probabilities, option_limit=5000, rng=rng)
+    if not candidates:
+        raise ValueError('model Pass1 produced no legal macro candidates')
+    interpreter.brain.current_valid_actions = candidates
+    return interpreter.snapshot(env)
+
+
 def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=None,
         windbot_seat=1, model=None, native_deck=None, seed=73, timeout=600,
         response_timeout=30, max_decisions=2000, capture_root='./replays/link_captures',
@@ -115,6 +135,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         'deck_paths': {str(actor): str(path) for actor, path in deck_paths.items()},
         'native_deck_source': native_deck_source, 'replay_path': None,
         'native_policy': {'policy_mode': policy_mode, 'temperature': temperature,
+                          'candidate_proposal': 'model_pass1_v1',
                           **ArenaBranchRetry.metadata()} if model else None}
     try:
         print('🏟️ [WindBot/对局] 初始化本局 Core 与脚本；此阶段运行实际对局。')
@@ -157,7 +178,8 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                 logger.set_decklists(decks['0']['main'], decks['0']['extra'],
                     decks['1']['main'], decks['1']['extra'],
                     p0_name=Path(deck_paths[0]).stem, p1_name=Path(deck_paths[1]).stem)
-                policy = {'policy_mode': policy_mode, 'temperature': temperature, **ArenaBranchRetry.metadata()}
+                policy = {'policy_mode': policy_mode, 'temperature': temperature,
+                          'candidate_proposal': 'model_pass1_v1' if model else None, **ArenaBranchRetry.metadata()}
                 replay_models = {seat: {'kind': info['kind']} for seat, info in participants.items()}
                 if model:
                     replay_models[str(native_actor)].update(bot.model_metadata)
@@ -208,7 +230,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                             response = peers[actor].respond(message, env)
                         elif model and kind in MODEL_ACTION_MSGS:
                             import torch
-                            snapshot = prepare_canonical_decision_snapshot(interpreter, env, message, rng)
+                            snapshot = prepare_model_decision_snapshot(interpreter, env, message, rng, bot, actor)
                             decision_snapshot = snapshot
                             observation = bot.encoder.encode(snapshot, player_id=actor)
                             with torch.no_grad():

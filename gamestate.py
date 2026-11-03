@@ -1406,14 +1406,10 @@ class DuelState:
 
             # 5. MSG_SELECT_YESNO (13) / EFFECTYN (12)
             elif msg_type == 12:
-                # [C++源码证实] 有卡片实体
-                # 结构: P(1) + Code(4) + C(1) + L(1) + S(1) + Desc(4)
-                stream.read(1) # P
-                code = struct.unpack('<I', stream.read(4))[0]
-                c = struct.unpack('<B', stream.read(1))[0]
-                l = struct.unpack('<B', stream.read(1))[0]
-                s = struct.unpack('<B', stream.read(1))[0]
-                desc = struct.unpack('<I', stream.read(4))[0]
+                # 固定公开 Core 载荷为玩家、卡密、四字节位置和描述编号，共 13 字节
+                _, code, c, l, s, _position, desc = struct.unpack(
+                    '<BIBBBBI', stream.read(13)
+                )
                 
                 # 关键：绑定卡片位置,让 AI 知道是哪张卡在问
                 loc_raw = LocationInfo.encode(c, l, s, 0)

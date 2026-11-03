@@ -237,7 +237,9 @@ Ordinary YRP lacks historical asset hashes and original full Core output; flags
 
 The optional 3.15.0 controlled runner reuses this SDK without the Link project. Optional `external_session` contract-v1 metadata contains a session UUID, both physical participants, executors, declared source commit and actual executable digest. It is not a model input or source authentication. Conversion preserves it under `ingress`; existing captures without it retain the old contract.
 
-Type23's responder is `payload[1]`; `payload[0]` is the selection mode. State, training dispatch, Arena, ingestion and independent replay share Core's player reader. Old traces with a mode-derived wrong actor are rejected rather than silently relabeled. Complete YRP evidence and imitation optimization remain pending; see the [controlled module](../integrations/windbot/README.md).
+Type23's responder is `payload[1]`; `payload[0]` is the selection mode. State, training dispatch, Arena, ingestion and independent replay share Core's player reader. Old traces with a mode-derived wrong actor are rejected rather than silently relabeled. Independent imitation collection, BC and evaluation are implemented; historical YRP without sufficient evidence remains ineligible. See the [controlled module](../integrations/windbot/README.md).
+
+Version3.16.8 fixes Type12 effect-question descriptions. Its fixed13-byte payload contains the player, card code, controller/location/sequence/position and32-bit description. Yes/No remains1/0; entity location keys are unchanged and effect slots use the full description. V4 fields and network shapes do not change. Regenerate old deterministic traces/expert caches containing the shifted observations from full raw captures; do not bypass digest checks to retain incorrect semantics. Existing model weights remain usable.
 
 `LINK_CAPTURE_FORMAT_VERSION=1` lives in `trajectory_ingest.py`. The SDK records raw Core chunks and
 actually submitted responses, using physical seats0/1; it does not operate the policy.

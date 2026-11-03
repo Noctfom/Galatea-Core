@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.16.7. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.16.8. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -29,7 +29,7 @@ WindBot belongs to Core's [optional integration directory](../integrations/windb
 - [x] 3.15.2: Program identity association audit reports shared identities and hypothetical group counts without program edges. Actual isolation still uses all stable identities; human/unknown handling remains conservative
 - [x] 3.15.3: Explicit duel/build/executor holdout goals. Program IDs retain provenance; human/unknown identities remain transitively grouped. Explicit family configuration is supported, not guessed automatic clustering
 - [x] WindBot-side Type15 physical-index-set label equivalence uses a Core-owned versioned interface for future Link reuse. All471 decisions in the original Albaz capture now map, with original responses/observations unchanged. Default/ordered matching, public ygocore, RuleBot packaging and training semantics are unchanged
-- [ ] Separately audit true reduced-pool coverage and other prompt-specific adapters. Design per-sample eligibility independently, without expert-answer injection or automatic whole-duel gate relaxation
+- [ ] Continue reviewing true reduced-pool coverage and prompt-specific adapters; native demonstrations can already drop unmapped expert labels, while canonical traces retain completeness checks without expert-answer injection
 - [x] 3.15.1: Core-owned host Start/query ingress, framing, sparse attributes and diagnostic projection. WindBot reuses packet builders/filtering; queries create neither actions nor transition events and never masquerade as original Core chunks
 - [ ] Accept full V4 online inference from a single-player view separately: opponent response boundaries, Type160 hints and dynamic-attribute coverage are not fully proven by this conservative profile. Default encoding stays gated; actual Link networking is future work
 - [x] 3.15.3: Independent BC optimizer, epoch budget, experimental UUID/checkpoints, one-time preparation/compressed caches, single-Core native collection and candidate/baseline fixed-build swapped-seat evaluation. Engineering closure only, not demonstrated playing-strength improvement
@@ -43,9 +43,11 @@ WindBot belongs to Core's [optional integration directory](../integrations/windb
 - [x] 3.16.4: All Arena modes and controlled native-model duels use leaf-first closed-return retries, matching response identities across macro-pool reordering; main training unchanged
 - [x] 3.16.6: Per-game configurable mirror/training-pool mixing for model decks in WindBot training; retain pure modes, actual-mode statistics and league/extra-Rule coverage behavior
 
-Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.
+Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and selected public prebuilt runtime files in the repository with manifests; intermediate build caches/logs stay out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.
 
 ## V4 deployment and training validation
+
+- [x] 3.16.8: Fix the fixed13-byte Type12 description reader, successor-value bootstrapping and single-count truncation statistics; controlled WindBot native models use Pass1 macro proposals. Network, V4 fields and reward settings remain unchanged; later learning/architecture work is separate
 
 - [x] 3.14.0: full V4 main-framework deployment, direct CUDA semantic aggregation and bilingual documentation audit; Model Protocol4/Checkpoint3/revision14 unchanged
 - [x] 3.14.1: public-hint/announcement hotfixes, deployment labels and public metric-reference corrections, dual-view prediction cursors/coverage diagnostics; protocols and network unchanged

@@ -87,8 +87,8 @@ Logging: [trainer.py](../trainer.py#L1239). Generation: [Worker rewards and GAE]
 | Chart | Y-axis and aggregation | Interpretation and limits |
 |---|---|---|
 | `Rollout/Average_Reward` | Equal-weight average of nonzero Worker mean episode rewards | Rising under matched conditions is encouraging; not a win rate or game-weighted mean; excluding zero means introduces bias |
-| `Rollout/Average_Length` | Equal-weight average of nonzero Worker mean ep_steps | Falling can mean faster wins/fewer empty actions, different opponents, or different truncation frequencies |
-| `Rollout/Timeout_Rate` | Worker timeouts counter / total counted games | Currently includes duplicate counting; not a literal fraction of timed-out games |
+| `Rollout/Average_Length` | Equal-weight average of nonzero Worker mean actual ep_steps | Falling can mean faster wins/fewer empty actions, different opponents or truncation frequencies; from3.16.8 Worker-budget exits no longer fabricate1500 steps |
+| `Rollout/Timeout_Rate` | Trusted nonterminal truncated games / total counted games, counted once per game | Includes decision limits and Worker budgets; pre3.16.8 records may double-count and are not directly comparable; rolled-back failures are excluded |
 | `Rollout/Deadlock_Rate` | Worker deadlocks counter / total counted games | Aborts generally roll back before this counter; zero does not establish absence of errors/deadlocks |
 | `Rollout/Draw_Rate` | Worker draws counter / total counted games | Tracks draw-like settlements, not all truncations or aborted games |
 

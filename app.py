@@ -293,7 +293,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.7"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.8"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1902,8 +1902,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                             help=_("温度越低越接近贪心；越高越容易探索其他合法动作。只用于部署温度采样。",
                                 "Lower temperatures approach greedy play; higher values explore other legal actions. Used only in deployment sampling."))
                     elif wb_policy_mode == 'training':
-                        st.caption(_("按 Categorical(logits) 采样，温度固定为1.0；本入口的宏候选仍使用均匀先验，不表示完整复现训练 Pass1 选池。",
-                            "Samples Categorical(logits) at fixed T=1.0. Macro pools still use uniform priors here, not the full training Pass1 selection pipeline."))
+                        st.caption(_("按模型概率采样，温度固定为1.0；多选组合先由模型给素材打分，再构建合法候选，与主训练使用相同的候选生成方式。本入口模型在CPU运行。",
+                            "Samples model probabilities at fixed T=1.0. For combination choices, the model scores materials before building legal candidates, using the training proposal method. This session runs the model on CPU."))
                     else:
                         st.caption(_("每次选择最高 Logit 的合法动作，不使用采样温度。", "Chooses the legal action with the highest logit; no sampling temperature is used."))
                 elif wb_other == 'windbot':

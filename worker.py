@@ -11,6 +11,7 @@ import time
 import random
 import os
 import gc
+import math
 import struct
 import zmq
 import sys
@@ -110,6 +111,30 @@ def get_repeated_action_penalty(action, repeat_count):
 def build_training_loop_key(state_key, action_index):
     """压缩完整状态键用于局内计数，避免长期保留大型场面元组"""
     return hash(state_key), int(action_index)
+
+
+def requested_rollout_stop(steps, elapsed, uptime):
+    """保留真实步数，分别识别决策上限和 Worker 采集预算"""
+    if steps >= MAX_EPISODE_STEPS:
+        return 'step_limit'
+    if elapsed > uptime:
+        return 'worker_budget'
+    return None
+
+
+def complete_rollout_advantages(trajectory, final_reward, gamma, gae_lambda, bootstrap_value=0.0):
+    """从可信后继价值回推 GAE，真实终局由调用方传入零值"""
+    if not math.isfinite(bootstrap_value):
+        raise ValueError('non-finite rollout bootstrap value')
+    next_value, advantage = float(bootstrap_value), 0.0
+    for index in reversed(range(len(trajectory))):
+        row = trajectory[index]
+        reward = row.get('step_reward', 0.0) + (final_reward if index == len(trajectory) - 1 else 0.0)
+        delta = reward + gamma * next_value - row['value']
+        advantage = delta + gamma * gae_lambda * advantage
+        row['advantage'] = advantage
+        row['return'] = advantage + row['value']
+        next_value = row['value']
 
 
 def get_worker_process_memory_status():
@@ -355,7 +380,7 @@ def worker_process(
     # 高 32 位使用训练轮次，避免新一轮 Worker 的请求号与上一轮重复。
     next_inference_request_id = int(iteration) << 32
 
-    def request_central_result(result_slot, phase, input_fill_ns=0):
+    def request_central_result(result_slot, phase, input_fill_ns=0, *, value_only=False):
         """请求中心推理；连接异常时重建 Socket，并阻止读取旧共享结果"""
         nonlocal socket, socket_generation, next_inference_request_id
         next_inference_request_id += 1
@@ -371,6 +396,8 @@ def worker_process(
                 request_id,
                 response_id_slot,
                 result_slot,
+                **({'value_only': True} if value_only else {}),
+                **({'deadline': truncation_started + 15.0} if truncation_started is not None else {}),
                 **({'phase': phase, 'input_fill_ns': input_fill_ns} if inference_profile else {}),
             )
         except (zmq.ZMQError, InferenceProtocolError) as exc:
@@ -488,7 +515,8 @@ def worker_process(
             'wins_self_second': 0, 'games_self_second': 0,
             'wins_hist': 0, 'games_hist': 0,
             'wins_rule': 0, 'games_rule': 0,
-            'deadlocks': 0, 'timeouts': 0, 'draws': 0
+            'deadlocks': 0, 'timeouts': 0, 'draws': 0,
+            'truncated_step_limit': 0, 'truncated_worker_budget': 0,
         }
 
         deck_records = []
@@ -663,6 +691,9 @@ def worker_process(
             ep_steps = 0
             win_reason = 0
             core_terminal_received = False
+            truncation_reason = None
+            truncation_started = None
+            bootstrap_value = None
             
             # 短期记忆与 Retry 逻辑
             consecutive_retries = 0
@@ -676,12 +707,23 @@ def worker_process(
 
             loop_tracker = {}
 
-            while ep_steps < MAX_EPISODE_STEPS:
+            while True:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
+                now = time.monotonic()
+                if truncation_reason is None:
+                    truncation_reason = requested_rollout_stop(ep_steps, now - worker_start_time, max_worker_uptime)
+                    if truncation_reason is not None:
+                        truncation_started = now
+                # 只推进到训练方下一决策或真实终局，最多使用预留保存时间中的 15 秒
+                if truncation_started is not None and now - truncation_started > 15.0:
+                    episode_aborted = True
+                    episode_abort_reason = 'truncation boundary timeout'
+                    break
                 # 超时保护
                 if time.monotonic() - last_act_time > 15.0:
-                    print(f"⚠️ [Worker {worker_id}] 引擎 15 秒无响应，触发超时强制结算！")
-                    ep_steps = MAX_EPISODE_STEPS  # 强制拉满，骗过底下的结算条件
+                    print(f"⚠️ [Worker {worker_id}] 消息泵 15 秒无进展，本局回滚")
+                    episode_aborted = True
+                    episode_abort_reason = 'engine progress timeout'
                     break
 
                 # 消息泵
@@ -741,17 +783,59 @@ def worker_process(
                     episode_abort_reason = f"game state update failed: {e}"
                     break
 
+                if truncation_reason is not None:
+                    if msg_type == 1:
+                        episode_aborted = True
+                        episode_abort_reason = 'response rejected before truncation boundary'
+                        break
+                    if (msg_type in AI_MANAGED_MSGS and not is_empty_chain_prompt(msg_type, msg[1:])
+                            and decision_player_from_message(msg_type, msg[1:]) == train_p_id):
+                        try:
+                            if game_buffer[train_p_id]:
+                                t_start = time.monotonic()
+                                snapshot = brain.get_snapshot(env)
+                                perf_ledger['t_cpp_env'] += time.monotonic() - t_start
+                                t_start = time.monotonic()
+                                observation = agent.encoder.encode(snapshot, player_id=train_p_id)
+                                observation['deck_film_mask'].fill_(episode_deck_film_enabled)
+                                perf_ledger['t_encoder'] += time.monotonic() - t_start
+                                t_start = time.monotonic()
+                                profile_fill_start = time.perf_counter_ns() if inference_profile else 0
+                                for name, value in observation.items():
+                                    if name in shared_buffers[worker_id]:
+                                        shared_buffers[worker_id][name].copy_(value.squeeze(0))
+                                bootstrap_value = float(request_central_result(
+                                    shared_outputs[worker_id], 'Bootstrap',
+                                    time.perf_counter_ns() - profile_fill_start if inference_profile else 0,
+                                    value_only=True,
+                                )[2].item())
+                                if not math.isfinite(bootstrap_value):
+                                    raise ValueError('non-finite bootstrap value')
+                                perf_ledger['t_central'] += time.monotonic() - t_start
+                            else:
+                                bootstrap_value = 0.0
+                            print(f"⏳ [Worker {worker_id}] 本局截断: {truncation_reason} | "
+                                  f"实际决策 {ep_steps} 步 | 后继价值 {bootstrap_value:.4f}")
+                        except Exception as error:
+                            episode_aborted = True
+                            episode_abort_reason = f'truncation evaluation failed: {error}'
+                        break
+
                 # 机器人只消费自己的可见消息，响应不写入PPO动作行
                 if windbot_opponent is not None:
                     try:
                         windbot_opponent.observe(msg)
                         if (msg_type in DECISION_MSGS and not is_empty_chain_prompt(msg_type, msg[1:])
                                 and decision_player_from_message(msg_type, msg[1:]) == opp_p_id):
-                            if time.monotonic() - worker_start_time > max_worker_uptime:
-                                ep_steps = MAX_EPISODE_STEPS
-                                break
                             t_windbot = time.monotonic()
-                            resp = windbot_opponent.respond(msg, env)
+                            previous_timeout = windbot_opponent.peer.timeout
+                            try:
+                                if truncation_started is not None:
+                                    windbot_opponent.peer.timeout = min(previous_timeout,
+                                        max(.001, truncation_started + 15.0 - time.monotonic()))
+                                resp = windbot_opponent.respond(msg, env)
+                            finally:
+                                windbot_opponent.peer.timeout = previous_timeout
                             perf_ledger['t_windbot'] += time.monotonic() - t_windbot
                             env.send_action(resp)
                             brain.begin_transition_event(opp_p_id, msg_type, resp)
@@ -818,12 +902,6 @@ def worker_process(
                     last_interaction_msg = msg
                     ai_handled = False
                     
-                    # 每次到了能操作的阶段，检查下班时间
-                    if time.monotonic() - worker_start_time > max_worker_uptime:
-                        print(f"⏳ [Worker {worker_id}] 达到最大服役时间上限，安全下班并上交数据...")
-                        ep_steps = MAX_EPISODE_STEPS
-                        break
-
                     # 获取当前行动玩家
                     t_start = time.monotonic()  #计时器1
 
@@ -1251,6 +1329,7 @@ def worker_process(
                             episode_abort_reason = f"RuleBot action failed: {e}"
                             break
 
+            episode_truncated = winner == -1 and truncation_reason is not None and bootstrap_value is not None
             # 先回收外部进程，再复用原有整局提交与异常回滚
             if windbot_opponent is not None:
                 windbot_record = {'executor': windbot_entry['executor'],
@@ -1263,6 +1342,7 @@ def worker_process(
                     'opponent_deck_sha256': windbot_entry.get('deck_sha256', ''),
                     'draw': core_terminal_received and winner not in (0, 1),
                     'completed': core_terminal_received, 'aborted': episode_aborted,
+                    'end_reason': 'terminal' if core_terminal_received else truncation_reason or episode_abort_reason,
                     'win': core_terminal_received and winner == train_p_id,
                     'model_steps': len(game_buffer[train_p_id]),
                     'responses': windbot_opponent.responses,
@@ -1277,7 +1357,7 @@ def worker_process(
                 windbot_opponent = None
 
             # 未产生可信终局的退出一律视为异常局，禁止其观察行进入训练批次。
-            if not episode_aborted and winner == -1 and ep_steps < MAX_EPISODE_STEPS:
+            if not episode_aborted and winner == -1 and not episode_truncated:
                 episode_aborted = True
                 episode_abort_reason = "episode loop exited without a terminal or truncation state"
 
@@ -1317,7 +1397,7 @@ def worker_process(
             last_episode_abort_key = None
 
             # --- 结算与 GAE ---
-            if winner != -1 or ep_steps >= MAX_EPISODE_STEPS:
+            if winner != -1 or episode_truncated:
                 if ep_steps == 0:
                     consecutive_ai_fails += 1
                     if consecutive_ai_fails >= 3:
@@ -1383,8 +1463,9 @@ def worker_process(
 
                     final_reward = 0.0
 
-                    if ep_steps >= MAX_EPISODE_STEPS:
+                    if episode_truncated:
                         stats['timeouts'] += 1
+                        stats[f'truncated_{truncation_reason}'] += 1
 
                     if winner != -1 and winner <= 1:
                         if winner == train_p_id:
@@ -1437,14 +1518,8 @@ def worker_process(
                             stats['draws'] += 1
                             final_reward = 0.0  # 平局
                     elif winner == -1:
-                        if ep_steps < MAX_EPISODE_STEPS:
-                            # 没到最大步数就停了，说明是引擎死锁了，这是致命的逻辑错误
-                            stats['deadlocks'] += 1
-                            final_reward = -1.0 
-                        else:
-                            # 达到了最大步数，说明是说书超时
-                            stats['timeouts'] += 1
-                            final_reward = 0.0
+                        # 可信截断没有终局胜负，不伪造平局或额外奖励
+                        final_reward = 0.0
                     else:
                         stats['draws'] += 1
                         final_reward = 0.0
@@ -1452,7 +1527,7 @@ def worker_process(
                     total_t = perf_ledger['t_cpp_env'] + perf_ledger['t_encoder'] + perf_ledger['t_central'] + perf_ledger['t_local_opponent'] + perf_ledger['t_pass1_cpu'] + perf_ledger['t_rule_bot'] + perf_ledger['t_windbot']
                     safe_t = max(0.0001, total_t)
                     print(f"\n📊 [Worker {worker_id} 审计报告] 单局步数: {perf_ledger['steps']} | 交互总耗时: {total_t:.2f}s")
-                    print(f"对手类型: {opp_type} | 胜负结果: {'胜' if winner == train_p_id else '负' if winner == opp_p_id else '平'} | 最终奖励: {final_reward:.2f}")
+                    print(f"对手类型: {opp_type} | 胜负结果: {'截断' if episode_truncated else '胜' if winner == train_p_id else '负' if winner == opp_p_id else '平'} | 最终奖励: {final_reward:.2f}")
                     print(f"   ├── 🧱 [环境/底盘] C++执行与解包: {perf_ledger['t_cpp_env']:.2f}s ({perf_ledger['t_cpp_env']/safe_t*100:.1f}%)")
                     print(f"   ├── 📐 [表征/特征] Encoder 矩阵生成: {perf_ledger['t_encoder']:.2f}s ({perf_ledger['t_encoder']/safe_t*100:.1f}%)")
                     print(f"   ├── 📡 [多进程管道] 中央推理往返(含自对局双侧): {perf_ledger['t_central']:.2f}s ({perf_ledger['t_central']/safe_t*100:.1f}%)")
@@ -1461,19 +1536,11 @@ def worker_process(
                     print(f"   ├── 👁️ [意图感知] Pass1 预查表耗时 : {perf_ledger['t_pass1_cpu']:.2f}s ({perf_ledger['t_pass1_cpu']/safe_t*100:.1f}%)")
                     print(f"   └── 🧠 [参谋部/规则] RuleBot 穷举打分: {perf_ledger['t_rule_bot']:.2f}s ({perf_ledger['t_rule_bot']/safe_t*100:.1f}%)")
 
-                    rewards = [0] * len(traj)
-                    if rewards: rewards[-1] = final_reward
-
                     ep_total_reward = sum(item.get('step_reward', 0.0) for item in traj) + final_reward
                     episode_rewards.append(ep_total_reward)
                     
-                    advantages = []
-                    last_gae_lam = 0
-                    # 修复：区分“真死”和“超时截断”
-                    next_value = 0.0
-                    if ep_steps >= MAX_EPISODE_STEPS: # 如果是超时被强行截断的
-                        # 使用最后一步的价值网络预测值作为未来收益的保底，而不是直接视为 0，这样可以让模型学会在超时前尽可能积累价值，而不是放弃抵抗
-                        next_value = traj[-1]['value']
+                    complete_rollout_advantages(traj, final_reward, gamma, gae_lambda,
+                                                bootstrap_value if episode_truncated else 0.0)
 
                     # 终极内存防爆：预分配连续内存，告别 list 与 torch.cat
                     if 'columns' not in locals():
@@ -1487,20 +1554,6 @@ def worker_process(
                             'advantage': torch.zeros(max_len, dtype=torch.float16)
                         }
                         ptr = 0 # 内存写入指针
-                    
-                    # 逆序计算 GAE，从后往前填充预分配的内存池
-                    for t in reversed(range(len(traj))):
-                        # 获取这一步的面包屑奖励
-                        s_rew = traj[t].get('step_reward', 0.0)
-                        # 只有最后一步才加上胜负大奖 (rewards[t] 就是 final_reward)
-                        actual_rew = s_rew + (rewards[t] if t == len(traj) - 1 else 0.0)
-                        
-                        delta = actual_rew + gamma * next_value - traj[t]['value']
-                        last_gae_lam = delta + gamma * gae_lambda * last_gae_lam
-                        traj[t]['advantage'] = last_gae_lam
-                        traj[t]['return'] = last_gae_lam + traj[t]['value']
-                        
-                        next_value = traj[t]['value']
                     
                     for i, t_data in enumerate(traj):
                         idx = rollout_cursor.episode_start_pos + i

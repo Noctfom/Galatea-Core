@@ -86,8 +86,8 @@
 | 图表 | 纵轴与记录方式 | 走向与限制 |
 |---|---|---|
 | `Rollout/Average_Reward` | 各 Worker 的单局总奖励均值，再对非零 Worker 均值做等权平均 | 同分布上升通常有利；不是胜率，也不是所有对局的加权平均；零均值被排除会造成偏差 |
-| `Rollout/Average_Length` | 各 Worker 单局 ep_steps 均值再等权平均，排除零均值 | 降低可能是更快取胜/更少空操作，也可能改变了对手结构或截断比例 |
-| `Rollout/Timeout_Rate` | Worker 的 timeouts 计数 / 总计入对局数 | 当前存在重复计数，不能直接解释成真实超时局百分比 |
+| `Rollout/Average_Length` | 各 Worker 单局实际 ep_steps 均值再等权平均，排除零均值 | 降低可能是更快取胜/更少空操作，也可能改变了对手结构或截断比例；3.16.8起不再把Worker预算结束伪记为1500步 |
+| `Rollout/Timeout_Rate` | 可信非终局截断局数 / 总计入对局数，每局只计一次 | 包括步数上限和Worker预算结束；旧于3.16.8的记录可能重复计数，不能直接与新版比例比较；异常回滚不计入 |
 | `Rollout/Deadlock_Rate` | Worker 的 deadlocks 计数 / 总计入对局数 | 当前异常局通常在此计数前回滚；零线不能证明没有异常或死锁 |
 | `Rollout/Draw_Rate` | Worker 的 draws 计数 / 总计入对局数 | 观察真实平局类结算；不包含所有非终局截断或异常回滚 |
 
