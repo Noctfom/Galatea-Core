@@ -1,6 +1,7 @@
 # 本文件统一管理检查点、ONNX 外置权重及部署包中的模型产物
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -8,6 +9,7 @@ import stat
 import tempfile
 import time
 import zipfile
+import unicodedata
 from pathlib import Path, PurePosixPath
 
 from card_vocab import (
@@ -46,7 +48,9 @@ from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME
 
 ARTIFACT_MANIFEST_FORMAT_VERSION = 3
 # 仅表示 .gkg 部署包协议，必须独立于 WebUI/框架版本维护
-DEPLOY_PACKAGE_FORMAT_VERSION = 4
+DEPLOY_PACKAGE_FORMAT_VERSION = 5
+LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION = 4
+DEPLOY_CONTENT_FORMAT_VERSION = 1
 MAX_ONNX_GRAPH_FILE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_FILE_BYTES = 32 * 1024 * 1024 * 1024
 MAX_MODEL_ARTIFACT_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
@@ -56,6 +60,14 @@ MAX_DEPLOY_ARCHIVE_MEMBER_BYTES = 32 * 1024 * 1024 * 1024
 MAX_DEPLOY_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
 MAX_DEPLOY_COMPRESSION_RATIO = 1000
 MAX_MANIFEST_FILE_BYTES = 2 * 1024 * 1024
+MAX_DEPLOY_CONTENT_FILES = 16384
+MAX_DEPLOY_CONTENT_MANIFEST_BYTES = 32 * 1024 * 1024
+DEPLOY_CONTENT_SUFFIXES = {
+    'decks': ('.ydk',),
+    'replays': ('.json', '.jsonl', '.jsonl.gz', '.yrp', '.yrp2', '.yrp3', '.yrp3d', '.yrpx'),
+    'documents': ('.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'),
+    'presets': ('.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.txt'),
+}
 SAFE_FILENAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 SAFE_PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 WINDOWS_RESERVED_FILENAMES = {
@@ -162,6 +174,370 @@ def validate_package_name(package_name):
 def validate_deployment_package_filename(filename):
     """校验本地部署包必须是安全的单层 .gkg 文件名"""
     return validate_safe_filename(filename, allowed_suffixes=(".gkg",))
+
+
+def _validate_content_relative_path(value, *, maximum_depth=16, maximum_bytes=1024):
+    """保留中文与目录层级，同时拒绝跨平台歧义和越界路径"""
+    if (not isinstance(value, str) or not value or '\\' in value
+            or len(value.encode('utf-8')) > maximum_bytes):
+        raise ValueError(f'unsafe content path: {value!r}')
+    parts = value.split('/')
+    if len(parts) > maximum_depth:
+        raise ValueError(f'content path is too deep: {value!r}')
+    for part in parts:
+        if (part in ('', '.', '..') or part.startswith('.') or part.endswith(('.', ' '))
+                or len(part.encode('utf-8')) > 200
+                or any(ord(char) < 32 or ord(char) == 127 or char in '<>:"|?*' for char in part)
+                or part.split('.', 1)[0].upper() in WINDOWS_RESERVED_FILENAMES):
+            raise ValueError(f'unsafe content path: {value!r}')
+    return value
+
+
+def _validate_content_archive_path(value, *, category=None):
+    """附件只能进入清单定义的内容分区，不能伪装为模型或根资产"""
+    _validate_content_relative_path(value)
+    parts = value.split('/')
+    if len(parts) < 3 or parts[0] != 'content' or parts[1] not in DEPLOY_CONTENT_SUFFIXES:
+        raise ValueError(f'unsafe content archive path: {value!r}')
+    if category is not None and parts[1] != category:
+        raise ValueError(f'content category does not match its path: {value!r}')
+    if not value.casefold().endswith(DEPLOY_CONTENT_SUFFIXES[parts[1]]):
+        raise ValueError(f'unsupported content file type: {value!r}')
+    return parts[1], '/'.join(parts[2:])
+
+
+def _content_path_key(value):
+    """统一识别大小写与Unicode等价路径，避免不同平台覆盖同一文件"""
+    return unicodedata.normalize('NFC', value).casefold()
+
+
+def _check_deployment_path_collisions(paths):
+    """预先拒绝文件与目录重名，以及大小写不同的目录别名"""
+    nodes = {}
+    for value in paths:
+        parts = value.split('/')
+        for index in range(1, len(parts) + 1):
+            path = '/'.join(parts[:index])
+            key = _content_path_key(path)
+            kind = 'file' if index == len(parts) else 'directory'
+            previous = nodes.get(key)
+            if previous is not None and (previous != (path, kind) or kind == 'file'):
+                raise ValueError(f'duplicate or conflicting archive path: {value!r}')
+            nodes[key] = (path, kind)
+
+
+def _reject_deployment_links(path):
+    """文件和上层目录都不能经过符号链接或Windows目录联接"""
+    raw = Path(path).absolute()
+    for current in (raw, *raw.parents):
+        if current.is_symlink() or (hasattr(current, 'is_junction') and current.is_junction()):
+            raise ValueError(f'deployment path must not traverse a link: {raw}')
+    return raw
+
+
+def discover_deployment_content(source_root, category):
+    """只列出用户指定目录中的可携带附件，不读取内容或自动纳入训练"""
+    if category not in DEPLOY_CONTENT_SUFFIXES:
+        raise ValueError(f'unknown content category: {category!r}')
+    root = _reject_deployment_links(source_root)
+    if not root.is_dir():
+        raise FileNotFoundError(f'content directory does not exist: {root}')
+    result = {}
+    for directory, folders, names in os.walk(root, followlinks=False):
+        folders[:] = sorted(name for name in folders if not name.startswith('.')
+                            and name not in {'python_env', '__pycache__', 'node_modules'})
+        for folder in list(folders):
+            candidate = Path(directory) / folder
+            if candidate.is_symlink() or (hasattr(candidate, 'is_junction') and candidate.is_junction()):
+                folders.remove(folder)
+        for name in sorted(names):
+            source = Path(directory) / name
+            if name.startswith('.') or not name.casefold().endswith(DEPLOY_CONTENT_SUFFIXES[category]):
+                continue
+            if source.is_symlink() or not source.is_file():
+                continue
+            relative = source.relative_to(root).as_posix()
+            _validate_content_archive_path(f'content/{category}/{relative}')
+            result[relative] = str(source)
+            if len(result) > MAX_DEPLOY_CONTENT_FILES:
+                raise ValueError(f'content directory exceeds {MAX_DEPLOY_CONTENT_FILES} files; select a smaller directory')
+    _check_deployment_path_collisions(result)
+    return result
+
+
+def _prepare_deployment_content(optional_files):
+    """展开显式选中的附件并检查数量、类型与容量，不自动扫描源目录"""
+    if optional_files is None:
+        return []
+    if not isinstance(optional_files, dict) or set(optional_files) - set(DEPLOY_CONTENT_SUFFIXES):
+        raise ValueError('optional_files must map content categories to relative-path/source mappings')
+    records = []
+    for category, files in sorted(optional_files.items()):
+        if not isinstance(files, dict):
+            raise ValueError(f'content category must contain a file mapping: {category}')
+        for relative, source in sorted(files.items()):
+            _validate_content_relative_path(relative)
+            archive_path = f'content/{category}/{relative}'
+            _validate_content_archive_path(archive_path, category=category)
+            raw = _reject_deployment_links(source)
+            if not raw.is_file() or not stat.S_ISREG(raw.stat().st_mode):
+                raise ValueError(f'content source must be a regular file: {raw}')
+            size = raw.stat().st_size
+            if size > MAX_DEPLOY_ARCHIVE_MEMBER_BYTES:
+                raise ValueError(f'content source exceeds the member size limit: {raw}')
+            records.append({'category': category, 'path': archive_path, 'relative_path': relative,
+                            'size': size, 'source': raw})
+            if len(records) > MAX_DEPLOY_CONTENT_FILES:
+                raise ValueError(f'too many optional content files; limit={MAX_DEPLOY_CONTENT_FILES}')
+    _check_deployment_path_collisions([row['path'] for row in records])
+    return records
+
+
+def _deployment_file_sha256(path):
+    """分块计算附件摘要，避免读取大型录像到内存"""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _deployment_content_records(manifest):
+    """独立读取附件合同，旧包没有附件区，新包逐项声明路径与摘要"""
+    version = manifest.get('package_format_version')
+    if version == LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION:
+        if 'optional_content' in manifest:
+            raise ValueError('GKG4 cannot declare optional content')
+        return []
+    if version != DEPLOY_PACKAGE_FORMAT_VERSION:
+        raise ValueError(f'unsupported deployment package format: {version!r}')
+    content = manifest.get('optional_content')
+    if not isinstance(content, dict) or content.get('format_version') != DEPLOY_CONTENT_FORMAT_VERSION:
+        raise ValueError('GKG5 requires the versioned optional_content section')
+    records = content.get('files')
+    if not isinstance(records, list) or not 0 < len(records) <= MAX_DEPLOY_CONTENT_FILES:
+        raise ValueError('optional content file list is empty or exceeds its limit')
+    for row in records:
+        if not isinstance(row, dict):
+            raise ValueError('optional content records must be objects')
+        category, relative = _validate_content_archive_path(row.get('path'), category=row.get('category'))
+        if category != row.get('category') or relative != row.get('relative_path'):
+            raise ValueError('optional content category or relative path does not match')
+        size = row.get('size')
+        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= MAX_DEPLOY_ARCHIVE_MEMBER_BYTES:
+            raise ValueError('invalid optional content size')
+        if not isinstance(row.get('sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', row['sha256']):
+            raise ValueError('invalid optional content sha256')
+    _check_deployment_path_collisions([row['path'] for row in records])
+    return records
+
+
+def _scan_deployment_stage(stage_root, *, has_content):
+    """有界扫描暂存目录，模型保持单层，只有附件允许进入专属子目录"""
+    files, directories, total = set(), set(), 0
+    limit = MAX_DEPLOY_ARCHIVE_MEMBERS + (MAX_DEPLOY_CONTENT_FILES if has_content else 0)
+    for directory, folders, names in os.walk(stage_root, followlinks=False):
+        for name in folders:
+            path = _reject_deployment_links(Path(directory) / name)
+            relative = path.relative_to(stage_root).as_posix()
+            _validate_content_relative_path(relative)
+            parts = relative.split('/')
+            if (not has_content or parts[0] != 'content'
+                    or len(parts) > 1 and parts[1] not in DEPLOY_CONTENT_SUFFIXES):
+                raise ValueError(f'undeclared deployment directory: {relative}')
+            directories.add(relative)
+        for name in names:
+            path = _reject_deployment_links(Path(directory) / name)
+            relative = path.relative_to(stage_root).as_posix()
+            if '/' in relative:
+                if not has_content:
+                    raise ValueError(f'unsafe deployment member path: {relative}')
+                _validate_content_archive_path(relative)
+            else:
+                validate_safe_filename(relative)
+            if not path.is_file() or not stat.S_ISREG(path.stat().st_mode):
+                raise ValueError(f'deployment member must be a regular file: {relative}')
+            size = path.stat().st_size
+            if size > MAX_DEPLOY_ARCHIVE_MEMBER_BYTES:
+                raise ValueError(f'deployment member is too large: {relative}')
+            total += size
+            files.add(relative)
+            if len(files) > limit or total > MAX_DEPLOY_ARCHIVE_TOTAL_BYTES:
+                raise ValueError('deployment stage exceeds its file count or total size limit')
+    _check_deployment_path_collisions(sorted(files))
+    return files, directories
+
+
+def _content_import_manifest(stage_dir):
+    """附件导入只读取自身合同，不加载模型或解释预设内容"""
+    root = _reject_deployment_links(stage_dir).resolve()
+    source = _reject_deployment_links(root / 'manifest.json')
+    if not source.is_file() or source.stat().st_size > MAX_DEPLOY_CONTENT_MANIFEST_BYTES:
+        raise ValueError('deployment manifest is absent or too large')
+    manifest = json.loads(source.read_text(encoding='utf-8'))
+    if not isinstance(manifest, dict):
+        raise ValueError('deployment manifest must be an object')
+    validate_package_name(manifest.get('package_name'))
+    records = _deployment_content_records(manifest)
+    return root, manifest, records
+
+
+def _content_short_label(value, maximum=60):
+    """缩短展示名称时保留完整中文字符，原始路径仍写入导入清单"""
+    result = ''
+    for character in value:
+        if len((result + character).encode('utf-8')) > maximum:
+            break
+        result += character
+    return result.rstrip('. ') or 'root'
+
+
+def plan_deployment_content_import(stage_dir, project_root='.', *, selected_paths=None):
+    """预览附件的独立落点，同名同内容复用，已有不同内容明确拒绝覆盖"""
+    stage, manifest, records = _content_import_manifest(stage_dir)
+    root = _reject_deployment_links(project_root).resolve()
+    declared = {row['path']: row for row in records}
+    selected = set(declared) if selected_paths is None else set(selected_paths)
+    if selected - set(declared):
+        raise ValueError('selected content is not declared by the package')
+    model_references = [{key: record.get(key) for key in
+        ('model_id', 'model_prefix', 'iteration', 'training_stage', 'training_lineage', 'format', 'primary')}
+        for record in manifest.get('model_artifacts', [])]
+    identity = hashlib.sha256(json.dumps({'package_name': manifest['package_name'],
+        'models': model_references, 'files': records},
+        sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()[:16]
+    group = f'{manifest["package_name"]}_{identity}'
+    planned = []
+    for name in sorted(selected):
+        row = declared[name]
+        source = _reject_deployment_links(stage / name)
+        if (not source.is_file() or source.stat().st_size != row['size']
+                or _deployment_file_sha256(source) != row['sha256']):
+            raise ValueError(f'optional content checksum or size mismatch: {name}')
+        relative = PurePosixPath(row['relative_path'])
+        category = row['category']
+        if category == 'decks':
+            parent = relative.parent.as_posix()
+            pool_hash = hashlib.sha256(parent.encode('utf-8')).hexdigest()[:16]
+            label = _content_short_label(relative.parent.name or 'root')
+            pool = f'GKG_{group}__{label}_{pool_hash}'
+            # 原加载器按小写扩展名定位YDK，保留卡组名并只统一扩展名
+            destination = PurePosixPath('decks', pool, relative.stem + '.ydk')
+        elif category == 'replays' and relative.parts[0] == 'holographic':
+            if relative.suffix.lower() != '.json':
+                raise ValueError('holographic replay content must be a JSON file')
+            path_hash = hashlib.sha256(row['relative_path'].encode('utf-8')).hexdigest()[:16]
+            label = _content_short_label(relative.stem)
+            destination = PurePosixPath('ai_thoughts', f'GKG_{group}_{path_hash}_{label}.json')
+        elif category == 'replays':
+            raw_relative = PurePosixPath(*relative.parts[1:]) if relative.parts[0] == 'raw' else relative
+            if str(raw_relative) == '.':
+                raise ValueError('raw replay path must identify a file')
+            destination = PurePosixPath('replays', 'imported', group, raw_relative)
+        else:
+            destination = PurePosixPath('deploy_packages', 'imported', group, category, relative)
+        target = _reject_deployment_links(root / destination)
+        target.resolve().relative_to(root)
+        _validate_content_relative_path(destination.as_posix(), maximum_depth=32, maximum_bytes=2048)
+        status = 'new'
+        if target.exists():
+            status = ('present' if target.is_file() and target.stat().st_size == row['size']
+                      and _deployment_file_sha256(target) == row['sha256'] else 'conflict')
+        planned.append(dict(row, destination=destination.as_posix(), status=status))
+    _check_deployment_path_collisions([row['destination'] for row in planned])
+    return {'package_name': manifest['package_name'], 'group': group, 'files': planned,
+            'models': model_references,
+            'receipt': f'deploy_packages/imported/{group}/contents.json'}
+
+
+def install_deployment_content(stage_dir, project_root='.', *, selected_paths=None):
+    """只安装显式附件，失败回收本次新增文件，不修改模型资产或运行参数"""
+    plan = plan_deployment_content_import(stage_dir, project_root, selected_paths=selected_paths)
+    if any(row['status'] == 'conflict' for row in plan['files']):
+        conflicts = [row['destination'] for row in plan['files'] if row['status'] == 'conflict']
+        raise FileExistsError(f'content import would overwrite existing files: {conflicts}')
+    if not plan['files']:
+        return dict(plan, installed=0, reused=0)
+    root = _reject_deployment_links(project_root).resolve()
+    stage = _reject_deployment_links(stage_dir).resolve()
+    created_files, created_directories, temporary_paths = [], [], []
+    receipt_path = _reject_deployment_links(root / plan['receipt'])
+    previous = {}
+    if receipt_path.exists():
+        if not receipt_path.is_file() or receipt_path.stat().st_size > 2 * MAX_DEPLOY_CONTENT_MANIFEST_BYTES:
+            raise ValueError('existing content receipt is not a supported regular file')
+        payload = json.loads(receipt_path.read_text(encoding='utf-8'))
+        if not isinstance(payload, dict) or payload.get('group') != plan['group'] or not isinstance(payload.get('files'), list):
+            raise ValueError('existing content receipt is invalid')
+        previous = {row['path']: row for row in payload['files']}
+
+    def prepare_parent(target):
+        """只创建当前工程边界内的缺失目录，回滚时仅清理本次创建部分"""
+        pending, parent = [], target.parent
+        while parent != root and not parent.exists():
+            pending.append(parent)
+            parent = parent.parent
+        for directory in reversed(pending):
+            _reject_deployment_links(directory)
+            directory.resolve().relative_to(root)
+            directory.mkdir()
+            created_directories.append(directory)
+
+    try:
+        pending_files = []
+        for row in plan['files']:
+            if row['status'] == 'present':
+                continue
+            target = root / row['destination']
+            prepare_parent(target)
+            with tempfile.NamedTemporaryFile(prefix='.gkg-', suffix='.tmp', dir=target.parent, delete=False) as output:
+                temporary = Path(output.name)
+            temporary_paths.append(temporary)
+            shutil.copyfile(stage / row['path'], temporary)
+            if temporary.stat().st_size != row['size'] or _deployment_file_sha256(temporary) != row['sha256']:
+                raise ValueError(f'content changed while importing: {row["path"]}')
+            pending_files.append((temporary, target))
+        for temporary, target in pending_files:
+            _reject_deployment_links(target)
+            target.resolve().relative_to(root)
+            # 排他写入避免并发导入覆盖刚出现的文件
+            with open(target, 'xb') as output:
+                created_files.append(target)
+                with open(temporary, 'rb') as source:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+        prepare_parent(receipt_path)
+        for row in plan['files']:
+            previous[row['path']] = {key: value for key, value in row.items() if key != 'status'}
+        receipt = {'format_version': DEPLOY_CONTENT_FORMAT_VERSION, 'package_name': plan['package_name'],
+                   'group': plan['group'], 'models': plan['models'],
+                   'files': [previous[key] for key in sorted(previous)]}
+        receipt_bytes = json.dumps(receipt, ensure_ascii=False, indent=2).encode('utf-8')
+        if len(receipt_bytes) > 2 * MAX_DEPLOY_CONTENT_MANIFEST_BYTES:
+            raise ValueError('content import receipt is too large')
+        with tempfile.NamedTemporaryFile(prefix='.gkg-', suffix='.tmp', dir=receipt_path.parent, delete=False) as output:
+            temporary = Path(output.name)
+            output.write(receipt_bytes)
+        temporary_paths.append(temporary)
+        os.replace(temporary, receipt_path)
+    except BaseException:
+        for path in temporary_paths:
+            path.resolve().relative_to(root)
+            path.unlink(missing_ok=True)
+        for path in reversed(created_files):
+            path.resolve().relative_to(root)
+            path.unlink(missing_ok=True)
+        for path in reversed(created_directories):
+            try:
+                path.resolve().relative_to(root)
+                path.rmdir()
+            except OSError:
+                pass
+        raise
+    finally:
+        for path in temporary_paths:
+            path.resolve().relative_to(root)
+            path.unlink(missing_ok=True)
+    return dict(plan, installed=len(created_files), reused=sum(row['status'] == 'present' for row in plan['files']))
 
 
 def model_artifact_stem(model_prefix, iteration, bc_epochs=None):
@@ -1851,9 +2227,12 @@ def create_deployment_package(
     *,
     package_name,
     extra_files=None,
+    optional_files=None,
 ):
     """校验模型池和附加文件后，原子生成带强制清单的部署包"""
     validate_package_name(package_name)
+    optional_records = _prepare_deployment_content(optional_files)
+    package_format = (DEPLOY_PACKAGE_FORMAT_VERSION if optional_records else LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION)
     target = Path(target_path)
     validate_deployment_package_filename(target.name)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1940,6 +2319,9 @@ def create_deployment_package(
         semantic_root=compiled_root,
     )
     model_total_size = validate_model_artifact_file_set(model_dir, model_files)
+    model_total_size += sum(row['size'] for row in optional_records)
+    if model_total_size > MAX_DEPLOY_ARCHIVE_TOTAL_BYTES:
+        raise ValueError('deployment package inputs exceed the 64 GiB safety limit')
     extras = {}
     for archive_name, source_path in requested_extras.items():
         if archive_name not in DEPLOY_ROOT_FILES:
@@ -2021,7 +2403,7 @@ def create_deployment_package(
             )
 
     manifest = {
-        "package_format_version": DEPLOY_PACKAGE_FORMAT_VERSION,
+        "package_format_version": package_format,
         **protocol_metadata,
         "package_name": package_name,
         "build_time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2035,6 +2417,9 @@ def create_deployment_package(
         "includes_static_semantics": True,
         "includes_card_vocab": True,
     }
+    member_limit = MAX_DEPLOY_ARCHIVE_MEMBERS + (MAX_DEPLOY_CONTENT_FILES if optional_records else 0)
+    if len(model_files) + len(extras) + len(optional_records) + 1 > member_limit:
+        raise ValueError('deployment archive member count is outside the safety limit')
 
     temporary = tempfile.NamedTemporaryFile(
         mode="wb",
@@ -2061,9 +2446,35 @@ def create_deployment_package(
                 )
             for archive_name, source in extras.items():
                 archive.write(source, arcname=archive_name)
+            if optional_records:
+                declared_content = []
+                for row in optional_records:
+                    digest, written = hashlib.sha256(), 0
+                    # 按实际入包字节计算摘要，压缩包和原始录像沿用存储模式
+                    info = zipfile.ZipInfo(row['path'])
+                    info.compress_type = (zipfile.ZIP_STORED if row['path'].lower().endswith(
+                        ('.gz', '.yrp', '.yrp2', '.yrp3', '.yrp3d', '.yrpx', '.pdf', '.png', '.jpg', '.jpeg', '.webp'))
+                        else zipfile.ZIP_DEFLATED)
+                    info._compresslevel = 1
+                    with open(row['source'], 'rb') as source, archive.open(info, 'w', force_zip64=True) as output:
+                        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                            written += len(chunk)
+                            if written > row['size']:
+                                raise ValueError(f'content changed while packaging: {row["path"]}')
+                            digest.update(chunk)
+                            output.write(chunk)
+                    if written != row['size']:
+                        raise ValueError(f'content changed while packaging: {row["path"]}')
+                    declared_content.append({key: row[key] for key in ('category', 'path', 'relative_path', 'size')})
+                    declared_content[-1]['sha256'] = digest.hexdigest()
+                manifest['optional_content'] = {'format_version': DEPLOY_CONTENT_FORMAT_VERSION, 'files': declared_content}
+            manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8')
+            manifest_limit = MAX_DEPLOY_CONTENT_MANIFEST_BYTES if optional_records else MAX_MANIFEST_FILE_BYTES
+            if len(manifest_bytes) > manifest_limit:
+                raise ValueError('deployment package manifest is too large')
             archive.writestr(
                 "manifest.json",
-                json.dumps(manifest, ensure_ascii=False, indent=2),
+                manifest_bytes,
             )
         if temporary_path.stat().st_size > MAX_DEPLOY_PACKAGE_FILE_BYTES:
             raise ValueError("deployment package exceeds the 64 GiB safety limit")
@@ -2078,36 +2489,33 @@ def create_deployment_package(
 
 def validate_deployment_package(stage_dir):
     """核验解包目录、部署协议清单、模型身份与实际文件集合完全一致"""
-    raw_stage_root = Path(stage_dir)
-    if raw_stage_root.is_symlink():
-        raise ValueError("deployment stage must not be a symbolic link")
+    raw_stage_root = _reject_deployment_links(stage_dir)
     stage_root = raw_stage_root.resolve()
     if not stage_root.is_dir():
         raise FileNotFoundError(f"deployment stage does not exist: {stage_root}")
-    staged_paths = sorted(stage_root.iterdir())
-    for path in staged_paths:
-        validate_safe_filename(path.name)
-        if path.is_symlink() or not path.is_file():
-            raise ValueError(f"deployment member must be a regular file: {path.name}")
-
     manifest_path = stage_root / "manifest.json"
+    _reject_deployment_links(manifest_path)
     if not manifest_path.is_file():
         raise FileNotFoundError("deployment package manifest.json is required")
-    if manifest_path.stat().st_size > MAX_MANIFEST_FILE_BYTES:
+    if manifest_path.stat().st_size > MAX_DEPLOY_CONTENT_MANIFEST_BYTES:
         raise ValueError("deployment package manifest is too large")
     with open(manifest_path, "r", encoding="utf-8") as stream:
         manifest = json.load(stream)
     if not isinstance(manifest, dict):
         raise ValueError("deployment package manifest must be an object")
-    if manifest.get("package_format_version") != DEPLOY_PACKAGE_FORMAT_VERSION:
+    if manifest.get("package_format_version") not in (LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION, DEPLOY_PACKAGE_FORMAT_VERSION):
         raise ValueError(
             "deployment package format version mismatch: "
             f"file={manifest.get('package_format_version')!r}, "
             f"current={DEPLOY_PACKAGE_FORMAT_VERSION}"
         )
     validate_package_name(manifest.get("package_name"))
+    content_records = _deployment_content_records(manifest)
+    if not content_records and manifest_path.stat().st_size > MAX_MANIFEST_FILE_BYTES:
+        raise ValueError('deployment package manifest is too large')
+    actual_paths, actual_directories = _scan_deployment_stage(stage_root, has_content=bool(content_records))
 
-    actual_names = {path.name for path in staged_paths}
+    actual_names = {name for name in actual_paths if '/' not in name}
     allowed_names = {"manifest.json", *DEPLOY_ROOT_FILES}
     for name in actual_names.difference(allowed_names):
         validate_model_artifact_filename(name)
@@ -2219,18 +2627,26 @@ def validate_deployment_package(stage_dir):
         from semantic_lookup import read_semantic_compatibility_registry
         read_semantic_compatibility_registry(stage_root)
         expected_names.add(SEMANTIC_COMPATIBILITY_FILENAME)
-    if actual_names != expected_names:
+    for row in content_records:
+        path = stage_root / row['path']
+        if not path.is_file() or path.stat().st_size != row['size'] or _deployment_file_sha256(path) != row['sha256']:
+            raise ValueError(f'optional content checksum or size mismatch: {row["path"]}')
+        expected_names.add(row['path'])
+    expected_directories = {'/'.join(row['path'].split('/')[:depth]) for row in content_records
+                            for depth in range(1, len(row['path'].split('/')))}
+    if actual_directories != expected_directories:
+        raise ValueError('deployment package contains undeclared directories')
+    if actual_paths != expected_names:
         raise ValueError(
-            f"deployment package contains undeclared files: {sorted(actual_names - expected_names)}"
+            f"deployment package contains undeclared files: {sorted(actual_paths - expected_names)}"
         )
-    return {"manifest": manifest, "records": actual_records, "files": actual_model_files}
+    return {"manifest": manifest, "records": actual_records, "files": actual_model_files,
+            "optional_files": content_records}
 
 
 def safe_extract_zip(archive, target_dir):
-    """限制 ZIP 路径、类型、数量、展开体积和压缩比后流式解压"""
-    raw_target = Path(target_dir)
-    if raw_target.exists() and raw_target.is_symlink():
-        raise ValueError("deployment extraction target must not be a symbolic link")
+    """兼容单层旧包与附件新包，预检全部成员后有界解压并回收失败结果"""
+    raw_target = _reject_deployment_links(target_dir)
     target_root = raw_target.resolve()
     target_root.mkdir(parents=True, exist_ok=True)
     archive_filename = getattr(archive, "filename", None)
@@ -2241,16 +2657,19 @@ def safe_extract_zip(archive, target_dir):
         if archive_path.stat().st_size > MAX_DEPLOY_PACKAGE_FILE_BYTES:
             raise ValueError("deployment package exceeds the 64 GiB safety limit")
     members = archive.infolist()
-    if not members or len(members) > MAX_DEPLOY_ARCHIVE_MEMBERS:
+    if not members or len(members) > MAX_DEPLOY_ARCHIVE_MEMBERS + MAX_DEPLOY_CONTENT_FILES:
         raise ValueError("deployment archive member count is outside the safety limit")
 
     total_size = 0
     seen_names = set()
     for info in members:
-        if info.is_dir() or "/" in info.filename or "\\" in info.filename:
+        if info.is_dir() or "\\" in info.filename:
             raise ValueError(f"unsafe archive member path: {info.filename!r}")
-        validate_safe_filename(info.filename)
-        folded = info.filename.casefold()
+        if '/' in info.filename:
+            _validate_content_archive_path(info.filename)
+        else:
+            validate_safe_filename(info.filename)
+        folded = _content_path_key(info.filename)
         if folded in seen_names:
             raise ValueError(f"duplicate archive member is not allowed: {info.filename!r}")
         seen_names.add(folded)
@@ -2271,13 +2690,46 @@ def safe_extract_zip(archive, target_dir):
             if info.compress_size <= 0 or info.file_size / info.compress_size > MAX_DEPLOY_COMPRESSION_RATIO:
                 raise ValueError(f"archive compression ratio is unsafe: {info.filename!r}")
         destination = target_root / info.filename
+        _reject_deployment_links(destination)
+        destination.resolve().relative_to(target_root)
         if destination.exists():
             raise FileExistsError(f"archive target already exists: {info.filename!r}")
+    _check_deployment_path_collisions([info.filename for info in members])
 
-    created_files = []
+    manifest_info = next((info for info in members if info.filename == 'manifest.json'), None)
+    content_records = []
+    if manifest_info is not None:
+        if manifest_info.file_size > MAX_DEPLOY_CONTENT_MANIFEST_BYTES:
+            raise ValueError('deployment package manifest is too large')
+        manifest = json.loads(archive.read(manifest_info).decode('utf-8'))
+        if not isinstance(manifest, dict):
+            raise ValueError('deployment package manifest must be an object')
+        content_records = _deployment_content_records(manifest)
+    if not content_records:
+        if len(members) > MAX_DEPLOY_ARCHIVE_MEMBERS:
+            raise ValueError('deployment archive member count is outside the safety limit')
+        if any('/' in info.filename for info in members):
+            raise ValueError('nested content requires a GKG5 manifest')
+        if manifest_info is not None and manifest_info.file_size > MAX_MANIFEST_FILE_BYTES:
+            raise ValueError('deployment package manifest is too large')
+    declared_content = {row['path'] for row in content_records}
+    if {info.filename for info in members if '/' in info.filename} != declared_content:
+        raise ValueError('archive content files do not match the manifest')
+
+    created_files, created_directories = [], []
     try:
         for info in members:
             destination = target_root / info.filename
+            pending = []
+            parent = destination.parent
+            while parent != target_root and not parent.exists():
+                pending.append(parent)
+                parent = parent.parent
+            for directory in reversed(pending):
+                _reject_deployment_links(directory)
+                directory.resolve().relative_to(target_root)
+                directory.mkdir()
+                created_directories.append(directory)
             written = 0
             with archive.open(info, "r") as source, open(destination, "xb") as output:
                 created_files.append(destination)
@@ -2295,6 +2747,11 @@ def safe_extract_zip(archive, target_dir):
         for path in reversed(created_files):
             try:
                 path.unlink()
+            except OSError:
+                pass
+        for path in reversed(created_directories):
+            try:
+                path.rmdir()
             except OSError:
                 pass
         raise

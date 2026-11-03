@@ -12,10 +12,11 @@ independent imitation still requires separate startup.
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.16.6 (per-game WindBot deck mixing, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.16.7 (GKG shared content and default WebUI graph acceleration, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | 2 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |
+| GKG container | 4 (no attachments) / 5 (with attachments) | Independent of model protocol | Container changes; see [specification](deployment_packages_en.md) |
 
 These versions are independent. Once Model Protocol 4 is enabled, it remains fixed throughout V4 development. Field inventories, tensor shapes, and `protocol_schema_hash` prevent intermediate artifacts from being mixed.
 
@@ -79,7 +80,7 @@ Static Lua semantics move to model-side lookup tables indexed by exact card iden
 
 Version 3.9.0 establishes the unified compiler, logical prefix identity, and artifact validation. Version 3.9.1 registers the table on the model: Encoder/shared-memory/PPO trajectories carry existing card tokens plus compact chain/history effect-slot IDs, and the model reconstructs semantics elementwise-identically to expanded inputs on device. Unknown slots retain whole-card fallback, with no change to visibility or action logic.
 
-Version 3.9.2 materializes the compiled result as two independent runtime assets: a pickle-free NPZ of numeric arrays and a JSON catalog carrying vocabulary/logical identity, array integrity, and lightweight effect-slot bindings. PTH/training restores the NPZ directly, spawn Workers register only the JSON catalog, and ONNX freezes the same constants into `.onnx.data`. GKG V4 requires the runtime pair while keeping the source KB/vector trio optional for continued semantic generation.
+Version 3.9.2 materializes the compiled result as two independent runtime assets: a pickle-free NPZ of numeric arrays and a JSON catalog carrying vocabulary/logical identity, array integrity, and lightweight effect-slot bindings. PTH/training restores the NPZ directly, spawn Workers register only the JSON catalog, and ONNX freezes the same constants into `.onnx.data`. GKG4/5 require the runtime pair while keeping the source KB/vector trio optional for continued semantic generation.
 
 ### 3.5 Deck protocol
 

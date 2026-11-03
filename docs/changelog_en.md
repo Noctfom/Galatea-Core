@@ -4,6 +4,20 @@
 
 ---
 
+## [v3.16.7] - 2026-11-03
+
+### GKG shared content and default graph acceleration
+
+- GKG5 adds separate categories for YDK decks, holographic/raw replays, developer/trainer notes and raw presets. Preserve Unicode filenames and relative directories; record the size and SHA-256 of bytes actually archived. Packages without attachments still write GKG4; the new reader supports both, while older readers need an update for GKG5
+- WebUI supports directory or individual-file selection with deduplication and explicit category/file imports. Attachment-only import skips models, vocabulary and runtime semantics. New deck pools follow existing weight rules; raw recordings do not become training samples automatically
+- Decks enter package-prefixed physical pools; holographic JSON joins existing replay lists and raw files enter replay storage. Notes/presets and automatic import receipts use deploy_packages/imported. Reuse identical files, reject different existing content and roll back newly created attachments on failure
+- Reuse the document viewer for imported UTF-8 notes and presets, including Markdown relative links/images. Imported embedded HTML is not executed; presets remain plain text without applying training, Arena, league or pool parameters. Publish the format/API contract for future Link readers
+- WebUI checks the existing CUDA Graph central-inference option by default, with an explicit off switch. CLI still requires --inference-cuda-graph. Graph cleanup, CPU/capture-failure fallback and sampling behavior are unchanged
+- Framework 3.16.7; Model Protocol4, Checkpoint3, revision14, static semantics1, trajectory2, network, rewards and PPO objectives remain unchanged. No new root-level code module
+- Validation: 464 related tests and 7 subtests passed; 16 optional environment cases skipped. Final content/document acceptance passed 47 tests covering both-language export→unpack→independent import→view, PTH/external ONNX, Unicode paths, tampering/link rejection, a 270-file package, rollback and uppercase YDK compatibility. No WSL or changes to existing vocabulary, KB, semantic index or compatibility registry
+
+See the [GKG4/5 deployment guide](deployment_packages_en.md).
+
 ## [v3.16.6] - 2026-11-03
 
 ### Per-game model deck mixing for WindBot training

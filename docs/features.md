@@ -2,7 +2,7 @@
 
 > 本文档详细介绍 Galatea-Core 的各个功能模块，包括 WebUI 界面和命令行工具。
 
-> 文档适用于 **Galatea-Core v3.16.6**。模型协议 V4、检查点格式 3；发布版本与协议版本独立。
+> 文档适用于 **Galatea-Core v3.16.7**。模型协议 V4、检查点格式 3；发布版本与协议版本独立。
 
 ---
 
@@ -455,6 +455,8 @@ ONNX、外置权重和制品清单。
 - 可选包含用于继续生成的语义源（`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`，新版另含 `code_embeddings_meta.json`，存在时附带 `hash_mapping_report.json`）和 142 宣言追加池 (`meta_staples.json`)
 - 语义源三件套不可拆分导入或导出；清单会交叉校验源文件、编译表、词表与模型内逻辑语义身份
 - 强制生成并校验清单文件 (`manifest.json`)
+- 3.16.7可选携带YDK卡组、全息/原始重放、开发者或训练者说明、预设文件；按目录或单文件选择，保留中文与相对路径，重叠选择去重。默认不携带
+- 没有共享附件时写GKG4，有附件时写GKG5，新版Core均可读取；旧版Core/Link读取器需更新后才能读取GKG5，模型仍为V4
 - 支持自定义包名；WebUI 留空时生成 `Galatea_V4_Pkg_<时间戳>.gkg`。`V4` 表示模型协议；包名不决定兼容性，导入以包内清单为准
 
 #### 📤 解包与选择性导入 (Import)
@@ -468,6 +470,13 @@ ONNX、外置权重和制品清单。
 
 `.gkg` 包协议版本在 `model_artifacts.py` 的
 `DEPLOY_PACKAGE_FORMAT_VERSION` 中独立维护，不与框架版本号共用。
+
+共享附件可独立导入，无需安装模型、词表或语义表。卡组按原目录进入带包名前缀的新物理池，
+全息JSON进入现有回放列表，原始文件进入`replays/imported/`；说明和预设进入
+`deploy_packages/imported/<包分组>/`，生成可追溯的`contents.json`。已有同内容文件复用，
+不同内容不覆盖。预设仅携带和查看，不自动改变训练/竞技场参数；导入录像不会启动学习。
+卡组新池沿用现有权重规则，可在资产管理中调整。操作、落点和供Link复用的清单合同见
+[GKG 4/5部署包指南](deployment_packages.md)。
 
 ---
 
@@ -502,7 +511,7 @@ python main.py train [选项]
 | `--protocol-audit` | 生成 V3 协议与效果槽诊断报告 | 关闭 |
 | `--inference-profile-batches` | 每轮计时的中央微批数上限，1～10000；0关闭，不限制采集或PPO批量 | 0 |
 | `--inference-transport` | `packed`为日常训练推荐的批量传输；`fields`沿用原逐字段方式，供性能比较和问题排查 | packed |
-| `--inference-cuda-graph` | CUDA图复用中央前向，适合小批量GPU采集；每轮自动预热，采集时增加显存、PPO前释放，下轮重建；无需模型编译，CPU或捕获失败时用常规前向 | 关闭 |
+| `--inference-cuda-graph` | CUDA图复用中央前向，适合小批量GPU采集；每轮自动预热，采集时增加显存、PPO前释放，下轮重建；无需模型编译，CPU或捕获失败时用常规前向 | CLI关闭；WebUI默认勾选 |
 | `--gamma` | 折扣因子 | 0.998 |
 | `--lr` | 学习率 | 1e-4 |
 | `--entropy` | 熵正则系数 | 0.03 |

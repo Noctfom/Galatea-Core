@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.16.6. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.16.7. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -52,7 +52,7 @@ Distinguish upstream sources, original licenses, pinned commits and local patche
 - [ ] Complete50-iteration trends,100–200-iteration medium runs and long-term fixed Arena comparisons; temporary short-run stability is not acceptance
 - [x] 3.15.7: Linux setup reuses current Python/Conda, constrains existing Torch and installs missing WindBot runtime prerequisites. Shared AnyCPU files ship in source without local compilation or a new Linux ZIP
 - [ ] Automatic Torch-build selection by GPU/driver on fresh machines remains pending; first installation uses requirements or an explicit wheel source without guessing compatibility
-- [ ] Optional GKG decks, replays, model-author documentation and presets, separate from required model assets
+- [x] 3.16.7: GKG5 optional decks, replays, developer/trainer notes and raw presets with independent import; retain GKG4 reads/writes without attachments, never apply presets automatically. See [format and usage](deployment_packages_en.md)
 
 ## Online ingress and collection performance
 

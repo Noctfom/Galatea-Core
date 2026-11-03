@@ -1,10 +1,10 @@
 # 3.13.4: Code-source provenance and content-aware semantic rebuilds
 
-> Usage guidance applies to v3.16.6; dated repair and measurement evidence below remains historical.
+> Usage guidance applies to v3.16.7; dated repair and measurement evidence below remains historical.
 
 ## Scope
 
-This repairs offline semantic assets only. Duel-network architecture, input fields/shapes, rewards, PPO/GAE, legality, Core and Link contracts are unchanged. Model Protocol **4**, Checkpoint Format **3**, schema revision **14**, static semantic format **1**, and GKG format **4** remain unchanged. Code-generation manifest format **1** lives independently in `code_semantic_provenance.py`; extraction version lives in `lua_semantic_source.py`.
+This page covers offline semantic maintenance and the 3.13.4 provenance repair. Semantic maintenance does not change Model Protocol **4**, Checkpoint Format **3**, revision **14** or static format **1**; the duel network, input shapes, rewards, PPO/GAE and legal candidates retain their existing definitions. Deployment containers separately support [GKG4/5](deployment_packages_en.md). Generation manifest format **1** lives in `code_semantic_provenance.py`; extraction versions live in `lua_semantic_source.py`.
 
 Coarse hashes and code vectors are independent channels. The existing `_hash_code_block()` normalization still groups variables, booleans and numbers to expose shared patterns. Embeddings use actual code, preserving literals and logic. Only duplicate/stale incremental registry memberships are cleaned; classification rules are not redesigned.
 

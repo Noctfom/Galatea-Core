@@ -2,7 +2,7 @@
 
 > Configure your first training run in **5–10 minutes** when the environment and assets are ready. Initial downloads or full semantic generation may take substantially longer.
 
-> This document applies to **Galatea-Core v3.16.6**, Model Protocol V4 / Checkpoint Format 3.
+> This document applies to **Galatea-Core v3.16.7**, Model Protocol V4 / Checkpoint Format 3.
 
 > See the [semantic-asset guide](code_semantics_en.md) for builds/sync and quality checks. Source/vector/index/provenance files form one bundle; compatible IDs and encoders allow old PTH weights to use updated semantics. For existing ONNX engines, see [ONNX engine updates](code_semantics_en.md#onnx-engine-updates).
 
@@ -259,10 +259,10 @@ Galatea-Core's training parameters are divided into three tiers:
 
 Click **🔥 Start Training Process**.
 
-For NVIDIA GPU training with slow central inference, enable **Accelerate Central Inference with CUDA
-Graphs**, or append `--inference-cuda-graph`. Each first batch size needs warm-up and some additional
-GPU memory; caching is automatic and requires no Torch Compile. It is off by default; CPU or capture
-failure uses normal inference. Graph memory is released before PPO and rebuilt next collection automatically.
+From 3.16.7, the WebUI checks **Accelerate Central Inference with CUDA Graphs** by default; uncheck
+to disable it. CLI still requires explicit `--inference-cuda-graph`. NVIDIA collection warms up each
+batch size with extra GPU memory and no Torch Compile requirement. CPU or capture failure uses normal
+inference. Graph memory is released before PPO and rebuilt next collection automatically.
 See [CUDA Graph acceleration](architecture_en.md#cuda-graph-acceleration-for-central-inference).
 
 To investigate central latency, temporarily enable Central Inference Timing (200 microbatches

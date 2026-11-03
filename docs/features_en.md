@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.16.6**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.16.7**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -463,6 +463,8 @@ Package models as .gkg format:
 - Optionally include semantic sources for continuation (`knowledge_base.json` + `code_embeddings.npy` + `code_embeddings_idx.json`, modern `code_embeddings_meta.json` and `hash_mapping_report.json` when present) and the 142 announcement add-on pool (`meta_staples.json`)
 - The three semantic source files cannot be imported or exported separately; the manifest cross-checks source files, compiled tables, vocabulary, and the model's logical semantic identity
 - Always generate and validate `manifest.json`
+- Version 3.16.7 optionally includes YDK decks, holographic/raw replays, developer/trainer notes and preset files. Select directories or individual files, preserving Unicode names and relative paths with deduplication. Nothing is included by default
+- Export GKG4 without shared attachments and GKG5 with them. The new Core reads both; older Core/Link readers need an update for GKG5. The model protocol remains V4
 - Custom package names; leaving the WebUI field blank generates `Galatea_V4_Pkg_<timestamp>.gkg`. `V4` identifies the model protocol. Compatibility is determined by the embedded manifest, not the filename
 
 #### 📤 Unpack & Selective Import
@@ -476,6 +478,14 @@ Import external .gkg packages into current system:
 
 The `.gkg` protocol version is maintained independently from the framework version as
 `DEPLOY_PACKAGE_FORMAT_VERSION` in `model_artifacts.py`.
+
+Shared content can be imported independently without installing models, vocabulary or semantic tables.
+Decks enter package-prefixed physical pools for their original directories. Holographic JSON joins the
+existing replay list; raw files enter `replays/imported/`. Notes and presets use
+`deploy_packages/imported/<group>/` with a traceable `contents.json`. Identical files are reused;
+different existing content is never overwritten. Presets are carried and viewed without applying
+training/Arena parameters; importing replays does not start learning. New deck pools follow current
+weight rules, adjustable in Asset Management. See the [GKG 4/5 guide and reader contract](deployment_packages_en.md).
 
 ---
 
@@ -510,7 +520,7 @@ python main.py train [options]
 | `--protocol-audit` | Generate V3 protocol and effect-slot diagnostics | Off |
 | `--inference-profile-batches` | Maximum central microbatches timed per iteration: 1–10000; 0 disables, without limiting rollout/PPO batches | 0 |
 | `--inference-transport` | `packed`: batched transfer recommended for normal training; `fields`: original per-field transfer for performance comparison or troubleshooting | packed |
-| `--inference-cuda-graph` | Replay central forward for small GPU batches; warm up each iteration, use extra GPU memory during collection, release before PPO and rebuild next iteration; no Torch Compile required; CPU or capture failure uses normal inference | Off |
+| `--inference-cuda-graph` | Replay central forward for small GPU batches; warm up each iteration, use extra GPU memory during collection, release before PPO and rebuild next iteration; no Torch Compile required; CPU or capture failure uses normal inference | CLI off; WebUI checked by default |
 | `--gamma` | Discount factor | 0.998 |
 | `--lr` | Learning rate | 1e-4 |
 | `--entropy` | Entropy regularization coefficient | 0.03 |

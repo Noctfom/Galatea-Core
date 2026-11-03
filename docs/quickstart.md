@@ -2,7 +2,7 @@
 
 > 本文档将带你从零开始完成 Galatea-Core 的首次训练配置。已有环境和资产时约需 **5–10 分钟**；首次下载或全量语义生成可能明显更久。
 
-> 文档适用于 **Galatea-Core v3.16.6**，Model Protocol V4 / Checkpoint Format 3。
+> 文档适用于 **Galatea-Core v3.16.7**，Model Protocol V4 / Checkpoint Format 3。
 
 > 代码语义构建/同步与质量检查见 [语义资产指南](code_semantics.md)。源码、向量、索引和生成清单须成组使用；编号与编码器兼容时旧PTH可使用新语义。旧ONNX的可用边界及重导出见[ONNX引擎更新](code_semantics.md#onnx引擎更新)。
 
@@ -253,9 +253,10 @@ Galatea-Core 的训练参数分为三个层级，理解这个分类有助于你�
 
 配置完毕后，点击 **🔥 在后台启动训练**。
 
-使用NVIDIA显卡且中央推理耗时较高时，可勾选“CUDA 图加速中央推理”，CLI追加
-`--inference-cuda-graph`。首次批量需要预热并占用少量额外显存，无需开启模型编译；
-程序每轮自动管理缓存，PPO前释放图显存、下轮重建；无需手工清理。默认关闭，CPU或捕获失败时使用常规前向，见[CUDA图说明](architecture.md#cuda图加速中央推理)。
+3.16.7起，WebUI默认勾选“CUDA 图加速中央推理”，可取消；CLI仍需显式追加
+`--inference-cuda-graph`。适合NVIDIA显卡采集，首次批量需要预热并占用额外显存，无需开启模型编译。
+程序自动管理缓存，PPO前释放图显存、下轮重建；CPU或捕获失败时使用常规前向。
+见[CUDA图说明](architecture.md#cuda图加速中央推理)。
 
 排查中央推理延迟时，可临时勾选“中央推理分段诊断”，每轮窗口默认200个微批；CLI在原训练
 命令后追加`--inference-profile-batches 200`。默认关闭且不改变学习参数，诊断窗口有额外开销。

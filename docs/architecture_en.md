@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.16.6**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.16.7**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -793,8 +793,8 @@ Workers, device and decks consistent when comparing gather/transfer time and who
 
 ### CUDA Graph acceleration for central inference
 
-Enable **Accelerate Central Inference with CUDA Graphs** in the training UI, or append
-`--inference-cuda-graph` to the existing training command. It is off by default and targets NVIDIA
+From 3.16.7, **Accelerate Central Inference with CUDA Graphs** is checked by default in the WebUI
+and can be unchecked. CLI still requires `--inference-cuda-graph`. It targets NVIDIA
 GPU collection dominated by small-batch forward scheduling. CPU uses normal inference. It does
 not require `torch.compile`: graphs accelerate collection; the existing compile setting still controls PPO.
 

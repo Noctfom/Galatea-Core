@@ -119,9 +119,14 @@ def resolve_local_document(path):
     root = Path(PROJECT_ROOT).resolve()
     target = (root / unquote(str(path))).resolve()
     relative = target.relative_to(root)
+    imported_text = (len(relative.parts) >= 5 and relative.parts[:2] == ('deploy_packages', 'imported')
+        and relative.parts[3] in {'documents', 'presets'}
+        and target.suffix.lower() in {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg'}
+        and not any(part.startswith('.') for part in relative.parts))
     allowed = (relative.as_posix() in {"README.md", "README_EN.md", "LICENSE"}
         or (target.suffix.lower() == ".md" and relative.parts[0] in {"docs", "integrations"}
-            and not any(part.startswith(".") or part in {"vendor", "runtime"} for part in relative.parts)))
+            and not any(part.startswith(".") or part in {"vendor", "runtime"} for part in relative.parts))
+        or imported_text)
     if not allowed or not target.is_file():
         raise ValueError("local document is absent or outside the documentation directories")
     return target
@@ -138,8 +143,12 @@ def render_local_document(path):
     from markdown_it import MarkdownIt
 
     target = resolve_local_document(path)
+    relative = target.relative_to(Path(PROJECT_ROOT).resolve())
+    imported = relative.parts[:2] == ('deploy_packages', 'imported')
+    if imported and target.stat().st_size > 4 * 1024 * 1024:
+        raise ValueError('imported text exceeds the 4 MiB preview limit; open the local file instead')
     content = target.read_text(encoding="utf-8-sig")
-    if target.name == "LICENSE":
+    if target.name == "LICENSE" or imported and target.suffix.lower() != '.md':
         return "<pre>" + html.escape(content) + "</pre>"
     root = Path(PROJECT_ROOT).resolve()
 
@@ -166,7 +175,7 @@ def render_local_document(path):
         except (OSError, ValueError):
             return ""
 
-    parser = MarkdownIt("commonmark", {"html": True}).enable(["table", "strikethrough"])
+    parser = MarkdownIt("commonmark", {"html": not imported}).enable(["table", "strikethrough"])
     tokens = parser.parse(content)
     headings = {}
     for index, token in enumerate(tokens):
@@ -284,7 +293,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.6"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.7"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1342,7 +1351,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                    "Batched transfer: copies observation data in larger groups to reduce small-copy overhead. Recommended for normal training on both CPU and CUDA.\n\nPer-field transfer: uses the original field-by-field copies. Select it to compare transfer performance or investigate problems with batched transfer.\n\nBoth use the same observation information and numeric precision. Keep the recommended option for routine use"))
         c_inference_cuda_graph = st.checkbox(
             _("CUDA 图加速中央推理", "Accelerate Central Inference with CUDA Graphs"),
-            value=False, key='training_inference_cuda_graph',
+            value=True, key='training_inference_cuda_graph',
             help=_("适合使用 NVIDIA 显卡、中央推理耗时较高的训练。每轮采集按实际批量自动预热并复用 GPU 前向；采集时增加显存占用，PPO 更新前自动释放图缓存，为训练预留显存，下一轮重新构建。无需开启模型编译，观测、网络与采样方式不变。CPU 或捕获失败时使用常规前向，可配合上方分段诊断比较耗时",
                    "For NVIDIA GPU training with slow central inference. Automatically warms up and replays exact-batch forward passes within each collection round. Collection uses extra GPU memory; graphs are released before PPO and rebuilt next round. Does not require Torch Compile and preserves observations, the network and sampling. CPU or capture failure uses normal forward. Use stage timing above to compare performance"))
         
@@ -5124,9 +5133,13 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     import subprocess
     from model_artifacts import (
         DEPLOY_PACKAGE_FORMAT_VERSION,
+        LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION,
         create_deployment_package,
+        discover_deployment_content,
         get_model_iteration_mismatch,
         install_model_artifact_bundle,
+        install_deployment_content,
+        plan_deployment_content_import,
         safe_extract_zip,
         validate_deployment_package,
         validate_deployment_package_filename,
@@ -5140,8 +5153,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
         "Package models and matching protocol assets into local `.gkg` files without uploading models through the browser.",
     ))
     st.caption(_(
-        f"框架 v{LOCAL_VERSION} · 模型协议 V{MODEL_PROTOCOL_VERSION} · GKG 格式 {DEPLOY_PACKAGE_FORMAT_VERSION}。包名仅作文件标识，兼容性以包内清单为准。",
-        f"Framework v{LOCAL_VERSION} · Model Protocol V{MODEL_PROTOCOL_VERSION} · GKG format {DEPLOY_PACKAGE_FORMAT_VERSION}. Names label files; the embedded manifest determines compatibility.",
+        f"框架 v{LOCAL_VERSION} · 模型协议 V{MODEL_PROTOCOL_VERSION} · GKG {LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION}/{DEPLOY_PACKAGE_FORMAT_VERSION}：无附件生成4，携带共享内容生成5，均可导入。包名不决定协议。",
+        f"Framework v{LOCAL_VERSION} · Model Protocol V{MODEL_PROTOCOL_VERSION} · GKG {LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION}/{DEPLOY_PACKAGE_FORMAT_VERSION}: no attachments writes4, shared content writes5; both can be imported. Filenames do not determine compatibility.",
     ))
     
     deploy_dir = os.path.abspath("./deploy_packages")
@@ -5208,11 +5221,67 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
     def deployment_stage_signature(stage_path):
         """生成暂存包文件签名，让安全验证仅在文件变化后重跑"""
         records = []
-        for filename in os.listdir(stage_path):
-            path = os.path.join(stage_path, filename)
-            if os.path.isfile(path):
-                records.append((filename, os.path.getmtime(path), os.path.getsize(path)))
+        for directory, folders, names in os.walk(stage_path, followlinks=False):
+            for filename in [*folders, *names]:
+                path = os.path.join(directory, filename)
+                status = os.lstat(path)
+                records.append((os.path.relpath(path, stage_path), status.st_mtime_ns, status.st_size, status.st_mode))
         return tuple(sorted(records))
+
+    def render_deployment_content_picker(category, key, default_root, *, relative_prefix=''):
+        """附件列表按目录或文件显式选择，复选框关闭后不扫描磁盘"""
+        enabled = st.checkbox(_("携带这一类文件", "Include these files"), value=False, key=key + '_enabled',
+            help=_("随模型共享的可选内容，不参与模型权重或输入协议。选择目录会包含其中符合类型的全部文件，子目录结构会保留；不会自动应用预设或把录像变成训练样本",
+                   "Optional shared content, separate from model weights and input schemas. Selecting a directory includes supported files below it and retains relative paths. Presets are not applied and replays do not become training samples"))
+        if not enabled:
+            return {}
+        source_root = st.text_input(_("本地来源目录", "Local Source Directory"), value=default_root, key=key + '_root',
+            help=_("可输入其他本地目录，仅列出这一类支持的文件。说明文档中的相对链接需要同时选择目标文件和图片",
+                   "Choose another local directory if needed. Only supported files for this category are listed. Select linked pages and images together to retain relative documentation links"))
+        refresh = st.button(_("读取 / 刷新文件列表", "Read / Refresh Files"), key=key + '_refresh')
+        if refresh or st.session_state.get(key + '_loaded_root') != source_root:
+            try:
+                st.session_state[key + '_catalog'] = discover_deployment_content(source_root, category)
+                st.session_state[key + '_error'] = None
+            except (OSError, ValueError) as error:
+                st.session_state[key + '_catalog'] = {}
+                st.session_state[key + '_error'] = str(error)
+            st.session_state[key + '_loaded_root'] = source_root
+        if st.session_state.get(key + '_error'):
+            st.warning(_(f"暂不能读取目录: {st.session_state[key + '_error']}",
+                         f"Directory unavailable: {st.session_state[key + '_error']}"))
+            return {}
+        catalog = st.session_state.get(key + '_catalog', {})
+        if not catalog:
+            st.info(_("目录中暂无支持的文件，可更换目录或添加文件后刷新", "No supported files found. Choose another directory or add files and refresh"))
+            return {}
+        directories = {'.': len(catalog)}
+        for relative in catalog:
+            parts = relative.split('/')
+            for depth in range(1, len(parts)):
+                parent = '/'.join(parts[:depth])
+                directories[parent] = directories.get(parent, 0) + 1
+        options = [f'directory:{name}' for name in sorted(directories)] + [f'file:{name}' for name in catalog]
+        selection_key = key + '_selected'
+        if selection_key in st.session_state:
+            st.session_state[selection_key] = [item for item in st.session_state[selection_key] if item in options]
+        def describe(value):
+            kind, name = value.split(':', 1)
+            return (_(f'目录｜{name}/（{directories[name]}个文件）', f'Directory | {name}/ ({directories[name]} files)')
+                    if kind == 'directory' else _(f'文件｜{name}', f'File | {name}'))
+        selections = st.multiselect(_("选择整目录或单个文件", "Select Directories or Individual Files"), options,
+            key=selection_key, format_func=describe,
+            help=_("“目录”会选入该目录下全部文件；“文件”只选入单个文件。重叠选择自动去重，默认不携带",
+                   "A directory includes all files below it; a file includes only that file. Overlapping selections are deduplicated. Nothing is selected by default"))
+        selected = set()
+        for selection in selections:
+            kind, name = selection.split(':', 1)
+            if kind == 'file':
+                selected.add(name)
+            else:
+                selected.update(relative for relative in catalog if name == '.' or relative.startswith(name + '/'))
+        st.caption(_(f'已选择 {len(selected)} 个文件', f'{len(selected)} files selected'))
+        return {(relative_prefix + '/' if relative_prefix else '') + name: catalog[name] for name in sorted(selected)}
 
     @st.cache_data(show_spinner=False)
     def load_staged_package_validation(stage_path, file_signature):
@@ -5276,8 +5345,8 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 sel_models = []
                 preview_records = []
                 st.warning(_(
-                    "暂无可验证的模型池；仍可打包完整运行时语义或宣言追加池。",
-                    "No verified model pool is available; a complete runtime semantic bundle or announcement add-on pool can still be packaged.",
+                    "暂无可验证的模型池；仍可打包语义维护组件、宣言追加池或下方的共享内容。",
+                    "No verified model pool is available; semantic maintenance assets, announcement add-ons or shared content below can still be packaged.",
                 ))
 
             selection_warning = get_model_iteration_mismatch(preview_records)
@@ -5301,8 +5370,41 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                     f"{len(package_repository['invalid'])} invalid or orphan artifacts were excluded.",
                 ))
 
+            optional_files = {}
+            with st.expander(_("📎 可选共享内容：卡组、重放、说明与预设", "📎 Optional Shared Content: Decks, Replays, Notes and Presets")):
+                st.caption(_("全部默认不携带。选中附件时生成GKG5，保留中文名和相对路径；没有附件时仍生成GKG4。GKG5需要新版Core或对应的Link读取器，模型仍为V4",
+                             "All content is optional and unselected by default. Attachments produce GKG5 with Unicode names and relative paths; otherwise GKG4 is retained. GKG5 requires an updated Core or Link package reader; the model protocol remains V4"))
+                content_tabs = st.tabs([_("卡组", "Decks"), _("重放与轨迹", "Replays and Trajectories"),
+                                        _("开发者 / 训练者说明", "Developer / Trainer Notes"), _("预设文件", "Preset Files")])
+                with content_tabs[0]:
+                    st.caption(_("携带YDK文件；导入后按原目录分别建立带包名前缀的物理池，不覆盖现有卡组。卡池权重配置如需共享，可作为预设文件携带",
+                                 "Include YDK files. Import creates package-prefixed physical pools for the original directories without overwriting existing decks. Pool-weight configuration can be shared separately as preset files"))
+                    optional_files['decks'] = render_deployment_content_picker('decks', 'gkg_content_decks', './decks')
+                with content_tabs[1]:
+                    st.markdown(_("**全息回放**", "**Holographic replays**"))
+                    holographic_files = render_deployment_content_picker('replays', 'gkg_content_holographic', './ai_thoughts', relative_prefix='holographic')
+                    st.markdown(_("**原始YRP录像与Core / Link轨迹**", "**Raw YRP replays and Core / Link trajectories**"))
+                    raw_files = render_deployment_content_picker('replays', 'gkg_content_raw', './replays', relative_prefix='raw')
+                    optional_files['replays'] = dict(holographic_files, **raw_files)
+                    st.caption(_("全息JSON导入回放列表；原始录像和轨迹进入重放目录，后续仍走原有检查/模仿数据流程，导入不会启动学习",
+                                 "Holographic JSON appears in the replay list. Raw recordings and trajectories enter replay storage and retain the existing inspection/imitation workflow. Import does not start learning"))
+                with content_tabs[2]:
+                    st.caption(_("支持Markdown、TXT、PDF及文档图片。请选择相对链接涉及的其他页面和图片；导入后的Markdown可在文档查看器互相跳转，嵌入HTML不执行",
+                                 "Supports Markdown, TXT, PDF and documentation images. Include linked pages and images. Imported Markdown supports local cross-page navigation; embedded HTML is not executed"))
+                    optional_files['documents'] = render_deployment_content_picker('documents', 'gkg_content_documents', './model_docs')
+                with content_tabs[3]:
+                    st.caption(_("携带JSON、YAML、TOML等现有预设文件，支持导入后查看；本批不定义预设参数协议，也不自动应用训练、竞技场、联盟或卡池配置",
+                                 "Carry existing JSON, YAML, TOML and similar preset files for later viewing. This release does not define preset parameter schemas or automatically apply training, Arena, league or pool settings"))
+                    optional_files['presets'] = render_deployment_content_picker('presets', 'gkg_content_presets', './presets')
+            optional_files = {category: files for category, files in optional_files.items() if files}
+            st.session_state['deploy_optional_files'] = optional_files
+            optional_count = sum(len(files) for files in optional_files.values())
+            selected_package_format = DEPLOY_PACKAGE_FORMAT_VERSION if optional_count else LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION
+            st.caption(_(f'共享附件 {optional_count} 个 · 本次生成GKG{selected_package_format}',
+                         f'{optional_count} shared files · exports GKG{selected_package_format}'))
+
             with st.form("pack_form"):
-                st.markdown("##### 🗂️ 附加数据组件")
+                st.markdown(_("##### 🗂️ 协议资产与语义维护组件", "##### 🗂️ Protocol Assets and Semantic Maintenance"))
                 st.caption(_(
                     "V4 精确卡片词表与编译静态语义运行表会作为必选协议资产自动打包。",
                     "The V4 exact card vocabulary and compiled static-semantic runtime table are always packaged as required protocol assets.",
@@ -5310,11 +5412,12 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     inc_semantic_bundle = st.checkbox(
-                        "包含 可接续语义源",
+                        _("包含 可接续语义源", "Include Resumable Semantic Sources"),
                         value=True,
-                        help=(
+                        help=_(
                             "knowledge_base.json + code_embeddings.npy + "
-                            "code_embeddings_idx.json + 新版 code_embeddings_meta.json；用于继续生成语义，关闭后仍会自动携带运行表"
+                            "code_embeddings_idx.json + 新版 code_embeddings_meta.json；用于继续生成语义，关闭后仍会自动携带运行表",
+                            "Includes the knowledge base, code vectors, index and generation provenance for future semantic updates. The required compiled runtime table is included even when source files are omitted"
                         ),
                     )
                 with c2:
@@ -5323,7 +5426,9 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                         value=True,
                         help=_("meta_staples.json：补充可宣言卡密，不替代引擎合法性筛选。", "meta_staples.json: additional announcement codes, still filtered by Core's predicate."),
                     )
-                with c3: st.checkbox("强制安全清单", value=True, disabled=True, help="manifest.json")
+                with c3: st.checkbox(_("包内容清单（必选）", "Contents Manifest (required)"), value=True, disabled=True,
+                    help=_("自动记录模型身份、配套资产与附件列表，导入时用于检查缺失或不匹配的文件，无需手工编辑manifest.json",
+                           "Automatically records model identity, required assets and optional files so import can detect missing or mismatched content. No manual editing of manifest.json is needed"))
                 
                 st.markdown("##### 🏷️ 包体信息")
                 pkg_name = st.text_input(
@@ -5354,7 +5459,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
 
                     if missing:
                         st.error(_(f"缺少勾选的组件: {', '.join(missing)}。请先生成或取消勾选！", f"Missing files: {', '.join(missing)}."))
-                    elif not sel_models and not (inc_semantic_bundle or inc_staples):
+                    elif not sel_models and not (inc_semantic_bundle or inc_staples or st.session_state.get('deploy_optional_files')):
                         st.error("包体不能为空，请至少选择一个模型或组件！")
                     else:
                         try:
@@ -5378,6 +5483,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     sel_models,
                                     package_name=final_name,
                                     extra_files=extra_files,
+                                    optional_files=st.session_state.get('deploy_optional_files', {}),
                                 )
                             st.success(_(f"✅ 打包成功！文件位于 `{target_zip}`", f"✅ Successfully packaged to `{target_zip}`"))
                             time.sleep(1)
@@ -5499,6 +5605,7 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                             st.write("**勾选需要部署进当前系统的文件：**")
                             selected_stage_models = []
                             selected_root_files = []
+                            selected_content_files = []
                             st.caption(_(
                                 "词表和运行语义表会自动安装；包内兼容性记录会自动合并，无需单独勾选",
                                 "The vocabulary and runtime semantics are installed automatically. Any compatibility records in the package are merged without a separate selection.",
@@ -5554,9 +5661,28 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     ):
                                         selected_root_files.extend(group_files)
 
+                            content_rows = stage_validation.get('optional_files', [])
+                            if content_rows:
+                                st.markdown(_("📎 **可选共享内容（可单独导入）**", "📎 **Optional Shared Content (independent import)**"))
+                                content_labels = {'decks': _("卡组YDK", "YDK Decks"), 'replays': _("重放与轨迹", "Replays and Trajectories"),
+                                    'documents': _("开发者 / 训练者说明", "Developer / Trainer Notes"), 'presets': _("预设文件", "Preset Files")}
+                                for category, label in content_labels.items():
+                                    category_rows = [row for row in content_rows if row['category'] == category]
+                                    if not category_rows:
+                                        continue
+                                    names = {row['path']: row['relative_path'] for row in category_rows}
+                                    choices = st.multiselect(f'{label}（{len(names)}）', ['__all__', *names],
+                                        format_func=lambda name, names=names: _("这一类全部文件", "All Files in This Category") if name == '__all__' else names[name],
+                                        key=f'gkg_import_{sel_stage}_{category}',
+                                        help=_("默认不导入；可选这一类全部文件，或逐个选择。附件不影响模型必需资产，也不会自动应用预设",
+                                               "Nothing selected by default. Import the entire category or select individual files. Shared content is independent of required model assets and presets are never applied automatically"))
+                                    selected_content_files.extend(names if '__all__' in choices else choices)
+                                st.caption(_("卡组导入带包名前缀的新物理池，沿用当前卡池权重规则，可在资产管理中调整；全息JSON进入回放列表，原始录像进入重放目录。说明与预设进入独立目录，不覆盖已有文件",
+                                             "Decks enter new package-prefixed physical pools and follow existing pool-weight rules, adjustable in Asset Management. Holographic JSON enters the replay list; raw recordings enter replay storage. Notes and presets use a separate directory without overwriting existing files"))
+
                             st.write("")
                             if st.form_submit_button("📥 " + _("执行精准导入", "Execute Import"), type="primary", **get_stretch_width_args(st.form_submit_button)):
-                                if not selected_stage_models and not selected_root_files:
+                                if not selected_stage_models and not selected_root_files and not selected_content_files:
                                     st.warning("未勾选任何文件！")
                                 elif (
                                     bool({
@@ -5576,70 +5702,48 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                     ))
                                 else:
                                     try:
-                                        from card_vocab import synchronize_authoritative_card_vocabulary, load_card_vocabulary
-                                        from semantic_lookup import synchronize_semantic_compatibility_registry
-                                        synchronize_semantic_compatibility_registry(stage_path, '.')
-                                        vocabulary_result = synchronize_authoritative_card_vocabulary(
-                                            os.path.join(stage_path, "card_vocab.json"),
-                                            "card_vocab.json",
-                                        )
-                                        semantic_source_names = {
-                                            "knowledge_base.json",
-                                            "hash_mapping_report.json",
-                                            "code_embeddings.npy",
-                                            "code_embeddings_idx.json",
-                                            "code_embeddings_meta.json",
-                                        }
-                                        if (
-                                            vocabulary_result["status"] == "local_newer"
-                                            and semantic_source_names.intersection(
-                                                selected_root_files
+                                        needs_runtime = bool(selected_stage_models or selected_root_files)
+                                        content_plan = plan_deployment_content_import(stage_path, PROJECT_ROOT, selected_paths=selected_content_files) if selected_content_files else None
+                                        if content_plan and any(row['status'] == 'conflict' for row in content_plan['files']):
+                                            raise FileExistsError('附件目标存在不同内容，未覆盖，请先处理导入目录中的冲突文件')
+                                        if needs_runtime:
+                                            from card_vocab import synchronize_authoritative_card_vocabulary, load_card_vocabulary
+                                            from semantic_lookup import synchronize_semantic_compatibility_registry
+                                            synchronize_semantic_compatibility_registry(stage_path, '.')
+                                            vocabulary_result = synchronize_authoritative_card_vocabulary(
+                                                os.path.join(stage_path, "card_vocab.json"),
+                                                "card_vocab.json",
                                             )
-                                        ):
-                                            raise ValueError(
-                                                "包内词表旧于本机，不能用旧语义源覆盖本机新资产"
-                                            )
-                                        if selected_stage_models:
-                                            install_model_artifact_bundle(
-                                                stage_path,
-                                                "./models",
-                                                selected_stage_models,
-                                                expected_model_id=(
-                                                    package_model_ids[0]
-                                                    if package_model_ids
-                                                    else None
-                                                ),
-                                                card_vocabulary=load_card_vocabulary(os.path.join(stage_path, 'card_vocab.json')),
-                                                semantic_root=stage_path,
-                                            )
-                                        for filename in selected_root_files:
-                                            source = os.path.join(stage_path, filename)
-                                            destination = os.path.abspath(filename)
-                                            with tempfile.NamedTemporaryFile(
-                                                prefix=f".{filename}.",
-                                                suffix=".import.tmp",
-                                                dir=os.path.dirname(destination),
-                                                delete=False,
-                                            ) as temporary_stream:
-                                                temporary = temporary_stream.name
-                                            try:
-                                                shutil.copy2(source, temporary)
-                                                os.replace(temporary, destination)
-                                            finally:
-                                                if os.path.exists(temporary):
-                                                    os.remove(temporary)
-                                        if "knowledge_base.json" in selected_root_files and "code_embeddings_meta.json" not in staged_files and os.path.isfile("code_embeddings_meta.json"):
-                                            os.remove("code_embeddings_meta.json")
-                                        compiled_runtime_files = (
-                                            "semantic_lookup_v1.npz",
-                                            "semantic_lookup_v1.json",
-                                        )
-                                        if vocabulary_result["status"] == "local_newer":
-                                            from semantic_lookup import ensure_static_semantic_assets
-
-                                            ensure_static_semantic_assets(".")
-                                        else:
-                                            for filename in compiled_runtime_files:
+                                            semantic_source_names = {
+                                                "knowledge_base.json",
+                                                "hash_mapping_report.json",
+                                                "code_embeddings.npy",
+                                                "code_embeddings_idx.json",
+                                                "code_embeddings_meta.json",
+                                            }
+                                            if (
+                                                vocabulary_result["status"] == "local_newer"
+                                                and semantic_source_names.intersection(
+                                                    selected_root_files
+                                                )
+                                            ):
+                                                raise ValueError(
+                                                    "包内词表旧于本机，不能用旧语义源覆盖本机新资产"
+                                                )
+                                            if selected_stage_models:
+                                                install_model_artifact_bundle(
+                                                    stage_path,
+                                                    "./models",
+                                                    selected_stage_models,
+                                                    expected_model_id=(
+                                                        package_model_ids[0]
+                                                        if package_model_ids
+                                                        else None
+                                                    ),
+                                                    card_vocabulary=load_card_vocabulary(os.path.join(stage_path, 'card_vocab.json')),
+                                                    semantic_root=stage_path,
+                                                )
+                                            for filename in selected_root_files:
                                                 source = os.path.join(stage_path, filename)
                                                 destination = os.path.abspath(filename)
                                                 with tempfile.NamedTemporaryFile(
@@ -5655,13 +5759,62 @@ elif menu == _("📦 模型部署与打包", "📦 Model Deployment"):
                                                 finally:
                                                     if os.path.exists(temporary):
                                                         os.remove(temporary)
-                                        load_model_repository.clear()
-                                        st.success(_(
-                                            f"✅ 导入成功！精确词表状态: {vocabulary_result['status']}，系统环境已更新。",
-                                            f"✅ Import complete. Exact-vocabulary status: {vocabulary_result['status']}.",
-                                        ))
+                                            if "knowledge_base.json" in selected_root_files and "code_embeddings_meta.json" not in staged_files and os.path.isfile("code_embeddings_meta.json"):
+                                                os.remove("code_embeddings_meta.json")
+                                            compiled_runtime_files = (
+                                                "semantic_lookup_v1.npz",
+                                                "semantic_lookup_v1.json",
+                                            )
+                                            if vocabulary_result["status"] == "local_newer":
+                                                from semantic_lookup import ensure_static_semantic_assets
+
+                                                ensure_static_semantic_assets(".")
+                                            else:
+                                                for filename in compiled_runtime_files:
+                                                    source = os.path.join(stage_path, filename)
+                                                    destination = os.path.abspath(filename)
+                                                    with tempfile.NamedTemporaryFile(
+                                                        prefix=f".{filename}.",
+                                                        suffix=".import.tmp",
+                                                        dir=os.path.dirname(destination),
+                                                        delete=False,
+                                                    ) as temporary_stream:
+                                                        temporary = temporary_stream.name
+                                                    try:
+                                                        shutil.copy2(source, temporary)
+                                                        os.replace(temporary, destination)
+                                                    finally:
+                                                        if os.path.exists(temporary):
+                                                            os.remove(temporary)
+                                            load_model_repository.clear()
+                                        content_result = install_deployment_content(stage_path, PROJECT_ROOT, selected_paths=selected_content_files) if selected_content_files else None
+                                        if content_result:
+                                            st.session_state['gkg_content_last_import'] = content_result
+                                        imported_count = content_result['installed'] if content_result else 0
+                                        reused_count = content_result['reused'] if content_result else 0
+                                        st.success(_(f'✅ 导入完成：模型主文件 {len(selected_stage_models)} 个，手选运行组件文件 {len(selected_root_files)} 个，附件新增 {imported_count} 个、复用 {reused_count} 个',
+                                                     f'✅ Import complete: {len(selected_stage_models)} model primaries, {len(selected_root_files)} selected runtime component files, {imported_count} new and {reused_count} existing attachments'))
                                     except Exception as e:
                                         st.error(f"导入中途失败: {str(e)}")
+
+                imported_content = st.session_state.get('gkg_content_last_import')
+                if imported_content:
+                    with st.expander(_("📖 最近导入的说明与预设", "📖 Recently Imported Notes and Presets")):
+                        st.caption(_(f"导入清单：{imported_content['receipt']}", f"Import receipt: {imported_content['receipt']}"))
+                        viewable = [row['destination'] for row in imported_content['files']
+                            if row['category'] in {'documents', 'presets'} and Path(row['destination']).suffix.lower()
+                            in {'.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg'}]
+                        if viewable:
+                            selected_text = st.selectbox(_("选择说明或预设文本", "Select a Note or Preset File"), viewable,
+                                key=f'gkg_imported_text_{imported_content["group"]}',
+                                format_func=lambda name: name.split('/' + imported_content['group'] + '/', 1)[-1],
+                                help=_("使用现有文档查看器打开UTF-8文本，Markdown支持本地相对链接；预设只展示原文，不会应用参数",
+                                       "Open UTF-8 text in the existing document viewer. Markdown supports local relative links; presets are displayed as text without applying any parameters"))
+                            if st.button(_("在文档查看器打开", "Open in Document Viewer"), key='gkg_open_imported_text'):
+                                st.query_params['doc'] = selected_text
+                                st.rerun()
+                        if st.button(_("打开导入清单与附件目录", "Open Import Receipt and Notes Folder"), key='gkg_open_imported_folder'):
+                            open_local_folder(os.path.join(PROJECT_ROOT, 'deploy_packages', 'imported', imported_content['group']))
 
                 if st.button("🗑️ " + _("清空此暂存目录", "Delete this Staged Folder"), **REPLAY_BUTTON_WIDTH):
                     remove_staged_package_folder(stage_path)
