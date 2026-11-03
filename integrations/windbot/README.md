@@ -1,6 +1,6 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.16.0 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
+此目录提供 Galatea-Core 3.16.6 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -36,6 +36,17 @@ python main.py train --resume models/galatea_iter_200.pth --additional-iteration
 - **卡组与席位**：默认每局镜像WindBot固定主/额外构筑；`training-pool`仅将模型侧改为常规
   训练卡组抽样，WindBot构筑保持不变。模型物理席位每局随机。Side只用于外部握手与来源记录，
   不进入单局模型观测。每个WindBot Worker按局从训练名单等概率选执行器。
+- **按局混合**：3.16.6可选`mixed`，每局独立决定镜像还是常规训练池；`--windbot-mirror-probability`
+  是镜像概率，取值0～1，未提供时为0.5。默认仍为纯镜像，两种旧命令不改变行为。
+  WebUI仅在选择混合后显示概率滑块，支持0%/100%端点；切回纯模式再返回会保留编辑值。
+  该概率与联盟分配独立，不是按轮强制的局数或步数配额，也不改变额外Rule补局。
+  常规池全部不可用时跳过并记录失败，不隐式换成镜像；现有统计按实际模式分区。
+  检查点与`Configuration/WindBot`自动保存概率，恢复时WebUI可读回，CLI需显式指定。
+  例如以下命令让WindBot场次中模型以60%概率镜像，40%概率使用常规池：
+
+  ```bash
+  python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --windbot-deck-mode mixed --windbot-mirror-probability 0.6 --no_compile
+  ```
 - **默认名单**：建议使用当前CDB/词表兼容的`Normal`和`Easy`执行器，每个有多个执行器的
   层级保留一个完整执行器；相同主/额外构筑的别名跟随留出，不以Side差异伪装独立构筑。
   `NotFinished`与`Test`默认不选，仍可手动选择。上游层级是脚本声明，不代表实测强度。

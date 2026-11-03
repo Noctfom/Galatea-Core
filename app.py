@@ -284,7 +284,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.5"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.6"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1422,12 +1422,33 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 wb_unassigned = len(set(wb_options) - set(wb_selected) - set(wb_reserved))
                 st.caption(_(f"两侧名单即时联动；尚未分组 {wb_unassigned} 个（默认未选的未完成/测试执行器可手动加入）",
                              f"Both lists update together; {wb_unassigned} unassigned (unfinished/test executors can be added manually)"))
-                wb_mode = st.selectbox(_("模型侧卡组选法", "Model-side Deck Selection"), ['mirror', 'training-pool'],
-                    index=0 if wb_saved.get('deck_mode', 'mirror') == 'mirror' else 1,
-                    format_func=lambda value: _("镜像WindBot固定构筑", "Mirror WindBot Build") if value == 'mirror' else _("常规训练卡组池", "Regular Training Deck Pool"),
+                wb_modes = ['mirror', 'training-pool', 'mixed']
+                wb_mode_labels = {'mirror': _("镜像WindBot固定构筑", "Mirror WindBot Build"),
+                    'training-pool': _("常规训练卡组池", "Regular Training Deck Pool"),
+                    'mixed': _("按概率混合镜像与常规池", "Mix Mirror and Training Pool")}
+                wb_saved_mode = wb_saved.get('deck_mode', 'mirror')
+                wb_mode = st.selectbox(_("模型侧卡组选法", "Model-side Deck Selection"), wb_modes,
+                    index=wb_modes.index(wb_saved_mode) if wb_saved_mode in wb_modes else 0,
+                    format_func=wb_mode_labels.get,
                     key=f'training_windbot_mode_{t_resume}',
-                    help=_("只改变WindBot场次。镜像让模型与机器人使用相同主/额外构筑；常规池沿用训练抽卡组逻辑。Side不进入单局模型认知",
-                           "Only affects WindBot games. Mirror shares Main/Extra builds; regular mode keeps training deck sampling. Side Deck is not a model input"))
+                    help=_("只改变WindBot场次的模型卡组。镜像适合同构筑练习；常规池练习不同构筑对抗，沿用当前启用范围和权重；混合在每局开始时按下方概率二选一。WindBot始终使用执行器固定构筑，Side不进入模型观测，不改变联盟对手比例",
+                           "Affects only the model's deck in WindBot games. Mirror practices the same build; regular pool practices different builds using enabled training ranges and weights. Mixed mode chooses per game with the probability below. WindBot keeps its fixed build. Side Deck is not observed; league opponent probabilities stay unchanged"))
+                wb_mirror_probability = None
+                wb_mirror_cache_key = f'training_windbot_mirror_percent_saved_{t_resume}'
+                if wb_mirror_cache_key not in st.session_state:
+                    st.session_state[wb_mirror_cache_key] = (round(100 * wb_saved.get('mirror_probability', 0.5))
+                        if wb_saved_mode == 'mixed' else 50)
+                if wb_mode == 'mixed':
+                    wb_mirror_percent = st.slider(_("WindBot场次镜像构筑概率 (%)", "Mirror Probability in WindBot Games (%)"),
+                        min_value=0, max_value=100,
+                        value=st.session_state[wb_mirror_cache_key],
+                        step=1, key=f'training_windbot_mirror_percent_{t_resume}',
+                        help=_("每局独立抽取，100%仅镜像，0%仅常规池，其余比例两者共存。概率按开局次数计算，长短局和异常跳过会使有效局数、样本步数占比不同；常规池不可用时不会自动换成镜像",
+                               "Drawn independently per game: 100% mirror, 0% regular pool, intermediate values mix both. This is a start probability, not a quota for completed games or sample steps. Game length and skipped failures affect observed shares. An unavailable regular pool never silently switches to mirror"))
+                    st.session_state[wb_mirror_cache_key] = wb_mirror_percent
+                    wb_mirror_probability = wb_mirror_percent / 100
+                    st.caption(_(f"仅WindBot场次：镜像 {wb_mirror_percent}% / 常规训练池 {100 - wb_mirror_percent}%；不影响下方联盟配比",
+                                 f"WindBot games only: {wb_mirror_percent}% mirror / {100 - wb_mirror_percent}% training pool; league probabilities below are separate"))
                 wb_runtime = st.text_input(_("WindBot程序路径（空为默认）", "WindBot Executable (blank for default)"),
                     value='', key='training_windbot_runtime',
                     help=_("留空自动选取当前平台运行文件；Windows直接启动，Linux自动使用Mono与系统SQLite。依赖缺失时提示，不自动安装或换成RuleBot",
@@ -1435,7 +1456,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 st.caption(_("Windows/Linux启动方式自动适配，无需选择平台；基础比例在下方联盟配比中显示和调整",
                              "Windows/Linux startup adapts automatically. View or customize the base probabilities below"))
                 windbot_training_options = {'executors': wb_selected, 'holdouts': wb_reserved,
-                    'deck_mode': wb_mode, 'runtime': wb_runtime.strip() or None}
+                    'deck_mode': wb_mode, 'mirror_probability': wb_mirror_probability, 'runtime': wb_runtime.strip() or None}
 
         from training_validation import resolve_league_weights
         with st.expander(_("⚖️ 联盟对手配比（可选高级设置）", "⚖️ League Opponent Probabilities (optional)")):
@@ -1568,6 +1589,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 cmd.extend(['--league-weights', *(str(league_values[name]) for name in ('rule', 'windbot', 'hist', 'self'))])
                 if windbot_training_options is not None:
                     cmd.extend(['--windbot', '--windbot-deck-mode', windbot_training_options['deck_mode']])
+                    if windbot_training_options['mirror_probability'] is not None:
+                        cmd.extend(['--windbot-mirror-probability', str(windbot_training_options['mirror_probability'])])
                     for name in windbot_training_options['executors']:
                         cmd.extend(['--windbot-executor', name])
                     for name in windbot_training_options['holdouts']:

@@ -1,6 +1,6 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.16.5 / Model Protocol V4.
+> Applies to Galatea-Core v3.16.6 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
@@ -303,6 +303,12 @@ cannot be replaced by action accuracy. See [explicit workflow and cache usage](c
 Explicit WindBot training writes to the ordinary PPO `runs/<prefix>_<time>/events.out.tfevents.*`.
 X is cumulative PPO iteration, not BC epoch, with one point per rollout merge. Definitions are implemented
 in [Trainer](../trainer.py) from [Worker](../worker.py) commit/rollback records.
+
+Version 3.16.6 mixed selection writes to `WindBot_Mirror/*` or `WindBot_Pool/*` according to each
+game's actual source; it adds no mixed scalar series. `mirror_probability` in `Configuration/WindBot`
+is a start probability, not a completed-game or sample share, so 50% does not require equal `Games`.
+Only runtime configuration uses `deck_mode=mixed`; per-game CSV rows retain `mirror` or
+`training-pool`, including startup failures after the source was selected.
 
 | Chart/text | Vertical axis or recording | Interpretation and limits |
 |---|---|---|

@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.16.5**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.16.6**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
 
 ---
 
@@ -838,15 +838,25 @@ Or click sync in WebUI's **🔄 Resource Sync Hub**.
 The main training page offers optional WindBot opponents. Version3.15.5 exposes absolute RuleBot/
 WindBot/history/self probabilities: `15%/0%/25%/60%` by default, `0%/15%/25%/60%` when enabled.
 Optional custom values must total100%. Windows/Linux startup adapts automatically without an OS choice.
-Mirror fixed builds or regular model-side decks, suggested per-level holdouts and editable rosters remain.
+Mirror remains the default. Version 3.16.6 adds **Mix Mirror and Training Pool** alongside both pure modes.
+Each WindBot game independently selects the model deck source, with a default 50% mirror probability
+adjustable from 0–100%; 100% is mirror only, 0% regular pool only. WindBot always keeps its fixed build.
+This is separate from league allocation: a 15% WindBot allocation and 60% mirror probability mean
+that each game within a WindBot Worker has a 60% chance of mirroring. It is not a completed-game or
+sample-step quota; game length and failures affect realized shares. Dashboard/TensorBoard keep
+actual mirror/pool partitions without a separate mixed leaderboard. Per-level holdouts remain editable.
 Regular-pool mode draws only the model-side deck. Empty or currently incompatible ranges are retried
 within the remaining enabled ranges, including virtual-pool recipes. Zero-weight ranges stay disabled;
 the mode never silently switches to mirror. A game is skipped only when all enabled ranges are unusable.
 The original uniform fallback when all top-level weights are zero is retained. A nonempty Main Deck is
 required; one usable deck in the root directory is sufficient.
-Only model actions train PPO; imitation remains separate. Mixed mode retains Rule coverage, while
-100% means WindBot only. Checkpoints/TensorBoard retain rosters, file/runtime hashes and settings.
-Disabled by default, without new model inputs or network structure. See [usage and metrics](../integrations/windbot/README.md#optional-main-training-opponents).
+Only model actions train PPO; imitation remains separate. A mixed opponent league retains extra
+Rule coverage; 100% WindBot league allocation uses WindBot only. Checkpoints/TensorBoard retain
+rosters, file/runtime hashes and settings, including model-side mirror probability.
+Example: `python main.py train --resume models/galatea_iter_200.pth --additional-iterations 10 --windbot --windbot-deck-mode mixed --windbot-mirror-probability 0.6 --no_compile`.
+Resume still requires explicit WindBot opt-in; WebUI reads saved deck settings, while CLI uses its
+defaults unless flags are supplied. Disabled by default, without new model input fields or network
+structure. See [usage and metrics](../integrations/windbot/README.md#optional-main-training-opponents).
 
 3.15.3 adds Independent Imitation in the training console: separate teacher/validation/test pools,
 one-time compressed caches, BC epochs/experimental checkpoints and fixed-build swapped-seat

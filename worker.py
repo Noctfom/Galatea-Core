@@ -567,10 +567,16 @@ def worker_process(
             # --- Reset 环境 ---
             try:
                 windbot_entry = None
+                windbot_deck_mode = None
                 if opp_type == 'windbot':
-                    from integrations.windbot.training import choose_episode_decks, TrainingOpponent
+                    from integrations.windbot.training import choose_episode_deck_mode, choose_episode_decks, TrainingOpponent
+                    # 本局只抽一次卡组模式，失败记录与正常统计都使用实际抽中值
+                    windbot_episode_config = dict(episode_opp_config['windbot'])
+                    windbot_deck_mode = choose_episode_deck_mode(windbot_episode_config, random)
+                    windbot_episode_config['deck_mode'] = windbot_deck_mode
+                    windbot_episode_config['mirror_probability'] = float(windbot_deck_mode == 'mirror')
                     windbot_entry, res = choose_episode_decks(
-                        episode_opp_config['windbot'], random, train_p_id, deck_dir)
+                        windbot_episode_config, random, train_p_id, deck_dir)
                 else:
                     res = deck_utils.get_random_deck_pair(ydk_dir=deck_dir)
                 if res is None:
@@ -579,7 +585,7 @@ def worker_process(
                 env_name, d1_name, d1, d2_name, d2 = res
                 raw_data = env.reset(d1, d2)
                 if windbot_entry is not None:
-                    windbot_opponent = TrainingOpponent(episode_opp_config['windbot'], windbot_entry,
+                    windbot_opponent = TrainingOpponent(windbot_episode_config, windbot_entry,
                         opp_p_id, env, {str(p): {'main': d.main, 'extra': d.extra, 'side': d.side}
                                        for p, d in enumerate((d1, d2))})
                 reset_failures = 0
@@ -588,7 +594,7 @@ def worker_process(
                 if opp_type == 'windbot':
                     reset_failures += 1
                     windbot_records.append({'executor': (windbot_entry or {}).get('executor', 'startup'),
-                        'deck_mode': episode_opp_config['windbot']['deck_mode'],
+                        'deck_mode': windbot_deck_mode or '',
                         'level': (windbot_entry or {}).get('level', ''), 'worker_id': worker_id,
                         'completed': False, 'aborted': True, 'win': False, 'model_steps': 0,
                         'responses': 0, 'response_seconds': 0.0})
@@ -1248,11 +1254,11 @@ def worker_process(
             # 先回收外部进程，再复用原有整局提交与异常回滚
             if windbot_opponent is not None:
                 windbot_record = {'executor': windbot_entry['executor'],
-                    'deck_mode': episode_opp_config['windbot']['deck_mode'],
+                    'deck_mode': windbot_deck_mode,
                     'level': windbot_entry.get('level', ''), 'worker_id': worker_id,
                     'model_seat': train_p_id, 'is_first': train_p_id == 0,
                     'model_deck': d1_name if train_p_id == 0 else d2_name,
-                    'model_pool': env_name if episode_opp_config['windbot']['deck_mode'] != 'mirror' else '',
+                    'model_pool': env_name if windbot_deck_mode == 'training-pool' else '',
                     'opponent_deck': windbot_entry['executor'],
                     'opponent_deck_sha256': windbot_entry.get('deck_sha256', ''),
                     'draw': core_terminal_received and winner not in (0, 1),

@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.16.5. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.16.6. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
@@ -41,7 +41,7 @@ WindBot belongs to Core's [optional integration directory](../integrations/windb
 - [x] 3.15.8: Automatic idle-socket selectors remove Linux select's high-descriptor restriction while preserving deadlines, invalid-packet rejection and cleanup; the real Linux high-descriptor regression still needs target-machine execution
 - [x] 3.15.9: Public GitHub download routes, local README navigation, vocabulary acknowledgement controls and optional WindBot self-check; network and protocol unchanged
 - [x] 3.16.4: All Arena modes and controlled native-model duels use leaf-first closed-return retries, matching response identities across macro-pool reordering; main training unchanged
-- [ ] Mix WindBot mirror builds and regular model-side training pools by a configurable probability, preserving statistics by actual mode
+- [x] 3.16.6: Per-game configurable mirror/training-pool mixing for model decks in WindBot training; retain pure modes, actual-mode statistics and league/extra-Rule coverage behavior
 
 Distinguish upstream sources, original licenses, pinned commits and local patches. Keep source snapshots inside the integration directory and build outputs/logs out of Git. Small UI/chart changes stay in their existing source files; add modules only for independently scoped components. Do not refactor existing modules solely to reorganize files.
 

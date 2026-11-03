@@ -4,6 +4,19 @@
 
 ---
 
+## [v3.16.6] - 2026-11-03
+
+### Per-game model deck mixing for WindBot training
+
+- Retain pure mirror and regular-pool selection and add per-game mixing. Each game independently selects the model deck source with a default 50% mirror probability, including 0–100% endpoints. WindBot keeps its fixed build; pure modes consume no additional random draws
+- Reuse the existing WebUI selector, showing one probability slider only for mixed selection. Bilingual help distinguishes deck-source probability from league allocation and from completed-game/sample shares. Switching modes preserves edits; selected checkpoints supply saved defaults
+- Add CLI `--windbot-deck-mode mixed --windbot-mirror-probability 0.6`. Save settings automatically in checkpoints and existing `Configuration/WindBot` text. Disabled WindBot paths do not import the optional module; no new maintenance assets
+- Use the actual per-game source for separate CSV, dashboard and TensorBoard mirror/pool partitions, including the selected mode on startup failure. Unavailable regular pools retain retry/error handling without mirror substitution. No mixed leaderboard or scalar series
+- Preserve league weights, extra Rule coverage, executor holdouts, random model seats, observation/candidate encodings, rewards and PPO/auxiliary/planning algorithms. Model Protocol4, Checkpoint3, revision14 and deployment formats remain unchanged
+- Validation: 337 related tests and 7 subtests passed; 15 optional environment cases skipped. Two additional bounded CPU/CUDA Core/WindBot collection and PPO-update tests passed, covering both sources within one Worker, actual CSV partitions, finite learning data and process cleanup. No WSL; target-server long-run acceptance remains separate
+
+See [training usage](features_en.md#optional-windbot-controlled-duels) and [metric definitions](tensorboard_metrics_en.md).
+
 ## [v3.16.5] - 2026-11-03
 
 ### In-place ONNX checks and artifact asset refresh

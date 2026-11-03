@@ -91,14 +91,41 @@ def synchronize_training_split(catalog, selected, previous, other):
     return sorted(selected), sorted(other)
 
 
+def resolve_mirror_probability(deck_mode, mirror_probability=None):
+    """统一校验单局镜像概率，兼容旧版纯镜像与纯常规池配置"""
+    if deck_mode not in ('mirror', 'training-pool', 'mixed'):
+        raise ValueError('WindBot模型侧卡组选法必须为mirror、training-pool或mixed')
+    fixed = {'mirror': 1.0, 'training-pool': 0.0}
+    if mirror_probability is None:
+        return fixed.get(deck_mode, 0.5)
+    if (isinstance(mirror_probability, bool) or not isinstance(mirror_probability, (int, float))
+            or not math.isfinite(mirror_probability) or not 0 <= mirror_probability <= 1):
+        raise ValueError('WindBot镜像构筑概率必须为0到1之间的有限数值')
+    if deck_mode in fixed and mirror_probability != fixed[deck_mode]:
+        raise ValueError('自定义WindBot镜像概率需要选择mixed，不能与纯镜像或纯常规池模式冲突')
+    return float(mirror_probability)
+
+
+def choose_episode_deck_mode(config, rng):
+    """混合模式每局只抽一次，纯模式不消耗额外随机数"""
+    mode = config['deck_mode']
+    if mode in ('mirror', 'training-pool'):
+        return mode
+    probability = resolve_mirror_probability(mode, config.get('mirror_probability'))
+    if probability <= 0:
+        return 'training-pool'
+    if probability >= 1:
+        return 'mirror'
+    return 'mirror' if rng.random() < probability else 'training-pool'
+
+
 def prepare_training_config(*, executors=None, holdouts=None, rate=0.15, deck_mode='mirror',
-                            runtime=None, mono=None, response_timeout=10):
+                            mirror_probability=None, runtime=None, mono=None, response_timeout=10):
     """启动前冻结训练名单与构筑，恢复任务也需显式开启对手"""
     if (isinstance(rate, bool) or not isinstance(rate, (int, float))
             or not math.isfinite(rate) or not 0 < rate <= 1):
         raise ValueError('WindBot Worker比例必须在0到1之间且大于0')
-    if deck_mode not in ('mirror', 'training-pool'):
-        raise ValueError('WindBot模型侧卡组选法必须为mirror或training-pool')
+    mirror_probability = resolve_mirror_probability(deck_mode, mirror_probability)
     if (isinstance(response_timeout, bool) or not isinstance(response_timeout, (int, float))
             or not math.isfinite(response_timeout) or not 0 < response_timeout <= 10):
         raise ValueError('WindBot单次响应预算必须在0到10秒之间且大于0')
@@ -123,6 +150,7 @@ def prepare_training_config(*, executors=None, holdouts=None, rate=0.15, deck_mo
     if {build_id(e) for e in training} & {build_id(e) for e in reserved}:
         raise ValueError('WindBot训练与留出名单含相同构筑，请将同构筑执行器放在同一侧')
     return {'format_version': 1, 'rate': float(rate), 'deck_mode': deck_mode,
+            'mirror_probability': mirror_probability,
             'runtime': str(Path(runtime).resolve()) if runtime else None, 'mono': mono,
             'response_timeout': float(response_timeout), 'executable_sha256': executable_sha256(runtime, mono),
             'training': training, 'holdouts': reserved}
@@ -130,9 +158,10 @@ def prepare_training_config(*, executors=None, holdouts=None, rate=0.15, deck_mo
 
 def choose_episode_decks(config, rng, train_seat, deck_dir):
     """WindBot固定使用冻结构筑，模型可镜像或沿用常规训练抽样"""
+    mode = choose_episode_deck_mode(config, rng)
     entry = deepcopy(rng.choice(config['training']))
     bot_deck = SimpleNamespace(**entry['deck'])
-    if config['deck_mode'] == 'mirror':
+    if mode == 'mirror':
         pair = (f"windbot:{entry['executor']}", entry['executor'], bot_deck, entry['executor'], bot_deck)
     else:
         import deck_utils

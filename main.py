@@ -133,6 +133,7 @@ def run_training_command(args, parser):
                 any(getattr(args, key, None) for key in ('windbot_executor', 'windbot_holdout', 'windbot_runtime', 'windbot_mono'))
                 or getattr(args, 'windbot_rate', None) is not None
                 or getattr(args, 'windbot_deck_mode', 'mirror') != 'mirror'
+                or getattr(args, 'windbot_mirror_probability', None) is not None
                 or getattr(args, 'windbot_response_timeout', 10) != 10):
             parser.error('WindBot对手参数需要同时显式指定 --windbot')
         requested_weights = getattr(args, 'league_weights', None)
@@ -226,6 +227,7 @@ def run_training_command(args, parser):
             **({'windbot_training': {
                 'executors': args.windbot_executor, 'holdouts': args.windbot_holdout,
                 'deck_mode': args.windbot_deck_mode,
+                'mirror_probability': getattr(args, 'windbot_mirror_probability', None),
                 'runtime': args.windbot_runtime, 'mono': args.windbot_mono,
                 'response_timeout': args.windbot_response_timeout,
             }} if getattr(args, 'windbot', False) and weights['windbot'] > 0 else {}),
@@ -340,7 +342,8 @@ def main():
         help='四类对手绝对概率，总和为1；默认0.15/0/0.25/0.6，启用WindBot后默认0/0.15/0.25/0.6')
     league_group.add_argument('--windbot-rate', type=float, default=None,
         help='兼容3.15.4的旧比例参数，保留按余量缩放语义；新配置建议使用--league-weights')
-    train_parser.add_argument('--windbot-deck-mode', choices=['mirror', 'training-pool'], default='mirror', help='模型侧使用镜像或常规训练卡组池，WindBot始终固定构筑')
+    train_parser.add_argument('--windbot-deck-mode', choices=['mirror', 'training-pool', 'mixed'], default='mirror', help='模型侧使用纯镜像、纯常规训练池或按局混合，WindBot始终固定构筑')
+    train_parser.add_argument('--windbot-mirror-probability', type=float, default=None, help='mixed模式中每局选择镜像构筑的概率，0到1，默认0.5；其余局从常规训练池选取，不改变联盟比例')
     train_parser.add_argument('--windbot-runtime', default=None, help='可选WindBot.exe路径，省略自动选取当前平台运行文件')
     train_parser.add_argument('--windbot-mono', default=None, help='Linux可选Mono路径')
     train_parser.add_argument('--windbot-response-timeout', type=float, default=10, help='单次机器人响应预算秒数，范围(0,10]')

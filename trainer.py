@@ -828,6 +828,7 @@ class PPOTrainer:
                 ensure_ascii=False, sort_keys=True), self.train_step)
             print(f"🤖 [WindBot训练] Worker比例={self.windbot_training['rate']:.0%} | "
                   f"卡组选法={self.windbot_training['deck_mode']} | "
+                  f"每局镜像概率={100 * self.windbot_training['mirror_probability']:g}% | "
                   f"训练执行器={len(self.windbot_training['training'])} | 留出={len(self.windbot_training['holdouts'])}")
         os.environ['GALATEA_RUN_ID'] = self.run_id
         print(f"📊 TensorBoard 日志将保存至: ./runs/{self.model_prefix}_{time_str}")

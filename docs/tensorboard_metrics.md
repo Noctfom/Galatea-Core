@@ -1,6 +1,6 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.16.5 / Model Protocol V4。
+> 适用于 Galatea-Core v3.16.6 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
@@ -299,6 +299,11 @@ RSS无增长，需另看内存日志；有界分段诊断中的`collection_phase
 3.15.4显式开启WindBot训练对手后，记录到原PPO的 `runs/<前缀>_<时间>/events.out.tfevents.*`。
 横轴为累计PPO iteration；每次采集合并记录一次，不是BC epoch。实现位置为
 [Trainer的对手统计](../trainer.py)，来源是 [Worker的单局提交与回滚](../worker.py)。
+
+3.16.6的混合选法按每局实际抽中的来源续写`WindBot_Mirror/*`或`WindBot_Pool/*`，
+不增加混合模式标量。`Configuration/WindBot`文本中的`mirror_probability`是镜像开局概率，
+不是完成局比例或样本比例；配置为50%时，两类`Games`也不必相等。`deck_mode=mixed`
+只出现在运行配置，逐局CSV的`deck_mode`仍为`mirror`或`training-pool`，包括已抽取模式的启动失败局。
 
 | 图表/文本 | 纵轴与记录方式 | 解释与限制 |
 |---|---|---|
