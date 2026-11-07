@@ -11,6 +11,27 @@ class CoreMessageProtocolError(ValueError):
     """表示报文不符合当前随包 Core 的固定协议"""
 
 
+def parse_hint(payload):
+    """读取提示原值与线上玩家字段，不将其统一解释为行动者"""
+    if len(payload) != 6:
+        raise CoreMessageProtocolError('Type 2 payload must be 6 bytes')
+    subtype, wire_player, value = struct.unpack('<BBI', payload)
+    if wire_player not in (0, 1):
+        raise CoreMessageProtocolError('Type 2 has invalid player')
+    return subtype, wire_player, value
+
+
+def hint_visibility_mask(subtype, wire_player):
+    """遵循固定客户端提示投递规则，选项公告与选择提示的接收方不同"""
+    if subtype in (1, 2, 3, 5):
+        return 1 << wire_player
+    if subtype in (4, 6, 7, 8, 9):
+        return 1 << (1 - wire_player)
+    if subtype in (10, 11):
+        return 0b11
+    return 0
+
+
 def decision_player_from_message(msg_type, payload):
     """读取物理响应者；Type 23 的 mode 在 player 前，不能把 mode 当座位"""
     offset = 1 if msg_type == 23 else 0

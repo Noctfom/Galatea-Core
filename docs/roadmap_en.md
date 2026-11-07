@@ -1,6 +1,8 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.16.8. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.16.9. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+
+- [x] 3.16.9: Independent current prompts, announced objects and per-chain resolution/negation states; 116 inputs, revision 15, existing learned parameters and Checkpoint 3 retained. Known old PTH files can resume; ONNX requires re-export. Rewards, temperature and DeckFiLM tuning remain future discussion. See [contract and migration](public_observations_en.md#3169-current-prompt-and-chain-context).
 
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 

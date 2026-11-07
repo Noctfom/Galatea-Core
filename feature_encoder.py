@@ -51,7 +51,10 @@ from event_history import (
 )
 from game_constants import LocationInfo, Position, Zone
 from semantic_lookup import register_static_semantic_runtime_catalog
-from public_observation import PUBLIC_INPUT_SPECS, MAX_PUBLIC_HINTS, DECK_POSITION_CAPACITY
+from public_observation import (
+    PUBLIC_INPUT_SPECS, MAX_PUBLIC_HINTS, DECK_POSITION_CAPACITY,
+    CURRENT_CONTEXT_INPUT_SPECS, CURRENT_CONTEXT_CAPACITY,
+)
 from public_hint_semantics import resolve_public_hint
 
 # --- 配置参数 ---
@@ -841,7 +844,7 @@ class GalateaEncoder:
         arrays = {
             name: np.zeros(shape, dtype=dtype)
             for name, (shape, dtype) in PUBLIC_INPUT_SPECS.items()
-            if not name.startswith('event_public_')
+            if not name.startswith(('event_public_', 'current_context_'))
         }
         hints = [hint for hint in snapshot.public_hints if hint.visibility & (1 << player_id)]
         if len(hints) > MAX_PUBLIC_HINTS:
@@ -883,6 +886,83 @@ class GalateaEncoder:
         if player_id == 1:
             flags[3], flags[4] = flags[4], flags[3]
         arrays['public_state_flags'][:] = flags
+        return {name: torch.from_numpy(value).unsqueeze(0) for name, value in arrays.items()}
+
+    def _encode_current_context(self, snapshot, player_id):
+        """编码决策前已有的询问与连锁事实，不伪造动作或未来监督"""
+        arrays = {
+            name: np.zeros(shape, dtype=dtype)
+            for name, (shape, dtype) in CURRENT_CONTEXT_INPUT_SPECS.items()
+        }
+        viewer_mask = 1 << player_id
+        index = 0
+
+        def append(kind, chain=0, *, code=0, location=None, offset=0, subtype=0, value=0):
+            """完整写入一项事实，容量不足时拒绝产生静默缺失的观测"""
+            nonlocal index
+            if index >= CURRENT_CONTEXT_CAPACITY:
+                raise ValueError(f'当前询问与连锁上下文超过容量 {CURRENT_CONTEXT_CAPACITY}，拒绝静默丢弃')
+            if not (0 <= int(kind) <= 255 and 0 <= int(chain) <= 255
+                    and 0 <= int(subtype) <= 255 and 0 <= int(offset) <= 0x7FFFFFFF):
+                raise ValueError('当前上下文字段超出固定存储范围')
+            arrays['current_context_mask'][index] = True
+            arrays['current_context_kind'][index] = kind
+            arrays['current_context_code'][index] = self._encode_card_code(code) if code else 0
+            arrays['current_context_location'][index] = location or (0, 0, 0, 0)
+            arrays['current_context_chain'][index] = chain
+            arrays['current_context_offset'][index] = offset
+            arrays['current_context_subtype'][index] = subtype
+            arrays['current_context_value'][index] = (
+                value if isinstance(value, (tuple, list))
+                else self._pack_transition_bits(value, 4)
+            )
+            index += 1
+
+        def append_targets(targets, chain):
+            """公告位置保持不变，当前位置只在实例仍可追踪时给出"""
+            for target_index, target in enumerate(targets):
+                raw = int(target.get('announcement_location', -1))
+                if raw < 0:
+                    announcement = (0, 0, 0, 0)
+                else:
+                    owner, zone, sequence, position = LocationInfo.decode(raw)
+                    role = 1 if owner == player_id else 2 if owner in (0, 1) else 0
+                    announcement = (role, zone, sequence, position)
+                tracked = bool(target.get('tracked', False))
+                current = int(target.get('current_location', -1)) if tracked else -1
+                visible = bool(int(target.get('visibility_mask', 0)) & viewer_mask)
+                append(
+                    83, chain,
+                    code=int(target.get('code', 0)) if visible else 0,
+                    location=self._encode_public_location(current, player_id),
+                    offset=target_index,
+                    subtype=int(tracked) | (int(visible) << 1),
+                    value=announcement,
+                )
+
+        resolving = int(getattr(snapshot, 'resolving_chain_index', 0))
+        for item in getattr(snapshot, 'chain_stack', ()):
+            chain = int(item.get('ct', 0))
+            status = sum(int(bool(item.get(name, False))) << bit for bit, name in enumerate((
+                'status_known', 'confirmed', 'solving', 'solved',
+                'activation_negated', 'effect_disabled', 'targets_known',
+            )))
+            status |= int(chain > 0 and chain == resolving) << 7
+            targets = item.get('targets', ())
+            append(70, chain, code=int(item.get('code', 0)),
+                   offset=len(targets), subtype=status, value=int(item.get('desc', 0)))
+            append_targets(targets, chain)
+        append_targets(getattr(snapshot, 'recent_chain_targets', ()), 0)
+        for hint in getattr(snapshot, 'prompt_context', ()):
+            if not int(hint.get('visibility_mask', 0)) & viewer_mask:
+                continue
+            wire_player = int(hint.get('wire_player', -1))
+            role = 1 if wire_player == player_id else 2 if wire_player in (0, 1) else 0
+            # 该角色仅表示原始字段，相应子类型决定其是接收者还是被公告的一方
+            append(int(hint.get('kind', 2)), int(hint.get('chain', 0)),
+                   code=int(hint.get('code', 0)), location=(role, 0, 0, 0),
+                   offset=int(hint.get('prompt_type', 0)),
+                   subtype=int(hint.get('subtype', 0)), value=int(hint.get('value', 0)))
         return {name: torch.from_numpy(value).unsqueeze(0) for name, value in arrays.items()}
 
     def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:
@@ -1294,6 +1374,7 @@ class GalateaEncoder:
         base_dict.update(self._encode_deck_profile(snapshot, player_id))
         base_dict.update(self._encode_transition_history(snapshot, player_id))
         base_dict.update(self._encode_public_observation(snapshot, player_id))
+        base_dict.update(self._encode_current_context(snapshot, player_id))
         base_dict.update(act_dict)
         return base_dict
 

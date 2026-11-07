@@ -24,7 +24,9 @@ MIN_MACRO_OPTION_WEIGHT = 1e-4
 
 
 def _freeze_action_value(value):
-    """把动作中的嵌套列表转换为可哈希元组，供循环状态键稳定比较"""
+    """把动作与上下文中的嵌套容器转换为可哈希元组，供循环状态键稳定比较"""
+    if isinstance(value, dict):
+        return tuple((key, _freeze_action_value(item)) for key, item in sorted(value.items()))
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_action_value(item) for item in value)
     return value
@@ -118,11 +120,11 @@ def build_action_state_key(snapshot, msg_type):
         for action in snapshot.valid_actions
     )
     chain_signature = tuple(
-        tuple(sorted(item.items()))
+        _freeze_action_value(item)
         for item in snapshot.chain_stack
     )
     history_signature = tuple(
-        tuple(sorted(item.items()))
+        _freeze_action_value(item)
         for item in snapshot.history_stack[-8:]
     )
     return (
@@ -132,6 +134,10 @@ def build_action_state_key(snapshot, msg_type):
         action_signature,
         chain_signature,
         history_signature,
+        # 场面相同但询问用途或处理链变化时，不应被判为同一无进展循环
+        int(getattr(snapshot, 'resolving_chain_index', 0)),
+        _freeze_action_value(getattr(snapshot, 'recent_chain_targets', ())),
+        _freeze_action_value(getattr(snapshot, 'prompt_context', ())),
     )
 
 

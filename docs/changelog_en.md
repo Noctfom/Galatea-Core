@@ -4,6 +4,20 @@
 
 ---
 
+## [v3.16.9] - 2026-11-06
+
+### Current prompt and chain observation completion
+
+- Type2 selection hints reach the current decision with exact32-bit values. Repeated select/unselect, Retry and replacement hints have distinct lifetimes; other known hint values retain their actual recipients without invented effect or tactical labels
+- MSG83 announced objects retain original chain indices, announcement positions and independently tracked current positions. Moves, swaps, reindexing, shuffle and query identity conflicts cannot rebind old objects to new slot occupants. These facts remain separate from persistent query targets and do not claim HintSelection is rules-level targeting
+- 70–76 track per-chain confirmation, resolution, completion, activation negation and effect disabling;162 leaves omitted context unknown. Full-zone queries in controlled receivers reconcile target identities; WindBot routing fixes Type2/4 recipients and Type2/11 broadcast
+- Unlinked per-card announcements accumulate within one decision window, survive Retry and clear at the next decision or phase boundary. Repeated-state signatures support nested targets and distinguish current prompts and resolving chains, preventing hash failures and false loop matches
+- Eight`current_context_*`inputs extend108→116fields and schema14→15, reusing existing notification parameters for chain/global representations. Backbone configurations such as512/8/6, all parameter names/shapes, Model Protocol4, Checkpoint3, rewards and PPO/GAE/auxiliary targets remain unchanged
+- Known complete revision14 PTH files retain learned weights and normal PPO optimizer state. Ordinary loading does not rewrite files; subsequent saves record observation provenance. Existing ONNX check/update marks old graphs for re-export. Old exact trajectories/BC caches are not mixed by relaxing digests
+- New holographic states retain prompt/chain facts. Bilingual observation, architecture, protocol and roadmap documentation is updated. Added storage is5KiB/sample; branch measurements and continuation instructions are in[public observations](public_observations_en.md#3169-current-prompt-and-chain-context)
+
+- Validation: 1,048 tests passed, 48 conditionally skipped and 50 subtests passed. Separately enabled real Core and WindBot short CPU/CUDA collection-to-PPO runs passed. Full-network ONNX checks cover dynamic batches 1/3, nonzero notification gates, context mutations and policy/value numerical agreement; production-scale cloud training remains unverified
+
 ## [v3.16.8] - 2026-11-03
 
 ### Effect-question decoding and rollout completion

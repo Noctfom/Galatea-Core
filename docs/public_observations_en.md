@@ -1,6 +1,49 @@
-# 3.13.3: Public hints, timing feedback and known deck positions
+# Public observations, prompts and chain context
 
-> Usage guidance applies to v3.14.1; dated repair and measurement evidence below remains historical.
+> Current usage applies to v3.16.9; dated sections retain their original contracts and measurements
+
+## 3.16.9 Current prompt and chain context
+
+The observation grows from **108 to 116 fields, schema revision 14 to 15**. Model Protocol 4, Checkpoint Format 3, backbone configurations such as 512/8/6, and every learned parameter name and shape remain unchanged. Current facts are separate from the 16 completed transition events. No synthetic actions, rewards, supervision or PPO rows are added.
+
+| Source | Added facts | Lifetime and uncertainty |
+| --- | --- | --- |
+| Type 2 / SELECTMSG(3) | Exact 32-bit selection parameter, prompt kind and recipient | Available before the choice; 15/18/20/23/24 consume it on completion; 26 retains it through repeated select/unselect; finish or leaving the flow consumes it; Retry preserves it; a new hint replaces it |
+| Other known Type 2 subtypes | Received event text, selected options, declarations, card/zone hints | Recipient-specific; chain notices last until chain end, unlinked notices retain the latest 16 per viewer; raw values are not automatically effect-slot IDs |
+| 70/71 | Original chain index and building/confirmed status | Nodes retain their indices until 74 |
+| 72/73 | Which chain began resolution and which has resolved | 73 retains the last resolving index with an explicit resolved flag; next 72 replaces it; 74 clears it |
+| 75/76 | Activation negation and effect disabling of the specified chain | Stored separately, not inferred from aggregate event bits |
+| 83 | Announced objects, announcement locations, known identities and tracked current locations | Follow provable moves/swaps; shuffle or uncertain identity invalidates tracking without rebinding a new occupant of the old slot |
+| 162 | Reloaded chain sources | Omitted statuses, targets and selection purposes remain unknown rather than inheriting old caches |
+
+SELECTMSG can contain a card code for a placement prompt, not just a cost/target purpose ID. MSG83 can also be emitted by `Duel.HintSelection`, so these are **announced objects**, not guaranteed rules-level targeting relationships. They remain separate from persistent `QUERY_TARGET_CARD` relations.
+
+Without an active chain, Core may announce each card in a group with a separate MSG83. The receiver accumulates these objects until the next decision rather than keeping only the final card. Retry retains that window; a subsequent decision or game, turn or phase boundary clears it. Repeated-state signatures include prompt and chain context so a changed selection purpose is not mistaken for the same loop.
+
+Type 2's player byte is a wire-routing field, not a universal actor: 1/2/3/5 go to that player; 4/6/7/8/9 to the other player; 10/11 to both. The controlled WindBot bridge fixes subtype 4 routing and subtype 11 broadcast to match the [upstream client delivery logic](https://github.com/Fluorohydride/ygopro/blob/master/gframe/single_duel.cpp#L593). Unknown UI hint subtypes neither invent observations nor alone abort a valid game.
+
+### Inputs and forward path
+
+`public_observation.CURRENT_CONTEXT_INPUT_SPECS` defines eight `current_context_*` fields with 256 fact slots: `mask`, `kind`, `code`, `location`, `chain`, `offset`, `subtype`, `value`. Exact identities use four bytes, players use relative roles, and card codes respect viewer knowledge. Capacity overflow fails explicitly rather than silently dropping objects or evicting transition history.
+
+`PublicContextEncoder.encode_current_context` reuses existing notification embeddings, pooling, projections and gates. Per-chain summaries enter their matching chain representations; prompts and unlinked facts enter global public context, then the shared state, policy, value and planner. The existing chain radar still has 12 slots; additional facts beyond chain 12 retain their raw index in the global group. No main 120-card tokens or learned parameters are added.
+
+Empty context matches the previous network bit for bit. Real added facts change outputs; existing notification gates are retained, and newly used types may require learning. Continued training updates shared notification parameters. Preserving weights does not promise unchanged decisions or already-correct use of the new evidence.
+
+Additional storage is 5,120 bytes/sample, about 160 MiB for 32,768 samples; worker and merged pools count separately. On a 5070 Ti at width 512/FP16, the new branch alone measured approximately 0.132 ms for batch 12 CUDA Graph forward and 7.65 MiB extra peak; batch 512 forward/backward measured 12.91 ms and 332.88 MiB extra peak. These are branch measurements, not whole-training overhead or long-run memory guarantees.
+
+### Continuation, exports and replay
+
+- PTH artifacts matching the complete known revision 14 schema can migrate to 15 with all weights retained. Normal PPO resume preserves Adam, AMP, counters and model identity; BC-to-new-PPO initialization keeps its existing separate-optimizer rules
+- Ordinary loading leaves the source file untouched. The next save uses the current schema and records `observation_protocol_updates`. Vocabulary IDs, semantic encoder compatibility and unknown schema differences remain checked
+- Restart trainer and workers together and collect a fresh round. Do not combine old encoded PPO rows/old log-probabilities with newly constructed observations
+- Old ONNX graphs lack the added path. Use the existing Resource Sync ONNX check/update entry with matching PTH files to re-export; no semantic vectors, vocabulary or hash categories need rebuilding. Relabeling ONNX metadata cannot add the computation
+- Old normalized trajectories/BC caches retain strict schema checks. Rebuilding current observations requires complete raw messages, queries and responses; replacing digests is insufficient. This release does not automatically migrate old normalized trajectories. Old holographic JSON remains viewable without invented missing facts
+- New holographic states store `prompt_context`, per-chain status/objects, `resolving_chain_index` and unlinked announced objects. Core training, Arena, controlled sessions and offline reconstruction share state logic. Link model readers must adopt the eight fields and revision 15; real-server readiness gates are not automatically enabled
+
+Rewards, temperature, GAE, KL limits, DeckFiLM strength and auxiliary targets are unchanged. Strategic decisions remain learned; the added facts reduce aliasing between genuinely different visible situations.
+
+## 3.13.3 Historical implementation
 
 This batch connects Types120,160/165,37/38 and162 to the shared state/observation path. It does not modify public Core, rewards, decision-request counts, MCTS or a universal active-effect tracker.
 

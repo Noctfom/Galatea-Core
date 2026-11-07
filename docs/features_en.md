@@ -2,7 +2,7 @@
 
 > Complete guide to all Galatea-Core modules, including WebUI and CLI tools.
 
-> This document applies to **Galatea-Core v3.16.8**. Model Protocol V4 and Checkpoint Format 3 are independent of release versions.
+> This document applies to **Galatea-Core v3.16.9**. Model Protocol V4 and Checkpoint Format3 are independent of release versions. Current prompt/chain inputs use schema revision15; known revision14 PTH weights can continue. See[public observations](public_observations_en.md#3169-current-prompt-and-chain-context).
 
 ---
 

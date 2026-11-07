@@ -298,7 +298,7 @@ def train_imitation(dataset_path, *, init_from=None, resume=None, output='./mode
     """BC has its own optimizer, identity, budgets and checkpoints; never invokes PPO."""
     from checkpoint_utils import (CHECKPOINT_FORMAT_VERSION, canonical_model_state_dict,
                                   generate_model_id, load_training_checkpoint, get_training_lineage, checkpoint_stem,
-                                  checkpoint_semantic_history)
+                                  checkpoint_semantic_history, checkpoint_observation_history)
     from galatea_net import GalateaNet
     from model_artifacts import write_checkpoint_artifact_manifest
     from protocol_schema import apply_current_protocol_metadata, get_current_protocol_metadata
@@ -376,6 +376,7 @@ def train_imitation(dataset_path, *, init_from=None, resume=None, output='./mode
         lineage = dict(source_lineage, base_prefix=(source_lineage['base_prefix'] if resume else model_prefix))
         previous_selection = checkpoint.get('imitation', {}).get('selection') if resume else None
         semantic_history = checkpoint_semantic_history(checkpoint)
+        observation_history = checkpoint_observation_history(checkpoint)
         del checkpoint
         lock.set_run_id(run_id)
         writer = SummaryWriter(log_dir=str(Path('runs') / f'imitation_{run_id}'),
@@ -430,6 +431,7 @@ def train_imitation(dataset_path, *, init_from=None, resume=None, output='./mode
                         **get_current_protocol_metadata(), 'net_config': config,
                         'semantic_compatibility': config.get('semantic_compatibility'),
                         'semantic_asset_updates': semantic_history,
+                        'observation_protocol_updates': observation_history,
                         'model_id': model_id, 'model_prefix': model_prefix, 'run_id': run_id,
                         'iteration': epoch, 'train_step': updates, 'global_step': examples,
                         'training_stage': 'imitation', 'optimizer_state_dict': optimizer.state_dict(),

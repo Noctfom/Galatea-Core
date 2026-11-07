@@ -2,7 +2,9 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.16.7**, retaining Protocol4/Checkpoint3/revision14. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.16.9**, Protocol4/Checkpoint3/schema revision15. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+
+Eight independent inputs complete current prompts and chain states. Existing notification parameters feed per-chain/global representations, then policy, value and planning. Backbone configuration, parameter shapes and learning targets remain unchanged; known revision14 PTH files can continue, while ONNX requires re-export. See[observation contracts and lifetimes](public_observations_en.md#3169-current-prompt-and-chain-context).
 
 > 💡 **Framework's unique handling logic** (Semantic Module, 142 Announce Pool, Multi-Select Chunk Wrapper, Hand Tracker, Deck Weights, Disguise Pools) — see [Special Handling Logic Document](special_handling_en.md).
 
@@ -775,7 +777,7 @@ Select Central Inference Data Transfer in the training WebUI or use the CLI:
 | Batched Transfer (recommended) | `--inference-transport packed`, default | Normal CPU/CUDA training; reduces overhead from many small copies |
 | Per-field Transfer (original) | `--inference-transport fields` | Compare performance with the original method or investigate problems with batched transfer |
 
-Each observation contains 108 fields, including scene cards, action candidates and event history.
+Each observation contains116 fields, including scene cards, action candidates, event history and current prompt context.
 The original method allocates shared storage per field, then gathers and transfers each field
 separately. Batched transfer puts fields of the same data type into continuous storage, currently
 eight blocks, while retaining each field's name, shape and numeric type.

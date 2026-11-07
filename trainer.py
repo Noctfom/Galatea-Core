@@ -627,6 +627,7 @@ class PPOTrainer:
         self.training_lineage = None
         self.initialization_source = None
         self.semantic_asset_updates = []
+        self.observation_protocol_updates = []
         requested_model_prefix = (
             validate_model_prefix(model_prefix) if model_prefix is not None else None
         )
@@ -641,8 +642,11 @@ class PPOTrainer:
             )
             from checkpoint_utils import validate_ppo_resume_stage
             validate_ppo_resume_stage(resume_checkpoint)
-            from checkpoint_utils import checkpoint_semantic_history
+            from checkpoint_utils import checkpoint_semantic_history, checkpoint_observation_history
             self.semantic_asset_updates = checkpoint_semantic_history(resume_checkpoint)
+            self.observation_protocol_updates = checkpoint_observation_history(resume_checkpoint)
+            if self.observation_protocol_updates:
+                print(f"♻️ [观测接续] {self.observation_protocol_updates[-1]['message']}")
             if self.semantic_asset_updates:
                 print(f"♻️ [语义兼容] {self.semantic_asset_updates[-1]['message']}")
             # 词表合法追加后，恢复训练立即升级运行时身份；下一检查点应覆盖新卡映射
@@ -2440,6 +2444,7 @@ class PPOTrainer:
                     'net_config': self.net_config, 
                     'semantic_compatibility': self.net_config.get('semantic_compatibility'),
                     'semantic_asset_updates': getattr(self, 'semantic_asset_updates', []),
+                    'observation_protocol_updates': getattr(self, 'observation_protocol_updates', []),
                     'iteration': self.iteration,
                     'train_step': self.train_step,   # TensorBoard 的 X 轴坐标
                     'global_step': self.global_step,  # 环境交互总步数

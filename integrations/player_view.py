@@ -69,7 +69,7 @@ def input_source_group(name):
         return 'effect_history'
     if name.startswith('event_'):
         return 'transitions'
-    if name.startswith(('hint_', 'known_deck_')) or name == 'public_state_flags':
+    if name.startswith(('hint_', 'known_deck_', 'current_context_')) or name == 'public_state_flags':
         return 'public_context'
     if name.startswith('act_'):
         return 'actions'
@@ -277,13 +277,12 @@ def visible_core_message(message, perspective):
                     raw[entry:entry + 4] = b'\0' * 4
         return bytes(raw)
     if kind == 2:
-        hint, actor = raw[1:3]
-        if actor not in (0, 1):
-            raise SessionProtocolError('invalid hint recipient')
-        if ((hint in (1, 2, 3, 4, 5) and actor == perspective)
-                or (hint in (6, 7, 8, 9) and actor != perspective) or hint == 10):
-            return bytes(raw)
-        return None
+        from core_message_protocol import parse_hint, hint_visibility_mask
+        try:
+            hint, wire_player, _ = parse_hint(raw[1:])
+        except ValueError as error:
+            raise SessionProtocolError(str(error)) from error
+        return bytes(raw) if hint_visibility_mask(hint, wire_player) & (1 << perspective) else None
     if kind in (90, 33, 39):
         actor, count = raw[1:3]
         if actor != perspective:
@@ -493,6 +492,11 @@ class PlayerViewAdapter:
             if zone == 1:
                 self.brain.public_observation.deck_counts[actor] = len(rows)
             self._refreshed.add((actor, zone))
+            if zone not in (1, 64):
+                # 仅完整区域查询证明序号已校准，不能用单卡增量刷新解除整个区域的未知状态
+                self.brain._chain_target_queried_zones = {(actor, zone)}
+                self.brain._chain_target_dirty_zones.discard((actor, zone))
+                self.brain._refresh_chain_target_identities()
         elif zone in (4, 8):
             self.brain._reload_counts[actor][zone] = len(new_zone)
 

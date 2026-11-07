@@ -12,13 +12,15 @@ independent imitation still requires separate startup.
 
 | Item | Current stable | V4 target | Switch point |
 | --- | ---: | ---: | --- |
-| Framework | 3.16.7 (GKG shared content and default WebUI graph acceleration, revision14 unchanged) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
+| Framework | 3.16.9 (current prompt/chain observation completion, schema revision15) | 3.x; 4.0.0 after the deck-building/BO3 layer | Per release stage |
 | Model Protocol | 4 | 4 | Switched when exact card identity landed |
 | Checkpoint Format | 3 | 3 | Required V4 metadata has landed |
 | Trajectory Schema | 2 (core_trajectory.py) | Independent of model/checkpoint versions | Raw trajectory format changes |
 | GKG container | 4 (no attachments) / 5 (with attachments) | Independent of model protocol | Container changes; see [specification](deployment_packages_en.md) |
 
 These versions are independent. Once Model Protocol 4 is enabled, it remains fixed throughout V4 development. Field inventories, tensor shapes, and `protocol_schema_hash` prevent intermediate artifacts from being mixed.
+
+3.16.9 adds eight independent current-context inputs without changing backbone configurations or learned parameter shapes. PTH files matching the known revision14 contract can retain weights/normal PPO optimizer state; old ONNX requires re-export and old exact observation caches remain strict. See[current prompt and chain contracts](public_observations_en.md#3169-current-prompt-and-chain-context).
 
 V4 trains from scratch. V3 weights, optimizer/scaler state, and historical opponent pools are not migrated. V3 models and Link remain supported by the archived V3 runtime.
 

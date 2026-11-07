@@ -5,7 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from event_history import MAX_PUBLIC_NOTIFICATIONS
-from public_observation import PUBLIC_CONTEXT_DIM, DECK_POSITION_CAPACITY
+from public_observation import (
+    PUBLIC_CONTEXT_DIM, DECK_POSITION_CAPACITY, CURRENT_CONTEXT_CHAIN_SLOTS,
+)
 
 
 class PublicContextEncoder(nn.Module):
@@ -108,3 +110,31 @@ class PublicContextEncoder(nn.Module):
         )
         summary = self._pool(tokens, mask)
         return self.notification_proj(summary) * torch.tanh(self.notification_gate)
+
+    def encode_current_context(self, batch, cards):
+        """共享通知参数，分别汇聚当前询问及各原始链号下的事实"""
+        mask = batch['current_context_mask'].bool()
+        chains = batch['current_context_chain'].long()
+        metadata = torch.stack((
+            chains.float() / float(CURRENT_CONTEXT_CHAIN_SLOTS),
+            torch.log1p(batch['current_context_offset'].float()) / 8.0,
+            batch['current_context_subtype'].float() / 255.0,
+        ), dim=-1)
+        tokens = F.gelu(
+            cards + self.notification_kind(batch['current_context_kind'].long())
+            + self._location(batch['current_context_location'])
+            + self.notification_order.weight[0]
+            + self._value_vector(batch['current_context_value'])
+            + self.notification_numeric(metadata)
+        )
+        # 超出既有十二链雷达的事实仍保留在全局组，其原链号继续进入数值编码
+        groups = torch.where(chains <= CURRENT_CONTEXT_CHAIN_SLOTS, chains, torch.zeros_like(chains))
+        group_ids = torch.arange(CURRENT_CONTEXT_CHAIN_SLOTS + 1, device=cards.device)
+        group_mask = mask.unsqueeze(1) & groups.unsqueeze(1).eq(group_ids.reshape(1, -1, 1))
+        scores = self.score(tokens).squeeze(-1).float().unsqueeze(1)
+        weights = torch.softmax(scores.masked_fill(~group_mask, -1e9), dim=-1)
+        weights = weights * group_mask.to(weights.dtype)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        # 矩阵乘法避免把256项事实复制成十三份特征张量
+        summaries = torch.bmm(weights.to(tokens.dtype), tokens)
+        return self.notification_proj(summaries) * torch.tanh(self.notification_gate)

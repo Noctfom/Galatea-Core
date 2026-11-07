@@ -293,7 +293,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.8"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.16.9"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1142,6 +1142,9 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 f"⚠️ {resume_model_protocol_warning}",
                 f"⚠️ {resume_model_protocol_warning}",
             ))
+        if not resume_metadata_error and saved_meta.get('observation_update'):
+            st.info(_("此模型将保留已学权重，使用补全后的询问与连锁观测继续训练；请从新一轮采集开始，历史对手 ONNX 可在资源同步中更新",
+                      "This model keeps its learned weights and continues with completed prompt and chain observations. Start a fresh collection round; update historical ONNX models in Resource Sync."))
         
         # 将读取到的配置安全转化为整数，防止格式报错
         default_d_model = int(saved_cfg.get('d_model', 256))

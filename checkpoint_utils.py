@@ -14,6 +14,7 @@ from protocol_schema import (
     MODEL_PROTOCOL_VERSION,
     apply_current_protocol_metadata,
     get_current_protocol_metadata,
+    observation_protocol_update,
     validate_protocol_metadata,
 )
 from training_validation import validate_model_prefix
@@ -236,6 +237,16 @@ def checkpoint_semantic_history(checkpoint, *, semantic_root='.'):
     return history
 
 
+def checkpoint_observation_history(checkpoint, *, card_vocabulary=None):
+    """保留已知观测合同的接续来源，不改模型权重或原检查点身份"""
+    history = list(checkpoint.get('observation_protocol_updates',
+                                 (checkpoint.get('net_config') or {}).get('observation_protocol_updates', [])))
+    update = observation_protocol_update(checkpoint, card_vocabulary=card_vocabulary)
+    if update and (not history or history[-1] != update):
+        history.append(update)
+    return history
+
+
 def inspect_training_checkpoint(path, map_location="cpu"):
     """安全读取 WebUI 所需的检查点身份和架构元数据，不修改文件"""
     checkpoint = safe_load_torch_checkpoint(
@@ -248,11 +259,15 @@ def inspect_training_checkpoint(path, map_location="cpu"):
     format_warning = get_checkpoint_format_warning(checkpoint)
     model_protocol_warning = get_model_protocol_warning(checkpoint)
     if format_warning is None and model_protocol_warning is None:
-        validate_protocol_metadata(checkpoint, label="checkpoint", allow_semantic_updates=True)
+        validate_protocol_metadata(checkpoint, label="checkpoint", allow_semantic_updates=True,
+                                   allow_observation_updates=True)
         validate_model_id(checkpoint.get("model_id"))
         validate_model_prefix(checkpoint.get("model_prefix"))
         net_config = checkpoint.get("net_config")
         apply_current_protocol_metadata(net_config)
+        for key in get_current_protocol_metadata():
+            if checkpoint.get(key) != net_config.get(key):
+                raise ValueError(f"checkpoint top-level {key} does not match checkpoint net_config")
         if (
             isinstance(checkpoint.get("iteration"), bool)
             or not isinstance(checkpoint.get("iteration"), int)
@@ -267,6 +282,8 @@ def inspect_training_checkpoint(path, map_location="cpu"):
         "model_id": checkpoint.get("model_id"),
         "model_prefix": checkpoint.get("model_prefix"),
         'semantic_update': checkpoint_semantic_update(checkpoint) if format_warning is None and model_protocol_warning is None else None,
+        'observation_update': observation_protocol_update(checkpoint) if format_warning is None and model_protocol_warning is None else None,
+        'observation_protocol_updates': checkpoint_observation_history(checkpoint) if format_warning is None and model_protocol_warning is None else [],
         'semantic_compatibility': checkpoint.get('semantic_compatibility') or (checkpoint.get('net_config') or {}).get('semantic_compatibility'),
         "iteration": checkpoint.get("iteration"),
         "run_id": checkpoint.get("run_id"),
@@ -292,6 +309,7 @@ def validate_training_checkpoint(
     card_vocabulary=None,
     semantic_root=".",
     allow_semantic_updates=True,
+    allow_observation_updates=True,
 ):
     """校验已加载检查点的协议、UUID、结构和可选文件名一致性"""
     if not isinstance(checkpoint, dict):
@@ -313,6 +331,7 @@ def validate_training_checkpoint(
         card_vocabulary=card_vocabulary,
         semantic_root=semantic_root,
         allow_semantic_updates=allow_semantic_updates,
+        allow_observation_updates=allow_observation_updates,
     )
 
     missing = sorted(REQUIRED_TRAINING_CHECKPOINT_KEYS.difference(checkpoint))
@@ -339,6 +358,7 @@ def validate_training_checkpoint(
         card_vocabulary=card_vocabulary,
         semantic_root=semantic_root,
         allow_semantic_updates=allow_semantic_updates,
+        allow_observation_updates=allow_observation_updates,
     )
     for key in get_current_protocol_metadata(
         card_vocabulary,
@@ -369,13 +389,16 @@ def validate_training_checkpoint(
             stacklevel=2,
         )
 
-    return checkpoint
+    history = checkpoint_observation_history(checkpoint, card_vocabulary=card_vocabulary)
+    return dict(checkpoint, observation_protocol_updates=history) if history else checkpoint
 
 
-def load_training_checkpoint(path, map_location="cpu", *, allow_semantic_updates=True):
+def load_training_checkpoint(path, map_location="cpu", *, allow_semantic_updates=True,
+                             allow_observation_updates=True):
     """加载并校验当前训练框架生成的完整检查点"""
     checkpoint = safe_load_torch_checkpoint(path, map_location=map_location)
-    return validate_training_checkpoint(checkpoint, source_path=path, allow_semantic_updates=allow_semantic_updates)
+    return validate_training_checkpoint(checkpoint, source_path=path, allow_semantic_updates=allow_semantic_updates,
+                                        allow_observation_updates=allow_observation_updates)
 
 
 def validate_training_checkpoint_file(
@@ -437,6 +460,7 @@ def initialize_ppo_from_weights(source_path, output_root='./models', *, learning
         'net_config': config, 'model_id': model_id, 'model_prefix': prefix, 'run_id': run_id,
         'semantic_compatibility': config.get('semantic_compatibility'),
         'semantic_asset_updates': checkpoint_semantic_history(checkpoint),
+        'observation_protocol_updates': checkpoint_observation_history(checkpoint),
         'training_stage': 'ppo', 'training_lineage': lineage,
         'iteration': lineage['ppo_iteration'], 'train_step': 0, 'global_step': 0,
         'model_state_dict': canonical_model_state_dict(network, to_cpu=True),

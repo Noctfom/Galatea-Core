@@ -1,7 +1,7 @@
 # 3.13.2: Fixed Core messages and cognition gaps
 
 > This page preserves the 3.13.2 audit. For v3.14.1, read it alongside the 3.13.3 implementation status below.
-> Current Model Protocol 4 / Checkpoint Format 3 / schema revision 14; historical gaps are not necessarily still open.
+> Current Model Protocol4 / Checkpoint Format3 / schema revision15; historical gaps are not necessarily still open.3.16.9 adds current prompts, announced objects and per-chain state; see the[current contract](public_observations_en.md#3169-current-prompt-and-chain-context).
 
 Splitting a message, maintaining its state and exposing it to the model are separate layers.
 Raw trajectory capture does not make every captured field a training input.

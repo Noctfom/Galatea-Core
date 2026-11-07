@@ -74,8 +74,12 @@ class SemanticLookupMismatchError(ValueError):
     """区分语义内容身份变化，避免将其与协议结构或模型文件损坏混淆"""
 
 
+class ObservationProtocolMismatchError(ValueError):
+    """区分可迁移权重的旧观测合同与不能直接复用的静态计算图"""
+
+
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 14
+PROTOCOL_SCHEMA_REVISION = 15
 
 
 def _schema_descriptor(card_vocabulary):
@@ -107,6 +111,7 @@ def _schema_descriptor(card_vocabulary):
                 "hint_semantic_card_idx",
                 "known_deck_idx",
                 "event_public_code",
+                "current_context_code",
             ],
         },
         "global_state": {
@@ -448,6 +453,44 @@ def _schema_descriptor(card_vocabulary):
     }
 
 
+def _protocol_descriptor_hash(descriptor):
+    """以统一规范计算结构身份，不混入运行路径或训练轮次"""
+    encoded = json.dumps(descriptor, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _revision_14_schema_hash(card_vocabulary):
+    """仅重建已知的108输入合同，其他结构差异仍会使旧哈希校验失败"""
+    descriptor = _schema_descriptor(card_vocabulary)
+    descriptor["schema_revision"] = 14
+    public = dict(descriptor["public_observation"])
+    public.pop("current_context", None)
+    public["inputs"] = {key: value for key, value in public["inputs"].items()
+                        if not key.startswith("current_context_")}
+    descriptor["public_observation"] = public
+    descriptor["card_identity"]["indexed_inputs"].remove("current_context_code")
+    return _protocol_descriptor_hash(descriptor)
+
+
+def observation_protocol_update(container, *, card_vocabulary=None):
+    """识别唯一允许接续的旧观测合同，保留源身份而不改写文件"""
+    vocabulary = card_vocabulary or get_default_card_vocabulary()
+    if (container.get("model_protocol_version") != MODEL_PROTOCOL_VERSION
+            or container.get("protocol_schema_revision") != 14
+            or container.get("protocol_schema_hash") != _revision_14_schema_hash(vocabulary)):
+        return None
+    return {
+        "source_protocol_schema_revision": 14,
+        "source_protocol_schema_hash": container["protocol_schema_hash"],
+        "runtime_protocol_schema_revision": PROTOCOL_SCHEMA_REVISION,
+        "runtime_protocol_schema_hash": _protocol_descriptor_hash(_schema_descriptor(vocabulary)),
+        "status": "current_context_input_extension",
+        "weights_preserved": True,
+        "message": "保留全部已有权重，补充当前询问与连锁观测；接续使用新采集样本，旧ONNX需从PTH重导出",
+    }
+
+
 def get_current_protocol_metadata(card_vocabulary=None, *, semantic_root="."):
     """返回检查点、ONNX 和部署包共用的 V4 协议身份"""
     vocabulary = card_vocabulary or get_default_card_vocabulary()
@@ -456,16 +499,10 @@ def get_current_protocol_metadata(card_vocabulary=None, *, semantic_root="."):
         card_vocabulary=vocabulary,
     )
     descriptor = _schema_descriptor(vocabulary)
-    encoded = json.dumps(
-        descriptor,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
     return {
         "model_protocol_version": MODEL_PROTOCOL_VERSION,
         "protocol_schema_revision": PROTOCOL_SCHEMA_REVISION,
-        "protocol_schema_hash": hashlib.sha256(encoded).hexdigest(),
+        "protocol_schema_hash": _protocol_descriptor_hash(descriptor),
         "card_vocab_hash": vocabulary.vocabulary_hash,
         "card_vocab_size": vocabulary.capacity,
         "card_vocab_card_count": vocabulary.card_count,
@@ -499,7 +536,14 @@ def apply_current_protocol_metadata(
             card_vocabulary=card_vocabulary,
             semantic_root=semantic_root,
             allow_semantic_updates=True,
+            allow_observation_updates=True,
         )
+        update = observation_protocol_update(normalized, card_vocabulary=card_vocabulary)
+        if update:
+            history = list(normalized.get("observation_protocol_updates", []))
+            if not history or history[-1] != update:
+                history.append(update)
+            normalized["observation_protocol_updates"] = history
     normalized.update(metadata)
     from semantic_lookup import semantic_compatibility_descriptor
     compatibility = semantic_compatibility_descriptor(get_static_semantic_lookup(semantic_root, card_vocabulary=card_vocabulary))
@@ -521,6 +565,7 @@ def validate_protocol_metadata(
     card_vocabulary=None,
     semantic_root=".",
     allow_semantic_updates=False,
+    allow_observation_updates=False,
 ):
     """校验结构一致且词表是当前只追加前缀的产物"""
     if not isinstance(container, dict):
@@ -530,6 +575,12 @@ def validate_protocol_metadata(
         vocabulary,
         semantic_root=semantic_root,
     )
+    observation_update = observation_protocol_update(container, card_vocabulary=vocabulary)
+    if observation_update and not allow_observation_updates:
+        raise ObservationProtocolMismatchError(
+            f"{label} 使用旧观测合同 revision 14，当前为 {PROTOCOL_SCHEMA_REVISION}；"
+            "PTH可保留权重接续，ONNX须从对应PTH重新导出，精确轨迹须由完整原始捕获重新生成"
+        )
     for key in (
         "model_protocol_version",
         "protocol_schema_revision",
@@ -537,6 +588,8 @@ def validate_protocol_metadata(
         "card_vocab_size",
         "semantic_lookup_format_version",
     ):
+        if observation_update and key in ("protocol_schema_revision", "protocol_schema_hash"):
+            continue
         expected_value = expected[key]
         if container.get(key) != expected_value:
             raise ValueError(

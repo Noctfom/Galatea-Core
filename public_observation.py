@@ -12,8 +12,23 @@ MAX_PUBLIC_HINTS = 128
 DECK_POSITION_CAPACITY = 256
 PUBLIC_CONTEXT_DIM = 128
 PUBLIC_OBSERVATION_FORMAT_VERSION = 1
+CURRENT_CONTEXT_CAPACITY = 256
+CURRENT_CONTEXT_CHAIN_SLOTS = 12
+CURRENT_CONTEXT_FORMAT_VERSION = 1
 CARD_QUESTION = 38723936
 _CONTIGUOUS_ZONES = {Zone.DECK, Zone.HAND, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA}
+
+# 当前事实与已完成动作历史分别存储，补全观测不会占用历史槽位
+CURRENT_CONTEXT_INPUT_SPECS = {
+    "current_context_mask": ((CURRENT_CONTEXT_CAPACITY,), "bool"),
+    "current_context_kind": ((CURRENT_CONTEXT_CAPACITY,), "uint8"),
+    "current_context_code": ((CURRENT_CONTEXT_CAPACITY,), "int32"),
+    "current_context_location": ((CURRENT_CONTEXT_CAPACITY, 4), "uint8"),
+    "current_context_chain": ((CURRENT_CONTEXT_CAPACITY,), "uint8"),
+    "current_context_offset": ((CURRENT_CONTEXT_CAPACITY,), "int32"),
+    "current_context_subtype": ((CURRENT_CONTEXT_CAPACITY,), "uint8"),
+    "current_context_value": ((CURRENT_CONTEXT_CAPACITY, 4), "uint8"),
+}
 
 # 观测与共享内存共用规格；只传身份/参数，不在轨迹内保存展开的语义向量
 PUBLIC_INPUT_SPECS = {
@@ -40,6 +55,7 @@ PUBLIC_INPUT_SPECS = {
     "event_public_offset": ((TRANSITION_EVENT_HISTORY_SIZE, MAX_PUBLIC_NOTIFICATIONS), "int32"),
     "event_public_subtype": ((TRANSITION_EVENT_HISTORY_SIZE, MAX_PUBLIC_NOTIFICATIONS), "uint8"),
     "event_public_value": ((TRANSITION_EVENT_HISTORY_SIZE, MAX_PUBLIC_NOTIFICATIONS, 4), "uint8"),
+    **CURRENT_CONTEXT_INPUT_SPECS,
 }
 
 
@@ -366,4 +382,16 @@ def public_observation_descriptor():
         "hint_semantics": "exact_slot_or_explicit_parent_code_context",
         "lifetime": "core_notifications_and_client_instance_lifecycle",
         "reward_changes": False,
+        "current_context": {
+            "format_version": CURRENT_CONTEXT_FORMAT_VERSION,
+            "capacity": CURRENT_CONTEXT_CAPACITY,
+            "chain_slots": CURRENT_CONTEXT_CHAIN_SLOTS,
+            "source": "current_prompt_and_active_chain_facts",
+            "grouping": "original_chain_index_with_global_prompt_group",
+            "targets": "announced_location_and_current_tracked_instance",
+            "visibility": "per_player_notification_and_card_identity_masks",
+            "overflow": "reject_incomplete_observation",
+            "history_capacity_changes": False,
+            "learned_parameter_changes": False,
+        },
     }

@@ -1,11 +1,13 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.15.3**: Model Protocol **4**, Checkpoint Format **3**, schema revision **14**.
+This document applies to **v3.16.9**: Model Protocol **4**, Checkpoint Format **3**, schema revision **15**.
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
 fixed message-protocol identity and automatic empty-chain responses. Raw Schema 1 traces are no
 longer accepted as current traces. Holographic JSON remains format 3; formats 1/2 remain viewable.
+
+3.16.9 adds independent current prompt/chain inputs. PTH weight continuation does not waive exact observation hashes or BC cache schemas. Complete source captures require reconstruction and renewed validation, not digest replacement. New holographic states retain the added facts; old recordings keep their original fields. See[observation continuation](public_observations_en.md#3169-current-prompt-and-chain-context).
 
 ## Enabling recording
 

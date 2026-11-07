@@ -8,7 +8,7 @@ import io
 import traceback
 import json
 import os
-from copy import copy
+from copy import copy, deepcopy
 from game_constants import LocationInfo, Position, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
@@ -21,6 +21,8 @@ from core_message_protocol import (
     parse_chain_prompt,
     parse_confirm_cards,
     parse_card_hint,
+    parse_hint,
+    hint_visibility_mask,
     read_chain_prompt,
     read_confirm_cards,
     read_reload_field,
@@ -82,14 +84,16 @@ _DECISION_MESSAGES = {
     10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26,
     132, 140, 141, 142, 143,
 }
+_SELECT_HINT_PROMPTS = {15, 18, 20, 23, 24, 26}
 _STATE_APPLIED_MESSAGES = {
-    30, 31, 40, 41, 42, 50, 53, 56, 70, 74, 90, 91, 92, 93, 94, 95,
+    2,
+    30, 31, 40, 41, 42, 50, 53, 56, 70, 71, 72, 73, 74, 75, 76, 83, 90, 91, 92, 93, 94, 95,
     96, 97, 100, 101, 102,
     32, 33, 36, 37, 38, 39, 55, 120, 160, 162, 165,
 }
 _QUERY_RECONCILED_MESSAGES = {
-    34, 54, 60, 61, 62, 63, 64, 65, 71, 72, 73, 75, 76,
-    81, 83, 110, 111, 112, 113, 114,
+    34, 54, 60, 61, 62, 63, 64, 65,
+    81, 110, 111, 112, 113, 114,
 }
 _KNOWN_OBSERVATION_GAPS = {35, 161}
 
@@ -465,6 +469,9 @@ class DuelState:
         self.field_map = {0: defaultdict(dict), 1: defaultdict(dict)}
 
         self.chain_stack = []
+        self.resolving_chain_index = 0
+        self.recent_chain_targets = []
+        self._chain_target_dirty_zones = set()
         self.history_stack = []
         self.known_hand_codes = {0: [], 1: []} 
         self.recently_confirmed = []
@@ -475,6 +482,7 @@ class DuelState:
         self.public_observation = PublicObservationState(self._initial_deck_counts)
         self._reload_counts = {}
         self.audit_enabled = bool(audit_enabled)
+        self._reset_prompt_context()
         self.transition_recorder = TransitionEventRecorder(
             retain_completed_events=retain_completed_transitions
         )
@@ -498,6 +506,9 @@ class DuelState:
         self.current_valid_actions = [] 
 
         self.chain_stack = []
+        self.resolving_chain_index = 0
+        self.recent_chain_targets = []
+        self._chain_target_dirty_zones = set()
         self.history_stack = []
         self.known_hand_codes = {0: [], 1: []}
         self.recently_confirmed = []
@@ -509,6 +520,8 @@ class DuelState:
 
         self.public_observation = PublicObservationState(self._initial_deck_counts)
         self._reload_counts = {}
+
+        self._reset_prompt_context()
 
     def _restore_public_snapshot(self, restored):
         """原子恢复162可证明的状态，其未包含的身份/提示/历史保持未知"""
@@ -531,10 +544,14 @@ class DuelState:
             slot = resolve_runtime_effect_slot(code, desc)
             chains.append({'code': code, 'hc': hc, 'hl': hl, 'hs': hs, 'hp': hp,
                            'c': player, 'l': zone, 's': sequence, 'desc': desc,
-                           'effect_slot': slot if slot is not None else -1, 'ct': index})
+                           'effect_slot': slot if slot is not None else -1, 'ct': index,
+                           **self._initial_chain_context(known=False)})
         # 快照边界不能把旧事件和不可验证的新实例串成一条因果历史
         self.transition_recorder.invalidate_context(self._transition_state_digest())
         self.field_map, self.chain_stack, self._reload_counts = new_field, chains, counts
+        self.resolving_chain_index = 0
+        self.recent_chain_targets = []
+        self._chain_target_dirty_zones = set()
         self.my_lp, self.op_lp = (data['lp'] for data in restored['players'])
         self.history_stack = []
         self.known_hand_codes = {0: [], 1: []}
@@ -544,6 +561,92 @@ class DuelState:
         self.public_observation.complete = False
         self.public_observation.reversal_known = False
         self.public_observation.remaining_composition_known = False
+        self._reset_prompt_context()
+
+    def _reset_prompt_context(self):
+        """清空提示实例，重载缺少的选择用途不会沿用上一场景"""
+        self.recent_chain_targets = []
+        self._recent_chain_targets_presented = False
+        self._select_hints = [None, None]
+        self._hint_revision = 0
+        self._prompt_kind = 0
+        self._prompt_player = -1
+        self._prompt_hint_revision = None
+        self._prompt_response = None
+        self._hint_notifications = {0: [], 1: []}
+
+    def _update_prompt_context(self, msg_type, payload):
+        """在决策生成前更新用途，响应仅暂记消费，重试仍保留原提示"""
+        if msg_type in (5, 40, 41, 74):
+            self._reset_prompt_context()
+            return
+        if msg_type == 1:
+            self._prompt_response = None
+            self._recent_chain_targets_presented = False
+            return
+        if msg_type == 2:
+            subtype, wire_player, value = parse_hint(payload)
+            if subtype == 3:
+                self._hint_revision += 1
+                self._select_hints[wire_player] = (self._hint_revision, value)
+                return
+            chain = int(getattr(self, 'resolving_chain_index', 0))
+            if not chain and self.chain_stack:
+                chain = int(self.chain_stack[-1]['ct'])
+            visibility = hint_visibility_mask(subtype, wire_player)
+            for viewer in (0, 1):
+                if not visibility & (1 << viewer):
+                    continue
+                record = dict(kind=2, subtype=subtype, wire_player=wire_player,
+                              value=value, visibility_mask=1 << viewer, chain=chain,
+                              prompt_type=0, code=value if subtype in (8, 10) else 0)
+                notices = self._hint_notifications[viewer]
+                notices.append(record)
+                # 无链通知只保留最近16项，链内公告保留到链结束
+                unlinked = [item for item in notices if item['chain'] == 0]
+                if len(unlinked) > 16:
+                    notices.remove(unlinked[0])
+            return
+        if msg_type not in _DECISION_MESSAGES:
+            return
+        player = decision_player_from_message(msg_type, payload)
+        # 无链公告只属于接下来的决策窗口，Retry 仍使用同一窗口
+        if self._recent_chain_targets_presented:
+            self.recent_chain_targets = []
+        self._recent_chain_targets_presented = bool(self.recent_chain_targets)
+        previous = self._prompt_response
+        if previous is not None:
+            old_player, old_kind, revision, finished = previous
+            continuing = old_kind == 26 and msg_type == 26 and player == old_player and not finished
+            old_hint = self._select_hints[old_player]
+            if not continuing and old_hint is not None and old_hint[0] == revision:
+                self._select_hints[old_player] = None
+            self._prompt_response = None
+        self._prompt_kind, self._prompt_player = int(msg_type), player
+        hint = self._select_hints[player]
+        self._prompt_hint_revision = hint[0] if hint is not None and msg_type in _SELECT_HINT_PROMPTS else None
+
+    def _note_prompt_response(self, actor, msg_type, response, action):
+        """成功发送不等于Core已接受，下一有效询问才最终消费原用途"""
+        if msg_type not in _SELECT_HINT_PROMPTS or actor != self._prompt_player:
+            return
+        finished = getattr(action, 'operation_id', -1) in (ActionOperation.FINISH, ActionOperation.CANCEL)
+        if isinstance(response, int):
+            finished = finished or response == -1
+        elif isinstance(response, (bytes, bytearray)):
+            finished = finished or bytes(response[:4]) == b'\xff\xff\xff\xff'
+        self._prompt_response = (actor, msg_type, self._prompt_hint_revision, finished)
+
+    def _snapshot_prompt_context(self):
+        """仅投影当前选择者可见的用途，公告保留原始子类型与投递角色"""
+        result = [dict(item) for notices in self._hint_notifications.values() for item in notices]
+        player = self._prompt_player
+        if player in (0, 1) and self._prompt_kind in _SELECT_HINT_PROMPTS and self.decision_player == player:
+            hint = self._select_hints[player]
+            if hint is not None:
+                result.append(dict(kind=2, subtype=3, wire_player=player, value=hint[1],
+                                   visibility_mask=1 << player, chain=0, prompt_type=self._prompt_kind))
+        return tuple(result)
 
     def _get_field_entry(self, raw_location):
         """按 Core 位置值查找当前镜像中的卡片条目"""
@@ -551,6 +654,183 @@ class DuelState:
         if controller not in (0, 1):
             return None
         return self.field_map[controller].get(location, {}).get(sequence)
+
+    @staticmethod
+    def _initial_chain_context(*, known=True):
+        """区分从发动起完整接收的链节与中途重载后未包含的上下文"""
+        return {
+            'status_known': bool(known),
+            'targets_known': bool(known),
+            'confirmed': False,
+            'solving': False,
+            'solved': False,
+            'activation_negated': False,
+            'effect_disabled': False,
+            'targets': [],
+        }
+
+    def _find_chain_context(self, chain_index):
+        """按 Core 原始链号查找，已经处理的节点仍保留到连锁结束"""
+        return next((item for item in self.chain_stack if item['ct'] == chain_index), None)
+
+    def _iter_chain_targets(self):
+        """遍历活动链与最近公告的独立目标副本"""
+        for item in self.chain_stack:
+            yield from item.get('targets', ())
+        yield from self.recent_chain_targets
+
+    def _capture_chain_target(self, raw_location):
+        """记录公告时的对象身份，可见性与后续位置分开保存"""
+        controller, zone, sequence, position = LocationInfo.decode(raw_location)
+        code = 0
+        entry = None
+        if controller in (0, 1) and (controller, zone & ~Zone.OVERLAY) not in self._chain_target_dirty_zones:
+            entry = self.field_map[controller].get(zone & ~Zone.OVERLAY, {}).get(sequence)
+            if entry is not None:
+                if zone & Zone.OVERLAY:
+                    overlays = entry.get('overlay_codes', entry.get('overlays', ()))
+                    if 0 <= position < len(overlays):
+                        code = int(overlays[position]) & 0x7FFFFFFF
+                else:
+                    code = int(entry.get('code', 0)) & 0x7FFFFFFF
+        # 超量素材为公开信息，未知实体不从完整卡组构成反推身份
+        public = bool(zone & Zone.OVERLAY) or self._is_public_event_location(raw_location)
+        own_known = controller in (0, 1) and zone in (Zone.HAND, Zone.MZONE, Zone.SZONE, Zone.REMOVED, Zone.EXTRA)
+        visibility = 0b11 if public else ((1 << controller) if own_known else 0)
+        if zone == Zone.GRAVE:
+            for viewer in (0, 1):
+                if self.public_observation.grave_blocked(viewer):
+                    visibility &= ~(1 << viewer)
+        return {
+            'announcement_location': int(raw_location),
+            'current_location': int(raw_location),
+            'code': code if visibility else 0,
+            'visibility_mask': visibility if code else 0,
+            'tracked': controller in (0, 1) and zone != 0,
+        }
+
+    def _refresh_chain_target_identities(self):
+        """查询校准后补齐仍可追踪对象的可见身份，绝不从失联旧位置猜测"""
+        for target in self._iter_chain_targets():
+            if not target.get('tracked'):
+                continue
+            controller, zone, sequence, position = LocationInfo.decode(target['current_location'])
+            base_zone = zone & ~Zone.OVERLAY
+            if (controller, base_zone) in getattr(self, '_chain_target_queried_zones', ()):
+                entry = self.field_map[controller].get(base_zone, {}).get(sequence)
+                missing = entry is None
+                if entry is not None and zone & Zone.OVERLAY:
+                    missing = position >= len(entry.get('overlay_codes', entry.get('overlays', ())))
+                if missing:
+                    target['current_location'], target['tracked'] = -1, False
+                    continue
+            visible = self._capture_chain_target(target['current_location'])
+            if visible['code']:
+                if target['code'] and target['code'] != visible['code']:
+                    # 查询只能证明现在的占位者，不能证明它继承旧对象的实例身份
+                    target['current_location'], target['tracked'] = -1, False
+                    continue
+                target['code'] = visible['code']
+                target['visibility_mask'] |= visible['visibility_mask']
+
+    def _record_chain_targets(self, payload):
+        """保存 MSG83 公开指示对象，不把 HintSelection 当作规则上的持久取对象关系"""
+        if not payload or len(payload) != 1 + 4 * payload[0]:
+            raise ValueError('invalid public chain target payload')
+        locations = struct.unpack('<' + 'I' * payload[0], payload[1:])
+        announced = [self._capture_chain_target(raw) for raw in locations]
+        chain = self._find_chain_context(self.resolving_chain_index)
+        if chain is None and self.chain_stack and not self.resolving_chain_index:
+            chain = self.chain_stack[-1]
+        if chain is None:
+            # HintSelection 对组内卡片逐条公告，必须合并同一窗口内的 MSG83
+            if self._recent_chain_targets_presented:
+                self.recent_chain_targets = []
+                self._recent_chain_targets_presented = False
+            targets = self.recent_chain_targets
+        else:
+            self.recent_chain_targets = []
+            targets = chain.setdefault('targets', [])
+        for target in announced:
+            # 重复公告同一可追踪实例只保留一份，失联旧对象不能与新占位者合并
+            if any(old.get('tracked') and location_key(old['current_location']) == location_key(target['current_location'])
+                   for old in targets):
+                continue
+            targets.append(target)
+
+    def _invalidate_chain_target_zone(self, player, zone):
+        """洗牌后保留曾公开的对象事实，停止断言它仍处在旧位置"""
+        self._chain_target_dirty_zones.add((player, zone))
+        for target in self._iter_chain_targets():
+            if not target.get('tracked'):
+                continue
+            current = location_key(target['current_location'])
+            if current[0] == player and current[1] == zone:
+                target['current_location'] = -1
+                target['tracked'] = False
+
+    def _remap_chain_target_locations(self, mapping):
+        """同时交换公开可追踪位置，空目标位置代表已经失联"""
+        for target in self._iter_chain_targets():
+            if not target.get('tracked'):
+                continue
+            raw = target['current_location']
+            key = location_key(raw)
+            for old, new_raw in mapping.items():
+                material = key[:3] == (old[0], old[1] | Zone.OVERLAY, old[2]) and not old[1] & Zone.OVERLAY
+                if key != old and not material:
+                    continue
+                if not new_raw:
+                    target['current_location'] = -1
+                    target['tracked'] = False
+                elif material:
+                    nc, nl, ns, _ = LocationInfo.decode(new_raw)
+                    target['current_location'] = LocationInfo.encode(nc, nl | Zone.OVERLAY, ns, key[3])
+                else:
+                    target['current_location'] = int(new_raw)
+                break
+
+    def _move_chain_target_locations(self, old_raw, new_raw, *, code=0, public=False):
+        """按公开移动平移目标位置，不把新占位卡继承为曾经公告的对象"""
+        old, new = location_key(old_raw), location_key(new_raw)
+        if old == new:
+            return
+        contiguous = (Zone.DECK, Zone.HAND, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA)
+        # 普通镜像在连续区移动后要等 query 才重排，期间不能从旧序号读身份
+        for key in (old, new):
+            if key[0] in (0, 1) and key[1] in contiguous:
+                self._chain_target_dirty_zones.add(key[:2])
+        for target in self._iter_chain_targets():
+            if not target.get('tracked'):
+                continue
+            raw = target['current_location']
+            controller, zone, sequence, position = LocationInfo.decode(raw)
+            key = location_key(raw)
+            if key == old:
+                if public and code:
+                    target['code'] = int(code) & 0x7FFFFFFF
+                    target['visibility_mask'] = 0b11
+                target['current_location'] = int(new_raw) if new[0] in (0, 1) and new[1] else -1
+                target['tracked'] = target['current_location'] >= 0
+                continue
+            if not old[1] & Zone.OVERLAY and key[:3] == (old[0], old[1] | Zone.OVERLAY, old[2]):
+                if new[0] in (0, 1) and new[1] in (Zone.MZONE, Zone.SZONE):
+                    target['current_location'] = LocationInfo.encode(new[0], new[1] | Zone.OVERLAY, new[2], position)
+                else:
+                    target['current_location'], target['tracked'] = -1, False
+                continue
+            if old[1] & Zone.OVERLAY and key[:3] == old[:3] and position > old[3]:
+                position -= 1
+            elif old[1] in contiguous and key[:2] == old[:2] and sequence > old[2]:
+                sequence -= 1
+            if new[1] & Zone.OVERLAY and (controller, zone, sequence) == new[:3] and position >= new[3]:
+                position += 1
+            elif new[1] in contiguous and (controller, zone) == new[:2] and sequence >= new[2]:
+                sequence += 1
+            elif new[1] not in contiguous and key == new:
+                target['current_location'], target['tracked'] = -1, False
+                continue
+            target['current_location'] = LocationInfo.encode(controller, zone, sequence, position)
 
     def _transition_state_digest(self):
         """生成事件边界使用的固定宽度公开资源摘要"""
@@ -668,7 +948,7 @@ class DuelState:
             and all(self._is_public_event_location(value) for value in target_locations)
             else actor_mask
         )
-        return self.transition_recorder.begin(
+        event = self.transition_recorder.begin(
             actor=int(actor),
             turn_count=self.turn,
             phase_id=self.phase,
@@ -678,6 +958,8 @@ class DuelState:
             source_visibility_mask=source_visibility,
             target_visibility_mask=target_visibility,
         )
+        self._note_prompt_response(int(actor), int(msg_type), response, resolved_action)
+        return event
 
     def update(self, msg_type, msg_payload):
         """解析消息，更新状态 + 解析合法动作"""
@@ -689,6 +971,7 @@ class DuelState:
                     _protocol_coverage_category(msg_type),
                 )
             stream = io.BytesIO(msg_payload)
+            self._update_prompt_context(msg_type, msg_payload)
             
             # --- 状态维护 ---
             if msg_type == 31:
@@ -714,15 +997,27 @@ class DuelState:
                 player = msg_payload[0]
                 self.public_observation.deck_cards[player].clear()
                 self.public_observation.shuffle_hints(player, Zone.DECK)
+                self._invalidate_chain_target_zone(player, Zone.DECK)
             elif msg_type in (33, 39):
                 self.public_observation.shuffle_hints(msg_payload[0], Zone.HAND if msg_type == 33 else Zone.EXTRA,
                                                      descriptions_reemitted=msg_type == 33)
+                self._invalidate_chain_target_zone(msg_payload[0], Zone.HAND if msg_type == 33 else Zone.EXTRA)
+            elif msg_type == 34:
+                self._invalidate_chain_target_zone(msg_payload[0], Zone.DECK)
+            elif msg_type == 35:
+                # 该特殊互换尚未维护完整状态，不能给旧位置保留确定的实例绑定
+                self._invalidate_chain_target_zone(msg_payload[0], Zone.DECK)
+                self._invalidate_chain_target_zone(msg_payload[0], Zone.GRAVE)
             elif msg_type == 36:
                 count = msg_payload[1]
                 positions = struct.unpack('<' + 'I' * (2 * count), msg_payload[2:])
                 self.public_observation.shuffle_set_hints(positions[:count], positions[count:])
+                self._remap_chain_target_locations({location_key(old): new for old, new in zip(positions[:count], positions[count:])})
+                self._chain_target_dirty_zones.update(location_key(raw)[:2] for raw in positions if raw)
             elif msg_type == 37:
                 self.public_observation.reverse_decks()
+                self._invalidate_chain_target_zone(0, Zone.DECK)
+                self._invalidate_chain_target_zone(1, Zone.DECK)
             elif msg_type == 38:
                 self.public_observation.deck_top(*struct.unpack('<BBI', msg_payload))
             elif msg_type == 160:
@@ -759,6 +1054,7 @@ class DuelState:
                     is_public_move = True
                 if new_l == Zone.GRAVE or (new_l in (Zone.MZONE, Zone.SZONE, Zone.REMOVED, Zone.EXTRA) and new_pos & 0x5):
                     is_public_move = True
+                self._move_chain_target_locations(old_raw, new_raw, code=pure_code, public=is_public_move)
                 self.public_observation.move_deck_card(old_raw, new_raw, pure_code, is_public_move)
                 if self._reload_counts:
                     for player, zone, delta in ((old_c, old_l, -1), (new_c, new_l, 1)):
@@ -824,6 +1120,11 @@ class DuelState:
                 code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
                 pure_code = code & 0x7FFFFFFF
+                for target in self._iter_chain_targets():
+                    if target.get('tracked') and location_key(target['current_location'])[:3] == (c, l, s):
+                        target['current_location'] = LocationInfo.encode(c, l, s, new_pos)
+                        if new_pos & (Position.FACEUP | Position.REVEAL) and pure_code:
+                            target['code'], target['visibility_mask'] = pure_code, 0b11
                 if not (prev & 0x1 or prev & 0x4) and (new_pos & 0x1 or new_pos & 0x4):
                     if pure_code in self.known_hand_codes[c]:
                         self.known_hand_codes[c].remove(pure_code)
@@ -831,6 +1132,8 @@ class DuelState:
             elif msg_type == 55: # SWAP：两张实例同时交换，不串行覆盖提示
                 _, first, _, second = struct.unpack('<IIII', msg_payload)
                 self.public_observation.remap_hints({location_key(first): location_key(second), location_key(second): location_key(first)})
+                self._remap_chain_target_locations({location_key(first): second, location_key(second): first})
+                self._chain_target_dirty_zones.update((location_key(first)[:2], location_key(second)[:2]))
 
             elif msg_type == 56: # FIELD_DISABLED
                 self.disabled_field_mask = struct.unpack('<I', stream.read(4))[0]
@@ -844,6 +1147,7 @@ class DuelState:
                 desc = struct.unpack('<I', stream.read(4))[0]   # 效果描述
                 ct = struct.unpack('<B', stream.read(1))[0]      # 连锁序号 (Chain Link X)
                 hc, hl, hs, hp = LocationInfo.decode(info_loc)
+                self.recent_chain_targets = []
 
                 # 只接受 Lua 对象级精确绑定，desc 低位不是效果创建顺序
                 effect_slot_idx = resolve_runtime_effect_slot(code, desc)
@@ -866,6 +1170,7 @@ class DuelState:
                     'desc': desc,
                     'effect_slot': -1 if effect_slot_idx is None else effect_slot_idx,
                     'ct': ct,
+                    **self._initial_chain_context(),
                 })
                 if self.audit_enabled:
                     record_protocol_chain(
@@ -894,13 +1199,40 @@ class DuelState:
                 if pure_code in self.known_hand_codes[tc]:
                     self.known_hand_codes[tc].remove(pure_code)
 
+            elif msg_type in (71, 72, 73, 75, 76):
+                chain_index, = struct.unpack('<B', msg_payload)
+                chain = self._find_chain_context(chain_index)
+                if msg_type == 72:
+                    self.resolving_chain_index = chain_index
+                    for previous in self.chain_stack:
+                        previous['solving'] = False
+                if chain is not None:
+                    if msg_type == 71:
+                        chain['confirmed'] = True
+                    elif msg_type == 72:
+                        chain['solving'] = True
+                    elif msg_type == 73:
+                        chain['solving'], chain['solved'] = False, True
+                    elif msg_type == 75:
+                        chain['activation_negated'] = True
+                    else:
+                        chain['effect_disabled'] = True
+
             elif msg_type == 74: # MSG_CHAIN_END (C++ 发送 0 字节，直接清空堆栈)
                 self.chain_stack.clear()
+                self.resolving_chain_index = 0
+                self.recent_chain_targets = []
+
+            elif msg_type == 83:
+                self._record_chain_targets(msg_payload)
 
             elif msg_type == 90: # DRAW (抽卡)
                 #  [录像修复 B] 记录抽卡到手牌！
                 p = struct.unpack('<B', stream.read(1))[0]
                 count = struct.unpack('<B', stream.read(1))[0]
+                if count:
+                    # 抽卡不逐张发送 MOVE，旧卡组位置不能继续绑定后来补入的卡
+                    self._invalidate_chain_target_zone(p, Zone.DECK)
                 hand_start = self._reload_counts.get(p, {}).get(Zone.HAND, len(self.field_map[p][Zone.HAND]))
                 known_draws = self.public_observation.draw(p, count, hand_start)
                 if self._reload_counts:
@@ -1857,6 +2189,7 @@ class DuelState:
         # 在生成快照前，执行绝对真理覆写
         if env is not None:
             self.sync_active_field(env)
+            self._refresh_chain_target_identities()
 
         # 查询校准可能补齐仅由 Core query 暴露的变化，必须在其后结算事件
         if self.transition_recorder.has_pending_boundary:
@@ -2075,16 +2408,20 @@ class DuelState:
             p1_initial_extra_codes=self.p1_initial_extra.copy(),
         )
         # 动态外挂连锁堆栈
-        snap.chain_stack = self.chain_stack.copy()
+        snap.chain_stack = deepcopy(self.chain_stack)
+        snap.resolving_chain_index = self.resolving_chain_index
+        snap.recent_chain_targets = deepcopy(self.recent_chain_targets)
         snap.history_stack = self.history_stack.copy()
         snap.transition_history = self.transition_recorder.snapshot()
         validate_transition_history(snap.transition_history)
         snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
         snap.public_hints, snap.known_deck_cards, snap.public_state_flags = self.public_observation.snapshot()
+        snap.prompt_context = self._snapshot_prompt_context()
         return snap
     
     def sync_active_field(self, env):
         """用公开 Core 查询校准场、手牌、墓地和除外区的动态状态"""
+        self._chain_target_queried_zones = set()
         zone_sizes = (
             (Zone.MZONE, 7, False),
             (Zone.SZONE, 8, False),
@@ -2128,5 +2465,7 @@ class DuelState:
                     reconciled_zone[sequence] = merged
 
                 self.field_map[player][zone] = reconciled_zone
+                self._chain_target_queried_zones.add((player, zone))
+                self._chain_target_dirty_zones.discard((player, zone))
                 if self._reload_counts and queried_count is not None:
                     self._reload_counts[player][zone] = queried_count

@@ -321,9 +321,14 @@ class GameSnapshot:
     p1_initial_extra_codes: List[int] = field(default_factory=list)
 
     chain_stack: List[dict] = field(default_factory=list)
+    # 最近开始处理的原始链号，处理完成标记由链节点自身保存
+    resolving_chain_index: int = 0
+    # MSG83 公开指示可来自 HintSelection，不等同于查询中的持久目标关系
+    recent_chain_targets: List[dict] = field(default_factory=list)
     history_stack: List[dict] = field(default_factory=list)
     # 3.11.2 事件协议历史，按视角脱敏后进入模型
     transition_history: List[StateTransitionEvent] = field(default_factory=list)
     public_hints: tuple = ()
+    prompt_context: tuple = ()
     known_deck_cards: tuple = ()
     public_state_flags: tuple = (True, True, False, False, False, True)

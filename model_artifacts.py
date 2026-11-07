@@ -24,7 +24,8 @@ from checkpoint_utils import (
     validate_training_checkpoint_file,
     validate_model_id,
 )
-from protocol_schema import get_current_protocol_metadata, validate_protocol_metadata, SemanticLookupMismatchError
+from protocol_schema import (get_current_protocol_metadata, validate_protocol_metadata,
+                             SemanticLookupMismatchError, ObservationProtocolMismatchError)
 from training_validation import validate_model_prefix
 from semantic_assets import (
     CODE_EMBEDDINGS_FILENAME,
@@ -588,9 +589,18 @@ def _onnx_update_examples(network):
         batch['deck_profile_section'][:, :count] = 1
         batch['deck_profile_initial_count'][:, :count] = 1
         batch['deck_profile_remaining_count'][:, :count] = 1
+        batch['c_context'][:, :count, 4] = torch.arange(1, count + 1, dtype=torch.float16) / 12.0
         batch['act_mask'][:, :2] = True
         batch['act_code'][:, :min(2, len(tokens))] = tokens[:2]
         batch['deck_film_mask'].fill_(True)
+        # 验证当前提示、链节状态与公开指示对象，不能只导出全空新输入
+        batch['current_context_mask'][:, :3] = True
+        batch['current_context_kind'][:, :3] = torch.tensor([2, 70, 83], dtype=torch.uint8)
+        batch['current_context_chain'][:, :3] = torch.tensor([0, 1, 1], dtype=torch.uint8)
+        batch['current_context_subtype'][:, :3] = torch.tensor([3, 67, 3], dtype=torch.uint8)
+        batch['current_context_value'][:, 0, :2] = torch.tensor([245, 1], dtype=torch.uint8)
+        batch['current_context_location'][:, 2] = torch.tensor([2, 3, 1, 1], dtype=torch.uint8)
+        batch['current_context_code'][:, 2] = tokens[0]
         examples.append(batch)
     return examples
 
@@ -631,7 +641,9 @@ def _export_updated_onnx(checkpoint, graph_path):
     options.inter_op_num_threads = 1
     session = ort.InferenceSession(str(graph_path), sess_options=options, providers=['CPUExecutionProvider'])
     inputs = {item.name for item in session.get_inputs()}
-    if not inputs.issubset(keys) or [item.name for item in session.get_outputs()] != ['action_logits', 'values']:
+    from public_observation import CURRENT_CONTEXT_INPUT_SPECS
+    if (not inputs.issubset(keys) or not set(CURRENT_CONTEXT_INPUT_SPECS).issubset(inputs)
+            or [item.name for item in session.get_outputs()] != ['action_logits', 'values']):
         raise ValueError('导出的ONNX输入或输出不符合当前模型推理合同')
     errors = []
     with torch.no_grad():
@@ -752,6 +764,8 @@ def inspect_onnx_updates(model_directory='./models', *, checkpoint_paths=None):
                     reason='ONNX可用，PTH记录的词表或语义版本仍较旧，可一并同步资产标记')
         except SemanticLookupMismatchError as error:
             row.update(status='semantic_changed', needs_update=True, reason=str(error))
+        except ObservationProtocolMismatchError as error:
+            row.update(status='observation_changed', needs_update=True, reason=str(error))
         except FileNotFoundError as error:
             row.update(status='missing' if not graph.exists() else 'incomplete', needs_update=True, reason=str(error))
         except Exception as error:
@@ -790,29 +804,33 @@ def _prepare_onnx_update_data(graph):
 
 
 def _refresh_checkpoint_assets(checkpoint, protocol):
-    """仅更新PTH的资产版本和来源历史，学习状态与模型身份保持原样"""
+    """更新PTH的资产和观测合同来源，学习状态与模型身份保持原样"""
     from protocol_schema import apply_current_protocol_metadata
-    from checkpoint_utils import checkpoint_semantic_update
+    from checkpoint_utils import checkpoint_semantic_update, checkpoint_observation_history
 
     changed = any(checkpoint.get(key) != value for key, value in protocol.items())
     if not changed:
         return checkpoint, False
     refreshed = dict(checkpoint)
-    update = checkpoint_semantic_update(checkpoint) or {
-        'status': 'append_only_update',
-        'source_semantic_lookup_hash': checkpoint['semantic_lookup_hash'],
-        'runtime_semantic_lookup_hash': protocol['semantic_lookup_hash'],
-        'message': '保留学习权重与模型身份，同步只追加词表和语义资产版本'}
-    update = dict(update, source_card_vocab_hash=checkpoint['card_vocab_hash'],
-        source_card_vocab_card_count=checkpoint['card_vocab_card_count'],
-        runtime_card_vocab_hash=protocol['card_vocab_hash'],
-        runtime_card_vocab_card_count=protocol['card_vocab_card_count'])
     history = list(checkpoint.get('semantic_asset_updates', []))
-    if not history or history[-1] != update:
-        history.append(update)
+    asset_changed = any(checkpoint.get(key) != value for key, value in protocol.items()
+                        if key not in ('protocol_schema_revision', 'protocol_schema_hash'))
+    if asset_changed:
+        update = checkpoint_semantic_update(checkpoint) or {
+            'status': 'append_only_update',
+            'source_semantic_lookup_hash': checkpoint['semantic_lookup_hash'],
+            'runtime_semantic_lookup_hash': protocol['semantic_lookup_hash'],
+            'message': '保留学习权重与模型身份，同步只追加词表和语义资产版本'}
+        update = dict(update, source_card_vocab_hash=checkpoint['card_vocab_hash'],
+            source_card_vocab_card_count=checkpoint['card_vocab_card_count'],
+            runtime_card_vocab_hash=protocol['card_vocab_hash'],
+            runtime_card_vocab_card_count=protocol['card_vocab_card_count'])
+        if not history or history[-1] != update:
+            history.append(update)
     refreshed.update(protocol)
     refreshed['net_config'] = apply_current_protocol_metadata(checkpoint['net_config'])
     refreshed['semantic_asset_updates'] = history
+    refreshed['observation_protocol_updates'] = checkpoint_observation_history(checkpoint)
     compatibility = semantic_compatibility_descriptor(get_static_semantic_lookup())
     if compatibility is not None:
         refreshed['semantic_compatibility'] = compatibility
@@ -841,6 +859,8 @@ def _build_onnx_update_manifest(source, checkpoint, record, validation):
         payload['semantic_compatibility'] = compatibility
     if checkpoint.get('semantic_asset_updates'):
         payload['semantic_asset_updates'] = checkpoint['semantic_asset_updates']
+    if checkpoint.get('observation_protocol_updates'):
+        payload['observation_protocol_updates'] = checkpoint['observation_protocol_updates']
     return payload
 
 
@@ -1149,6 +1169,7 @@ def _read_artifact_manifest(
         card_vocabulary=card_vocabulary,
         semantic_root=semantic_root,
         allow_semantic_updates=True,
+        allow_observation_updates=True,
     )
     validate_model_id(payload.get("model_id"))
     validate_model_prefix(payload.get("model_prefix"))
@@ -1243,6 +1264,11 @@ def _validate_static_onnx_metadata(metadata, *, card_vocabulary=None, semantic_r
         raise SemanticLookupMismatchError(
             f'{error}; ONNX已固化导出时的静态语义，无法直接替换为当前语义，'
             '需用对应PTH重新导出；编号与编码器兼容的PTH仍可使用新语义'
+        ) from error
+    except ObservationProtocolMismatchError as error:
+        raise ObservationProtocolMismatchError(
+            f'{error}；旧ONNX没有当前询问与连锁输入，不能仅改元数据，'
+            '请在资源同步中枢执行ONNX检查与更新'
         ) from error
 
 
@@ -1872,6 +1898,7 @@ def validate_package_model_records(
             card_vocabulary=card_vocabulary,
             semantic_root=semantic_root,
             allow_semantic_updates=record.get('format') == 'pytorch_checkpoint',
+            allow_observation_updates=record.get('format') == 'pytorch_checkpoint',
         )
     if expected_model_id is not None and model_ids and model_ids != {expected_model_id}:
         raise PermissionError("selected models do not belong to the requested model_id pool")
@@ -2400,6 +2427,7 @@ def create_deployment_package(
                 card_vocabulary=packaged_vocabulary,
                 semantic_root=semantic_root,
                 allow_semantic_updates=record.get('format') == 'pytorch_checkpoint',
+                allow_observation_updates=record.get('format') == 'pytorch_checkpoint',
             )
 
     manifest = {
@@ -2614,6 +2642,7 @@ def validate_deployment_package(stage_dir):
         label="deployment package manifest",
         card_vocabulary=packaged_vocabulary,
         semantic_root=staged_semantic_root,
+        allow_observation_updates=all(record.get('format') == 'pytorch_checkpoint' for record in actual_records),
     )
     for record in actual_records:
         validate_protocol_metadata(
@@ -2622,6 +2651,7 @@ def validate_deployment_package(stage_dir):
             card_vocabulary=packaged_vocabulary,
             semantic_root=staged_semantic_root,
             allow_semantic_updates=record.get('format') == 'pytorch_checkpoint',
+            allow_observation_updates=record.get('format') == 'pytorch_checkpoint',
         )
     if SEMANTIC_COMPATIBILITY_FILENAME in actual_names:
         from semantic_lookup import read_semantic_compatibility_registry

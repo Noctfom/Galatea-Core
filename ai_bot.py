@@ -40,10 +40,13 @@ class AiBot:
 
         try:
             checkpoint = load_training_checkpoint(path, map_location=self.device)
-            from checkpoint_utils import checkpoint_semantic_update
+            from checkpoint_utils import checkpoint_semantic_update, checkpoint_observation_history
             semantic_update = checkpoint_semantic_update(checkpoint)
             if semantic_update:
                 print(f"♻️ [语义兼容] {semantic_update['message']}")
+            observation_history = checkpoint_observation_history(checkpoint)
+            if observation_history:
+                print(f"♻️ [观测接续] {observation_history[-1]['message']}")
             if (
                 expected_model_id is not None
                 and checkpoint['model_id'] != expected_model_id
@@ -53,7 +56,8 @@ class AiBot:
                     f"期望 {expected_model_id}, 实际 {checkpoint['model_id']}"
                 )
 
-            saved_config = checkpoint['net_config']
+            from protocol_schema import apply_current_protocol_metadata
+            saved_config = apply_current_protocol_metadata(checkpoint['net_config'])
             print(f"📦 发现内嵌配置: {saved_config}")
             self.net = GalateaNet(saved_config).to(self.device)
             self.net.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -65,6 +69,9 @@ class AiBot:
                             'checkpoint_format_version', 'model_protocol_version', 'training_stage')
             }
             self.model_metadata['net_config'] = dict(saved_config)
+            self.model_metadata['observation_protocol_updates'] = observation_history
+            self.model_metadata['source_protocol_schema_revision'] = checkpoint['protocol_schema_revision']
+            self.model_metadata['source_protocol_schema_hash'] = checkpoint['protocol_schema_hash']
             from checkpoint_utils import get_training_lineage, checkpoint_stem
             self.model_metadata['training_lineage'] = get_training_lineage(checkpoint)
             self.model_metadata['display_name'] = checkpoint_stem(checkpoint)
