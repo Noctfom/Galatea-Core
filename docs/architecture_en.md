@@ -2,7 +2,7 @@
 
 > In-depth introduction to Galatea-Core's technical architecture and core algorithms. Suitable for users who want to understand internals or contribute to development.
 
-> Applies to **Galatea-Core v3.16.9**, Protocol4/Checkpoint3/schema revision15. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
+> Applies to **Galatea-Core v3.17.3**, Protocol4/Checkpoint3/schema revision15. Independent imitation and optional WindBot training opponents start separately: the former supervises demonstrations, while the latter trains only the model's own actions with PPO. Human games never train automatically. Partial player views remain diagnostic, not complete native observations.
 
 Eight independent inputs complete current prompts and chain states. Existing notification parameters feed per-chain/global representations, then policy, value and planning. Backbone configuration, parameter shapes and learning targets remain unchanged; known revision14 PTH files can continue, while ONNX requires re-export. See[observation contracts and lifetimes](public_observations_en.md#3169-current-prompt-and-chain-context).
 
@@ -1004,6 +1004,56 @@ class ONNXWrapper(torch.nn.Module):
 - **Lazy Safe Fallback**: A historical PTH network is loaded for CPU inference only when ONNX is incomplete, mismatched, or fails at runtime; the normal ONNX path does not keep both history engines resident
 
 ---
+
+#### Historical-opponent state reuse (3.17.2)
+
+Material and multi-selection prompts use Pass1 for individual-card priorities and Pass2 to score macro-action candidates. Both formerly ran the complete CPU ONNX graph. Loading now analyzes the existing graph, exposes the state tensors needed by the action head in memory, and derives an action subgraph. Pass1 computes the state; Pass2 reuses computation independent of `act_*` and recomputes all action-dependent nodes. Policy, value, planning, deck FiLM and semantic formulas and weights are unchanged.
+
+Reuse requires exact dtype, shape and content equality for every non-action input, including the current prompt, chain, events, deck and visible state. Any change requires a full forward. Independent input copies protect against encoder array reuse. Only the current Pass1/Pass2 pair is cached; consumption or a new episode clears it. The cache is capped at 64 MiB. Ordinary single-pass decisions still run the full graph without an extra state pass.
+
+Each historical runtime holds one full ONNX session and one smaller action session. This adds CPU memory and graph-analysis time at loading, with no CUDA allocation. Thread counts retain the Trainer's per-worker budget and graph execution is sequential; no automatic thread increase is introduced. Unsupported graphs, unknown boundaries, random operators or reuse failures retain full ONNX inference. Only a full ONNX failure invokes the existing PTH fallback.
+
+The existing `--use_onnx` historical-opponent path enables reuse automatically. No new control, cache file or re-export is required. Original ONNX files, external weights, artifact identity, 116 public inputs and two outputs are unchanged. `model_artifacts.py` derives graphs; `worker.py` manages sessions and the temporary cache. Episode audit lines add full-forward, state-reuse, changed-state and disabled-reuse counts; timing stays in the historical CPU and Pass1 columns.
+
+Benefits depend on history's share, material/multi-selection frequency, successful reuse and load cost. Pair-forward speedups are not whole-collection speedups. This does not accelerate current-policy/self-play central inference, ordinary single-pass historical inference or WindBot execution.
+
+The implementation follows [ONNX control-flow extraction boundaries](https://onnx.ai/onnx/api/utils.html): If/Loop nodes stay intact, including their implicit outer-scope dependencies. See [ONNX Runtime threading](https://onnxruntime.ai/docs/performance/tune-performance/threading.html) for thread-budget and sequential-execution semantics.
+
+Local Windows/9950X, ORT 1.29.0, 512/8/6 weights and real Core inputs: single-thread medians over 20 measurements were 115.34→61.17 ms per pair and 57.85→57.45 ms for ordinary single forwards. With two threads, pairs were 87.07→45.81 ms and ordinary singles 41.45→44.19 ms; not every call necessarily accelerates. The temporary cache was about 2.23 MiB, but total memory costs are larger: independent-process loaded RSS was about 808→1200 MiB, including in-memory graph bytes and both ORT sessions. Graph analysis took about 1.19 seconds. Cloud whole-iteration gains are unmeasured; concurrency and rollout targets are not automatically increased.
+
+Maximum logit absolute error against the original graph was about `1.17e-6`, with identical values, within the existing `1e-4` tolerance. Graph boundaries may change floating-point fusion order, so bitwise-identical stochastic trajectories are not promised. `tests/benchmark_historical_onnx.py` repeats the probe with retained weights and real paired inputs, writing diagnostics only to its specified output directory.
+
+#### WindBot message wakeup and startup assets (3.17.3)
+
+The original release loop slept for 30 ms after every `Tick`. `BinaryClient` now checks and waits under the same
+packet-queue lock, waking on connection, a complete packet or disconnection. Partial frames retain the existing
+assembler; all decision callbacks still execute serially in the update loop. Idle waits have a one-second upper
+bound and return earlier on notification, without busy polling or extra threads. Executor ordering, deck decisions
+and protocol fields are unchanged.
+
+The Python bridge sends all visible query updates and the prompt as the same ordered, separately framed messages
+in one `sendall`. Queries, masking and response checks remain intact. On first use, each training worker prepares
+an executor catalog and read-only resources, including the Linux executable copy/SQLite mapping. Subsequent games
+reuse those files but still create fresh processes, writable subdirectories, connections, Duel and Executor state.
+Worker exit releases resources; the parent removes leftovers derived from its own process-registry path. Each new
+collection iteration prepares fresh resources.
+
+Model inputs (116), weights, PPO/GAE, rewards, temperature and quota logic are unchanged. Controlled games and
+imitation workflows also get message wakeup and batched writes; cross-game asset reuse currently applies to main
+training. Per-game process/database initialization and actual strategy calculations remain; no persistent Bot
+service is introduced. Startup audit lines separately show preparation/process/handshake time, excluded from
+interaction totals but included in existing worker-seconds and collection duration.
+
+A local Windows/9950X probe used Type19 with one legal position, four processes and 400 identical expected responses
+per version: round-trip median 31.06→0.051 ms, P95 31.67→0.154 ms; startup/handshake median 0.358→0.211 seconds,
+plus about 0.067 seconds of initial preparation for the new version. This isolates polling latency, not full-game
+or whole-training speed. No GPU allocation is added. Target Linux/Mono concurrency and long-run validation remain
+pending; no WSL testing was used.
+
+Update the bundled `runtime/WindBot.exe` together with the code; no user compilation or model re-export is needed.
+[Source provenance](../integrations/windbot/UPSTREAM.json) lists the pinned upstream and before/after hashes of both
+C# patches. The [runtime manifest](../integrations/windbot/runtime/manifest.json) records the executable hash and
+Windows Release AnyCPU build. Explicit older executables remain usable, with their original polling overhead.
 
 ## Next Steps
 

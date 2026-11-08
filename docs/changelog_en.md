@@ -4,6 +4,26 @@
 
 ---
 
+## [v3.17.3] - 2026-11-08
+
+### WindBot message wakeup and reusable startup assets
+
+- Replaced the release loop's fixed 30 ms sleep with connection/complete-packet/disconnect wakeups and blocking idle waits. Executors still run serially in original queue order; strategies and protocol fields are unchanged. Updated the bundled Release AnyCPU executable for the existing automatic Windows/.NET and Linux/Mono paths, without new dependencies or user compilation
+- Send all visible query refreshes and the prompt as unchanged, ordered independent frames in one socket write. Main training prepares startup assets once per worker, including Linux copies and SQLite mapping; every game retains its own process, writable directory, connection and executor. Normal and forced cleanup handle temporary resources
+- Added startup/preparation/handshake time and response count to existing episode logs; retained current source, response and collection metrics without extra controls, charts or manual cache maintenance. Network, 116 inputs, weights, Protocol 4, Checkpoint 3, observation revision 15 and learning algorithms are unchanged; no ONNX re-export
+- Local fixed Type19 single-choice probe, 400 responses per version: round-trip median 31.06→0.051 ms and P95 31.67→0.154 ms; startup/handshake median 0.358→0.211 seconds, plus about 0.067 seconds of initial preparation. This isolates polling/preparation cost, not full-training acceleration. Source patches and executable hashes are recorded; see [scope and measurement conditions](architecture_en.md#windbot-message-wakeup-and-startup-assets-3173)
+- Verified actual Debug/Release AnyCPU builds; fragmented/coalesced packets, disconnection and 100 arrival/wait races with serial dispatch; and 13 real-Core integrations covering Blue-Eyes seats, Blue-Eyes/Albaz mirrors, early cleanup, CPU/CUDA training and mixed-deck collection→PPO, and four-source quota rotation. Target Linux/Mono and production long-run gains still require cloud validation; no WSL was used
+
+## [v3.17.2] - 2026-11-08
+
+### State reuse across historical ONNX forward passes
+
+- Pass1 retains action-independent state for material/multi-selection prompts; Pass2 recomputes the complete action subgraph. Derived automatically from existing ONNX at loading, with no original file, weight, public I/O, artifact identity or learning-algorithm changes and no re-export
+- Every non-action input must match exactly. Cache entries are consumed per pair, cleared between episodes and capped at64 MiB. Unsupported graphs or reuse failures retain full ONNX; only full ONNX failures invoke the existing PTH fallback. Worker thread budgets are retained and no GPU history model is introduced
+- Episode logs add full-forward/reuse/changed-state/disable counts, while timings and source throughput use existing metrics. Updated ONNX help distinguishes historical CPU opponents from centralized self-play; no new control or TensorBoard charts
+- Real-input512/8/6 microbenchmark: single-thread pair medians115.34→61.17 ms, about47% less time; two-thread87.07→45.81 ms. Ordinary single forwards are not guaranteed faster. Loaded RSS was about808→1200 MiB, with no new VRAM allocation. See [conditions, errors and limitations](architecture_en.md#historical-opponent-state-reuse-3172)
+- Validation covers both current export paths, state changes/input reuse, implicit control-flow dependencies, capacity limits and fallback. Real Core collection checked864 historical forwards against the original graph, with242 reuse hits, followed by a successful PPO update. A single worker also switched between historical ONNX/WindBot/self/RuleBot and completed collection→PPO. The full regression suite and focused checks after corrections are complete. Cloud whole-iteration gains remain unmeasured
+
 ## [v3.17.1] - 2026-11-08
 
 ### Valid-sample quotas and episode-boundary scheduling

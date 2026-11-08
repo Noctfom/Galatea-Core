@@ -1,5 +1,5 @@
 {
-  "version": "3.15.5",
+  "version": "3.17.3",
   "upstream": {
     "repository": "https://github.com/IceYGO/windbot.git",
     "branch": "master",
@@ -9,7 +9,24 @@
     "copyright": "Copyright (c) 2015-2017 IceYGO",
     "source_directory": "vendor",
     "archive_sha256": "e65ab1f245ec06dac0751b0a31a013605e6951066b6ee32b50fd54790f3dfb84",
-    "local_patches": []
+    "local_patches": [
+      {
+        "id": "galatea-3.17.3-message-wakeup",
+        "date": "2026-11-08",
+        "summary": "Wake the existing serial update loop on connection, complete packet or disconnect; preserve executor decisions and protocol fields",
+        "files": {
+          "Program.cs": {
+            "upstream_sha256": "ebed535427d519ae86f6484387975aee1ac2f94e57e8180927906a12a8104261",
+            "patched_sha256": "e5d3869be47e3d2b532c40f9e970ca6b9f3dffd69ca23afb955a34898b242fed"
+          },
+          "YGOSharp.Network/BinaryClient.cs": {
+            "upstream_sha256": "e4193426af41c5f7f0b478d23e682cc584e6dad5ddbd4c49d4a00e3155a387fe",
+            "patched_sha256": "a0563087f9f6b25746803f95eba3826f8bbd5256ecafaa25d1710af587491865"
+          }
+        },
+        "hash_normalization": "LF line endings; all other bytes preserved"
+      }
+    ]
   },
   "platforms": [
     "windows",
@@ -120,13 +137,20 @@
     "integrations/windbot/runtime/Dialogs/swordsman.zh-CN.json": "cbadd4116c7e3c62fb5d1c3d18d4dcbf840cf10168bab2389ac89ba82459d2c7",
     "integrations/windbot/runtime/Dialogs/verre.zh-CN.json": "82cb8883b089b146683e0e4e4e849137166be6abad32a1db81dc50a6750eed56",
     "integrations/windbot/runtime/Dialogs/zh-CN.json": "dd91669775cc6dab3d147fd9020d9d37ab7b3de06d105b62b4af8806c0475b32",
-    "integrations/windbot/runtime/INSTALL.txt": "2e89b829ddb468a13b2be185c223a523f41a92af6d284238a261c8bcd499df82",
-    "integrations/windbot/runtime/UPSTREAM.json": "801ebeed0089f7a56a2c4efc343c89bdea2b93ce33e8c9b9b63d2be3a4a3c954",
-    "integrations/windbot/runtime/WindBot.exe": "4d1788070dd56816800944ad594032810e666fe3d1cf75d70c050f192ef1abdf",
+    "integrations/windbot/runtime/INSTALL.txt": "246e4336be561f8579cc05dfa8d3c925d26be4b8d6dbf83ca1f166c150a20339",
+    "integrations/windbot/runtime/UPSTREAM.json": "6bc4c22dfed6376b11c8ed3ef63b358b70e865149bf3db814065e73fac2211a7",
+    "integrations/windbot/runtime/WindBot.exe": "a6b47df4e393d554d82e6c5f8423ad20ed21e897bac43b8a2d46eb45989a0317",
     "integrations/windbot/runtime/WindBot.exe.config": "f97d190912e6ed91bae640dd26f2f3ce6c7229e03f97324c768957b270a41a71",
     "integrations/windbot/runtime/licenses/Mono.Data.Sqlite-notices.txt": "18876f5b372da0695186cb2d034c37d164f41794af66db7a84c4de6290bf9b74",
     "integrations/windbot/runtime/licenses/WindBot-MIT.txt": "2ef84e3620c50ba8affc96ad56ec1f2d1e3a5b1d4cf622cccd72e04cc818de38",
     "integrations/windbot/runtime/x64/sqlite3.dll": "ab57d0437795ecc757cb693f32ea224173fa9856594d95cfa6b5033e645cd1ec",
     "integrations/windbot/runtime/x86/sqlite3.dll": "1c2fcfa7632b6025829e3539142f1b7ebdbc5bb44d4fd6cc0f42f83715d2eb9f"
+  },
+  "build": {
+    "compiler": "MSBuild 17.14.19",
+    "configuration": "Release AnyCPU",
+    "reference_assemblies": "Microsoft.NETFramework.ReferenceAssemblies.net48 1.0.3",
+    "host": "Windows",
+    "linux_runtime_tested": false
   }
 }

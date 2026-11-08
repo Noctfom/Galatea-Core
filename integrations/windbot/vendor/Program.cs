@@ -182,11 +182,8 @@ namespace WindBot
                     try
                     {
                         client.Tick();
-                        #if DEBUG
-                            Thread.Sleep(1);
-                        #else
-                            Thread.Sleep(30);
-                        #endif
+                        // 有消息立即唤醒，决策仍在当前线程按原顺序执行
+                        client.Connection.WaitForUpdate(1000);
                     }
                     catch (Exception ex)
                     {

@@ -170,9 +170,11 @@ class YGOProPeer:
             raise SessionProtocolError('external idle packet flood')
 
     def respond(self, prompt, env):
-        for update in query_updates(env, self.seat):
-            self.game_message(update)
-        self.game_message(visible_message(prompt, self.seat))
+        # 保留每条查询和询问的独立帧及原顺序，只合并一次socket写入
+        packets = [frame(b'\x01' + update) for update in query_updates(env, self.seat)]
+        packets.append(frame(b'\x01' + visible_message(prompt, self.seat)))
+        self.connection.settimeout(self.timeout)
+        self.connection.sendall(b''.join(packets))
         deadline = time.monotonic() + self.timeout
         for _ in range(32):
             packet = self.receive(deadline)

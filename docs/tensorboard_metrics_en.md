@@ -1,6 +1,6 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.17.1 / Model Protocol V4.
+> Applies to Galatea-Core v3.17.3 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
@@ -311,6 +311,15 @@ Workers count terminal games and valid truncations separately. The live panel sh
 merging and final valid counts afterward; lost files can make them differ. The existing game-audit `steps` includes
 both modeled players and cannot substitute for training-row counts. CPU/central/WindBot timings reuse the existing
 ledger and accumulate at game end; startup/save overhead only enters worker-seconds. Quota mode uses smoothed valid rows per game-task second for allocation. The panel yield includes startup, idle waiting and cleanup in worker-seconds, so it uses a different denominator. New processes re-estimate speed rather than restoring another machine’s rates from checkpoints. Probability mode retains the original allocation.
+
+Historical ONNX state reuse in 3.17.2 keeps these metrics without adding charts. Episode logs also count full forwards, reuse hits, changed-state recomputations and reuse disablements. These include historical-opponent decisions and are not training rows. Compare `Collection/hist/Steps_Per_Worker_Second` under comparable source, deck and concurrency conditions; loading graph analysis and extra CPU sessions also contribute to worker-seconds.
+
+WindBot optimizations in 3.17.3 also retain existing metrics. The new episode startup line covers asset preparation,
+process startup and handshake separately from interaction totals. It is already included in
+`Collection/windbot/Worker_Seconds`, so do not add it again. Compare `Collection/windbot/Steps_Per_Worker_Second`,
+`Performance/Collection_Seconds` and actual source rows/shortfalls together. `WindBot_Training/Bot_Response_Seconds`
+accumulates successful refresh/response seconds, excluding per-game startup; divide by `Bot_Responses` when comparing
+average response time. No TensorBoard charts are added.
 
 ## 10. Independent imitation metrics
 

@@ -305,12 +305,25 @@ shortfalls and initial/participating/current workers. A worker may participate i
 Low-share sources get at least one game; games are not sliced to hit exact quotas. Empty history falls back to
 self-play. At zero RuleBot share, one valid RuleBot game is still added with all its samples, except at 100% WindBot.
 
-Workers reuse their environment and at most one historical-model session per iteration. Rollout buffers have
+Workers reuse their environment and at most one historical-model runtime per iteration. Rollout buffers have
 fixed capacity and complete episodes are saved in chunks; failed work cannot erase previously saved chunks.
 PPO starts only after all workers are reaped, and the next iteration uses new workers rather than old-policy rows.
 With 12 workers the original merge-pool allowance is retained; small collections with few workers reserve at least 3,000 extra rows for complete games.
 Each game adds a small CPU task message, with no extra network forward or GPU synchronization. This changes
 allocation and waiting time, not the intrinsic cost of historical or WindBot inference.
+
+From 3.17.2, the existing ONNX export option also enables automatic state reuse between the two scoring passes
+of material/multi-selection prompts for compatible historical ONNX opponents. No extra switch, re-export or file
+maintenance is needed; changed states use a full forward. The historical ONNX audit line reports reuse counts;
+existing history CPU and Pass1 timings remain comparable. Extra CPU memory and load time reduce repeated computation,
+with no VRAM allocation. Current-policy/self-play and WindBot do not use this cache.
+See [implementation and scope](architecture_en.md#historical-opponent-state-reuse-3172).
+
+WindBot optimizations in 3.17.3 are automatic: update the bundled `integrations/windbot/runtime/WindBot.exe` along
+with the code. Windows and Linux still use the same managed program, without compilation or new settings.
+Episode logs now show startup/handshake seconds separately from refresh/response time. Workers reuse read-only
+startup assets; every game retains its own process and decision state. Model inputs and weights are unchanged,
+so no ONNX re-export is required. See [implementation and scope](architecture_en.md#windbot-message-wakeup-and-startup-assets-3173).
 
 A running job cannot initialize disabled WindBot support or change its network, worker count, rollout target or PPO settings.
 New processes use startup settings and do not inherit pending requests. CLI: `--collection-allocation sample_quota`;

@@ -1272,6 +1272,93 @@ def _validate_static_onnx_metadata(metadata, *, card_vocabulary=None, semantic_r
         ) from error
 
 
+def build_historical_onnx_reuse_graphs(graph_path):
+    """从现有图派生局面输出与动作子图，仅供历史对手在内存中复用"""
+    import onnx
+    from onnx import helper, shape_inference
+
+    def dependencies(node):
+        names = set(node.input) - {''}
+        for attribute in node.attribute:
+            graphs = [attribute.g] if attribute.type == onnx.AttributeProto.GRAPH else list(attribute.graphs)
+            for graph in graphs:
+                defined = {value.name for value in [*graph.input, *graph.initializer]}
+                defined.update(name for child in graph.node for name in child.output if name)
+                used = {value.name for value in graph.output}
+                for child in graph.node:
+                    used.update(dependencies(child))
+                names.update(used - defined)
+        if node.domain not in {'', 'ai.onnx'} or node.op_type.startswith('Random') or node.op_type in {'Bernoulli', 'Multinomial', 'Dropout'}:
+            raise ValueError(f'历史局面复用不支持算子: {node.domain}/{node.op_type}')
+        return names
+
+    model = onnx.load(str(graph_path))
+    if model.functions or model.graph.sparse_initializer:
+        raise ValueError('历史局面复用暂不支持本地函数或稀疏常量')
+    model = shape_inference.infer_shapes(model, strict_mode=True, data_prop=True)
+    initializers = {value.name: value for value in model.graph.initializer}
+    values = {value.name: value for value in [*model.graph.value_info, *model.graph.input, *model.graph.output]}
+    inputs = {value.name for value in model.graph.input}
+    # 位标记区分常量、局面与动作依赖，控制流连同隐式外部引用整体分析
+    masks = {name: 0 for name in initializers}
+    masks.update({name: 2 if name.startswith('act_') else 1 for name in inputs})
+    producers, node_inputs = {}, []
+    for index, node in enumerate(model.graph.node):
+        used = dependencies(node)
+        node_inputs.append(used)
+        mask = 0
+        for name in used:
+            mask |= masks[name]
+        for name in node.output:
+            if name:
+                masks[name], producers[name] = mask, index
+    boundary, visited = set(), set()
+
+    def add_boundary(name):
+        if name in visited or masks[name] != 1 or name in inputs:
+            return
+        visited.add(name)
+        if name in values and values[name].type.tensor_type.HasField('shape'):
+            boundary.add(name)
+        else:
+            # 无法推断类型或形状时向前寻找边界，不猜测中间张量规格
+            for ancestor in node_inputs[producers[name]]:
+                add_boundary(ancestor)
+
+    for node, used in zip(model.graph.node, node_inputs):
+        if any(masks[name] & 2 for name in node.output if name):
+            for name in used:
+                add_boundary(name)
+    action_outputs = [value.name for value in model.graph.output if masks[value.name] & 2]
+    selected, seen = set(), set()
+    pending = list(action_outputs)
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in boundary or name in inputs or name in initializers:
+            continue
+        index = producers[name]
+        selected.add(index)
+        pending.extend(node_inputs[index])
+    boundary &= seen
+    if not boundary or not action_outputs or len(selected) >= len(model.graph.node):
+        raise ValueError('历史图没有可独立复用的局面计算')
+    head = helper.make_model(helper.make_graph(
+        [node for index, node in enumerate(model.graph.node) if index in selected], 'historical_action',
+        [values[name] for name in sorted(seen & (inputs | boundary))],
+        [values[name] for name in action_outputs],
+        initializer=[value for name, value in initializers.items() if name in seen]),
+        ir_version=model.ir_version, opset_imports=model.opset_import)
+    original_outputs = [value.name for value in model.graph.output]
+    for name in sorted(boundary - set(original_outputs)):
+        model.graph.output.append(values[name])
+    onnx.checker.check_model(head)
+    onnx.checker.check_model(model)
+    return model.SerializeToString(), head.SerializeToString(), original_outputs
+
+
 def describe_onnx_artifact(
     onnx_path,
     *,

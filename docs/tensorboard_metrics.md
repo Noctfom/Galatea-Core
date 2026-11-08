@@ -1,6 +1,6 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.17.1 / Model Protocol V4。
+> 适用于 Galatea-Core v3.17.3 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
@@ -308,6 +308,10 @@ Worker会分别累计完整终局与可信截断。实时面板在合并前显�
 最终有效数量；进程丢失文件时两者可能不同。单局审计的`steps`包含双方模型交互，不能替代这里的
 训练行数。细分CPU/中央推理/WindBot计时沿用原账本，在对局收尾时更新，额外启动/保存时间只进入占用秒。
 配额模式根据逐局有效样本/任务耗时的平滑估计分配并发，面板中的每Worker秒样本使用包含启动、空闲等待和收尾的完整占用口径，两者不能直接当成同一个分母。新进程重新估计吞吐，不从检查点恢复旧机器速度。概率模式保持原分配方式。
+
+3.17.2历史ONNX局面复用沿用上述指标，不增加TensorBoard图表。单局日志另外记录完整前向、复用、状态变化重算和停用次数；这些次数包含历史对手动作，不是训练行数。比较`Collection/hist/Steps_Per_Worker_Second`时需保持来源、卡组和并发条件可比，加载时图分析与新增CPU会话的开销也计入Worker占用。
+
+3.17.3的WindBot优化同样沿用现有指标。单局日志新增的“WindBot启动”显示资源准备、进程启动与握手秒数，独立于交互总耗时；它已经包含在`Collection/windbot/Worker_Seconds`中，不应再相加。比较优化收益时同时查看`Collection/windbot/Steps_Per_Worker_Second`、`Performance/Collection_Seconds`及实际来源样本/欠额；`WindBot_Training/Bot_Response_Seconds`累计成功响应的刷新与等待秒数，不含逐局启动，应结合`Bot_Responses`比较平均每次耗时。没有新增TensorBoard图表。
 
 ## 10. 独立模仿学习指标
 

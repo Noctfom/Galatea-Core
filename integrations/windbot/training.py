@@ -177,7 +177,7 @@ def choose_episode_decks(config, rng, train_seat, deck_dir):
 class TrainingOpponent:
     """复用当前Worker的Core，只负责机器人传输，不采集专家训练样本"""
 
-    def __init__(self, config, entry, seat, env, decks):
+    def __init__(self, config, entry, seat, env, decks, *, prepared=None):
         self.seat = seat
         self.entry = entry
         self.stack = ExitStack()
@@ -191,7 +191,7 @@ class TrainingOpponent:
             process, self.log = self.stack.enter_context(launch_bot(
                 runtime=config.get('runtime'), mono=config.get('mono'), executor=entry['executor'],
                 deck_file=entry['deck_file'], cdb_path=env.cdb_path, port=self.peer.port,
-                room_token=self.peer.room_token, log_root='./system_logs/windbot'))
+                room_token=self.peer.room_token, log_root='./system_logs/windbot', prepared=prepared))
             if self.registry is not None:
                 import psutil
                 self.registry.parent.mkdir(parents=True, exist_ok=True)
@@ -252,3 +252,8 @@ def reap_worker_bot(registry_path):
         pass
     finally:
         path.unlink(missing_ok=True)
+        # 路径仅由Trainer的登记文件派生，不使用外部记录传入的任意目录
+        cache = path.with_suffix('.runtime')
+        if cache.is_dir() and not cache.is_symlink() and cache.resolve().parent == path.resolve().parent:
+            import shutil
+            shutil.rmtree(cache)

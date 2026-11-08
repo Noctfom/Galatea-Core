@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 
 namespace YGOSharp.Network
 {
@@ -23,8 +24,8 @@ namespace YGOSharp.Network
         private byte[] _lengthBuffer = new byte[16];
 
         private int _pendingLength;
-        private bool _wasConnected;
-        private bool _wasDisconnected;
+        private volatile bool _wasConnected;
+        private volatile bool _wasDisconnected;
         private bool _wasDisconnectedEventFired;
         private Exception _closingException;
 
@@ -106,6 +107,18 @@ namespace YGOSharp.Network
             _client.BeginSend(data);
         }
 
+        public void WaitForUpdate(int timeoutMilliseconds)
+        {
+            // 检查与等待共用队列锁，避免收包发生在二者之间而错过唤醒
+            lock (_pendingPackets)
+            {
+                if (_pendingPackets.Count == 0 && !_wasConnected && !_wasDisconnected)
+                {
+                    Monitor.Wait(_pendingPackets, timeoutMilliseconds);
+                }
+            }
+        }
+
         public void Close(Exception error = null)
         {
             _client.Close(error);
@@ -142,13 +155,21 @@ namespace YGOSharp.Network
 
         private void Client_Connected()
         {
-            _wasConnected = true;
+            lock (_pendingPackets)
+            {
+                _wasConnected = true;
+                Monitor.PulseAll(_pendingPackets);
+            }
         }
 
         private void Client_Disconnected(Exception ex)
         {
-            _wasDisconnected = true;
-            _closingException = ex;
+            lock (_pendingPackets)
+            {
+                _closingException = ex;
+                _wasDisconnected = true;
+                Monitor.PulseAll(_pendingPackets);
+            }
         }
 
         private void Client_DataReceived(byte[] data)
@@ -219,6 +240,7 @@ namespace YGOSharp.Network
                 lock (_pendingPackets)
                 {
                     _pendingPackets.Enqueue(packet);
+                    Monitor.PulseAll(_pendingPackets);
                 }
 
                 return true;

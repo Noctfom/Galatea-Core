@@ -7,5 +7,22 @@
   "copyright": "Copyright (c) 2015-2017 IceYGO",
   "source_directory": "vendor",
   "archive_sha256": "e65ab1f245ec06dac0751b0a31a013605e6951066b6ee32b50fd54790f3dfb84",
-  "local_patches": []
+  "local_patches": [
+    {
+      "id": "galatea-3.17.3-message-wakeup",
+      "date": "2026-11-08",
+      "summary": "Wake the existing serial update loop on connection, complete packet or disconnect; preserve executor decisions and protocol fields",
+      "files": {
+        "Program.cs": {
+          "upstream_sha256": "ebed535427d519ae86f6484387975aee1ac2f94e57e8180927906a12a8104261",
+          "patched_sha256": "e5d3869be47e3d2b532c40f9e970ca6b9f3dffd69ca23afb955a34898b242fed"
+        },
+        "YGOSharp.Network/BinaryClient.cs": {
+          "upstream_sha256": "e4193426af41c5f7f0b478d23e682cc584e6dad5ddbd4c49d4a00e3155a387fe",
+          "patched_sha256": "a0563087f9f6b25746803f95eba3826f8bbd5256ecafaa25d1710af587491865"
+        }
+      },
+      "hash_normalization": "LF line endings; all other bytes preserved"
+    }
+  ]
 }

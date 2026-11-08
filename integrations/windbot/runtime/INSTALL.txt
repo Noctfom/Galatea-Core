@@ -1,4 +1,4 @@
-Galatea-Core 3.15.5 WindBot runtime
+Galatea-Core 3.17.3 WindBot runtime
 
 将本包解压到项目根目录，保留integrations/windbot/runtime目录结构
 Extract into the project root, preserving integrations/windbot/runtime

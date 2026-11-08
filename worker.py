@@ -32,7 +32,7 @@ from auxiliary_targets import (
     build_auxiliary_targets,
 )
 from inference_protocol import InferenceProtocolError, request_shared_inference_result
-from model_artifacts import describe_onnx_artifact
+from model_artifacts import describe_onnx_artifact, build_historical_onnx_reuse_graphs
 from protocol_schema import SemanticLookupMismatchError
 from data_types import ActionOperation, DECK_FILM_DROPOUT
 import deck_utils
@@ -244,6 +244,84 @@ def create_worker_opponent_agent(
     return opponent_agent
 
 
+class HistoricalOnnxSession:
+    """只保留当前两次前向之间的局面结果，动作候选始终重新评分"""
+
+    def __init__(self, full_session, action_session, original_outputs, max_cache_bytes=64 * 1024**2):
+        self.full_session = full_session
+        self.action_session = action_session
+        self.output_names = list(original_outputs)
+        self.full_output_names = [node.name for node in full_session.get_outputs()]
+        self.action_output_names = [node.name for node in action_session.get_outputs()]
+        self.action_input_names = [node.name for node in action_session.get_inputs()]
+        self.state_input_names = [node.name for node in full_session.get_inputs() if not node.name.startswith('act_')]
+        self.max_cache_bytes = max_cache_bytes
+        self.cache = None
+        self.peak_cache_bytes = 0
+        self.counts = dict(full=0, reused=0, changed=0, disabled=0)
+
+    def get_inputs(self):
+        return self.full_session.get_inputs()
+
+    def get_outputs(self):
+        nodes = {node.name: node for node in self.full_session.get_outputs()}
+        return [nodes[name] for name in self.output_names]
+
+    def run(self, output_names, input_feed, run_options=None):
+        self.cache = None
+        self.counts['full'] += 1
+        return self.full_session.run(output_names or self.output_names, input_feed, run_options)
+
+    def disable_reuse(self, reason):
+        self.cache = None
+        self.action_session = None
+        self.counts['disabled'] += 1
+        print(f'ℹ️ [历史ONNX] 局面复用已停用，继续完整ONNX前向: {reason}')
+
+    def run_phase(self, phase, inputs):
+        cached, self.cache = self.cache, None
+        if self.action_session is not None and phase == 'pass2' and cached is not None:
+            state, outputs = cached
+            unchanged = all(
+                inputs[name].dtype == value.dtype and inputs[name].shape == value.shape
+                and np.array_equal(inputs[name], value)
+                for name, value in state.items())
+            if unchanged:
+                try:
+                    head_inputs = {name: outputs[name] if name in outputs else inputs[name]
+                                   for name in self.action_input_names}
+                    action_values = self.action_session.run(None, head_inputs)
+                    outputs.update(zip(self.action_output_names, action_values))
+                    self.counts['reused'] += 1
+                    return [outputs[name] for name in self.output_names]
+                except Exception as error:
+                    self.disable_reuse(error)
+            else:
+                self.counts['changed'] += 1
+        if phase != 'pass1' or self.action_session is None:
+            return self.run(None, inputs)
+        self.counts['full'] += 1
+        try:
+            result = self.full_session.run(None, inputs)
+        except Exception as error:
+            self.disable_reuse(error)
+            return self.run(None, inputs)
+        outputs = dict(zip(self.full_output_names, result))
+        cache_bytes = sum(inputs[name].nbytes for name in self.state_input_names) + sum(value.nbytes for value in result)
+        try:
+            if cache_bytes > self.max_cache_bytes:
+                raise MemoryError(f'单次缓存超过 {self.max_cache_bytes / 1024**2:.0f} MiB')
+            # 编码器可能复用底层数组，保留独立副本才能检查后续状态是否一致
+            state = {name: inputs[name].copy() for name in self.state_input_names}
+            self.cache = state, outputs
+            self.peak_cache_bytes = max(self.peak_cache_bytes, cache_bytes)
+            # 不向调用方暴露缓存输出的可写别名
+            return [outputs[name].copy() for name in self.output_names]
+        except Exception as error:
+            self.disable_reuse(error)
+            return [outputs[name] for name in self.output_names]
+
+
 def create_historical_onnx_session(opp_config, cpu_threads):
     """校验历史 ONNX 产物身份并创建受控 CPU 推理会话"""
     opponent_path = opp_config.get("path")
@@ -263,6 +341,17 @@ def create_historical_onnx_session(opp_config, cpu_threads):
 
     sess_options = ort.SessionOptions()
     sess_options.intra_op_num_threads = max(1, int(cpu_threads))
+    sess_options.inter_op_num_threads = 1
+    sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    full = action = full_graph = action_graph = None
+    try:
+        full_graph, action_graph, outputs = build_historical_onnx_reuse_graphs(hist_onnx_path)
+        full = ort.InferenceSession(full_graph, sess_options, providers=['CPUExecutionProvider'])
+        action = ort.InferenceSession(action_graph, sess_options, providers=['CPUExecutionProvider'])
+        return HistoricalOnnxSession(full, action, outputs), hist_onnx_path
+    except Exception as error:
+        full = action = full_graph = action_graph = None
+        print(f'ℹ️ [历史ONNX] 当前图使用完整前向，未启用局面复用: {error}')
     session = ort.InferenceSession(
         hist_onnx_path,
         sess_options,
@@ -463,17 +552,27 @@ def worker_process(
     ort_session_p1 = None
     opp_agent = None
     windbot_opponent = None
+    windbot_runtime = None
     task_client = None
     opponent_cache = {}
     active_opponent_key = None
 
-    def run_historical_onnx(tensor_dict):
+    def run_historical_onnx(tensor_dict, phase):
         """运行历史 ONNX；首次异常时延迟加载 PyTorch 回退网络"""
         nonlocal use_onnx_p1, ort_session_p1
         if not use_onnx_p1 or ort_session_p1 is None:
             return None
         try:
             ort_inputs = build_ort_inputs(ort_session_p1, tensor_dict)
+            if isinstance(ort_session_p1, HistoricalOnnxSession):
+                session = ort_session_p1
+                before = session.counts.copy()
+                try:
+                    return session.run_phase(phase, ort_inputs)
+                finally:
+                    for name, count in session.counts.items():
+                        key = f'onnx_{name}'
+                        perf_ledger[key] = perf_ledger.get(key, 0) + count - before[name]
             return ort_session_p1.run(None, ort_inputs)
         except Exception as onnx_error:
             use_onnx_p1 = False
@@ -712,6 +811,8 @@ def worker_process(
             telemetry.begin_episode(opp_type, perf_ledger)
             if task_client is not None:
                 activate_opponent(episode_opp_config)
+            if isinstance(ort_session_p1, HistoricalOnnxSession):
+                ort_session_p1.cache = None
 
             # --- Reset 环境 ---
             try:
@@ -734,9 +835,17 @@ def worker_process(
                 env_name, d1_name, d1, d2_name, d2 = res
                 raw_data = env.reset(d1, d2)
                 if windbot_entry is not None:
+                    started = time.perf_counter()
+                    if windbot_runtime is None:
+                        from integrations.windbot.runtime import PreparedBotRuntime
+                        registry = windbot_episode_config.get('process_registry')
+                        windbot_runtime = PreparedBotRuntime(windbot_episode_config.get('runtime'),
+                            windbot_episode_config.get('mono'),
+                            cache_parent=os.path.splitext(registry)[0] + '.runtime' if registry else None)
                     windbot_opponent = TrainingOpponent(windbot_episode_config, windbot_entry,
                         opp_p_id, env, {str(p): {'main': d.main, 'extra': d.extra, 'side': d.side}
-                                       for p, d in enumerate((d1, d2))})
+                                       for p, d in enumerate((d1, d2))}, prepared=windbot_runtime)
+                    perf_ledger['t_windbot_start'] = time.perf_counter() - started
                 reset_failures = 0
             except Exception as e: 
                 print(f"⚠️ [Worker {worker_id}] 环境Reset异常 (已记录并跳过): {e}")
@@ -1087,7 +1196,7 @@ def worker_process(
                                         
                                     # 如果是历史存档老模型（P1 Hist），执行宿主本地独立剥离推演（ONNX 优先，CPU 兜底）
                                     else:
-                                        ort_outs = run_historical_onnx(dict_pass1)
+                                        ort_outs = run_historical_onnx(dict_pass1, 'pass1')
                                         if ort_outs is not None:
                                             probs = torch.softmax(torch.tensor(ort_outs[0]), dim=-1).squeeze(0).numpy()
                                         else:
@@ -1224,7 +1333,7 @@ def worker_process(
                             else:
                                 t_p1_anchor = time.monotonic()
                                 with torch.no_grad():
-                                    ort_outs = run_historical_onnx(tensor_dict)
+                                    ort_outs = run_historical_onnx(tensor_dict, 'pass2')
                                     if ort_outs is not None:
                                         action_logits = torch.tensor(ort_outs[0]).squeeze(0)
                                         value = torch.tensor(ort_outs[1]).squeeze(0)
@@ -1658,6 +1767,14 @@ def worker_process(
                     print(f"   ├── 🤖 [外部对手] WindBot刷新与响应: {perf_ledger['t_windbot']:.2f}s ({perf_ledger['t_windbot']/safe_t*100:.1f}%)")
                     print(f"   ├── 👁️ [意图感知] Pass1 预查表耗时 : {perf_ledger['t_pass1_cpu']:.2f}s ({perf_ledger['t_pass1_cpu']/safe_t*100:.1f}%)")
                     print(f"   └── 🧠 [参谋部/规则] RuleBot 穷举打分: {perf_ledger['t_rule_bot']:.2f}s ({perf_ledger['t_rule_bot']/safe_t*100:.1f}%)")
+                    if perf_ledger.get('onnx_full', 0):
+                        print(f"   ♻️ [历史ONNX] 完整前向 {perf_ledger['onnx_full']} 次 | "
+                              f"局面复用 {perf_ledger.get('onnx_reused', 0)} 次 | "
+                              f"状态变化重算 {perf_ledger.get('onnx_changed', 0)} 次 | "
+                              f"复用停用 {perf_ledger.get('onnx_disabled', 0)} 次")
+                    if opp_type == 'windbot':
+                        print(f"   ⏱️ [WindBot启动] 资源准备/进程/握手 {perf_ledger.get('t_windbot_start', 0):.3f}s | "
+                              f"响应 {windbot_record.get('responses', 0)} 次（启动耗时独立于交互统计）")
 
                     ep_total_reward = sum(item.get('step_reward', 0.0) for item in traj) + final_reward
                     episode_rewards.append(ep_total_reward)
@@ -1719,6 +1836,11 @@ def worker_process(
                 windbot_opponent.close()
             except Exception as cleanup_error:
                 print(f'⚠️ [Worker {worker_id}] WindBot回收失败: {cleanup_error}')
+        if windbot_runtime is not None:
+            try:
+                windbot_runtime.close()
+            except Exception as cleanup_error:
+                print(f'⚠️ [Worker {worker_id}] WindBot启动资源回收失败: {cleanup_error}')
         flushed_audit_path = flush_protocol_v3_audit(force=True)
         if flushed_audit_path is not None:
             print(f"🧪 [Worker {worker_id}] V3 观测审计已保存: {flushed_audit_path}")

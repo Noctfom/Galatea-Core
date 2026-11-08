@@ -294,7 +294,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.17.1"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.17.3"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -1532,8 +1532,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         c_nocomp = st.checkbox(_("禁用模型编译 (--no_compile)", "Disable Torch Compile"), value=True, 
                                 help=_("Windows 系统下 PyTorch 2.0+ 的 compile 极易报错，勾选此项牺牲 5% 速度换取绝对稳定。", "Disable torch.compile for Windows compatibility."))
         c_onnx = st.checkbox(_("同时导出 ONNX 静态模型 (--use_onnx)", "Export ONNX Model (--use_onnx)"), value=True, 
-                             help=_("开启后会在保存 Checkpoint 时同步导出优化后的 .onnx 文件，大幅加速老模型对打和自决斗时的 CPU 推理速度。", 
-                                   "Export .onnx graphs synchronously to accelerate CPU inference during arena duels."))
+                             help=_("保存检查点时同步导出ONNX，主训练的历史对手优先使用CPU ONNX推理。材料、多选等操作会自动复用两次评分间未变化的局面计算；当前模型与自对局仍使用中央推理。导出会增加保存耗时与磁盘占用。",
+                                   "Export ONNX when saving checkpoints and prefer CPU ONNX for historical training opponents. Material and multi-selection prompts automatically reuse unchanged state computation between their two scoring passes. Current-policy and self-play inference remain centralized. Export adds save time and disk usage."))
         c_protocol_audit = st.checkbox(
             _("V3 观测审计 (--protocol-audit)", "V3 Observation Audit (--protocol-audit)"),
             value=False,

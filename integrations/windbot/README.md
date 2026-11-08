@@ -1,8 +1,20 @@
 # WindBot 可选集成
 
-此目录提供 Galatea-Core 3.16.9 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
+此目录提供 Galatea-Core 3.17.3 的可选 WindBot 集成：受控 BO1 会话自3.15.0提供，可选主训练对手自3.15.4提供。一个公开 Core 驱动对局，WindBot通过本地协议桥响应。默认训练不依赖本模块；真人客户端和BO3尚未接入。
 
-3.16.9的Core当前询问/连锁合同为修订15，模型输入116项；旧PTH可保留权重接续，ONNX需重导出。桥接按上游规则将Type2/4发给原始玩家字段的另一方、Type2/11广播，WindBot本体未修改。详见[观测与迁移](../../docs/public_observations.md#3169-当前询问与连锁上下文)。
+3.16.9的Core当前询问/连锁合同为修订15，模型输入116项；从此前观测版本迁移时，旧PTH可保留权重接续，ONNX需重导出。桥接按上游规则将Type2/4发给原始玩家字段的另一方、Type2/11广播。3.17.3只改WindBot消息等待和启动资源准备，无需再次重导出模型。详见[观测与迁移](../../docs/public_observations.md#3169-当前询问与连锁上下文)。
+
+## 3.17.3消息唤醒与启动资源复用
+
+更新项目时同时更新随仓库提供的`runtime/WindBot.exe`，原有Windows/.NET和Linux/Mono启动方式自动沿用，无新选项或系统依赖。自选旧程序仍可运行，但不会获得程序内部的消息唤醒优化。
+
+- 上游Release循环原先每次固定休眠30 ms。当前程序在连接建立、完整消息到达或断开时唤醒等待线程；执行器仍在原线程按队列顺序执行，空闲时阻塞等待，不忙轮询。修改仅涉及`Program.cs`和`YGOSharp.Network/BinaryClient.cs`，卡组策略与协议字段未改
+- `bridge.py`将同一次询问前的全部可见查询刷新和询问按原顺序编码为独立帧，再一次发送。没有删除查询、减少刷新或改变双方可见信息
+- 主训练每个Worker首次使用WindBot时扫描执行器并准备只读运行资源，后续各局复用；Linux的程序副本和SQLite映射每Worker准备一次。每局仍有全新的进程、工作目录、连接、房间令牌与执行器，旧局可写文件不会传到新局。Worker正常退出时清理，父进程也回收对应登记路径下的残留资源
+- 普通受控对局与模仿采集同样获得消息唤醒和合并发送；只读资源的跨局复用目前用于主训练，不将独立会话改为常驻Bot服务。每局的进程启动、卡库初始化和执行器计算仍有开销
+- 原单局审计增加“WindBot启动”一行，显示资源准备/进程/握手耗时及响应次数。启动耗时未混入“交互总耗时”；来源Worker占用和采集秒仍包含这些时间，无新增TensorBoard卡片或需手工维护的缓存文件
+
+本地Windows/9950X固定单选询问、每版4个独立进程共400次：往返中位数31.06→0.051 ms，P95为31.67→0.154 ms，全部响应字节符合相同预期。启动握手中位数约0.358→0.211秒，新版首轮另有约0.067秒资源准备。这是隔离网络等待的微基准，不包含复杂执行器计算或完整Core对局，不能换算为整轮训练加速比例。目标Linux/Mono并发和长训收益需实机测量；本批未使用WSL。
 
 3.15.3的独立模仿组件位于 `../imitation/`，提供教师/留出池、一次准备缓存、BC优化器和固定
 换边评测。必须显式通过WebUI“独立模仿学习”或 `imitate` CLI启动，不由普通WindBot对局
@@ -112,7 +124,7 @@ Core 会话合同 v1 位于 `../duel_session.py`，包含会话 UUID、单调请
 
 ## 上游来源与许可证
 
-- 上游项目：[IceYGO/windbot](https://github.com/IceYGO/windbot)。本次原样快照固定为 `master` 的 `dec0535f8669dca01457a898890a968139711b19`，来源记录见 `UPSTREAM.json`，不在运行时跟随分支变化。未改上游决策代码。
+- 上游项目：[IceYGO/windbot](https://github.com/IceYGO/windbot)。基础源码固定为 `master` 的 `dec0535f8669dca01457a898890a968139711b19`，不在运行时跟随分支变化。3.17.3本地消息唤醒补丁及修改前后文件摘要记录于`UPSTREAM.json`的`local_patches`；运行文件摘要和构建信息见`runtime/manifest.json`。未改上游决策代码。
 - 许可证：[MIT](https://github.com/IceYGO/windbot/blob/master/LICENSE)，版权声明为 `Copyright (c) 2015-2017 IceYGO`。导入源码或分发编译包时保留原许可证、版权声明和所带第三方依赖的通知。
 - 上游是独立 C# YGOPro 客户端，不是 Galatea 原创代码或通用动作 RPC；用法见 [上游说明](https://github.com/IceYGO/windbot#usage)。
 
@@ -120,17 +132,17 @@ Core 会话合同 v1 位于 `../duel_session.py`，包含会话 UUID、单调请
 
 Galatea 原创的适配代码在 `bridge.py`、`runtime.py`、`session.py` 和 `training.py`；上游完整源码快照在 `vendor/`，不拆散到项目根目录。`UPSTREAM.json` 记录仓库、分支、提交、导入日期和原始归档摘要；上游许可证保留在 `vendor/LICENSE`，依赖原有通知随快照保留。Git 提交应区分原样源码导入、Galatea 适配和后续上游更新。
 
-不提交嵌套 `.git`。3.15.7起，`runtime/`中的公共AnyCPU程序、配置、卡组／对话、Windows SQLite原生库、许可证、来源和摘要按明确名单进入仓库；`.gitattributes`禁止转换这些文件的换行，保持摘要对应原始字节。本批沿用3.15.5构建产物，程序与上游源码提交不变，不因Core小版本更新而重编。`build/`、旧平台副本、调试文件、上游`bin/obj`和独立构建包继续排除。若修改上游，仍须单独标记补丁及理由。
+不提交嵌套 `.git`。3.15.7起，`runtime/`中的公共AnyCPU程序、配置、卡组／对话、Windows SQLite原生库、许可证、来源和摘要按明确名单进入仓库；`.gitattributes`禁止转换这些文件的换行，保持摘要对应原始字节。3.17.3更新消息唤醒补丁对应的AnyCPU程序；基础上游提交保持不变，两个修改文件及理由单独记录。`build/`、旧平台副本、调试文件、上游`bin/obj`和独立构建包继续排除。
 
 一键包默认排除 `vendor/`、`runtime/` 和 `build/`，保留原创适配代码与说明；`build_portable_package.py --with-windbot` 显式携带源码、许可证和已安装的 `runtime/`，始终排除构建工作区。此选项不下载或编译组件，不改变 GKG 模型包。
 维护者构建脚本位于独立的 [windbot_build](../../windbot_build/README.md)，普通便携包始终排除
-该目录。`WindBot_Build_3.15.5.zip`自带固定源码及脚本，供维护者在实际Linux机器构建和验收；
+该目录。`WindBot_Build_<版本>.zip`自带该版本源码及脚本，供维护者在实际Linux机器构建和验收；
 它与供普通用户使用的运行包分开发布，不由主项目启动流程调用。
 
 ## 运行包与使用
 
 3.15.7起，仓库检出和源码归档自带`integrations/windbot/runtime/`，无需单独下载或编译。
-旧源码归档或未携带WindBot的一键包仍可解压配套`WindBot_Runtime_3.15.5.zip`到项目根目录，
+旧源码归档或未携带WindBot的一键包仍可解压对应版本的`WindBot_Runtime_<版本>.zip`到项目根目录，
 保留目录结构。一键包的`--with-windbot`选配规则不变，本批不新增Linux ZIP。
 
 Windows需要.NET Framework 4.8运行时；Linux需要Mono与系统SQLite。Ubuntu可安装运行

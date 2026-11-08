@@ -1,5 +1,5 @@
 """Optional IceYGO lifecycle helpers; no dependency probing at import time."""
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import ctypes
 import ctypes.util
 from functools import lru_cache
@@ -120,34 +120,58 @@ def _linux_config(source, destination, library):
     tree.write(destination, encoding='utf-8', xml_declaration=True)
 
 
-@contextmanager
-def launch_bot(*, runtime, executor, deck_file, cdb_path, port, log_root, mono=None, room_token=''):
-    """Own exactly one process; isolated cwd and an 8 MiB log cap, no HTTP server.
+class PreparedBotRuntime:
+    """复用一轮内的只读启动资源，各局仍使用独立进程和工作目录"""
 
-    Source executors/decisions are unmodified. An explicit runtime may be built by
-    the user; the session records its executable hash rather than pretending it
-    is authenticated by the pinned source commit.
-    """
-    if executor not in executor_catalog():
-        raise ValueError(f'unknown WindBot executor: {executor}')
-    command = resolve_runtime(runtime, mono)
-    exe = Path(command[-1])
-    cdb = Path(cdb_path).resolve()
-    if not cdb.is_file():
-        raise FileNotFoundError(cdb)
-    os.makedirs(log_root, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='galatea-windbot-') as scratch:
-        if sys.platform.startswith('linux'):
-            # 私有启动副本携带系统SQLite映射，原始二进制摘要与Windows运行目录保持不变
-            shadow = Path(scratch) / exe.name
-            shutil.copy2(exe, shadow)
-            for dependency in exe.parent.glob('*.dll'):
-                shutil.copy2(dependency, Path(scratch) / dependency.name)
-            _linux_config(Path(str(exe) + '.config'), Path(str(shadow) + '.config'), linux_sqlite_library())
-            command[-1] = str(shadow)
-        for directory in ('Dialogs',):
-            if (exe.parent / directory).is_dir():
-                shutil.copytree(exe.parent / directory, Path(scratch) / directory)
+    def __init__(self, runtime=None, mono=None, cache_parent=None):
+        self.request = (runtime, mono)
+        self.executors = frozenset(executor_catalog())
+        self.command = resolve_runtime(runtime, mono)
+        exe = Path(self.command[-1])
+        if cache_parent is not None:
+            Path(cache_parent).mkdir(parents=True, exist_ok=True)
+        self.storage = tempfile.TemporaryDirectory(prefix='galatea-windbot-', dir=cache_parent)
+        self.closed = False
+        try:
+            self.directory = Path(self.storage.name).resolve()
+            if sys.platform.startswith('linux'):
+                shadow = self.directory / exe.name
+                shutil.copy2(exe, shadow)
+                for dependency in exe.parent.glob('*.dll'):
+                    shutil.copy2(dependency, self.directory / dependency.name)
+                _linux_config(Path(str(exe) + '.config'), Path(str(shadow) + '.config'), linux_sqlite_library())
+                self.command[-1] = str(shadow)
+            if (exe.parent / 'Dialogs').is_dir():
+                shutil.copytree(exe.parent / 'Dialogs', self.directory, dirs_exist_ok=True)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        """所属进程均退出后释放启动资源"""
+        if not self.closed:
+            self.storage.cleanup()
+            self.closed = True
+
+
+@contextmanager
+def launch_bot(*, runtime, executor, deck_file, cdb_path, port, log_root, mono=None, room_token='', prepared=None):
+    """每局拥有独立进程与8 MiB日志，可复用调用方持有的只读启动资源"""
+    with ExitStack() as stack:
+        if prepared is None:
+            prepared = PreparedBotRuntime(runtime, mono)
+            stack.callback(prepared.close)
+        if prepared.closed or prepared.request != (runtime, mono):
+            raise ValueError('WindBot准备资源已关闭或运行文件配置不一致')
+        if executor not in prepared.executors:
+            raise ValueError(f'unknown WindBot executor: {executor}')
+        cdb = Path(cdb_path).resolve()
+        if not cdb.is_file():
+            raise FileNotFoundError(cdb)
+        os.makedirs(log_root, exist_ok=True)
+        # 上游ReadFile支持父目录文件回退，单局目录不携带上一局的可写文件
+        scratch = stack.enter_context(tempfile.TemporaryDirectory(prefix='duel-', dir=prepared.directory))
+        command = list(prepared.command)
         log = tempfile.NamedTemporaryFile(prefix='windbot_', suffix='.log', dir=log_root, delete=False)
         try:
             # Argument lists preserve paths containing spaces, never invoke a shell.
