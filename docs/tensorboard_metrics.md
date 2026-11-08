@@ -1,10 +1,11 @@
 # TensorBoard 指标手册
 
-> 适用于 Galatea-Core v3.16.7 / Model Protocol V4。
+> 适用于 Galatea-Core v3.17.1 / Model Protocol V4。
 > 面向使用者和开发者：说明每项图表的功能、纵轴、记录位置和趋势含义。
 > [English](tensorboard_metrics_en.md)
 
-默认主PPO面板包含 **80 个固定标量、3 个规划分布和 1 个配置文本**，另有 `Deck_WinRates/*`。
+默认主PPO面板包含 **104 个固定标量、3 个规划分布和 2 个启动配置文本**，另有 `Deck_WinRates/*`。
+其中24个来源采集标量为3.17.0新增；3.17.1的配额模式另有12个目标/欠额/参与Worker标量。运行中修改另外记录`Configuration/Runtime_Update`文本。
 显式开启WindBot对手后另有7个固定标量、1个配置文本及按执行器展开的序列，见第11节。
 独立模仿工作流另有10个标量，使用独立run，不改变PPO图表。不能把预测更准、更新更多、模仿更像和对局更强混为同一指标。
 
@@ -17,6 +18,7 @@
 | Planning | 不预先指定动作时，能否形成对未来资源和结果有用的表示？ |
 | Train / PPO_Update | 策略和值如何更新，实际用了多少样本，是否触及保护边界？ |
 | Performance / Configuration | 时间花在哪里，实际按什么训练参数运行？ |
+| Collection | 各来源实际提供多少有效样本，每个Worker秒产出多少，是否出现采集失败？ |
 | Imitation（独立 run） | 策略是否更愿意选择专家动作，对留出示范的拟合是否改善？ |
 
 快速跳转：[记录规则](#1-记录位置横轴与读图规则) · [对局胜率](#2-league训练内对局胜率) · [采集结果](#3-rollout采集结果与终止情况) · [标签覆盖](#4-auxiliary_targets标签覆盖与事件分布) · [辅助预测](#5-auxiliary_train结构化预测学习) · [目标规划](#6-planning目标隐变量与策略接入) · [训练更新](#7-train当前小批的-ppo-联合更新) · [更新保护](#8-ppo_update整轮更新控制与实际复用) · [耗时与配置](#9-performance-与-configuration) · [独立模仿](#10-独立模仿学习指标)
@@ -35,13 +37,16 @@
 | 分组 | 横轴 Step | 写入频率 | 每个点的统计范围 |
 |---|---|---|---|
 | `League_Overall/*`、`League_Self/*`、`League_Opponent/*` | 采集轮次 iteration | 每轮采集后 | 汇总成功读入的 Worker 对局计数，不是整个训练的累计胜率 |
-| `Rollout/*` | iteration | 每轮采集后 | 对局计数，或 Worker 均值的再平均，详见第 3 节 |
+| `Rollout/*` | iteration | 每轮采集后 | 有效对局计数或对局平均值，详见第 3 节 |
 | `Auxiliary_Targets/*` | iteration | 每轮合并后 | 本轮有效训练样本行上的标签审计，不是对局比例 |
 | `Train/*`、`Auxiliary_Train/*`、`Planning/*` | 累计优化器更新数 train_step | 每 20 次更新位置 | 当前一个 mini-batch 的诊断，不是整轮平均 |
 | `Planning_Histograms/*` | train_step | 每 200 次更新位置 | 当前批规划向量，或当前模型的门参数 |
 | `PPO_Update/*` | iteration | 每轮 PPO 后 | 所有被检查小批的摘要，以及实际完成的优化器更新 |
 | `Performance/*` | iteration | 每轮对应阶段后 | 完整采集/更新耗时及提交样本吞吐 |
+| `Collection/{source}/*` | iteration | 每轮合并后 | 各来源有效行数、占用时间与Worker分配；无样本也写零 |
 | `Configuration/PPO` | 启动时 train_step | 每次启动一次 | JSON 文本：本次 PPO 配置与实际优化器学习率 |
+| `Configuration/Runtime` | iteration | 启动时 | 实际网络规模、接续来源与采集配置 |
+| `Configuration/Runtime_Update` | iteration | 实际应用修改时 | 动态调整的内容与生效轮次 |
 
 `train_step` 仅在实际优化器更新成功后递增。诊断条件在更新前判断：第一个点可以是 Step 0；若 FP16 溢出导致更新跳过，同一步可能重复写点。梯度范数在反向、AMP unscale 后测量，**记录的是裁剪前范数**；损失/预测对应本次更新前的前向。
 
@@ -85,8 +90,8 @@
 
 | 图表 | 纵轴与记录方式 | 走向与限制 |
 |---|---|---|
-| `Rollout/Average_Reward` | 各 Worker 的单局总奖励均值，再对非零 Worker 均值做等权平均 | 同分布上升通常有利；不是胜率，也不是所有对局的加权平均；零均值被排除会造成偏差 |
-| `Rollout/Average_Length` | 各 Worker 单局实际 ep_steps 均值再等权平均，排除零均值 | 降低可能是更快取胜/更少空操作，也可能改变了对手结构或截断比例；3.16.8起不再把Worker预算结束伪记为1500步 |
+| `Rollout/Average_Reward` | 3.17.1起，合并数据中的有效轨迹单局总奖励之和÷对应对局数，包含零奖励 | 同分布上升通常有利；不是胜率。旧版对非零Worker均值等权平均，新旧口径可能产生数值变化，训练奖励未变 |
+| `Rollout/Average_Length` | 3.17.1起，合并数据中有效轨迹对局实际ep_steps之和÷对局数，不按Worker或轨迹文件等权平均 | 降低可能是更快取胜/更少空操作，也可能改变了对手结构或截断比例；3.16.8起不再把Worker预算结束伪记为1500步 |
 | `Rollout/Timeout_Rate` | 可信非终局截断局数 / 总计入对局数，每局只计一次 | 包括步数上限和Worker预算结束；旧于3.16.8的记录可能重复计数，不能直接与新版比例比较；异常回滚不计入 |
 | `Rollout/Deadlock_Rate` | Worker 的 deadlocks 计数 / 总计入对局数 | 当前异常局通常在此计数前回滚；零线不能证明没有异常或死锁 |
 | `Rollout/Draw_Rate` | Worker 的 draws 计数 / 总计入对局数 | 观察真实平局类结算；不包含所有非终局截断或异常回滚 |
@@ -98,15 +103,15 @@
 - 相同场面、相同候选的无进展重复达到阈值会扣 −0.005，Cancel/Unselect 阈值为 5，其他为 10；Retry 可扣 −0.001。这不是按“进行了多次材料选择”统一惩罚。
 - 辅助/规划 Loss **不是奖励**，不会把预测准确率转换成额外胜局或额外 Reward。
 
-ep_steps 不等于 Core 报文数、回合数或提交训练行数：Self/Hist 时会累积双方模型决策，RuleBot 侧规则操作不按同样方式累积；Worker 时间预算/引擎等待截断还可能把它直接设为 1500。因此平均长度既含真实交互差异，也含终止口径影响。
+ep_steps 不等于 Core 报文数、回合数或提交训练行数：Self/Hist 时会累积双方模型决策，RuleBot/WindBot 侧操作不按同样方式累积。因此平均长度会受对手结构影响。3.16.8 起，预算截断保留实际决策步数，不再直接记为 1500。
 
 ### 已确认的统计限制
 
-1. `worker.py` 在 ep_steps 达到 1500 时加一次 timeout；无真实胜者且达到该上限的分支又加一次。同一非终局截断可能计两次。不能盲目把曲线除以二：正常终局与混合分支仍需辨别。这是计数问题，不是重复扣分。
-2. Trainer 对 Worker 均值不按其对局数加权，且排除恰为零的奖励均值。少局 Worker 与多局 Worker 权重相同。
+1. 旧于3.16.8的版本可能对同一非终局截断重复计数。新版每局只计一次，并区分步数上限与Worker预算；读取旧记录时不能直接把整条曲线除以二
+2. 旧于3.17.1的版本对Worker均值等权平均，并排除恰为零的奖励均值。新版按有效对局数汇总，包含零奖励；版本切换处的数值变化可能来自统计修正
 3. 异常局不提交是数据保护，不是异常监控。Deadlock_Rate 没覆盖所有回滚路径，需同时看 Worker 错误日志。
 
-这些是当前记录口径的限制，不意味着所有对应对局都异常。修正前应结合 Worker 日志和逐局结算读图，不能仅凭这些统计证明容量或棋力达标。
+前两项用于解释历史版本的口径差异；异常覆盖限制仍存在。应结合Worker日志和逐局结算读图，不能仅凭这些统计证明容量或棋力达标。
 
 ## 4. Auxiliary_Targets：标签覆盖与事件分布
 
@@ -270,7 +275,39 @@ KL 衡量策略改变的幅度，不衡量改变后的优劣；低 KL 可能表�
 版本、模型编译、CUDA图及传输布局。旧事件文件没有这些字段，不能用当前默认值补推历史设置。
 网络层数、Core/资产指纹及普通联盟各组对局分母仍不在此文本内。事件文件不能证明CUDA峰值/
 RSS无增长，需另看内存日志；有界分段诊断中的`collection_phase_seconds`可定位整轮耗时阶段，
-见[CUDA图与采集计时](architecture.md#cuda图加速中央推理)。本次不新增标量图表。
+见[CUDA图与采集计时](architecture.md#cuda图加速中央推理)。
+
+3.17.0增加`Configuration/Runtime`启动文本，记录面板中的实际网络规模、来源概率、镜像概率、
+接续路径和优化器学习率；`Configuration/Runtime_Update`在动态请求实际应用后记录修改内容和生效轮次。
+请求提交时不提前记录为生效，启动表单也不会自动改变运行中的配置。
+
+### 按来源的采集吞吐（3.17.0–3.17.1）
+
+`Collection/{source}/*`中`source`为`self`、`hist`、`windbot`、`rule`。每轮合并结束记录一次，
+横轴为PPO采集轮次；没有样本的来源也写零值，以保留失败和未分配的信息。记录位置为
+[Trainer来源汇总](../trainer.py)、[Worker提交位置](../worker.py)和[共享计数器](../rollout_cursor.py)。
+
+| 图表模板 | 纵坐标与记录方式 | 走向与限制 |
+|---|---|---|
+| `Collection/{source}/Accepted_Steps` | 成功合并的训练模型动作行数；对手动作、异常回滚、未接收文件均不计入 | 表示可供本轮PPO使用的量，不是优化器实际复用次数；小批尾部处理规则不变 |
+| `Collection/{source}/Sample_Fraction` | 该来源Accepted_Steps÷整轮成功合并行数；无样本记0 | 是实际采集分布；不等于配置中的Worker抽选概率，补Rule局也会贡献样本 |
+| `Collection/{source}/Worker_Seconds` | 该来源所有Worker的占用秒之和，包含进程启动、资源载入、重置、对局、标签计算与保存收尾 | 并行时可以大于整轮耗时；失败Worker已观测到的耗时也保留，时间精度受5秒计数刷新和进程回收观察影响 |
+| `Collection/{source}/Steps_Per_Worker_Second` | Accepted_Steps÷Worker_Seconds；分母为0时以极小正数保护 | 可比较各来源的单位Worker产出，不是GPU吞吐或总墙钟吞吐；执行器、构筑、局长与并发数变化都会影响 |
+| `Collection/{source}/Aborted_Games` | 已记录的重置/解析/标签等失败局数，按实际对手归类 | 上涨需结合异常日志；进程被强杀后尚未发布的计数不可恢复，不能视为完整故障率 |
+| `Collection/{source}/Assigned_Workers` | 本轮初始分配给该来源的Worker数 | 不是样本配额，未包含由其他来源Worker承担的额外RuleBot单局；历史池为空时实际回退到self |
+
+配额模式每轮另记以下指标，未启用时不写，不能将缺测点理解为零：
+
+| 图表模板 | 纵坐标与记录方式 | 走向与限制 |
+|---|---|---|
+| `Collection/{source}/Target_Steps` | 当轮基础样本目标乘有效来源比例并取整；历史池为空转入self，正比例至少1，零Rule比例补局目标为1 | 表示目标而非强制精确裁切；Rule目标1要求一局有效对局，整局所有样本均保留 |
+| `Collection/{source}/Shortfall_Steps` | max(0,Target_Steps−Accepted_Steps)，使用合并后的真实有效数量 | 持续非零需结合超时、异常或容量上限检查；超额记录为0，不代表比例完全相同 |
+| `Collection/{source}/Participating_Workers` | 本轮曾领取该来源任务的不同Worker数量 | 失败任务也计入，表示调度范围；同一Worker可出现在多个来源，合计可能超过总Worker数 |
+
+Worker会分别累计完整终局与可信截断。实时面板在合并前显示**Worker已提交**数量，合并后显示
+最终有效数量；进程丢失文件时两者可能不同。单局审计的`steps`包含双方模型交互，不能替代这里的
+训练行数。细分CPU/中央推理/WindBot计时沿用原账本，在对局收尾时更新，额外启动/保存时间只进入占用秒。
+配额模式根据逐局有效样本/任务耗时的平滑估计分配并发，面板中的每Worker秒样本使用包含启动、空闲等待和收尾的完整占用口径，两者不能直接当成同一个分母。新进程重新估计吞吐，不从检查点恢复旧机器速度。概率模式保持原分配方式。
 
 ## 10. 独立模仿学习指标
 

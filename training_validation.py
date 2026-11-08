@@ -38,6 +38,13 @@ def resolve_league_weights(weights=None, *, windbot_enabled=False, legacy_windbo
     return {key: float(weights[key]) for key in DEFAULT_LEAGUE_WEIGHTS}
 
 
+def validate_collection_allocation(value):
+    """统一采集比例的含义，旧模式仍按Worker抽选"""
+    if value not in ('worker_probability', 'sample_quota'):
+        raise ValueError('采集调度必须为worker_probability或sample_quota')
+    return value
+
+
 def _require_positive_integer(name, value):
     """校验必须为正整数的训练参数"""
     if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:

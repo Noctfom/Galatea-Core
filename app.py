@@ -48,6 +48,7 @@ from training_validation import (
     validate_training_config,
 )
 from ppo_control import DEFAULT_GAE_LAMBDA, DEFAULT_PPO_EPOCHS, DEFAULT_TARGET_KL
+from training_lock import read_training_runtime, request_training_update, pending_training_updates
 from update_tools import CARD_VOCAB_URL, MOCKA_CDB_URL, GITHUB_DOWNLOAD_MIRRORS
 from semantic_assets import (
     DEFAULT_SEMANTIC_REPOSITORY_URL,
@@ -293,7 +294,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.16.9"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.17.1"  # 当前本地版本号 (每次更新时手动改一下这里)
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -543,8 +544,8 @@ def render_onnx_updates():
 
     st.subheader(_("🔁 ONNX 引擎更新", "🔁 ONNX Engine Update"))
     st.info(_(
-        "检查原训练目录中的ONNX是否匹配当前语义和依赖文件；更新时从对应PTH重导出，直接替换同名旧ONNX，没有则补齐。只使用CPU，不启动训练，也不自动生成GKG",
-        "Check training-directory ONNX engines against current semantics and dependencies. Update re-exports the corresponding PTH, replacing its same-name ONNX or creating it when missing. Runs on CPU without training or automatic GKG packaging"))
+        "检查原训练目录中的ONNX是否匹配当前观测协议、语义和依赖文件；更新时从对应PTH重导出，直接替换同名旧ONNX，没有则补齐。只使用CPU，不启动训练，也不自动生成GKG",
+        "Check training-directory ONNX engines against the current observation protocol, semantics and dependencies. Update re-exports the corresponding PTH, replacing its same-name ONNX or creating it when missing. Runs on CPU without training or automatic GKG packaging"))
     st.caption(_(
         "使用项目根目录当前词表与语义资产，需要时同步PTH的资产标记并保留旧来源；模型UUID、已学权重、优化器状态和PPO/BC计数不变。请先结束主训练；后续Worker直接加载原路径的新引擎。检查可单独使用，不必先检查才能更新",
         "Uses current project-root assets and refreshes PTH asset metadata when needed, retaining provenance. Model UUID, learned weights, optimizer state and PPO/BC counters stay unchanged. End main training first; later Workers use the original engine path. Checking is independent and is not required before an update"))
@@ -604,16 +605,208 @@ def render_onnx_updates():
     if report is not None:
         labels = {'current': _("当前可用", "Current"), 'append_only': _("可用，未覆盖新增卡", "Usable; added cards not covered"),
             'checkpoint_assets_changed': _("PTH资产标记待同步", "PTH asset metadata outdated"),
+            'observation_changed': _("观测协议已更新，需重导出", "Observation protocol changed; re-export required"),
             'semantic_changed': _("旧卡语义已变化", "Old semantics changed"), 'missing': _("缺少ONNX", "ONNX missing"),
             'incomplete': _("制品不完整", "Incomplete artifacts"), 'invalid': _("ONNX校验失败", "ONNX validation failed"),
             'checkpoint_invalid': _("PTH或同名身份异常", "PTH or target identity invalid")}
         rows = [{_('PTH', 'PTH'): str(Path(row['checkpoint_path']).relative_to(directory)),
-                 _('状态', 'Status'): labels[row['status']], _('可更新', 'Can Update'): row['can_update'],
+                 _('状态', 'Status'): labels.get(row['status'], _(
+                     f"未识别状态（{row['status']}）", f"Unrecognized status ({row['status']})")),
+                 _('可更新', 'Can Update'): row['can_update'],
                  _('说明', 'Details'): row['reason']} for row in report['models']]
         if rows:
             st.dataframe(pd.DataFrame(rows), hide_index=True, **REPLAY_DATAFRAME_WIDTH)
         else:
             st.info(_("目录内没有PTH或ONNX", "No PTH or ONNX files in this directory"))
+
+@st.fragment(run_every=5)
+def render_training_runtime():
+    """独立刷新小型状态快照，浏览器重连后恢复实际训练参数"""
+    state = read_training_runtime(PROJECT_ROOT)
+    st.subheader(_("当前训练状态", "Current Training Status"))
+    st.caption(_("每5秒刷新本面板，不读取模型或扫描完整日志；命令行启动的训练也会显示", "Refreshes this panel every 5 seconds without reading models or scanning full logs; CLI training is also shown"))
+    if not state.get('session_id'):
+        st.info(_("尚无运行记录，启动3.17.0及后续版本的训练后自动显示", "No runtime record yet; start training with version 3.17.0 or later"))
+        return
+    phases = {'initializing': _("初始化", "Initializing"), 'ready': _("已就绪", "Ready"),
+        'collecting': _("采集", "Collecting"), 'merging': _("合并轨迹", "Merging rollouts"),
+        'updating': _("PPO更新", "PPO update"), 'saving': _("保存 / 导出", "Saving / exporting"),
+        'between_iterations': _("轮次收尾", "Finishing iteration"),
+        'completed': _("已完成", "Completed"), 'failed': _("异常退出", "Failed"),
+        'interrupted': _("已中断", "Interrupted"), 'stopped': _("已停止", "Stopped")}
+    phase = phases.get(state.get('phase'), str(state.get('phase', '—')))
+    if state.get('active'):
+        st.success(_(f"训练运行中 · PID {state['pid']} · {state.get('run_id') or '初始化'}", f"Training active · PID {state['pid']} · {state.get('run_id') or 'initializing'}"))
+    elif state.get('phase') not in ('completed', 'failed', 'interrupted', 'stopped'):
+        st.warning(_("训练进程已退出，以下为最后一次快照，无法据此确认正常完成", "Training process has exited; this is its last snapshot, not confirmation of completion"))
+    else:
+        st.info(_("以下为最近一次训练记录", "Showing the most recent training run"))
+    if state.get('active') and state.get('snapshot_age_seconds', 0) > 30:
+        st.caption(_(f"快照已有 {state['snapshot_age_seconds']:.0f} 秒未更新，可能正在初始化或导出；进程存活不等于采集仍在推进", f"Snapshot is {state['snapshot_age_seconds']:.0f} seconds old; initialization or export may be in progress. A live process does not guarantee progress"))
+    columns = st.columns(3)
+    columns[0].metric(_("当前轮次 / 目标", "Iteration / target"), f"{state.get('iteration', '—')} / {state.get('target_iteration', '—')}")
+    columns[1].metric(_("阶段", "Phase"), phase)
+    columns[2].metric(_("已完成轮次", "Last completed iteration"), state.get('last_completed_iteration', '—'))
+    config = state.get('config') or {}
+    quota_mode = config.get('allocation_mode') == 'sample_quota'
+    if state.get('error'):
+        st.error(state['error'])
+    collection = state.get('collection') or {}
+    if collection:
+        merged = collection.get('sample_stage') == 'merged'
+        if not merged:
+            st.caption(_(f"仍在运行的Worker：{collection.get('active_workers', 0)} / {config.get('workers', '—')}",
+                f"Workers still running: {collection.get('active_workers', 0)} / {config.get('workers', '—')}"))
+        total = collection.get('accepted_steps', sum(row['committed_steps'] for row in collection['sources'].values()))
+        st.metric(_("合并后有效样本" if merged else "Worker已提交样本", "Merged valid samples" if merged else "Worker-committed samples"),
+                  f"{int(total):,} / {config.get('rollout_steps', '—')}")
+        st.caption(_("按训练模型自己的动作计数，排除对手动作与已回滚样本；合并前的提交数仍可能因进程异常或文件丢弃而减少", "Counts the training model's actions only, excluding opponent actions and rolled-back rows. Before merging, counts can still decrease if a worker or file is lost"))
+        names = {'rule': 'RuleBot', 'windbot': 'WindBot', 'hist': _("历史模型", "Historical models"), 'self': _("自对局", "Self-play")}
+        rows = []
+        for source, row in collection['sources'].items():
+            steps = row.get('accepted_steps', row['committed_steps'])
+            seconds = row['worker_seconds']
+            rows.append({_('来源', 'Source'): names[source],
+                _('目标样本比例' if quota_mode else '抽选比例', 'Target sample share' if quota_mode else 'Worker probability'): f"{config.get('league_weights', {}).get(source, 0):.1%}",
+                _('初始分配Worker' if quota_mode else '本轮分配Worker', 'Initially assigned workers' if quota_mode else 'Assigned workers'): collection.get('assigned_workers', {}).get(source, 0),
+                _('样本数', 'Samples'): int(steps), _('实际样本占比', 'Actual sample share'): f"{steps / max(1, total):.1%}",
+                _('Worker占用秒', 'Worker-seconds'): round(seconds, 1),
+                _('每Worker秒样本', 'Samples per worker-second'): round(steps / max(seconds, 1e-6), 2),
+                _('完整终局', 'Terminal games'): int(row['completed_games']),
+                _('可信截断', 'Valid truncations'): int(row['truncated_games']),
+                _('异常丢弃局', 'Aborted games'): int(row['aborted_games'])})
+            if collection.get('quota'):
+                quota = collection['quota']
+                target = quota['target_steps'][source]
+                rows[-1].update({_("目标样本", "Target samples"): target,
+                    _("距目标仍缺", "Remaining shortfall"): max(0, target - int(steps)),
+                    _("本轮参与Worker", "Participating workers"): quota['participating_workers'][source],
+                    _("当前承接Worker", "Workers assigned now"): quota['inflight_workers'][source]})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+        st.caption(_("占用时间合计所有Worker的启动、对局和收尾，并行时可大于整轮耗时。样本配额模式允许整局收尾超额；概率模式不保证样本占比。一个Worker可先后参与多个来源", "Worker-seconds sum startup, games and cleanup and may exceed elapsed time. Quotas allow full-game overshoot; worker probabilities do not guarantee sample shares. A worker can serve several sources"))
+        if collection.get('quota', {}).get('rule_supplement'):
+            st.caption(_("RuleBot目标1表示独立补一局有效对局，完整样本仍全部保留，不是只保留一条动作", "RuleBot target 1 requests one additional game with valid model actions; all of that game's samples are retained"))
+        if collection.get('quota', {}).get('capacity_limited'):
+            st.caption(_("接近本轮轨迹容量，不再分配可能超出容量的新对局；已开始的对局仍正常收尾", "Near the rollout capacity: no new game is assigned without room for a complete episode; active games still finish normally"))
+        if collection.get('forced_rule_worker') is not None:
+            st.caption(_(f"Worker {collection['forced_rule_worker']} 承担额外RuleBot补局，补局样本归入RuleBot", f"Worker {collection['forced_rule_worker']} covers the extra RuleBot game; its samples are attributed to RuleBot"))
+        if collection.get('unattributed_steps', 0):
+            st.warning(_(f"{collection['unattributed_steps']} 条有效样本缺少来源统计，训练样本已保留", f"{collection['unattributed_steps']} valid samples lack source metrics; training samples are retained"))
+        with st.expander(_("查看耗时组成与历史推理后端", "Timing breakdown and historical inference backend")):
+            st.write(_("历史Worker后端", "Historical worker backends"),
+                {name: collection.get('backends', {}).get(name, 0) for name in ('ONNX', 'PyTorch')})
+            timing_names = {'t_cpp_env': _("环境秒", "Environment seconds"), 't_encoder': _("编码秒", "Encoder seconds"),
+                't_central': _("中央往返秒", "Central round-trip seconds"), 't_local_opponent': _("历史CPU前向秒", "Historical CPU forward seconds"),
+                't_pass1_cpu': _("历史Pass1秒", "Historical Pass1 seconds"), 't_windbot': _("WindBot秒", "WindBot seconds"),
+                't_rule_bot': _("规则/宏池秒", "Rule / macro-pool seconds")}
+            st.dataframe(pd.DataFrame([{_('来源', 'Source'): names[source], **{label: round(row[key], 2)
+                for key, label in timing_names.items()}} for source, row in collection['sources'].items()]),
+                hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+            st.caption(_("细分计时沿用单局审计，在每局收尾后累加；启动、重置与保存等额外时间只计入Worker占用秒", "Breakdowns reuse per-game audit timings, accumulated at game end. Startup, reset and save overhead is included only in worker-seconds"))
+    ppo = state.get('ppo')
+    if ppo:
+        st.caption(_(f"本轮PPO已更新 {ppo['optimizer_updates']} 个小批次 · 已进入 {ppo['epochs_started']}/{ppo['requested_epochs']} 个epoch · KL提前停止：{'是' if ppo['kl_stopped'] else '否'}",
+            f"PPO: {ppo['optimizer_updates']} optimizer updates · {ppo['epochs_started']}/{ppo['requested_epochs']} epochs started · KL early stop: {ppo['kl_stopped']}"))
+    if config:
+        with st.expander(_("实际运行配置", "Effective runtime configuration"), expanded=not bool(collection)):
+            network = config.get('network', {})
+            values = {
+                _('模型', 'Model'): config.get('model_prefix'), _('模型UUID', 'Model UUID'): config.get('model_id'),
+                _('接续来源', 'Resume source'): (config.get('resume_source') or {}).get('checkpoint_path', '—'),
+                _('网络宽度 / 头数 / 层数', 'Width / heads / layers'): ' / '.join(str(network.get(k, '—')) for k in ('d_model', 'n_heads', 'n_layers')),
+                _('设备', 'Device'): config.get('device'), 'Workers': config.get('workers'),
+                _('采集目标步数', 'Target rollout steps'): config.get('rollout_steps'),
+                _('采集调度', 'Collection allocation'): _("有效样本配额" if quota_mode else "Worker概率", "Sample quotas" if quota_mode else "Worker probability"),
+                _('PPO小批次', 'PPO minibatch'): config.get('mini_batch_size'), _('Worker时间预算（秒）', 'Worker time budget (seconds)'): config.get('worker_timeout'),
+                _('实际优化器学习率', 'Actual optimizer learning rates'): config.get('optimizer_learning_rates'),
+                _('启动参数学习率', 'Requested learning rate'): config.get('requested_learning_rate'),
+                'Gamma / GAE lambda': f"{config.get('gamma')} / {config.get('gae_lambda')}",
+                'Entropy / Clip': f"{config.get('entropy')} / {config.get('clip_eps')}",
+                'PPO epochs / Target KL': f"{config.get('ppo_epochs')} / {config.get('target_kl')}",
+                'ONNX / compile / CUDA Graph': f"{config.get('onnx')} / {config.get('compile')} / {config.get('inference_cuda_graph')}",
+                _('中央搬运布局', 'Central transfer layout'): config.get('inference_transport'),
+                _('卡组目录', 'Deck directory'): config.get('deck_dir'), _('保存目录', 'Save directory'): config.get('save_dir'),
+                _('WindBot训练执行器', 'WindBot training executors'): config.get('windbot_executors'),
+            }
+            st.dataframe(pd.DataFrame([{_('参数', 'Parameter'): key, _('生效值', 'Effective value'): str(value)} for key, value in values.items()]),
+                hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+            st.caption(_("这里显示Trainer实际使用的值。接续时恢复优化器可能沿用检查点学习率，与启动表单填写值不同", "These are the Trainer's actual values. A restored optimizer may retain checkpoint learning rates that differ from the startup form"))
+    if state.get('last_checkpoint'):
+        st.caption(_(f"最近保存：{state['last_checkpoint']}", f"Last checkpoint: {state['last_checkpoint']}"))
+
+
+@st.fragment
+def render_dynamic_collection_config():
+    """将动态调整与启动参数分开，明确展示请求是否已经生效"""
+    st.subheader(_("动态采集配置", "Live Collection Configuration"))
+    st.button(_("刷新生效状态", "Refresh applied status"), key='runtime_config_refresh',
+        help=_("查看最新生效比例及上次提交结果，不会重启训练", "Read current proportions and the last request result without restarting training"))
+    state = read_training_runtime(PROJECT_ROOT)
+    config = state.get('config') or {}
+    result = state.get('control_result') or {}
+    if result.get('status') == 'applied':
+        st.success(_(f"上次修改已从第 {result['iteration']} 轮采集起生效", f"Last change applied from collection iteration {result['iteration']}"))
+    elif result.get('status') == 'rejected':
+        st.warning(_(f"上次请求未应用：{result.get('reason', '')}", f"Last request was not applied: {result.get('reason', '')}"))
+    if not state.get('active') or not config:
+        st.info(_("请先启动训练；此处调整正在运行的任务，下一次启动参数请在“发起训练”中设置", "Start training first. This panel changes the running task; use Start Training for a new run"))
+        return
+    if state.get('target_iteration') is not None and state.get('iteration', 0) >= state['target_iteration']:
+        st.info(_("当前已是本次任务的最后一轮，没有下一轮采集可应用修改；后续任务请在发起训练中配置", "This is the final iteration of this run; there is no next collection to apply changes to. Configure a new run in Start Training"))
+        return
+    weights = config['league_weights']
+    labels = {'rule': 'RuleBot', 'windbot': 'WindBot', 'hist': _("历史模型", "Historical models"), 'self': _("自对局", "Self-play")}
+    st.caption(_("配额模式按目标有效样本比例调度，概率模式按Worker抽选。修改在下一轮采集前生效，不打断当前对局；总Worker数、采集目标和PPO参数需重新启动时修改", "Quota mode targets valid sample shares; probability mode draws worker opponents. Changes apply before the next collection without interrupting games. Worker count, rollout target and PPO settings require a new run"))
+    st.write(_("当前调度：", "Current allocation: ") + (_("有效样本配额", "Sample quotas") if config.get('allocation_mode') == 'sample_quota' else _("Worker概率", "Worker probability")))
+    st.write(_("当前生效：", "Currently applied: ") + ' · '.join(f'{labels[key]} {value:.1%}' for key, value in weights.items()))
+    if config.get('windbot_enabled'):
+        st.caption(_(f"WindBot当前每局镜像概率：{config['windbot_mirror_probability']:.1%}", f"Current WindBot mirror probability per game: {config['windbot_mirror_probability']:.1%}"))
+    pending = pending_training_updates(PROJECT_ROOT, state['session_id'])
+    if pending:
+        st.info(_("请求待生效：将在下一轮采集前处理，点击上方刷新可查看结果", "Request pending: it will be processed before the next collection iteration. Refresh above to check the result"))
+        for request in pending:
+            change = request.get('changes', {})
+            if 'allocation_mode' in change:
+                st.caption(_("待生效调度：", "Pending allocation: ") + (_("有效样本配额", "Sample quotas") if change['allocation_mode'] == 'sample_quota' else _("Worker概率", "Worker probability")))
+            st.write(_("待生效比例：", "Pending proportions: ") + ' · '.join(f'{labels[key]} {value:.1%}' for key, value in change.get('league_weights', {}).items()))
+            if 'windbot_mirror_probability' in change:
+                st.caption(_(f"待生效镜像概率：{change['windbot_mirror_probability']:.1%}", f"Pending mirror probability: {change['windbot_mirror_probability']:.1%}"))
+    key = f"runtime_{state['session_id']}_{state.get('config_revision', 0)}"
+    with st.form(key):
+        sample_quota = st.checkbox(_("按有效样本配额调度", "Allocate by valid sample quotas"),
+            value=config.get('allocation_mode') == 'sample_quota', key=f'{key}_quota',
+            disabled=bool(pending) or not config.get('sample_quota_supported'),
+            help=_("勾选后，四项比例表示本轮目标有效样本占比，按预计耗时分配Worker，整局结束后可换来源；允许整局超额，超时或异常可能欠额。不勾选则保留每Worker固定对手的概率抽选方式",
+                   "Checked: proportions target valid samples; workers are assigned by estimated work and may switch sources between games. Full-game overshoot and timeout/failure shortfalls are possible. Unchecked: each worker retains its probabilistically selected opponent"))
+        if not config.get('sample_quota_supported'):
+            st.caption(_("当前Trainer未提供配额调度，使用3.17.1或更新版本启动后可切换；仍可调整原有比例", "This Trainer does not support quota scheduling; start version3.17.1 or later to switch modes. Existing proportions remain adjustable"))
+        columns = st.columns(4)
+        changes = {}
+        for column, source in zip(columns, ('rule', 'windbot', 'hist', 'self')):
+            changes[source] = column.number_input(labels[source] + ' (%)', 0.0, 100.0,
+                float(weights[source] * 100), step=1.0, key=f'{key}_{source}',
+                disabled=bool(pending) or (source == 'windbot' and not config.get('windbot_enabled')),
+                help=_("四项合计100%。含义由调度方式决定；历史池为空时历史份额回到自对局。RuleBot覆盖独立保留，只有100% WindBot时不补", "Values total 100%; their meaning follows the allocation mode. Empty history falls back to self-play. RuleBot coverage is retained except at 100% WindBot")) / 100
+        mirror = st.number_input(_("WindBot每局镜像概率 (%)", "WindBot mirror probability per game (%)"),
+            0.0, 100.0, float(config.get('windbot_mirror_probability', 1.0) * 100), step=5.0,
+            key=f'{key}_mirror', disabled=bool(pending) or not config.get('windbot_enabled'),
+            help=_("仅作用于WindBot对局：100%让模型使用对手固定构筑，0%从常规训练卡组池抽取，中间值逐局混合；不改变WindBot在联盟中的比例", "Applies only to WindBot games: 100% mirrors the bot's fixed deck, 0% samples the regular training deck pool, and intermediate values mix per game. This does not change WindBot's league share")) / 100
+        if not config.get('windbot_enabled'):
+            st.caption(_("本次未初始化WindBot，无法运行中新增；需在发起训练时启用", "WindBot was not initialized for this run; enable it when starting a new run"))
+        submitted = st.form_submit_button(_("提交，下一轮采集生效", "Submit for next collection iteration"), disabled=bool(pending))
+    if submitted:
+        update = {'league_weights': changes}
+        if config.get('sample_quota_supported'):
+            update['allocation_mode'] = 'sample_quota' if sample_quota else 'worker_probability'
+        if config.get('windbot_enabled'):
+            update['windbot_mirror_probability'] = mirror
+        try:
+            request_training_update(PROJECT_ROOT, state['session_id'], state.get('config_revision', 0), update)
+        except (ValueError, OSError) as error:
+            st.error(_(f"未提交：{error}", f"Not submitted: {error}"))
+        else:
+            st.rerun()
+
 
 # ==========================================
 # 🎨 前端 CSS 魔法
@@ -1023,6 +1216,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
     
     # 新增：全局进程控制台
     is_running = False
+    runtime_state = read_training_runtime(PROJECT_ROOT)
     if st.session_state.running_pid:
         is_running = is_process_alive(
             st.session_state.running_pid,
@@ -1031,6 +1225,10 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         if not is_running:
             st.session_state.running_pid = None
             st.session_state.running_process_create_time = None
+    if not is_running and runtime_state.get('active'):
+        st.session_state.running_pid = runtime_state['pid']
+        st.session_state.running_process_create_time = runtime_state['process_create_time']
+        is_running = True
             
     col_status, col_kill, col_purge = st.columns([6, 2, 2])
     with col_status:
@@ -1080,12 +1278,18 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 st.warning(_(f"部分进程清理失败: {result['failed']}", f"Some processes could not be stopped: {result['failed']}"))
     st.divider()
     
-    tab_train, tab_duel, tab_selfcheck, tab_imitation = st.tabs([
+    tab_train, tab_runtime, tab_runtime_config, tab_duel, tab_selfcheck, tab_imitation = st.tabs([
         _("🔥 发起训练 (Train)", "🔥 Start Training"), 
+        _("📊 当前训练状态", "📊 Training Status"),
+        _("⚖️ 动态采集配置", "⚖️ Live Collection Config"),
         _("🏟️ 发起竞技 (Duel)", "🏟️ Start Arena"),
         _("🛠️ 规则自检压测 (Self-Check)", "🛠️ Rules Self-Check"),
         _("🧑‍🏫 独立模仿学习", "🧑‍🏫 Independent Imitation")
     ])
+    with tab_runtime:
+        render_training_runtime()
+    with tab_runtime_config:
+        render_dynamic_collection_config()
     models = ["None"] + sorted(
         (
             path
@@ -1471,8 +1675,12 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     'deck_mode': wb_mode, 'mirror_probability': wb_mirror_probability, 'runtime': wb_runtime.strip() or None}
 
         from training_validation import resolve_league_weights
-        with st.expander(_("⚖️ 联盟对手配比（可选高级设置）", "⚖️ League Opponent Probabilities (optional)")):
-            league_custom = st.checkbox(_("自定义联盟配比", "Customize League Probabilities"),
+        c_sample_quota = st.checkbox(_("按有效样本配额调度", "Allocate by valid sample quotas"),
+            value=False, key='training_sample_quota',
+            help=_("适合不同对手采集速度差异较大时使用。勾选后，联盟比例改为目标样本比例；Worker在整局结束后接手未完成来源，按观测吞吐分配并发。保留整局，实际比例可能有超额或欠额；不勾选沿用固定Worker概率抽选。运行中可在动态采集配置切换",
+                   "Useful when opponents have different collection speeds. Proportions become target sample shares; workers take unfinished sources between games based on measured throughput. Complete games are retained, so shares can over/undershoot. Unchecked keeps fixed worker draws. Switch during a run in Live Collection Config"))
+        with st.expander(_("⚖️ 联盟对手配比（可选高级设置）", "⚖️ League Opponent Mix (optional)")):
+            league_custom = st.checkbox(_("自定义联盟配比", "Customize League Mix"),
                 value=False, key=f'league_custom_{t_resume}',
                 help=_("默认关闭：原联盟为15% RuleBot/25%历史/60%自对局；启用WindBot后由它接替基础RuleBot的15%。勾选后可逐项调整，总和必须为100%",
                        "Defaults: 15% RuleBot, 25% history, 60% self-play. WindBot replaces the base RuleBot 15% when enabled. Customize all four probabilities with a 100% total"))
@@ -1489,8 +1697,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         value=round(league_defaults[name] * 100, 8), step=1.0, format='%.2f',
                         key=f'league_{name}_{t_resume}_{t_windbot_enabled}_{league_custom}',
                         disabled=not league_custom or (name == 'windbot' and not t_windbot_enabled),
-                        help=_("Worker基础分配概率，不是实际样本比例；四项合计100%，不隐式归一化",
-                               "Base Worker allocation probability, not actual sample share. Total must be 100%; no implicit normalization"))) / 100.0
+                        help=_("配额模式表示目标有效样本比例，普通模式表示Worker抽选概率；四项合计100%，不隐式归一化",
+                               "Quota mode targets valid sample shares; ordinary mode draws worker opponents. Total must be 100%; no implicit normalization"))) / 100.0
             st.caption(_(f"基础分配合计: {sum(league_values.values()):.2%}。额外RuleBot补局独立保留；只有100% WindBot时不补。历史池为空时，其份额回落到自对局",
                          f"Total base probability: {sum(league_values.values()):.2%}. Extra RuleBot coverage is retained except at 100% WindBot. Empty history falls back to self-play"))
             if abs(sum(league_values.values()) - 1) > 1e-8:
@@ -1598,6 +1806,7 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 if c_inference_profile: cmd.extend(["--inference-profile-batches", str(t_inference_profile_batches)])
                 cmd.extend(['--inference-transport', t_inference_transport])
                 if c_inference_cuda_graph: cmd.append('--inference-cuda-graph')
+                cmd.extend(['--collection-allocation', 'sample_quota' if c_sample_quota else 'worker_probability'])
                 cmd.extend(['--league-weights', *(str(league_values[name]) for name in ('rule', 'windbot', 'hist', 'self'))])
                 if windbot_training_options is not None:
                     cmd.extend(['--windbot', '--windbot-deck-mode', windbot_training_options['deck_mode']])

@@ -50,6 +50,10 @@ from ppo_control import (
 )
 from galatea_env import GalateaEnv
 from worker import worker_process
+from rollout_cursor import (
+    COLLECTION_SOURCES, COLLECTION_SLOT_SIZE,
+    summarize_collection_slots, accepted_source_steps, SampleQuotaScheduler, saved_collection_counts,
+)
 from ai_bot import AiBot
 from data_types import (
     ACTION_CONTEXT_DIM,
@@ -120,6 +124,7 @@ from training_validation import (
     resolve_training_target,
     validate_model_prefix,
     validate_training_config,
+    validate_collection_allocation,
 )
 # [新增] 头部
 import warnings
@@ -578,12 +583,14 @@ def ensure_rule_opponent_coverage(worker_opp_configs, iteration):
 
 class PPOTrainer:
     def __init__(self, save_dir="./models", deck_dir="./decks", net_config=None, resume_path=None,
-                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None, league_weights=None, inference_profile_batches=0, inference_transport='packed', inference_cuda_graph=False):
+                 update_timesteps=4096, mini_batch_size=512, num_workers=4, training_device='auto', compile_model=True, worker_timeout=300, gamma=0.998, lr=1e-4, entropy=0.03, gae_lambda=DEFAULT_GAE_LAMBDA, clip_eps=0.2, use_onnx=False, model_prefix=None, preloaded_resume_checkpoint=None, protocol_audit=False, ppo_epochs=DEFAULT_PPO_EPOCHS, target_kl=DEFAULT_TARGET_KL, windbot_training=None, league_weights=None, inference_profile_batches=0, inference_transport='packed', inference_cuda_graph=False, collection_allocation='worker_probability'):
         self.save_dir = save_dir
         self.deck_dir = deck_dir
         self.update_timesteps = update_timesteps
         self.mini_batch_size = mini_batch_size
         self.num_workers = num_workers
+        self.collection_allocation = validate_collection_allocation(collection_allocation)
+        self.collection_rate_estimates = {}
         self.requested_training_device = training_device
         self.use_onnx = use_onnx
         self.protocol_audit = bool(protocol_audit)
@@ -628,6 +635,8 @@ class PPOTrainer:
         self.initialization_source = None
         self.semantic_asset_updates = []
         self.observation_protocol_updates = []
+        self.runtime_monitor = None
+        self.runtime_config_history = []
         requested_model_prefix = (
             validate_model_prefix(model_prefix) if model_prefix is not None else None
         )
@@ -645,6 +654,7 @@ class PPOTrainer:
             from checkpoint_utils import checkpoint_semantic_history, checkpoint_observation_history
             self.semantic_asset_updates = checkpoint_semantic_history(resume_checkpoint)
             self.observation_protocol_updates = checkpoint_observation_history(resume_checkpoint)
+            self.runtime_config_history = list(resume_checkpoint.get('runtime_config_history', []))
             if self.observation_protocol_updates:
                 print(f"♻️ [观测接续] {self.observation_protocol_updates[-1]['message']}")
             if self.semantic_asset_updates:
@@ -846,6 +856,7 @@ class PPOTrainer:
                 'kl_stop_multiplier': TARGET_KL_STOP_MULTIPLIER,
                 'mini_batch_size': self.mini_batch_size,
                 'league_weights': self.league_weights,
+                'collection_allocation': self.collection_allocation,
                 'runtime': {
                     'workers': self.num_workers, 'rollout_steps': self.update_timesteps,
                     'worker_timeout': self.worker_timeout, 'device': str(self.device),
@@ -1239,6 +1250,142 @@ class PPOTrainer:
             except (OSError, ValueError) as error:
                 print(f'⚠️ [WebUI] WindBot CSV写入失败: {error}')
 
+    def attach_runtime_monitor(self, monitor):
+        """发布实际生效配置，CLI和WebUI启动的训练使用同一状态入口"""
+        self.runtime_monitor = monitor
+        windbot = self.windbot_training or {}
+        self.runtime_config = {
+            'model_prefix': self.model_prefix, 'model_id': self.model_id,
+            'resume_source': self.resume_source_record,
+            'network': {key: self.net_config[key] for key in ('d_model', 'n_heads', 'n_layers')},
+            'device': str(self.device), 'workers': self.num_workers,
+            'rollout_steps': self.update_timesteps, 'mini_batch_size': self.mini_batch_size,
+            'worker_timeout': self.worker_timeout, 'deck_dir': os.path.abspath(self.deck_dir),
+            'save_dir': os.path.abspath(self.save_dir),
+            'gamma': self.gamma, 'gae_lambda': self.gae_lambda, 'entropy': self.entropy,
+            'clip_eps': self.clip_eps, 'ppo_epochs': self.ppo_epochs, 'target_kl': self.target_kl,
+            'requested_learning_rate': self.lr,
+            'optimizer_learning_rates': [float(group['lr']) for group in self.optimizer.param_groups],
+            'onnx': self.use_onnx, 'compile': self.enable_compile,
+            'inference_cuda_graph': self.inference_cuda_graph, 'inference_transport': self.inference_transport,
+            'allocation_mode': self.collection_allocation, 'league_weights': dict(self.league_weights),
+            'sample_quota_supported': True,
+            'windbot_enabled': self.windbot_training is not None,
+            'windbot_mirror_probability': windbot.get('mirror_probability', 1.0),
+            'windbot_executors': [entry['executor'] for entry in windbot.get('training', [])],
+        }
+        self._publish_runtime(force=True, phase='ready', config=self.runtime_config,
+                              iteration=self.iteration, last_completed_iteration=self.iteration,
+                              collection=None, ppo=None)
+        self.writer.add_text('Configuration/Runtime', json.dumps(self.runtime_config, ensure_ascii=False), self.iteration)
+
+    def _publish_runtime(self, *, force=False, **values):
+        """只发布已有CPU计数，不查询CUDA或读取模型文件"""
+        monitor = getattr(self, 'runtime_monitor', None)
+        if monitor is not None:
+            monitor.publish_runtime(force=force, **values)
+
+    def _apply_runtime_updates(self):
+        """冻结本轮配置后再启动Worker，请求不改变正在采集的对局"""
+        monitor = getattr(self, 'runtime_monitor', None)
+        if monitor is None:
+            return
+        for result in monitor.take_runtime_updates(self.runtime_config, self.iteration):
+            changes = result['changes']
+            if 'allocation_mode' in changes:
+                self.collection_allocation = changes['allocation_mode']
+            if 'league_weights' in changes:
+                self.league_weights = dict(changes['league_weights'])
+                if self.windbot_training is not None:
+                    self.windbot_training['rate'] = self.league_weights['windbot']
+            if 'windbot_mirror_probability' in changes:
+                probability = changes['windbot_mirror_probability']
+                self.windbot_training.update(mirror_probability=probability,
+                    deck_mode='mirror' if probability == 1 else 'training-pool' if probability == 0 else 'mixed')
+            self.runtime_config_history.append(dict(result, run_id=self.run_id))
+            self.writer.add_text('Configuration/Runtime_Update', json.dumps(result, ensure_ascii=False), self.iteration)
+            print(f"⚙️ [动态采集配置] 第 {self.iteration} 轮起生效: {json.dumps(changes, ensure_ascii=False)}")
+
+    def _publish_collection_progress(self, active_workers=(), *, force=False):
+        """共享计数最多五秒读取一次，独立于中央推理请求与文件合并"""
+        now = time.monotonic()
+        if not force and now - self._collection_publish_time < 5.0:
+            return
+        self._collection_publish_time = now
+        self.collection_summary = summarize_collection_slots(
+            self.collection_slots, self._collection_snapshots, active_workers,
+            now=now, ended_at=self._collection_ended_at)
+        self.collection_summary.update(assigned_workers=self._collection_assigned,
+                                       active_workers=len(active_workers),
+                                       forced_rule_worker=self._collection_forced_rule_worker)
+        scheduler = getattr(self, '_collection_scheduler', None)
+        if scheduler is not None:
+            self.collection_summary['quota'] = scheduler.summary()
+        self._publish_runtime(force=force, collection=self.collection_summary)
+
+    def _finish_collection_metrics(self, counts, total_steps):
+        """最终样本数只以成功合并行数为准，未接收文件的成本仍计入占用"""
+        self._publish_collection_progress(force=True)
+        summary = self.collection_summary
+        summary.update(sample_stage='merged', accepted_steps=int(total_steps),
+                       unattributed_steps=max(0, int(total_steps) - sum(counts.values())))
+        for source, row in summary['sources'].items():
+            row['accepted_steps'] = counts[source]
+            row['sample_fraction'] = counts[source] / max(1, total_steps)
+            row['steps_per_worker_second'] = counts[source] / max(1e-6, row['worker_seconds'])
+            for tag, value in {
+                'Accepted_Steps': counts[source], 'Sample_Fraction': row['sample_fraction'],
+                'Worker_Seconds': row['worker_seconds'],
+                'Steps_Per_Worker_Second': row['steps_per_worker_second'],
+                'Aborted_Games': row['aborted_games'], 'Assigned_Workers': self._collection_assigned[source],
+            }.items():
+                self.writer.add_scalar(f'Collection/{source}/{tag}', value, self.iteration)
+            if 'quota' in summary:
+                quota = summary['quota']
+                for tag, value in {
+                    'Target_Steps': quota['target_steps'][source],
+                    'Shortfall_Steps': max(0, quota['target_steps'][source] - counts[source]),
+                    'Participating_Workers': quota['participating_workers'][source],
+                }.items():
+                    self.writer.add_scalar(f'Collection/{source}/{tag}', value, self.iteration)
+        self._publish_runtime(force=True, collection=summary)
+
+    def _service_collection_tasks(self, connections, pending, active_workers, config_for_source):
+        """父进程串行处理整局任务，避免可被终止的Worker持有共享调度锁"""
+        scheduler = self._collection_scheduler
+        for worker_id, connection in list(connections.items()):
+            disconnected = False
+            try:
+                while connection.poll():
+                    message = connection.recv()
+                    scheduler.report(worker_id, message)
+                    if message['kind'] == 'ready':
+                        pending.add(worker_id)
+                    else:
+                        pending.discard(worker_id)
+            except (EOFError, OSError):
+                disconnected = True
+            if disconnected or worker_id not in active_workers:
+                token = getattr(self, '_collection_token', None)
+                saved = saved_collection_counts(self.iteration, worker_id, token) if token else None
+                scheduler.worker_exited(worker_id, saved)
+                pending.discard(worker_id)
+                connection.close()
+                del connections[worker_id]
+        for worker_id in sorted(pending):
+            source = scheduler.claim(worker_id)
+            if source is None and not scheduler.stopped:
+                continue
+            try:
+                connections[worker_id].send(config_for_source(worker_id, source) if source else None)
+            except (EOFError, OSError):
+                token = getattr(self, '_collection_token', None)
+                saved = saved_collection_counts(self.iteration, worker_id, token) if token else None
+                scheduler.worker_exited(worker_id, saved)
+                connections[worker_id].close()
+                del connections[worker_id]
+            pending.discard(worker_id)
+
     def collect_rollouts(self):
         graph_runner = getattr(self, 'inference_graph', None)
         if graph_runner is not None:
@@ -1278,25 +1425,66 @@ class PPOTrainer:
         windbot_config = getattr(self, 'windbot_training', None)
         weights = getattr(self, 'league_weights', None) or resolve_league_weights(
             windbot_enabled=windbot_config is not None, legacy_windbot_rate=(windbot_config or {}).get('rate'))
-        for i in range(self.num_workers):
-            config = select_league_opponent_config(random.random(), historical_models, self.model_id, weights)
-            if config['type'] == 'windbot':
-                registry = os.path.abspath(os.path.join('system_logs', 'windbot', 'processes',
-                    f'{self.run_id}_{self.iteration}_{i}_{time.time_ns()}.json'))
-                config['windbot'] = dict(windbot_config, process_registry=registry)
-            worker_opp_configs.append(config)
+        quota_mode = getattr(self, 'collection_allocation', 'worker_probability') == 'sample_quota'
+        self._collection_scheduler = None
+        collection_token = f'{os.getpid()}_{time.time_ns()}' if quota_mode else None
+        self._collection_token = collection_token
+        connections, pending = {}, set()
+        registries = []
+        forced_rule_worker = None
+        required_capacity = self.update_timesteps + max(self.num_workers * 1000, 2 * MAX_EPISODE_STEPS if quota_mode else 0)
+        if getattr(self, 'max_buffer_steps', required_capacity) != required_capacity:
+            self._release_merged_memory_pool()
+        self.max_buffer_steps = required_capacity
+        if quota_mode:
+            self._collection_scheduler = SampleQuotaScheduler(self.update_timesteps, weights,
+                has_history=bool(historical_models), max_episode_steps=MAX_EPISODE_STEPS,
+                capacity=self.max_buffer_steps, estimates=self.collection_rate_estimates)
+            history_paths = [random.choice(historical_models) if historical_models else None for _ in range(self.num_workers)]
+            registries = [os.path.abspath(os.path.join('system_logs', 'windbot', 'processes',
+                f'{self.run_id}_{collection_token}_{i}.json')) for i in range(self.num_workers)] if windbot_config else []
 
-        # 混合模式优先由普通AI补Rule局，100%外部对手模式不再插入其他对手
-        forced_rule_worker = (None if weights['windbot'] == 1.0 else
-                             ensure_rule_opponent_coverage(worker_opp_configs, self.iteration))
-        if forced_rule_worker is not None:
-            print(
-                f"🎯 [Iter {self.iteration}] 本轮未抽中 Rule Worker，"
-                f"Worker {forced_rule_worker} 将先完成 1 局 Rule 对局后恢复原对手。"
-            )
-        # --------------------------------------
+            def config_for_source(worker_id, source):
+                if source == 'hist':
+                    return {'mode': 'ai', 'type': 'hist', 'path': history_paths[worker_id], 'model_id': self.model_id}
+                if source == 'windbot':
+                    return {'mode': 'external', 'type': 'windbot', 'path': None,
+                            'windbot': dict(windbot_config, process_registry=registries[worker_id])}
+                return {'mode': 'rule' if source == 'rule' else 'ai', 'type': source or 'self',
+                        'path': None, '_quota_idle': source is None}
+
+            for i in range(self.num_workers):
+                worker_opp_configs.append(config_for_source(i, self._collection_scheduler.claim(i)))
+            print(f'⚖️ [样本配额] {self._collection_scheduler.targets} | 整局边界调度，允许完整对局超额')
+        else:
+            for i in range(self.num_workers):
+                config = select_league_opponent_config(random.random(), historical_models, self.model_id, weights)
+                if config['type'] == 'windbot':
+                    registry = os.path.abspath(os.path.join('system_logs', 'windbot', 'processes',
+                        f'{self.run_id}_{self.iteration}_{i}_{time.time_ns()}.json'))
+                    config['windbot'] = dict(windbot_config, process_registry=registry)
+                worker_opp_configs.append(config)
+
+            # 混合模式优先由普通AI补Rule局，100%外部对手模式不再插入其他对手
+            forced_rule_worker = (None if weights['windbot'] == 1.0 else
+                                 ensure_rule_opponent_coverage(worker_opp_configs, self.iteration))
+            if forced_rule_worker is not None:
+                print(
+                    f"🎯 [Iter {self.iteration}] 本轮未抽中 Rule Worker，"
+                    f"Worker {forced_rule_worker} 将先完成 1 局 Rule 对局后恢复原对手。"
+                )
+
+            registries = [config['windbot']['process_registry'] for config in worker_opp_configs if config['type'] == 'windbot']
 
         steps_per_worker = max(200, self.update_timesteps // self.num_workers)
+        self.collection_slots = [mp.RawArray('d', COLLECTION_SLOT_SIZE) for _ in range(self.num_workers)]
+        self._collection_snapshots = {}
+        self._collection_ended_at = {}
+        self._collection_publish_time = 0.0
+        self._collection_forced_rule_worker = forced_rule_worker
+        self._collection_assigned = {source: sum(c['type'] == source and not c.get('_quota_idle') for c in worker_opp_configs)
+                                    for source in COLLECTION_SOURCES}
+        self._publish_collection_progress(force=True)
         self._report_memory_status("Worker 启动前")
         self._validate_rollout_commit_headroom(steps_per_worker)
         phase_start = time.monotonic()
@@ -1305,7 +1493,11 @@ class PPOTrainer:
         # Worker异常或主进程取消时，也要回收其外部对手
         processes = []
         try:
+            collection_deadline = time.monotonic() + self.worker_timeout - 30.0
             for i in range(self.num_workers):
+                child = None
+                if quota_mode:
+                    connections[i], child = mp.Pipe()
                 p = mp.Process(target=worker_process, args=(
                     i, self.iteration, self.net_config, self.deck_dir, steps_per_worker,
                     self.zmq_port, worker_opp_configs[i], self.worker_timeout, self.gamma,
@@ -1313,38 +1505,59 @@ class PPOTrainer:
                     self.shared_outputs, self.worker_events, self.use_onnx,
                     self.shared_logits, self.shared_response_ids, self.protocol_audit,
                     diagnostics is not None,
+                    self.collection_slots[i], time.monotonic(),
+                    child, collection_token, collection_deadline if quota_mode else None,
                 ))
                 p.daemon = True
-                p.start()
-                processes.append(p)
+                try:
+                    p.start()
+                    processes.append(p)
+                finally:
+                    if child is not None:
+                        child.close()
             print(f"   ... 中央批量推理服务 ({self.device.type.upper()}) 运算中 ...")
             start_wait = time.monotonic()
             self.collection_phase_seconds['worker_startup'] = start_wait - phase_start
             while time.monotonic() - start_wait < self.worker_timeout:
-                if not any(p.is_alive() for p in processes):
+                active_workers = [i for i, p in enumerate(processes) if p.is_alive()]
+                for i in range(len(processes)):
+                    if i not in active_workers:
+                        self._collection_ended_at.setdefault(i, time.monotonic())
+                if quota_mode:
+                    self._service_collection_tasks(connections, pending, active_workers, config_for_source)
+                self._publish_collection_progress(active_workers)
+                if not active_workers:
                     break
-                time.sleep(1.0)
+                time.sleep(0.05 if quota_mode else 1.0)
         finally:
             reap_start = time.monotonic()
             self.collection_phase_seconds['worker_wait'] = reap_start - locals().get('start_wait', reap_start)
-            for p in processes:
+            for i, p in enumerate(processes):
                 if p.is_alive():
                     print(f'⏳ [Trainer] Worker未完成采集，正在终止并回收进程')
                     p.terminate()
                 p.join(timeout=5.0)
+                self._collection_ended_at.setdefault(i, time.monotonic())
                 try:
                     p.close()
                 except Exception as e:
                     print(f'[Trainer] Worker进程句柄回收失败: {e}')
-            for config in worker_opp_configs:
-                if config.get('type') == 'windbot':
-                    from integrations.windbot.training import reap_worker_bot
-                    try:
-                        reap_worker_bot(config['windbot']['process_registry'])
-                    except Exception as error:
-                        print(f'⚠️ [Trainer] WindBot进程登记回收失败: {error}')
+            if quota_mode:
+                self._service_collection_tasks(connections, pending, [], config_for_source)
+                for i in range(len(processes)):
+                    self._collection_scheduler.worker_exited(i, saved_collection_counts(self.iteration, i, collection_token))
+                self.collection_rate_estimates = self._collection_scheduler.estimates
+            for registry in registries:
+                from integrations.windbot.training import reap_worker_bot
+                try:
+                    reap_worker_bot(registry)
+                except Exception as error:
+                    print(f'⚠️ [Trainer] WindBot进程登记回收失败: {error}')
             phase_start = time.monotonic()
             self.collection_phase_seconds['worker_reap'] = phase_start - reap_start
+        self._publish_runtime(force=True, phase='merging')
+        self._publish_collection_progress(force=True)
+        accepted_counts = dict.fromkeys(COLLECTION_SOURCES, 0)
         
         orphan_tmps = glob.glob(f"tmp_rollout_iter_{self.iteration}_worker_*.pt.tmp")
         for f in orphan_tmps:
@@ -1377,13 +1590,15 @@ class PPOTrainer:
             print(f"⚠️ 内存检查失败: {mem_check_err}")
 
         # 3. 直接去硬盘收割
-        file_list = []
-        for i in range(self.num_workers):
-            tmp_file = f"tmp_rollout_iter_{self.iteration}_worker_{i}.pt"
-            if os.path.exists(tmp_file):
-                file_list.append(tmp_file)
+        file_list = sorted(glob.glob(f'tmp_rollout_iter_{self.iteration}_worker_*_batch_{collection_token}_*.pt')) if quota_mode else []
+        if not quota_mode:
+            for i in range(self.num_workers):
+                tmp_file = f"tmp_rollout_iter_{self.iteration}_worker_{i}.pt"
+                if os.path.exists(tmp_file):
+                    file_list.append(tmp_file)
 
         if not file_list:
+            self._finish_collection_metrics(accepted_counts, 0)
             self.collection_phase_seconds['merge'] = time.monotonic() - phase_start
             print("❌ 所有 Worker 均未能产出数据！")
             return None
@@ -1394,6 +1609,7 @@ class PPOTrainer:
         
         total_rewards = []
         total_lens = []
+        episode_sums = dict(reward_sum=0.0, reward_count=0, length_sum=0.0, length_count=0)
 
         ## 统计先后手胜率的全局计数器
         t_stats = {k: 0 for k in [
@@ -1517,6 +1733,14 @@ class PPOTrainer:
                     self.merged_memory['aux'][k][cursor:cursor+s] = data['aux'][k][:s]
                     
                 cursor += s
+                for key in episode_sums:
+                    episode_sums[key] += data.get(key, 0)
+                try:
+                    source_counts = accepted_source_steps(data.get('collection_sources', {}), s)
+                    for source, count in source_counts.items():
+                        accepted_counts[source] += count
+                except (ValueError, TypeError) as error:
+                    print(f'⚠️ 采集来源统计无法归类，已保留有效训练样本: {error}')
                 
                 # 6. 阅后即焚：彻底断开引用，强制回收这几百MB内存，并删掉硬盘文件
                 del data
@@ -1531,12 +1755,17 @@ class PPOTrainer:
         self._write_windbot_metrics(windbot_records)
         self._write_windbot_history(windbot_records)
         self.collection_phase_seconds['merge'] = time.monotonic() - phase_start
+        self._finish_collection_metrics(accepted_counts, cursor)
         if cursor == 0:
             print('❌ 本轮没有可提交的模型动作，已保留外部对手诊断统计，不执行PPO更新')
             return None
         t_cost = time.monotonic() - t0
         avg_rew = np.mean(total_rewards) if total_rewards else 0.0
         avg_len = np.mean(total_lens) if total_lens else 0.0
+        if episode_sums['reward_count']:
+            avg_rew = episode_sums['reward_sum'] / episode_sums['reward_count']
+        if episode_sums['length_count']:
+            avg_len = episode_sums['length_sum'] / episode_sums['length_count']
         print(f"✅ 采集完成! 耗时: {t_cost:.1f}s | 样本: {cursor} | Avg Reward: {avg_rew:.2f}")
         if t_stats['timeouts']:
             print(f"⏳ 截断对局: 步数上限 {t_stats['truncated_step_limit']} | "
@@ -2348,6 +2577,9 @@ class PPOTrainer:
                 else:
                     update_audit.nonfinite_batches += 1
 
+                self._publish_runtime(ppo={'optimizer_updates': update_audit.optimizer_updates,
+                    'epochs_started': update_audit.epochs_started, 'requested_epochs': update_audit.requested_epochs,
+                    'kl_stopped': update_audit.kl_stopped})
                 del logits, values, v_input, surr1, surr2, ratio, entropy, loss, policy_loss, value_loss, entropy_loss, base_loss
                 if use_auxiliary_heads:
                     del auxiliary_predictions, auxiliary_loss, planning_loss
@@ -2376,9 +2608,12 @@ class PPOTrainer:
         )
         print("🚦 Starting PPO Training Loop...")
         print(f"🎯 当前轮次: {self.iteration} | 明确停止轮次: {target_iter}")
+        self._publish_runtime(force=True, target_iteration=target_iter)
 
         while self.iteration < target_iter:
             self.iteration += 1
+            self._publish_runtime(force=True, phase='collecting', iteration=self.iteration, collection=None, ppo=None)
+            self._apply_runtime_updates()
             iter_start = time.monotonic()
 
             # 1. 采集 (现在返回的是总步数)
@@ -2401,8 +2636,14 @@ class PPOTrainer:
 
             # 2. 优化 (只有当样本足够时才更新)
             if total_steps is not None and total_steps >= self.mini_batch_size:
+                self._publish_runtime(force=True, phase='updating')
                 policy_update_start = time.monotonic()
                 self.update_policy(total_steps)
+                audit = getattr(self, 'last_ppo_update_audit', None)
+                if audit is not None:
+                    self._publish_runtime(force=True, ppo={'optimizer_updates': audit.optimizer_updates,
+                        'epochs_started': audit.epochs_started, 'requested_epochs': audit.requested_epochs,
+                        'kl_stopped': audit.kl_stopped})
                 self.writer.add_scalar(
                     'Performance/PPO_Update_Seconds',
                     time.monotonic() - policy_update_start,
@@ -2420,6 +2661,7 @@ class PPOTrainer:
             
             # 3. 保存 (打包保存)
             if self.iteration % 10 == 0:
+                self._publish_runtime(force=True, phase='saving')
                 artifact_stem = model_artifact_stem(
                     self.model_prefix,
                     self.iteration,
@@ -2458,6 +2700,8 @@ class PPOTrainer:
                     'training_stage': 'ppo',
                     'windbot_training': getattr(self, 'windbot_training', None),
                     'league_weights': getattr(self, 'league_weights', resolve_league_weights()),
+                    'collection_allocation': getattr(self, 'collection_allocation', 'worker_probability'),
+                    'runtime_config_history': getattr(self, 'runtime_config_history', []),
                 }
                 if self.training_lineage is not None:
                     checkpoint['training_lineage'] = dict(self.training_lineage, ppo_iteration=self.iteration)
@@ -2491,11 +2735,17 @@ class PPOTrainer:
                 )
                 print(f"💾 Model saved: {path}")
                 print(f"🏷️ Artifact manifest saved: {artifact_manifest}")
+                self._publish_runtime(force=True, last_checkpoint=os.path.abspath(path))
             
             dt = time.monotonic() - iter_start
             print(f"⏱️ Iteration {self.iteration} finished in {dt:.1f}s")
+            self._publish_runtime(force=True, phase='between_iterations', last_completed_iteration=self.iteration,
+                last_iteration_seconds=dt, global_step=self.global_step, train_step=self.train_step)
 
         print("🏁 训练结束！")
+        monitor = getattr(self, 'runtime_monitor', None)
+        if monitor is not None:
+            monitor.finish()
 
     def close(self):
         """停止中央推理线程并释放日志、环境和设备资源"""
@@ -2611,6 +2861,7 @@ if __name__ == "__main__":
         trainer = PPOTrainer()
         try:
             training_lock.set_run_id(trainer.run_id)
+            trainer.attach_runtime_monitor(training_lock)
             trainer.run_training_loop(additional_iterations=1000)
         finally:
             trainer.close()

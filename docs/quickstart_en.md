@@ -280,6 +280,51 @@ see the [observation contract](core_trajectories_en.md#player-observation-contra
 
 ## View Training Results
 
+### Runtime status and live collection configuration
+
+Open **Control & Logs → Training Status** to see current/target iterations, the active phase and actual settings.
+Browser refresh recovers the running Trainer, including CLI-started jobs. The panel independently refreshes a small
+snapshot every 5 seconds; initialization or export can delay updates, in which case its age is shown. An exited
+process with an unfinished snapshot is not reported as completed. Actual optimizer learning rates may differ from
+startup values when optimizer state is restored from a checkpoint.
+
+The adjacent **Live Collection Config** tab adjusts allocation mode, league proportions and WindBot's per-game mirror probability:
+
+1. Set the four league percentages to a total of 100%, then submit for the next collection iteration
+2. The current iteration keeps its settings. Refresh applied status to see the effective iteration or rejection reason
+3. A 100% mirror probability uses the bot's fixed deck; 0% uses the regular training pool; intermediate values mix per game. This does not alter WindBot's league probability
+
+**Allocate by valid sample quotas** is unchecked by default. Select it in Start Training or Live Collection Config; changes apply before the next collection:
+
+- **Unchecked**: each worker retains its drawn opponent; league proportions are worker assignment probabilities
+- **Checked**: proportions target valid model-action rows. Workers are assigned by remaining quotas and observed samples per second, switching sources only between complete games. Rates start with equal estimates and are smoothed from game results
+
+For example, 15% WindBot in a 32,768-step target gives about 4,915 model actions. Complete games may overshoot;
+time budgets, failures or bounded storage may leave a shortfall. The panel separates targets, accepted rows,
+shortfalls and initial/participating/current workers. A worker may participate in several sources.
+Low-share sources get at least one game; games are not sliced to hit exact quotas. Empty history falls back to
+self-play. At zero RuleBot share, one valid RuleBot game is still added with all its samples, except at 100% WindBot.
+
+Workers reuse their environment and at most one historical-model session per iteration. Rollout buffers have
+fixed capacity and complete episodes are saved in chunks; failed work cannot erase previously saved chunks.
+PPO starts only after all workers are reaped, and the next iteration uses new workers rather than old-policy rows.
+With 12 workers the original merge-pool allowance is retained; small collections with few workers reserve at least 3,000 extra rows for complete games.
+Each game adds a small CPU task message, with no extra network forward or GPU synchronization. This changes
+allocation and waiting time, not the intrinsic cost of historical or WindBot inference.
+
+A running job cannot initialize disabled WindBot support or change its network, worker count, rollout target or PPO settings.
+New processes use startup settings and do not inherit pending requests. CLI: `--collection-allocation sample_quota`;
+the default is `worker_probability`.
+
+Worker-committed samples count only valid training-model actions, excluding opponent actions and rolled-back rows.
+Final counts become available after merging. Worker-seconds sum startup, reset, games and cleanup across processes,
+so they can exceed the collection's elapsed time. See the [collection metrics](tensorboard_metrics_en.md#9-performance-and-configuration).
+
+Runtime files require no manual maintenance or upload. The latest snapshot uses `.galatea_train.lock.owner.json` in
+the project root; requests use `system_logs/training_control/<session_id>/` and are removed after processing.
+Applied changes are also recorded in TensorBoard configuration text and subsequent checkpoint history. None of these
+files change model inputs.
+
 ### Live Logs
 
 After training starts, view real-time logs at the bottom of **⚔️ Launch & Monitor Hub**.

@@ -1,6 +1,13 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.16.9. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.17.1. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+
+## Collection scheduling and runtime visibility
+
+- [x] 3.17.0: Sibling training status and live collection controls; recover actual settings/progress after browser refresh, apply league/mirror probability changes at the next iteration, and measure accepted samples and worker-seconds by actual source
+- [x] 3.17.1: Optional sample-quota scheduling assigns workers by estimated remaining work; switch sources between complete episodes, give low-share sources at least one game, use bounded rollout chunks, freeze the policy within each iteration and never reuse old-policy rows across PPO iterations
+- [ ] Optimize historical ONNX threading and repeated Pass1/Pass2 computation with real-input equivalence checks; any bounded GPU historical-model cache must be released before PPO and validated against memory limits
+- [ ] Reduce WindBot polling and per-game startup overhead while preserving executor decisions and protocol semantics; record upstream patches and artifact provenance separately
 
 - [x] 3.16.9: Independent current prompts, announced objects and per-chain resolution/negation states; 116 inputs, revision 15, existing learned parameters and Checkpoint 3 retained. Known old PTH files can resume; ONNX requires re-export. Rewards, temperature and DeckFiLM tuning remain future discussion. See [contract and migration](public_observations_en.md#3169-current-prompt-and-chain-context).
 

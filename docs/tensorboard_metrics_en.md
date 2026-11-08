@@ -1,13 +1,15 @@
 # TensorBoard Metric Reference
 
-> Applies to Galatea-Core v3.16.7 / Model Protocol V4.
+> Applies to Galatea-Core v3.17.1 / Model Protocol V4.
 > For users and developers: chart purposes, y-axes, logging locations, and trend interpretation.
 > [中文](tensorboard_metrics.md)
 
-Default main PPO contains **80 fixed scalars, 3 planning distributions and 1 configuration text**, plus `Deck_WinRates/*`.
+Default main PPO contains **104 fixed scalars, 3 planning distributions and 2 startup configuration texts**, plus `Deck_WinRates/*`.
+Twenty-four source collection scalars are new in 3.17.0; applied live changes also write `Configuration/Runtime_Update` text.
 Explicit WindBot opponents add 7 fixed scalars, 1 configuration text and per-executor series; see section 11.
 Independent imitation adds10 scalars in its own run without changing PPO charts. Prediction, update budget,
 expert agreement and playing strength are different quantities.
+Quota allocation in 3.17.1 adds 12 target/shortfall/participating-worker scalars.
 
 | Group | Question it answers |
 |---|---|
@@ -18,6 +20,7 @@ expert agreement and playing strength are different quantities.
 | Planning | Without specifying the chosen action, is the representation informative about future resources and outcomes? |
 | Train / PPO_Update | How do policy/value change, how much data is actually used, and which guards trigger? |
 | Performance / Configuration | Where does runtime go, and which training settings are actually used? |
+| Collection | How many valid samples does each source provide per worker-second, and did collection fail? |
 | Imitation (separate run) | Does policy agree more with experts, and does agreement improve on held-out demonstrations? |
 
 Jump to: [logging rules](#1-storage-axes-and-reading-rules) · [win rates](#2-league-training-game-win-rates) · [collection](#3-rollout-collection-outcomes-and-termination) · [labels](#4-auxiliary_targets-coverage-and-event-distribution) · [auxiliary prediction](#5-auxiliary_train-structured-predictive-learning) · [planning](#6-planning-latent-goals-and-policy-integration) · [training updates](#7-train-current-mini-batch-ppo-joint-update) · [update guards](#8-ppo_update-iteration-controls-and-actual-reuse) · [runtime and settings](#9-performance-and-configuration) · [independent imitation](#10-independent-imitation-metrics)
@@ -36,13 +39,16 @@ Jump to: [logging rules](#1-storage-axes-and-reading-rules) · [win rates](#2-le
 | Group | Step axis | Frequency | Scope of one point |
 |---|---|---|---|
 | `League_Overall/*`, `League_Self/*`, `League_Opponent/*` | Collection iteration | After each collection | Game counters from successfully loaded Worker outputs; not cumulative training win rate |
-| `Rollout/*` | iteration | After each collection | Game counts or an average of Worker means; see section 3 |
+| `Rollout/*` | iteration | After each collection | Valid episode counts or episode averages; see section 3 |
 | `Auxiliary_Targets/*` | iteration | After merging | Label audit over valid training rows; not fractions of games |
 | `Train/*`, `Auxiliary_Train/*`, `Planning/*` | Cumulative optimizer updates, train_step | Every 20-update position | Diagnostics for the current mini-batch, not iteration averages |
 | `Planning_Histograms/*` | train_step | Every 200-update position | Current batch planning vectors or current gate parameters |
 | `PPO_Update/*` | iteration | After each PPO update phase | Summaries of inspected batches and actual optimizer updates |
 | `Performance/*` | iteration | After the corresponding phase | Complete collection/update durations and submitted-row throughput |
+| `Collection/{source}/*` | iteration | After merging | Source rows, occupancy and worker allocation; zeros are recorded for empty sources |
 | `Configuration/PPO` | train_step at launch | Once per launch | JSON text of PPO settings and actual optimizer learning rates |
+| `Configuration/Runtime` | iteration | At launch | Actual network dimensions, resume source and collection settings |
+| `Configuration/Runtime_Update` | iteration | When a change is applied | Changed settings and effective iteration |
 
 train_step advances only after a successful optimizer update. Logging conditions are checked before the update: the first point can be Step 0, and FP16 overflow skipping an update can produce repeated steps. Gradient norms are measured after backward and AMP unscaling, **before clipping**. Predictions and losses come from the pre-update forward pass.
 
@@ -86,9 +92,9 @@ Logging: [trainer.py](../trainer.py#L1239). Generation: [Worker rewards and GAE]
 
 | Chart | Y-axis and aggregation | Interpretation and limits |
 |---|---|---|
-| `Rollout/Average_Reward` | Equal-weight average of nonzero Worker mean episode rewards | Rising under matched conditions is encouraging; not a win rate or game-weighted mean; excluding zero means introduces bias |
-| `Rollout/Average_Length` | Equal-weight average of nonzero Worker mean actual ep_steps | Falling can mean faster wins/fewer empty actions, different opponents or truncation frequencies; from3.16.8 Worker-budget exits no longer fabricate1500 steps |
-| `Rollout/Timeout_Rate` | Trusted nonterminal truncated games / total counted games, counted once per game | Includes decision limits and Worker budgets; pre3.16.8 records may double-count and are not directly comparable; rolled-back failures are excluded |
+| `Rollout/Average_Reward` | From 3.17.1, sum of episode rewards in merged valid trajectories / their episode count, including zero rewards | Rising under matched conditions is encouraging; not a win rate. Older versions averaged nonzero Worker means equally, so values can shift with this reporting change; training rewards are unchanged |
+| `Rollout/Average_Length` | From 3.17.1, summed actual ep_steps for merged valid trajectories / episode count, rather than equal-weight Worker/file means | Falling can mean faster wins/fewer empty actions, different opponents or truncation frequencies; from 3.16.8 Worker-budget exits no longer fabricate 1500 steps |
+| `Rollout/Timeout_Rate` | Trusted nonterminal truncated games / total counted games, counted once per game | Includes decision limits and Worker budgets; pre-3.16.8 records may double-count and are not directly comparable; rolled-back failures are excluded |
 | `Rollout/Deadlock_Rate` | Worker deadlocks counter / total counted games | Aborts generally roll back before this counter; zero does not establish absence of errors/deadlocks |
 | `Rollout/Draw_Rate` | Worker draws counter / total counted games | Tracks draw-like settlements, not all truncations or aborted games |
 
@@ -99,15 +105,15 @@ Episode reward is **the training trajectory's summed step_reward + final_reward*
 - Repeated identical candidates in identical states without progress can incur −0.005 after the threshold: 5 for Cancel/Unselect, 10 for other actions. Retry can incur −0.001. This does not penalize every multi-material selection indiscriminately.
 - Auxiliary/planning losses **are not rewards** and do not turn prediction accuracy into additional wins or reward.
 
-ep_steps is not Core-message count, turn count, or submitted training-row count. Self/Hist accumulates both model actors' decisions; RuleBot-side rule actions are not counted the same way. Worker-budget/engine-wait truncations can also assign ep_steps=1500 directly. Length therefore combines actual interaction differences and termination bookkeeping.
+ep_steps is not Core-message count, turn count, or submitted training-row count. Self/Hist accumulates both model actors' decisions; RuleBot/WindBot-side actions are not counted the same way. Opponent mix therefore affects average length. Since 3.16.8, budget truncations preserve actual decision counts rather than assigning 1500.
 
 ### Confirmed statistical limitations
 
-1. worker.py increments timeout when ep_steps reaches 1500, then increments it again in the no-winner/cap-reached branch. One nonterminal truncation can count twice. Do not blindly halve the entire curve: real terminal cases and mixed branches require identification. This is a counter problem, not duplicate reward punishment.
-2. Worker means are not weighted by game counts, and exactly-zero mean rewards are excluded. Workers with few and many games have equal weight.
+1. Versions before 3.16.8 could count the same nonterminal truncation twice. Current code counts each game once and separates decision limits from worker budgets. Do not blindly halve an entire historical curve
+2. Versions before 3.17.1 averaged Worker means equally and excluded exactly-zero mean rewards. Current code aggregates valid episodes, including zero rewards. A change at the version boundary can reflect this reporting correction
 3. Excluding aborted games protects training data; it is not error monitoring. Deadlock_Rate does not cover every rollback path. Inspect Worker error logs separately.
 
-These are limitations of current bookkeeping, not evidence that all corresponding games failed. Read them alongside Worker logs and game settlements; they do not independently establish strength or capacity acceptance.
+The first two points explain historical version differences; incomplete error coverage remains a limitation. Read charts alongside Worker logs and game settlements; they do not independently establish playing strength or model capacity.
 
 ## 4. Auxiliary_Targets: coverage and event distribution
 
@@ -273,7 +279,38 @@ fields; current defaults cannot establish historical settings. Network depth, Co
 ordinary-league game denominators remain absent. Events cannot establish stable CUDA peaks/RSS;
 inspect memory logs separately. The existing bounded report adds `collection_phase_seconds` for complete
 collection phases; see [CUDA Graphs and collection timing](architecture_en.md#cuda-graph-acceleration-for-central-inference).
-No new scalar charts are added.
+From 3.17.0, `Configuration/Runtime` records the panel's actual network dimensions, source/mirror probabilities,
+resume path and optimizer learning rates at startup. `Configuration/Runtime_Update` records changes and their
+effective iteration only after application. Submitting a request or editing the startup form does not prematurely
+mark the running configuration as changed.
+
+### Collection throughput by source (3.17.0–3.17.1)
+
+`Collection/{source}/*` uses `self`, `hist`, `windbot` and `rule`. Values are recorded after each merge; the X-axis
+is the collection iteration. Unassigned/empty sources also write zeros. Sources: [Trainer aggregation](../trainer.py),
+[Worker commits](../worker.py) and [shared counters](../rollout_cursor.py).
+
+| Tag template | Y-axis and recording | Interpretation and limits |
+|---|---|---|
+| `Collection/{source}/Accepted_Steps` | Successfully merged training-model action rows; excludes opponent actions, rollbacks and unreceived files | Available PPO rows, not optimizer reuse count; minibatch-tail handling is unchanged |
+| `Collection/{source}/Sample_Fraction` | Source Accepted_Steps / all merged rows; zero for an empty iteration | Actual sample distribution, not configured worker probabilities; extra RuleBot games contribute here |
+| `Collection/{source}/Worker_Seconds` | Summed worker occupancy for the source, including process launch, loading, reset, games, labels, save and cleanup | Can exceed elapsed collection time in parallel; observed failed-worker time remains included. Precision is limited by 5-second counter updates and process-exit observation |
+| `Collection/{source}/Steps_Per_Worker_Second` | Accepted_Steps / Worker_Seconds, using a tiny positive denominator at zero | Per-worker yield, not GPU throughput or aggregate wall-clock throughput; executor, deck, game length and concurrency affect it |
+| `Collection/{source}/Aborted_Games` | Recorded reset/parser/label and other failed games, attributed to actual opponents | Investigate increases using logs; unpublished counters from forcibly terminated workers cannot be recovered, so this is not a complete failure rate |
+| `Collection/{source}/Assigned_Workers` | Initial workers assigned to the source in this iteration | Not a sample quota; excludes extra RuleBot games handled by workers assigned elsewhere. An empty history pool assigns its workers to self-play |
+
+Quota mode also records the following after each merge. Disabled-mode gaps are not zeros:
+
+| Tag template | Y-axis and recording | Interpretation and limits |
+|---|---|---|
+| `Collection/{source}/Target_Steps` | Rounded source share of the base target; empty history transfers to self, positive shares have a minimum of1, and a zero-share RuleBot supplement has target1 | A target, not an instruction to slice games; Rule target1 requests one valid game and retains every sample in it |
+| `Collection/{source}/Shortfall_Steps` | max(0,Target_Steps−Accepted_Steps), using final merged rows | Persistent deficits warrant checking timeouts, errors or capacity; overshoot reports0, not exact proportion agreement |
+| `Collection/{source}/Participating_Workers` | Distinct workers that received a task for this source during the iteration | Includes failed tasks; one worker can serve several sources, so their sum can exceed worker count |
+
+Workers count terminal games and valid truncations separately. The live panel shows worker-committed counts before
+merging and final valid counts afterward; lost files can make them differ. The existing game-audit `steps` includes
+both modeled players and cannot substitute for training-row counts. CPU/central/WindBot timings reuse the existing
+ledger and accumulate at game end; startup/save overhead only enters worker-seconds. Quota mode uses smoothed valid rows per game-task second for allocation. The panel yield includes startup, idle waiting and cleanup in worker-seconds, so it uses a different denominator. New processes re-estimate speed rather than restoring another machine’s rates from checkpoints. Probability mode retains the original allocation.
 
 ## 10. Independent imitation metrics
 

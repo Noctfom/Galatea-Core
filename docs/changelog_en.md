@@ -4,10 +4,33 @@
 
 ---
 
+## [v3.17.1] - 2026-11-08
+
+### Valid-sample quotas and episode-boundary scheduling
+
+- Added Allocate by valid sample quotas to startup and live controls, unchecked by default to preserve worker-probability allocation. CLI: `--collection-allocation sample_quota`. Allocation mode and league proportions take effect at the next collection
+- Quotas count the training model's valid actions; concurrency follows estimated remaining work. Workers switch sources between complete games, low-share sources get at least one game, and whole-game overshoot is allowed. Empty history transfers to self-play; zero-share RuleBot still gets a valid supplementary game except at 100% WindBot
+- Reuse the Core environment and at most one historical-model session per worker per iteration, with bounded rollout chunks and small per-game task messages. Atomic completed filenames recover source counts when a save acknowledgement is lost. Failures/rollbacks do not satisfy quotas; time/capacity limits leave visible shortfalls
+- The panel separates targets, accepted rows, shortfalls and initial/participating/current workers. Quota mode adds 12 TensorBoard scalars. Mean reward/length now aggregate valid episodes, including zero rewards, so file chunking does not alter these averages; training rewards are unchanged
+- Network, 116 inputs, observation revision 15, Model Protocol 4, Checkpoint 3, temperature, rewards and PPO/GAE are unchanged. All workers exit before policy updates; old-policy samples are not reused across iterations. No ONNX re-export is needed. Historical ONNX forward and WindBot runtime acceleration remain future work
+- Validation: the full suite passed 1,088 tests and 50 subtests, with 52 conditional skips; 76 related checks passed after the final-flush correction. Real CPU and CUDA runs each completed two collection→PPO iterations; a single-worker historical ONNX/WindBot/self/RuleBot run also completed collection→PPO. Cloud throughput gains for prolonged 512/8/6 training have not been measured
+
+## [v3.17.0] - 2026-11-08
+
+### Training status and live collection configuration
+
+- Added sibling Training Status and Live Collection Config tabs to Control & Logs. Browser refresh recovers this project's Trainer identity, including CLI runs; shows actual settings, current/target iterations, collection/PPO/save phases and the last completion state
+- Running jobs accept changes to the four league worker probabilities and WindBot's per-game mirror probability before the next collection iteration. Pending and applied states are distinct; current games continue. Only initialized opponents can be adjusted; extra RuleBot coverage and its 100% WindBot exception are preserved
+- Source statistics count the training model's actions, terminal games, valid truncations, aborted games and worker-seconds separately. Extra games use their actual source; final counts use successfully merged rows. Existing game timing ledgers and actual ONNX/PyTorch backends are displayed; `Collection/{source}/*` metrics are added
+- Runtime snapshots reuse the training lock owner file. Fixed shared counters update every 5 seconds without per-step disk writes or GPU synchronization. Requests are isolated per run and consumed automatically; changes are recorded in TensorBoard configuration text and checkpoint history. No manual file maintenance is needed
+- Allocation still uses worker probabilities; sample quotas and automatic worker redistribution are not implemented in this batch. Network, 116 observations, Model Protocol4, Checkpoint3, rewards, PPO/GAE and model naming are unchanged; ONNX re-export is unnecessary. See [Quick Start](quickstart_en.md#runtime-status-and-live-collection-configuration) and [metrics](tensorboard_metrics_en.md#9-performance-and-configuration)
+- Validation: full training/protocol regression and follow-up release, WebUI and metrics-documentation checks completed. Real Core runs on CPU and CUDA each completed two collection-to-PPO iterations, verifying that live changes apply only to the next collection. Production-scale cloud training was not run for this batch
+
 ## [v3.16.9] - 2026-11-06
 
 ### Current prompt and chain observation completion
 
+- Fix a WebUI KeyError when ONNX inspection returns `observation_changed`, displaying that the observation protocol changed and re-export is required. Unrecognized statuses retain their code and inspection details without interrupting the page or changing backend update eligibility
 - Type2 selection hints reach the current decision with exact32-bit values. Repeated select/unselect, Retry and replacement hints have distinct lifetimes; other known hint values retain their actual recipients without invented effect or tactical labels
 - MSG83 announced objects retain original chain indices, announcement positions and independently tracked current positions. Moves, swaps, reindexing, shuffle and query identity conflicts cannot rebind old objects to new slot occupants. These facts remain separate from persistent query targets and do not claim HintSelection is rules-level targeting
 - 70–76 track per-chain confirmation, resolution, completion, activation negation and effect disabling;162 leaves omitted context unknown. Full-zone queries in controlled receivers reconcile target identities; WindBot routing fixes Type2/4 recipients and Type2/11 broadcast

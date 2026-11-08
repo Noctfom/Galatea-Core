@@ -37,7 +37,9 @@ from protocol_schema import SemanticLookupMismatchError
 from data_types import ActionOperation, DECK_FILM_DROPOUT
 import deck_utils
 import rule_bot
-from rollout_cursor import RolloutCursor
+from rollout_cursor import (
+    RolloutCursor, CollectionTelemetry, CollectionTaskClient, accepted_source_steps, rollout_chunk_path,
+)
 from ppo_control import DEFAULT_GAE_LAMBDA
 from deck_trajectory import (
     DeckProfileRegistry,
@@ -319,6 +321,39 @@ def log_fatal_crash(worker_id, source, msg_type, resp, exc, valid_actions=None):
         # 哪怕发生极端情况的并发踩踏，也静默吞下异常，保证 Worker 能够顺利走完后续的销毁流程
         pass
 
+def save_worker_rollout(path, columns, steps, *, worker_id, profiles, sources,
+                        stats, rewards, lengths, deck_records, windbot_records):
+    """按已提交行原子保存轨迹块，释放大数组后再领取后续任务"""
+    batch = {'action': torch.empty(0, dtype=torch.long), 'windbot_records': windbot_records}
+    if steps:
+        batch.update(obs={}, aux={})
+        for key in ('action', 'log_prob', 'return', 'advantage', 'deck_profile_index'):
+            batch[key] = columns.pop(key)[:steps].clone()
+        for group in ('obs', 'aux'):
+            for key in list(columns[group]):
+                batch[group][key] = columns[group].pop(key)[:steps].clone()
+        batch.update(deck_profiles=profiles, collection_sources=sources, worker_id=worker_id,
+                     deck_records=deck_records,
+                     avg_rew=torch.tensor([float(np.mean(rewards)) if rewards else 0.0]),
+                     avg_len=torch.tensor([float(np.mean(lengths)) if lengths else 0.0]),
+                     reward_sum=float(sum(rewards)), reward_count=len(rewards),
+                     length_sum=float(sum(lengths)), length_count=len(lengths))
+        batch.update({f'stats_{key}': torch.tensor([value], dtype=torch.int32) for key, value in stats.items()})
+    elif not windbot_records:
+        return
+    columns.clear()
+    temporary = path + '.tmp'
+    torch.save(batch, temporary)
+    for attempt in range(5):
+        try:
+            os.replace(temporary, path)
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1)
+
+
 def worker_process(
     worker_id,
     iteration,
@@ -339,8 +374,15 @@ def worker_process(
     shared_response_ids=None,
     protocol_audit=False,
     inference_profile=False,
+    collection_telemetry=None,
+    collection_started_at=None,
+    collection_tasks=None,
+    collection_token=None,
+    collection_deadline=None,
 ):
     """在固定 CPU Worker 中运行对局采集并请求中央模型推理"""
+
+    telemetry = CollectionTelemetry(collection_telemetry, (opp_config or {}).get('type', 'self'), collection_started_at)
 
     try:
         from system_logger import setup_global_logger
@@ -421,6 +463,9 @@ def worker_process(
     ort_session_p1 = None
     opp_agent = None
     windbot_opponent = None
+    task_client = None
+    opponent_cache = {}
+    active_opponent_key = None
 
     def run_historical_onnx(tensor_dict):
         """运行历史 ONNX；首次异常时延迟加载 PyTorch 回退网络"""
@@ -432,24 +477,33 @@ def worker_process(
             return ort_session_p1.run(None, ort_inputs)
         except Exception as onnx_error:
             use_onnx_p1 = False
+            telemetry.backend = 'PyTorch'
             ort_session_p1 = None
             ensure_historical_pytorch_fallback(opp_agent, opp_config)
+            opponent_cache[(opp_config['type'], opp_config.get('path'))] = (opp_agent, False, None)
             print(
                 f"⚠️ [Worker {worker_id}] 历史对手 ONNX 运行失败，"
                 f"本 Worker 后续改用 PyTorch: {onnx_error}"
             )
             return None
 
-    try:
-        time.sleep(worker_id * 0.4) # 让 0~N 号工人错开 0.4 秒启动
-
-        # 中央推理模式下当前模型不在 Worker 本地执行，只保留编码器与动作封包器
-        agent = AiBot(
-            device='cpu',
-            net_config=net_config,
-            initialize_network=False,
-        )
-
+    def activate_opponent(config):
+        """整局边界切换对手，本轮最多缓存一个历史模型和一个轻量自对局控制器"""
+        nonlocal opp_config, opp_agent, use_onnx_p1, ort_session_p1, active_opponent_key
+        key = (config['type'], config.get('path'))
+        if key == active_opponent_key:
+            opp_config = config
+            return
+        if opp_agent is not None:
+            opponent_cache[(opp_config['type'], opp_config.get('path'))] = (
+                opp_agent, use_onnx_p1, ort_session_p1)
+        opp_config = config
+        active_opponent_key = key
+        if key in opponent_cache:
+            opp_agent, use_onnx_p1, ort_session_p1 = opponent_cache[key]
+            telemetry.backend = ('ONNX' if use_onnx_p1 else 'PyTorch') if config['type'] == 'hist' else 'central'
+            return
+        opp_agent, use_onnx_p1, ort_session_p1 = None, False, None
         if use_onnx and opp_config.get("type") == "hist":
             try:
                 ort_session_p1, hist_onnx_path = create_historical_onnx_session(
@@ -493,6 +547,21 @@ def worker_process(
         except (OSError, psutil.Error) as memory_error:
             print(f"⚠️ [Worker {worker_id}] 无法读取进程内存统计: {memory_error}")
 
+        telemetry.backend = ('ONNX' if use_onnx_p1 else 'PyTorch') if opp_config.get('type') == 'hist' else (
+            'central' if opp_config.get('type', 'self') == 'self' else opp_config['type'])
+        telemetry.publish(force=True)
+
+    try:
+        time.sleep(worker_id * 0.4) # 让 0~N 号工人错开 0.4 秒启动
+
+        # 中央推理模式下当前模型不在 Worker 本地执行，只保留编码器与动作封包器
+        agent = AiBot(
+            device='cpu',
+            net_config=net_config,
+            initialize_network=False,
+        )
+
+        activate_opponent(opp_config)
         env = GalateaEnv()
         rollout_cursor = RolloutCursor()
         
@@ -503,6 +572,8 @@ def worker_process(
         worker_start_time = time.monotonic()
         # 给 Worker 留出充足的保存时间 (至少 30s)，防止 torch.save 大文件时被 p.terminate() 抢先杀掉
         max_worker_uptime = float(worker_timeout) - 30.0
+        if collection_deadline is not None:
+            max_worker_uptime = max(0.0, min(max_worker_uptime, collection_deadline - worker_start_time))
         
         # 统计数据
         episode_rewards = []
@@ -528,24 +599,64 @@ def worker_process(
             int(opp_config.get("forced_rule_games", 0)),
         )
 
-        #提前拉起绝对连续的静态内存池
         max_len = target_steps + MAX_EPISODE_STEPS + 100
-        columns = {
-            'obs': {},
-            'aux': allocate_auxiliary_target_columns(max_len),
-            'deck_profile_index': torch.zeros(max_len, dtype=torch.int32),
-            'action': torch.zeros(max_len, dtype=torch.long),
-            'log_prob': torch.zeros(max_len, dtype=torch.float32),
-            'return': torch.zeros(max_len, dtype=torch.float32),
-            'advantage': torch.zeros(max_len, dtype=torch.float32)
-        }
-        gc.collect()
+
+        def allocate_columns():
+            """每块复用同一容量，不随Worker累计采集量增长"""
+            columns = {
+                'obs': {},
+                'aux': allocate_auxiliary_target_columns(max_len),
+                'deck_profile_index': torch.zeros(max_len, dtype=torch.int32),
+                'action': torch.zeros(max_len, dtype=torch.long),
+                'log_prob': torch.zeros(max_len, dtype=torch.float32),
+                'return': torch.zeros(max_len, dtype=torch.float32),
+                'advantage': torch.zeros(max_len, dtype=torch.float32)
+            }
+            gc.collect()
         
-        for k, v in shared_buffers[worker_id].items():
-            if is_deck_static_observation(k):
-                continue
-            shape = (max_len,) + v.shape
-            columns['obs'][k] = torch.empty(shape, dtype=v.dtype)
+            for k, v in shared_buffers[worker_id].items():
+                if is_deck_static_observation(k):
+                    continue
+                shape = (max_len,) + v.shape
+                columns['obs'][k] = torch.empty(shape, dtype=v.dtype)
+
+            return columns
+
+        columns = allocate_columns()
+        chunk_index = 0
+        if collection_tasks is not None:
+            task_client = CollectionTaskClient(collection_tasks, None if opp_config.get('_quota_idle') else opp_config, telemetry,
+                                               worker_start_time + max_worker_uptime)
+
+        def flush_chunk():
+            """只保存完整提交区，已写出的块不受后续任务失败影响"""
+            nonlocal columns, rollout_cursor, deck_profile_registry, chunk_index
+            nonlocal stats, episode_rewards, episode_lens, deck_records, windbot_records
+            steps = rollout_cursor.committed_pos
+            if telemetry.ledger is not None:
+                telemetry.end_episode(aborted=True)
+            minimum = 1 if task_client is not None else 10
+            if steps < minimum:
+                steps = 0
+                for record in windbot_records:
+                    record['accepted_steps'] = 0
+            sources = telemetry.export()
+            if task_client is not None:
+                sources['segments'] = sources['segments'][task_client.segment_start:]
+            path = (rollout_chunk_path(iteration, worker_id, collection_token, chunk_index,
+                    accepted_source_steps(sources, steps)) if task_client is not None else
+                    f'tmp_rollout_iter_{iteration}_worker_{worker_id}.pt')
+            save_worker_rollout(path, columns, steps, worker_id=worker_id,
+                profiles=deck_profile_registry.export() if steps else {}, sources=sources, stats=stats,
+                rewards=episode_rewards, lengths=episode_lens,
+                deck_records=deck_records, windbot_records=windbot_records)
+            if task_client is not None:
+                task_client.mark_saved()
+            chunk_index += 1
+            rollout_cursor = RolloutCursor()
+            deck_profile_registry = DeckProfileRegistry()
+            stats = dict.fromkeys(stats, 0)
+            episode_rewards, episode_lens, deck_records, windbot_records = [], [], [], []
 
         context = zmq.Context()
         socket = _create_inference_socket(
@@ -557,14 +668,21 @@ def worker_process(
 
         # print(f"👷 Worker {worker_id} 启动 | 目标: {target_steps} 步")
 
-        while rollout_cursor.collected_steps < target_steps:
+        while task_client is not None or rollout_cursor.collected_steps < target_steps:
             if time.monotonic() - worker_start_time > max_worker_uptime:
                 break
 
-            episode_opp_config, force_rule_episode = select_episode_opponent_config(
-                opp_config,
-                forced_rule_games_remaining,
-            )
+            if task_client is not None:
+                if rollout_cursor.collected_steps >= target_steps:
+                    flush_chunk()
+                    columns = allocate_columns()
+                next_config = task_client.next_task()
+                if next_config is None:
+                    break
+                episode_opp_config, force_rule_episode = next_config, False
+            else:
+                episode_opp_config, force_rule_episode = select_episode_opponent_config(
+                    opp_config, forced_rule_games_remaining)
 
             perf_ledger = {
                 'steps': 0,
@@ -591,6 +709,9 @@ def worker_process(
             
             # 记录本局实际使用的对手类型，强制 Rule 局不会改写 Worker 原配置
             opp_type = episode_opp_config.get("type", "self")
+            telemetry.begin_episode(opp_type, perf_ledger)
+            if task_client is not None:
+                activate_opponent(episode_opp_config)
 
             # --- Reset 环境 ---
             try:
@@ -710,6 +831,7 @@ def worker_process(
             while True:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
                 now = time.monotonic()
+                telemetry.publish(now=now)
                 if truncation_reason is None:
                     truncation_reason = requested_rollout_stop(ep_steps, now - worker_start_time, max_worker_uptime)
                     if truncation_reason is not None:
@@ -1362,6 +1484,7 @@ def worker_process(
                 episode_abort_reason = "episode loop exited without a terminal or truncation state"
 
             if episode_aborted:
+                telemetry.end_episode(aborted=True)
                 if windbot_entry is not None and windbot_records:
                     windbot_records[-1].update(completed=False, aborted=True, win=False)
                 discarded_rows = rollout_cursor.write_pos - rollout_cursor.episode_start_pos
@@ -1405,7 +1528,6 @@ def worker_process(
                         stop_worker_after_episode = True
                 else:
                     consecutive_ai_fails = 0
-                    episode_lens.append(ep_steps)
 
                 # 只处理主训练模型 (train_p_id) 的数据
                 traj = game_buffer[train_p_id]
@@ -1425,6 +1547,7 @@ def worker_process(
                             win_reason=win_reason,
                         )
                     except Exception as aux_error:
+                        telemetry.end_episode(aborted=True)
                         if windbot_entry is not None and windbot_records:
                             windbot_records[-1].update(completed=False, aborted=True, win=False)
                         discarded_rows = (
@@ -1538,6 +1661,7 @@ def worker_process(
 
                     ep_total_reward = sum(item.get('step_reward', 0.0) for item in traj) + final_reward
                     episode_rewards.append(ep_total_reward)
+                    episode_lens.append(ep_steps)
                     
                     complete_rollout_advantages(traj, final_reward, gamma, gae_lambda,
                                                 bootstrap_value if episode_truncated else 0.0)
@@ -1565,6 +1689,7 @@ def worker_process(
                 game_buffer[0].clear()
                 game_buffer[1].clear()
                 rollout_cursor.commit_episode(trajectory_length)
+                telemetry.end_episode(trajectory_length, truncated=episode_truncated)
                 if windbot_entry is not None and windbot_records:
                     windbot_records[-1]['accepted_steps'] = trajectory_length
 
@@ -1578,87 +1703,7 @@ def worker_process(
                 if stop_worker_after_episode:
                     break
 
-        # 死锁保护 - 只要有数据就保存，宁可少也要有
-        tmp_file = f"tmp_rollout_iter_{iteration}_worker_{worker_id}.pt"
-        committed_steps = rollout_cursor.committed_pos
-        if 'columns' not in locals() or committed_steps < 10:
-            print(f"❌ [Worker {worker_id}] 数据几乎为空 ({committed_steps}/{target_steps})，跳过保存")
-            if opp_config.get('type') == 'windbot' and windbot_records:
-                # 只上传诊断，不把失败局伪装成训练动作，也不分配主进程合并池
-                for record in windbot_records:
-                    record['accepted_steps'] = 0
-                torch.save({'action': torch.empty(0, dtype=torch.long),
-                            'windbot_records': windbot_records}, tmp_file + '.tmp')
-                os.replace(tmp_file + '.tmp', tmp_file)
-            return
-        if committed_steps < (target_steps * 0.6):
-            print(f"⚠️ [Worker {worker_id}] 数据仅收集了 {committed_steps}/{target_steps} 步 (<60%)，但仍然保存以便训练继续")
-
-        batch_data = {'obs': {}, 'aux': {}}
-
-        # 提取外层特征
-        for k in ['action', 'log_prob', 'return', 'advantage']:
-            batch_data[k] = columns[k][:committed_steps].clone()
-            columns[k] = None
-
-        batch_data['deck_profile_index'] = columns['deck_profile_index'][
-            :committed_steps
-        ].clone()
-        columns['deck_profile_index'] = None
-        batch_data['deck_profiles'] = deck_profile_registry.export()
-
-        # 辅助标签保持独立于模型观测，供训练专用预测头监督使用
-        for key in list(columns['aux'].keys()):
-            batch_data['aux'][key] = columns['aux'][key][
-                :committed_steps
-            ].clone()
-            columns['aux'][key] = None
-        columns['aux'].clear()
-            
-        # 提取 obs 内部特征
-        for k in shared_buffers[worker_id].keys():
-            if is_deck_static_observation(k):
-                continue
-            if k in columns['obs']:
-                batch_data['obs'][k] = columns['obs'][k][:committed_steps].clone()
-                columns['obs'][k] = None
-            else:
-                # 这一局压根没触发过这个特征，用 zeros 安全补齐
-                ref_tensor = shared_buffers[worker_id][k]
-                shape = list(ref_tensor.shape)
-                shape[0] = committed_steps
-                batch_data['obs'][k] = torch.zeros(shape, dtype=ref_tensor.dtype)
-            
-        columns.clear()
-        gc.collect()
-        
-        avg_rew = np.mean(episode_rewards) if episode_rewards else 0.0
-        avg_len = np.mean(episode_lens) if episode_lens else 0.0
-        batch_data['avg_rew'] = torch.tensor([avg_rew], dtype=torch.float32)
-        batch_data['avg_len'] = torch.tensor([avg_len], dtype=torch.float32)
-
-        # 把胜率字典保存为安全可加载的 Tensor
-        for k, v in stats.items():
-            batch_data[f'stats_{k}'] = torch.tensor([v], dtype=torch.int32)
-
-        batch_data['deck_records'] = deck_records
-        if opp_config.get('type') == 'windbot':
-            batch_data['windbot_records'] = windbot_records
-        
-        # 原子写入：先写成临时文件，写完瞬间改名。绝不让 Trainer 读到损坏的残局
-        tmp_write_file = tmp_file + ".tmp"
-        torch.save(batch_data, tmp_write_file)
-        # 替换原来的 os.replace
-        for _ in range(5):
-            try:
-                os.replace(tmp_write_file, tmp_file)
-                break
-            except PermissionError:
-                time.sleep(0.1)
-            except Exception as e:
-                print(f"❌ [Worker {worker_id}] 文件写入失败: {e}")
-                return
-        
+        flush_chunk()
         return
 
     except Exception as e:
@@ -1740,5 +1785,9 @@ def worker_process(
         except Exception:
             pass
         
+        if task_client is not None:
+            task_client.close()
+        opponent_cache.clear()
+        telemetry.finish()
         print(f"👋 Worker {worker_id} 任务圆满完成，强制释放内存...")
         os._exit(0)

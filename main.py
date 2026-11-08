@@ -223,6 +223,7 @@ def run_training_command(args, parser):
             inference_profile_batches=getattr(args, 'inference_profile_batches', 0),
             inference_transport=getattr(args, 'inference_transport', 'packed'),
             inference_cuda_graph=getattr(args, 'inference_cuda_graph', False),
+            collection_allocation=getattr(args, 'collection_allocation', 'worker_probability'),
             league_weights=weights,
             **({'windbot_training': {
                 'executors': args.windbot_executor, 'holdouts': args.windbot_holdout,
@@ -234,9 +235,13 @@ def run_training_command(args, parser):
         )
         try:
             training_lock.set_run_id(trainer.run_id)
+            trainer.attach_runtime_monitor(training_lock)
             trainer.run_training_loop(target_iteration=resolved_target_iteration)
         finally:
             trainer.close()
+    except BaseException as error:
+        training_lock.finish('interrupted' if isinstance(error, KeyboardInterrupt) else 'failed', str(error))
+        raise
     finally:
         training_lock.release()
 
@@ -338,8 +343,10 @@ def main():
     train_parser.add_argument('--windbot-executor', action='append', default=None, help='可重复指定训练执行器；省略则自动按层级留出并选择兼容构筑')
     train_parser.add_argument('--windbot-holdout', action='append', default=None, help='可重复指定保留作独立评测的执行器，不进入WindBot训练抽样')
     league_group = train_parser.add_mutually_exclusive_group()
+    train_parser.add_argument('--collection-allocation', choices=['worker_probability', 'sample_quota'],
+        default='worker_probability', help='按Worker概率抽选，或按有效样本配额在整局边界动态调度')
     league_group.add_argument('--league-weights', type=float, nargs=4, metavar=('RULE', 'WINDBOT', 'HIST', 'SELF'),
-        help='四类对手绝对概率，总和为1；默认0.15/0/0.25/0.6，启用WindBot后默认0/0.15/0.25/0.6')
+        help='四类对手比例，总和为1；随调度方式表示Worker概率或目标有效样本比例；默认0.15/0/0.25/0.6，启用WindBot后默认0/0.15/0.25/0.6')
     league_group.add_argument('--windbot-rate', type=float, default=None,
         help='兼容3.15.4的旧比例参数，保留按余量缩放语义；新配置建议使用--league-weights')
     train_parser.add_argument('--windbot-deck-mode', choices=['mirror', 'training-pool', 'mixed'], default='mirror', help='模型侧使用纯镜像、纯常规训练池或按局混合，WindBot始终固定构筑')
