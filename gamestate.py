@@ -573,6 +573,9 @@ class DuelState:
         self._prompt_player = -1
         self._prompt_hint_revision = None
         self._prompt_response = None
+        self._transition_prompt_type = 0
+        self._transition_prompt_payload = b''
+        self._transition_prompt_actions = ()
         self._hint_notifications = {0: [], 1: []}
 
     def _update_prompt_context(self, msg_type, payload):
@@ -878,37 +881,101 @@ class DuelState:
 
     @staticmethod
     def _response_matches_action(action, msg_type, response):
-        """把 RuleBot/外部响应尽量还原为当前合法动作语义"""
+        """按 Core 缓冲合同比较响应，不把外部整数槽误当作多选字节槽"""
+        from core_trajectory import canonical_response
+
         decision_bytes = bytes(getattr(action, 'decision_bytes', b'') or b'')
-        if isinstance(response, (bytes, bytearray, memoryview)):
-            packed = bytes(response)
-            if decision_bytes and decision_bytes == packed:
-                return True
-            if msg_type in (15, 20, 22, 26):
-                if int(getattr(action, 'index', -1)) < 0:
-                    return packed == int(-1).to_bytes(4, 'little', signed=True)
-                return packed == bytes([1, int(action.index) & 0xFF])
+        try:
+            if isinstance(response, memoryview):
+                response = response.tobytes()
+            if decision_bytes:
+                expected = decision_bytes
+            elif msg_type in (15, 20, 26):
+                index = int(action.index)
+                expected = -1 if index < 0 else bytes((1, index))
+            elif msg_type in (18, 21, 22, 23, 24, 25):
+                # 这些消息的基础候选不是可直接提交的完整响应
+                return False
+            elif getattr(action, 'decision_value', None) is not None:
+                expected = int(action.decision_value)
+            elif msg_type in (10, 11):
+                expected = (int(action.index) << 16) | int(action.action_type)
+            elif msg_type in (140, 141, 142):
+                expected = int(action.desc_id)
+            else:
+                expected = int(action.index)
+            return canonical_response(expected) == canonical_response(response)
+        except (TypeError, ValueError, OverflowError, struct.error):
             return False
 
+    def _selection_transition_action(self, msg_type, response):
+        """从原询问直接恢复已提交的组合，只记录事件而不扩充策略候选池"""
+        from core_trajectory import canonical_response
+        from selection_protocol import CANCEL_RESPONSE, parse_selection_prompt, validate_selection_response
+
+        payload = self._transition_prompt_payload
         try:
-            response_value = int(response)
-        except (TypeError, ValueError):
-            return False
-        if getattr(action, 'decision_value', None) is not None:
-            return int(action.decision_value) == response_value
-        if msg_type in (10, 11):
-            return ((int(action.index) << 16) | int(action.action_type)) == response_value
-        if msg_type in (140, 141, 142):
-            return int(action.desc_id) == response_value
-        return int(action.index) == response_value
+            raw = canonical_response(bytes(response) if isinstance(response, memoryview) else response)
+            validate_selection_response(msg_type, payload, raw)
+            prompt = parse_selection_prompt(msg_type, payload)
+        except (TypeError, ValueError, OverflowError, struct.error):
+            return None
+        if raw[:4] == CANCEL_RESPONSE:
+            return GameAction(action_type=msg_type, index=-1,
+                              operation_id=int(ActionOperation.CANCEL),
+                              cancelable=True, decision_bytes=CANCEL_RESPONSE)
+        indices = list(raw[1:1 + raw[0]])
+        if msg_type == 15:
+            # 选卡是物理索引集合，重复卡仍保留不同索引，不扩展到排序消息
+            indices.sort()
+        mandatory = prompt.get('mandatory', [])
+        cards = list(mandatory)
+        cards.extend(prompt['candidates'][index] for index in indices[len(mandatory):])
+        locations = [LocationInfo.encode(card['controller'], card['location'],
+                                        card['sequence'], card.get('position', 0))
+                     for card in cards]
+        codes = [card['code'] & 0x7FFFFFFF for card in cards]
+        values = [card.get('sum_value', card.get('release_value', 0)) for card in cards]
+        return GameAction(
+            action_type=msg_type, index=-1,
+            operation_id=int(ActionOperation.MACRO_SELECT),
+            target_location_raw=locations[0] if locations else -1,
+            selection_min=prompt['minimum'], selection_max=prompt['maximum'],
+            selection_count=len(cards), cancelable=prompt['cancelable'],
+            context_value=prompt.get('target', 0), prompt_flags=prompt.get('mode', 0),
+            prompt_value=len(mandatory),
+            macro_targets=locations, macro_target_locations=locations,
+            macro_target_codes=codes, macro_target_values=values,
+            decision_bytes=bytes((raw[0],)) + bytes(indices),
+        )
 
     def _resolve_transition_action(self, msg_type, response, action=None):
-        """优先采用模型已选动作，否则从响应反查 RuleBot 动作"""
+        """优先采用明确动作，外部响应按原询问恢复，歧义保持未知"""
         if action is not None:
             return action
-        for candidate in self.current_valid_actions:
-            if self._response_matches_action(candidate, msg_type, response):
-                return candidate
+        original_prompt = self._transition_prompt_type == int(msg_type)
+        if original_prompt and msg_type in (15, 20, 23):
+            recovered = self._selection_transition_action(msg_type, response)
+            if recovered is not None:
+                # 已记录候选的事件布局保持原样，精确重放不能改变目标排列
+                matches = [candidate for candidate in self.current_valid_actions
+                           if candidate.decision_bytes
+                           and self._response_matches_action(candidate, msg_type, response)]
+                if len(matches) == 1:
+                    return matches[0]
+                return recovered
+            # 原选择约束不满足时不得借用裁剪池中的同形字节猜测身份
+            candidate_pools = ()
+        else:
+            candidate_pools = ((self._transition_prompt_actions, self.current_valid_actions)
+                               if original_prompt else (self.current_valid_actions,))
+        for candidates in candidate_pools:
+            matches = [candidate for candidate in candidates
+                       if self._response_matches_action(candidate, msg_type, response)]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                break
         prompt_operation = {
             15: ActionOperation.MACRO_SELECT,
             18: ActionOperation.PLACE,
@@ -1353,11 +1420,18 @@ class DuelState:
                 self.decision_player = self.active_player
                 self._parse_valid_actions(msg_type, stream)
                 self._bind_action_effect_slots()
+                # 基础动作独立保留，宏池裁剪和快照实体重映射不能改写已提交动作的来源
+                self._transition_prompt_type = int(msg_type)
+                self._transition_prompt_payload = bytes(msg_payload)
+                self._transition_prompt_actions = tuple(copy(action) for action in self.current_valid_actions)
             # 绝对不要在收到 MSG_RETRY (1) 时清空动作列表
             # 否则重演时无法用上一次的选项去验证人类的修正点击
             elif msg_type != 1:
                 self.current_valid_actions = []
                 self.decision_player = -1
+                self._transition_prompt_type = 0
+                self._transition_prompt_payload = b''
+                self._transition_prompt_actions = ()
 
         except Exception as e:
             print(f"⚠️ [GameState] update消息解析失败: {e}")

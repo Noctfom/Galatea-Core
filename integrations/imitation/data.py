@@ -19,6 +19,8 @@ from protocol_schema import get_current_protocol_metadata
 from trajectory_dataset import _participants, deck_identity, open_verified_demonstrations
 
 CACHE_FORMAT_VERSION = 1
+# 缓存记录事件解码口径，输入形状相同也不能复用修复前的缺失事件
+EXPERT_EVENT_DECODER_REVISION = 1
 MAX_BLOCK_BYTES = 32 * 1024 * 1024
 MAX_CACHE_BYTES = 2 * 1024**3
 ROLES = ('train', 'validation', 'test')
@@ -53,6 +55,7 @@ def data_identity(root='.'):
         digest.update(_json_bytes({'name': name, 'size': len(content)}))
         digest.update(content)
     return {'protocol': get_current_protocol_metadata(),
+            'event_decoder_revision': EXPERT_EVENT_DECODER_REVISION,
             'core_sha256': file_sha256(root / ('ocgcore.dll' if platform.system() == 'Windows' else 'ocgcore.so')),
             'cdb_sha256': file_sha256(root / 'cards.cdb'), 'scripts_sha256': digest.hexdigest()}
 

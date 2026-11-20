@@ -294,7 +294,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.17.3"  # 当前本地版本号 (每次更新时手动改一下这里)
+LOCAL_VERSION = "3.17.4"  # 当前本地版本号
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -606,6 +606,7 @@ def render_onnx_updates():
         labels = {'current': _("当前可用", "Current"), 'append_only': _("可用，未覆盖新增卡", "Usable; added cards not covered"),
             'checkpoint_assets_changed': _("PTH资产标记待同步", "PTH asset metadata outdated"),
             'observation_changed': _("观测协议已更新，需重导出", "Observation protocol changed; re-export required"),
+            'graph_changed': _("语义条件计算已修正，需重导出", "Semantic condition calculation corrected; re-export required"),
             'semantic_changed': _("旧卡语义已变化", "Old semantics changed"), 'missing': _("缺少ONNX", "ONNX missing"),
             'incomplete': _("制品不完整", "Incomplete artifacts"), 'invalid': _("ONNX校验失败", "ONNX validation failed"),
             'checkpoint_invalid': _("PTH或同名身份异常", "PTH or target identity invalid")}

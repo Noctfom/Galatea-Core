@@ -48,6 +48,15 @@ from code_semantic_provenance import CODE_EMBEDDINGS_META_FILENAME
 
 
 ARTIFACT_MANIFEST_FORMAT_VERSION = 3
+# 计算图修订独立于网络参数、观测输入和检查点格式
+ONNX_SEMANTIC_REQUIREMENT_REVISION = 1
+ONNX_SEMANTIC_REQUIREMENT_KEY = "galatea.semantic_requirement_revision"
+
+
+class OnnxGraphImplementationMismatchError(ValueError):
+    """静态图仍使用已修正的旧计算，需要从原PTH重新导出"""
+
+
 # 仅表示 .gkg 部署包协议，必须独立于 WebUI/框架版本维护
 DEPLOY_PACKAGE_FORMAT_VERSION = 5
 LEGACY_DEPLOY_PACKAGE_FORMAT_VERSION = 4
@@ -766,6 +775,8 @@ def inspect_onnx_updates(model_directory='./models', *, checkpoint_paths=None):
             row.update(status='semantic_changed', needs_update=True, reason=str(error))
         except ObservationProtocolMismatchError as error:
             row.update(status='observation_changed', needs_update=True, reason=str(error))
+        except OnnxGraphImplementationMismatchError as error:
+            row.update(status='graph_changed', needs_update=True, reason=str(error))
         except FileNotFoundError as error:
             row.update(status='missing' if not graph.exists() else 'incomplete', needs_update=True, reason=str(error))
         except Exception as error:
@@ -1067,6 +1078,7 @@ def tag_onnx_model_identity(
     properties = {item.key: item.value for item in model.metadata_props}
     properties.update(
         {
+            ONNX_SEMANTIC_REQUIREMENT_KEY: str(ONNX_SEMANTIC_REQUIREMENT_REVISION),
             ONNX_IDENTITY_KEYS["model_id"]: model_id,
             ONNX_IDENTITY_KEYS["model_prefix"]: model_prefix,
             ONNX_IDENTITY_KEYS["iteration"]: str(iteration),
@@ -1371,6 +1383,7 @@ def describe_onnx_artifact(
     model_protocol_version=None,
     card_vocabulary=None,
     semantic_root=".",
+    _allow_legacy_graph_identity=False,
 ):
     """读取 ONNX 主图引用并返回主图与全部外置权重的完整记录"""
     import onnx
@@ -1493,6 +1506,15 @@ def describe_onnx_artifact(
             card_vocabulary=card_vocabulary,
             semantic_root=semantic_root,
         )
+        # 旧图固化了填充位覆盖条件0的计算，不能仅因输入和词表一致继续使用
+        graph_revision = properties.get(ONNX_SEMANTIC_REQUIREMENT_KEY)
+        legacy_identity_only = _allow_legacy_graph_identity and graph_revision in (None, '0')
+        if graph_revision != str(ONNX_SEMANTIC_REQUIREMENT_REVISION) and not legacy_identity_only:
+            raise OnnxGraphImplementationMismatchError(
+                'ONNX语义条件展开计算已更新，旧图可能丢失编号0的条件；'
+                '请在资源同步中枢的ONNX检查与更新中，用同名PTH重新导出；'
+                '学习权重、模型身份、词表与语义资源无需重建'
+            )
     if expected_model_id is not None and embedded_model_id != expected_model_id:
         raise PermissionError(
             f"ONNX embedded model_id mismatch: expected {expected_model_id}, "
@@ -1539,6 +1561,10 @@ def describe_onnx_artifact(
         get_training_lineage({'training_lineage': training_lineage, 'iteration': embedded_iteration})
     record = {
         "format": "onnx",
+        "semantic_requirement_revision": (
+            int(properties[ONNX_SEMANTIC_REQUIREMENT_KEY])
+            if embedded_model_id is not None and ONNX_SEMANTIC_REQUIREMENT_KEY in properties else None
+        ),
         "training_lineage": training_lineage,
         "model_id": embedded_model_id,
         "model_prefix": embedded_model_prefix,
@@ -1766,7 +1792,13 @@ def assert_model_artifact_target_identity(model_dir, record, *, card_vocabulary=
                 f"refusing to overwrite orphan target artifact: {existing_files[0].name}"
             )
         return
-    existing = build_package_model_records(model_root, [primary_name])[0]
+    if record['format'] == 'onnx':
+        # 只读旧目标的身份以允许新图覆盖，推理和新源图仍需当前计算修订
+        existing = describe_onnx_artifact(target_primary, card_vocabulary=card_vocabulary,
+            semantic_root=semantic_root, _allow_legacy_graph_identity=True)
+    else:
+        existing = build_package_model_records(model_root, [primary_name],
+            card_vocabulary=card_vocabulary, semantic_root=semantic_root)[0]
     for key in ("format", "model_id", "model_prefix", "iteration"):
         if existing.get(key) != record.get(key):
             raise PermissionError(

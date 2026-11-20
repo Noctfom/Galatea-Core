@@ -63,6 +63,8 @@ An appended library does **not** invalidate every old engine. The hash represent
 
 There is one WebUI entry: **Update Manager → ONNX Engine Update**. It uses current project-root vocabulary and semantics to maintain original training directories, without automatically building GKG packages or a separate model tree.
 
+3.17.4 corrects padding overwriting valid condition ID0 during compressed-condition expansion. Existing ONNX graphs retain the old calculation and are marked for re-export. Update them from the same-name PTH; learned weights, model identity and optimizer state are preserved, with no vocabulary or semantic-vector rebuild. Graph metadata `galatea.semantic_requirement_revision=1` identifies corrected exports independently of observation revision15 and checkpoint format3. ONNX-only artifacts can be inspected but require the original PTH to update. Historical opponents retain the existing PTH fallback
+
 - **Check**: Recursively inspect PTH/ONNX pairs, protocol, semantic prefixes and external dependencies. Results distinguish current engines, pure appends without new-card coverage, revised old semantics, missing/incomplete artifacts and outdated PTH asset metadata. ONNX-only files can be checked but need PTH for re-export. Checking neither modifies models nor generates assets
 - **Update**: Select PTH files across model pools or BC/PPO branches. Re-export original learned weights with current compatible semantics on CPU and compare three input cases. Replace an existing same-name ONNX or create it when missing. Refresh PTH/net_config asset versions and compatibility records when needed; retain previous provenance in semantic_asset_updates
 

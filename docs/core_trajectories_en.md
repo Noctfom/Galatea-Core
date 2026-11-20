@@ -1,6 +1,6 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.16.9**: Model Protocol **4**, Checkpoint Format **3**, schema revision **15**.
+This document applies to **v3.17.4**: Model Protocol **4**, Checkpoint Format **3**, schema revision **15**.
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds
@@ -387,9 +387,21 @@ probabilities or tactical rewards.
 The dataset's `cache/` holds bounded compressed numeric blocks with deduplicated stable deck profiles.
 Only mini-batches reach the GPU; trainable Encoder/latent outputs are never frozen into the cache.
 Relative references allow moving the whole dataset. BC consumption checks vocabulary/semantic
-protocol identity, not an identical native Core binary across operating systems. Collection Core/Lua/CDB
+protocol identity and event-decoder revision, not an identical native Core binary across operating systems. Collection Core/Lua/CDB
 hashes remain provenance. Prepare new data after those source resources change; old caches are not
 silently rewritten.
+
+3.17.4 corrects events reconstructed from external byte responses: scalar actions preserve card,
+operation and effect-slot identity, and Type15/20/23 selections can be recovered independently of
+the model's macro pool. Preparation automatically writes `event_decoder_revision=1`; no manual
+maintenance is required. Missing or different revisions require rebuilding the cache from complete
+raw captures before imitation training. Retagging an old cache cannot restore missing events.
+Existing PTH weights remain usable and older holographic recordings remain viewable. Rebuilding
+changes the dataset digest: use the old PTH with `--init-from` for a new BC experiment instead of
+restoring its BC optimizer with `--resume`, which requires the same dataset. This cache check does
+not affect PPO continuation. If an exact
+trace's observation digests no longer match the corrected events, reconvert its original capture
+rather than disabling digest validation.
 
 Outputs go to `models/imitation/<run_id>/`: epoch reports, saved PTH/artifact manifests and stage
 results. New tasks generate new UUIDs and record parent checkpoint/dataset hashes. Epoch monitoring

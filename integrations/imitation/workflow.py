@@ -13,7 +13,7 @@ from core_trajectory import file_sha256, matching_action_indices
 from integrations.duel_session import WINDBOT_SELECTION_LABEL_V1, resolve_core_seed
 from integrations.imitation import IMITATION_WORKFLOW_VERSION
 from integrations.imitation.data import (
-    ExampleCacheWriter, PreparedDataset, ROLES, build_manifest, data_identity,
+    ExampleCacheWriter, PreparedDataset, ROLES, EXPERT_EVENT_DECODER_REVISION, build_manifest, data_identity,
     prepare_trace, read_json, source_info, write_json,
 )
 
@@ -326,6 +326,8 @@ def train_imitation(dataset_path, *, init_from=None, resume=None, output='./mode
         # describe collection, not a requirement to start a Core while doing BC.
         if dataset.manifest['identity'].get('protocol') != get_current_protocol_metadata():
             raise ValueError('prepared input vocabulary/semantic protocol differs from this model runtime')
+        if dataset.manifest['identity'].get('event_decoder_revision') != EXPERT_EVENT_DECODER_REVISION:
+            raise ValueError('专家缓存的外部响应事件解码版本已更新，请从完整原始捕获重新准备模仿数据；已有PTH仍可加载')
         if not any(e['split'] == 'train' and e['effective_count'] for e, _, _ in dataset.entries):
             raise ValueError('dataset has no training examples with an actual choice')
         checkpoint = load_training_checkpoint(resume or init_from, map_location='cpu')

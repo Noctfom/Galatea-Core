@@ -43,6 +43,18 @@ FILM_PARAMETER_COUNT = 2
 FILM_MAX_AMPLITUDE = 0.5
 
 
+def expand_semantic_requirements(indices):
+    """还原压缩条件编号，填充项不覆盖编号为零的真实条件"""
+    flat_indices = indices.reshape(-1, indices.shape[-1]).long()
+    # 所有填充写入独立废弃列，重复真实编号也只写入相同的值
+    destinations = flat_indices.masked_fill(flat_indices < 0, 128)
+    expanded = torch.zeros(
+        flat_indices.shape[0], 129, device=indices.device, dtype=torch.float32,
+    )
+    expanded.scatter_(1, destinations, torch.ones_like(flat_indices, dtype=torch.float32))
+    return expanded[:, :128].reshape(*indices.shape[:-1], 128)
+
+
 def sum_embedding_vectors(embedding, indices):
     """直接求和引用向量，保留重复项、padding 数值及原有权重梯度。"""
     # CPU/ONNX 保留原算子；特殊 Embedding 配置也不改变原有行为。
@@ -618,17 +630,9 @@ class GalateaNet(nn.Module):
         code_v = self.code_vec_proj(sem_code_vec)
         cat_v = cat_v + code_v
         
-        # 修复：兼容旧版本权重与新版超压缩索引的 GPU 极速还原
+        # 压缩条件与原有 128 维输入共享同一投影及编号
         if sem_req.dtype == torch.int8 or sem_req.shape[-1] == 16:
-            B, N, S, K = sem_req.shape
-            indices_flat = sem_req.view(-1, K).long()
-            valid_mask = (indices_flat >= 0).float()
-            indices_clamped = indices_flat.clamp(min=0)
-            
-            # 使用 scatter_ 零损耗展开回 128 维 One-Hot
-            req_multi_hot = torch.zeros(indices_flat.size(0), 128, device=sem_req.device, dtype=torch.float32)
-            req_multi_hot.scatter_(1, indices_clamped, valid_mask)
-            req_multi_hot = req_multi_hot.view(B, N, S, 128)
+            req_multi_hot = expand_semantic_requirements(sem_req)
         else:
             req_multi_hot = sem_req.to(torch.float32)
             

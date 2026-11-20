@@ -4,6 +4,17 @@
 
 ---
 
+## [v3.17.4] - 2026-11-18
+
+### External action events and semantic condition calculation
+
+- Interpret byte-encoded integer responses using the Core response-buffer contract, preserving card, operation and effect-slot identity for Type11/16 and other scalar responses. Recover Type15/20/23 selections from the original prompt and physical entities without requiring the expert combination to exist in the model's macro pool. Ambiguous responses remain unknown
+- Retain each valid prompt's payload and base candidates until reset, a new prompt or a subsequent non-Retry message. Training, Arena and trace replay share the same event entry point; no expert answer is injected into policy candidates and legal response rules remain unchanged
+- Prevent padding from overwriting semantic condition ID0 by using a separate temporary column. Valid IDs0–127 are preserved. PTH weights, parameter shapes, 116 inputs, Model Protocol4, Checkpoint3, observation revision15, rewards and PPO are unchanged; correcting the calculation can change forward outputs
+- Old ONNX graphs contain the former calculation and require re-export from their matching PTH through Resource Sync → ONNX Check and Update. Inspection explains the graph revision and historical opponents retain the existing PTH fallback. Artifact identity and learned weights are preserved; no semantic-vector or vocabulary rebuild is required. See [semantic and ONNX updates](code_semantics_en.md)
+- Newly prepared imitation caches automatically record the event-decoder revision. Rebuild older caches from complete raw captures; exact traces retain observation-digest validation. Existing BC/PPO checkpoints remain loadable. See [trajectories and imitation data](core_trajectories_en.md)
+- Validation: 1,132 tests and 50 subtests passed, with 54 conditional skips; after completing replacement compatibility, 94 ONNX/GKG/historical-session tests passed. Real WindBot capture/replay, native/offline preparation equivalence, one BC epoch and both-seat evaluation passed. Semantic checks cover CPU/CUDA/ONNX, CUDA Graph replay and full-network output/gradient equivalence. Cloud long training and playing-strength gains have not been measured
+
 ## [v3.17.3] - 2026-11-08
 
 ### WindBot message wakeup and reusable startup assets
