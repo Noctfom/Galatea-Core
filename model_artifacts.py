@@ -1279,7 +1279,7 @@ def _validate_static_onnx_metadata(metadata, *, card_vocabulary=None, semantic_r
         ) from error
     except ObservationProtocolMismatchError as error:
         raise ObservationProtocolMismatchError(
-            f'{error}；旧ONNX没有当前询问与连锁输入，不能仅改元数据，'
+            f'{error}；静态图的观测合同与当前编码器不同，不能仅改元数据，'
             '请在资源同步中枢执行ONNX检查与更新'
         ) from error
 

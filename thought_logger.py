@@ -211,6 +211,11 @@ def _serialize_snapshot(snapshot):
         "history": list(getattr(snapshot, "history_stack", [])),
         "public_hints": [_serialize_public_hint(hint) for hint in getattr(snapshot, "public_hints", ())],
         "known_deck_cards": [asdict(card) for card in getattr(snapshot, "known_deck_cards", ())],
+        "opponent_hand_memory_by_viewer": {
+            f'P{viewer}': [{'code': code, 'minimum_in_opponent_hand': lower}
+                           for code, lower in getattr(snapshot, 'opponent_hand_memory', ((), ()))[1 - viewer]]
+            for viewer in (0, 1)
+        },
         "public_state_flags": list(getattr(snapshot, "public_state_flags", ())),
     }
 

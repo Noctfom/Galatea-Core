@@ -4,6 +4,11 @@
 
 ---
 
+## [v3.17.5] - 2026-11-20
+
+- Replaced slot-based guesses with [position-free opponent hand memory](public_observations_en.md#3175-position-free-opponent-hand-memory). Each viewer distinguishes guaranteed copy counts from historical sightings; hidden hands and sets do not inherit identities, stats or effects
+- Observation revision 16 retains 116 inputs, Model Protocol 4 and Checkpoint Format 3. Known revision 14/15 PTH files can resume; re-export static ONNX from the matching PTH and rebuild exact trajectories or imitation caches from raw captures
+
 ## [v3.17.4] - 2026-11-18
 
 ### External action events and semantic condition calculation

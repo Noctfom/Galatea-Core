@@ -1,6 +1,14 @@
 # Public observations, prompts and chain context
 
-> Current usage applies to v3.16.9; dated sections retain their original contracts and measurements
+> The current observation revision is 16; historical sections retain their original contracts and measurements
+
+## 3.17.5 Position-free opponent hand memory
+
+Memory answers “how many copies must still be in the opponent’s hand?”, never “which hidden slot contains one?”. If two identical cards were shown together and an unknown card was then set, at least one copy remains, but the set card is not identified. A zero lower bound means previously seen, not confirmed present; it is neither a probability nor proof of absence. Repeat reveals do not add copies. Shuffling the hand preserves counts; an empty hand, field reload or new game clears old clues. Private confirmations are not shared. A publicly indicated target entering a hand keeps its original announcement, not its new hidden slot
+
+The existing global `current_context_*` group carries internal kind `201`, indexed card identity, `subtype=1/2` for guaranteed/previously seen, and the four-byte little-endian lower bound in `value`. No location, chain or entity index is attached. Each viewer retains at most 64 names, guaranteed first and then ordered by card code. Prompt and chain facts have priority in the existing 256 slots. Holographic logs use `opponent_hand_memory_by_viewer.P0/P1` to identify the **viewer**; older logs are not backfilled
+
+Revision 15 to 16 adds no input tensors, parameters or training targets. Known revision 14/15 PTH files can resume with learned weights; ordinary PPO resume retains optimizer and counters. Restart the trainer and workers and collect fresh samples. Use **Resource Sync → ONNX check/update** with matching PTH files to re-export static graphs. No vocabulary or semantic-vector rebuild is necessary. Old observation digests do not certify current observations; rebuild imitation data from complete raw captures
 
 ## 3.16.9 Current prompt and chain context
 

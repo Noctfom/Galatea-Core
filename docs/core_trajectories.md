@@ -1,6 +1,6 @@
 # 规范 Core 轨迹、AI 预测回放与外部数据入口
 
-文档适用于 **v3.17.4**：Model Protocol **4**、Checkpoint Format **3**、结构修订 **15**。
+文档适用于 **v3.17.5**：Model Protocol **4**、Checkpoint Format **3**、结构修订 **16**。详见[公开手牌记忆](public_observations.md#3175-无位置的对手手牌记忆)。
 规范轨迹与预测回放于 3.13.1 引入，固定 Core 解码修正于 3.13.2 完成，
 公开观测于 3.13.3 补齐，外部数据入口与隔离门禁于 3.13.5 接入。
 `TRAJECTORY_SCHEMA_VERSION=2` 独立维护于 `core_trajectory.py`，新增固定报文身份及空连锁

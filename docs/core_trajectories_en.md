@@ -1,6 +1,6 @@
 # Canonical Core trajectories, AI predictions and external ingestion
 
-This document applies to **v3.17.4**: Model Protocol **4**, Checkpoint Format **3**, schema revision **15**.
+This document applies to **v3.17.5**: Model Protocol **4**, Checkpoint Format **3**, schema revision **16**. See [public hand memory](public_observations_en.md#3175-position-free-opponent-hand-memory).
 Canonical traces and prediction replay arrived in 3.13.1, fixed Core decoding in 3.13.2,
 public observations in 3.13.3, and external ingestion/quality gates in 3.13.5.
 Independent `TRAJECTORY_SCHEMA_VERSION=2` in `core_trajectory.py` adds

@@ -141,6 +141,12 @@ def parse_confirm_cards(payload):
     return prompt
 
 
+def confirm_visibility_mask(reveal):
+    """复用受控接收端的保守口径，全手牌展示双方可见，其他展示仅按接收席位记忆"""
+    cards = reveal['cards']
+    return 3 if cards and all(card['location'] == 2 for card in cards) else 1 << reveal['player']
+
+
 def is_empty_chain_prompt(msg_type, payload):
     """识别已校验的空连锁询问，避免为唯一自动响应调用模型"""
     return msg_type == 16 and len(payload) == 11 and payload[1] == 0

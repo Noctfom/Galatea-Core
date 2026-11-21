@@ -20,6 +20,7 @@ from core_message_protocol import (
     is_empty_chain_prompt,
     parse_chain_prompt,
     parse_confirm_cards,
+    confirm_visibility_mask,
     parse_card_hint,
     parse_hint,
     hint_visibility_mask,
@@ -473,13 +474,13 @@ class DuelState:
         self.recent_chain_targets = []
         self._chain_target_dirty_zones = set()
         self.history_stack = []
-        self.known_hand_codes = {0: [], 1: []} 
-        self.recently_confirmed = []
         self._initial_deck_counts = (
             len(p0_main) if p0_main is not None else None,
             len(p1_main) if p1_main is not None else None,
         )
         self.public_observation = PublicObservationState(self._initial_deck_counts)
+        if all(count is not None for count in self._initial_deck_counts):
+            self.public_observation.hand_sizes = [0, 0]
         self._reload_counts = {}
         self.audit_enabled = bool(audit_enabled)
         self._reset_prompt_context()
@@ -510,8 +511,6 @@ class DuelState:
         self.recent_chain_targets = []
         self._chain_target_dirty_zones = set()
         self.history_stack = []
-        self.known_hand_codes = {0: [], 1: []}
-        self.recently_confirmed = []
         self.transition_recorder.reset()
         self.p0_deck = self.p0_initial_deck.copy()
         self.p0_extra = self.p0_initial_extra.copy()
@@ -519,6 +518,8 @@ class DuelState:
         self.p1_extra = self.p1_initial_extra.copy()
 
         self.public_observation = PublicObservationState(self._initial_deck_counts)
+        if all(count is not None for count in self._initial_deck_counts):
+            self.public_observation.hand_sizes = [0, 0]
         self._reload_counts = {}
 
         self._reset_prompt_context()
@@ -554,10 +555,9 @@ class DuelState:
         self._chain_target_dirty_zones = set()
         self.my_lp, self.op_lp = (data['lp'] for data in restored['players'])
         self.history_stack = []
-        self.known_hand_codes = {0: [], 1: []}
-        self.recently_confirmed = []
         self.p0_deck, self.p1_deck, self.p0_extra, self.p1_extra = [], [], [], []
         self.public_observation = PublicObservationState((counts[0][Zone.DECK], counts[1][Zone.DECK]))
+        self.public_observation.hand_sizes = [counts[p][Zone.HAND] for p in (0, 1)]
         self.public_observation.complete = False
         self.public_observation.reversal_known = False
         self.public_observation.remaining_composition_known = False
@@ -813,6 +813,13 @@ class DuelState:
                 if public and code:
                     target['code'] = int(code) & 0x7FFFFFFF
                     target['visibility_mask'] = 0b11
+                # 原公告仍然有效，但它不能把一张已公开的牌持续钉在暗手牌或盖卡的新槽位
+                hidden_exit = old[1] == Zone.HAND and (new[1] == Zone.DECK or
+                    (new[1] in (Zone.MZONE, Zone.SZONE, Zone.EXTRA, Zone.REMOVED)
+                     and not (int(new_raw) >> 24) & (Position.FACEUP | Position.REVEAL)))
+                if new[1] == Zone.HAND or hidden_exit:
+                    target['current_location'], target['tracked'] = -1, False
+                    continue
                 target['current_location'] = int(new_raw) if new[0] in (0, 1) and new[1] else -1
                 target['tracked'] = target['current_location'] >= 0
                 continue
@@ -1043,12 +1050,21 @@ class DuelState:
             # --- 状态维护 ---
             if msg_type == 31:
                 confirmation = parse_confirm_cards(msg_payload)
-                self.recently_confirmed.extend(
-                    card['code'] & 0x7FFFFFFF for card in confirmation['cards']
-                )
+                visibility = confirm_visibility_mask(confirmation)
+                shown = [{}, {}]
                 for card in confirmation['cards']:
+                    holder = card['controller']
+                    if holder not in (0, 1):
+                        continue
+                    code = card['code'] & 0x7FFFFFFF
                     if card['location'] == Zone.DECK:
-                        self.public_observation.set_deck_card(card['controller'], card['sequence'], card['code'])
+                        if code:
+                            self.public_observation.set_deck_card(holder, card['sequence'], card['code'], visibility)
+                    elif card['location'] == Zone.HAND and visibility & (1 << (1 - holder)):
+                        # 序号仅在同一条展示消息内去重，绝不跨消息保存或关联手牌位置
+                        shown[holder][card['sequence']] = code
+                for holder in (0, 1):
+                    self.public_observation.confirm_hand(holder, shown[holder].values())
 
             elif msg_type in [30, 42]:
                 stream.read(1) # P
@@ -1056,7 +1072,6 @@ class DuelState:
                 for _ in range(count):
                     code = struct.unpack('<I', stream.read(4))[0]
                     c, l, s = struct.unpack('<BBB', stream.read(3))
-                    self.recently_confirmed.append(code & 0x7FFFFFFF)
                     if l == Zone.DECK:
                         self.public_observation.set_deck_card(c, s, code)
 
@@ -1066,13 +1081,18 @@ class DuelState:
                 self.public_observation.shuffle_hints(player, Zone.DECK)
                 self._invalidate_chain_target_zone(player, Zone.DECK)
             elif msg_type in (33, 39):
+                if msg_type == 33:
+                    self.public_observation.set_hand_size(msg_payload[0], msg_payload[1])
                 self.public_observation.shuffle_hints(msg_payload[0], Zone.HAND if msg_type == 33 else Zone.EXTRA,
                                                      descriptions_reemitted=msg_type == 33)
                 self._invalidate_chain_target_zone(msg_payload[0], Zone.HAND if msg_type == 33 else Zone.EXTRA)
             elif msg_type == 34:
+                self.public_observation.deck_cards[msg_payload[0]].clear()
                 self._invalidate_chain_target_zone(msg_payload[0], Zone.DECK)
             elif msg_type == 35:
                 # 该特殊互换尚未维护完整状态，不能给旧位置保留确定的实例绑定
+                self.public_observation.deck_cards[msg_payload[0]].clear()
+                self.public_observation.deck_counts[msg_payload[0]] = None
                 self._invalidate_chain_target_zone(msg_payload[0], Zone.DECK)
                 self._invalidate_chain_target_zone(msg_payload[0], Zone.GRAVE)
             elif msg_type == 36:
@@ -1108,37 +1128,32 @@ class DuelState:
                 known_deck_card = self.public_observation.deck_cards[old_c].get(old_s) if old_c in (0, 1) and old_l == Zone.DECK else None
                 self.public_observation.move_hints(old_raw, new_raw)
 
-                # ========================================================
-                # 状态记忆池：只进不出（除非明牌被打出）
-                # ========================================================
-                is_public_move = False
-                if (old_l & 0x7F) == Zone.GRAVE: is_public_move = True
-                elif (old_l & 0x7F) in [Zone.MZONE, Zone.SZONE, Zone.REMOVED] and (old_pos & 0x1 or old_pos & 0x4 or old_pos & 0x20): is_public_move = True
-                elif pure_code in self.recently_confirmed:
-                    is_public_move = True
-                    self.recently_confirmed.remove(pure_code)
-                if known_deck_card is not None and known_deck_card.code == pure_code:
-                    is_public_move = True
-                if new_l == Zone.GRAVE or (new_l in (Zone.MZONE, Zone.SZONE, Zone.REMOVED, Zone.EXTRA) and new_pos & 0x5):
-                    is_public_move = True
-                self._move_chain_target_locations(old_raw, new_raw, code=pure_code, public=is_public_move)
-                self.public_observation.move_deck_card(old_raw, new_raw, pure_code, is_public_move)
+                # 暗目的地的全知线包可能仍有卡密，只能沿事前可证明的明来源恢复身份
+                visible_code, audience = 0, 0
+                faceup_zones = (Zone.MZONE, Zone.SZONE, Zone.REMOVED, Zone.EXTRA)
+                grave_audience = (sum(1 << p for p in (0, 1) if not self.public_observation.grave_blocked(p))
+                                  if Zone.GRAVE in (old_l, new_l) else 3)
+                if pure_code and (new_l == Zone.GRAVE or new_l in faceup_zones and new_pos & Position.FACEUP):
+                    visible_code, audience = pure_code, grave_audience if new_l == Zone.GRAVE else 3
+                elif known_deck_card is not None:
+                    visible_code, audience = known_deck_card.code, known_deck_card.visibility
+                elif (old_c in (0, 1) and (old_c, old_l) not in self._chain_target_dirty_zones
+                      and (old_l == Zone.GRAVE or old_l in faceup_zones and old_pos & (Position.FACEUP | Position.REVEAL))):
+                    source = self.field_map[old_c].get(old_l, {}).get(old_s, {})
+                    visible_code = int(source.get('code', 0)) & 0x7FFFFFFF
+                    audience = grave_audience if old_l == Zone.GRAVE else 3
+                self._move_chain_target_locations(old_raw, new_raw, code=visible_code, public=audience == 3)
+                self.public_observation.move_deck_card(old_raw, new_raw, visible_code, bool(visible_code and audience), visibility=audience)
                 if self._reload_counts:
                     for player, zone, delta in ((old_c, old_l, -1), (new_c, new_l, 1)):
                         if player in self._reload_counts and zone in self._reload_counts[player]:
                             self._reload_counts[player][zone] = max(0, self._reload_counts[player][zone] + delta)
 
-                # 进池：明牌入库 (比如检索)
-                if new_l == Zone.HAND and new_c in [0, 1] and is_public_move and pure_code != 0:
-                    self.known_hand_codes[new_c].append(pure_code)
-
-                # 出池：必须满足是从【手牌】离开，或者从【场上的暗牌/里侧表示】暴露真实身份离开
-                is_from_hidden = (old_l == Zone.HAND) or (old_l in [Zone.MZONE, Zone.SZONE] and not (old_pos & 0x1 or old_pos & 0x4 or old_pos & 0x20))
-                
-                if pure_code != 0 and old_c in [0, 1] and is_from_hidden:
-                    if pure_code in self.known_hand_codes[old_c]:
-                        self.known_hand_codes[old_c].remove(pure_code)
-                # ========================================================
+                if (old_c, old_l) != (new_c, new_l):
+                    if old_l == Zone.HAND and old_c in (0, 1):
+                        self.public_observation.leave_hand(old_c, visible_code if audience & (1 << (1 - old_c)) else 0)
+                    if new_l == Zone.HAND and new_c in (0, 1):
+                        self.public_observation.enter_hand(new_c, visible_code if audience & (1 << (1 - new_c)) else 0)
 
                 # --- 1. 处理脱离旧位置 ---
                 if old_l & 0x80: # 从超量素材区拔除
@@ -1192,9 +1207,6 @@ class DuelState:
                         target['current_location'] = LocationInfo.encode(c, l, s, new_pos)
                         if new_pos & (Position.FACEUP | Position.REVEAL) and pure_code:
                             target['code'], target['visibility_mask'] = pure_code, 0b11
-                if not (prev & 0x1 or prev & 0x4) and (new_pos & 0x1 or new_pos & 0x4):
-                    if pure_code in self.known_hand_codes[c]:
-                        self.known_hand_codes[c].remove(pure_code)
 
             elif msg_type == 55: # SWAP：两张实例同时交换，不串行覆盖提示
                 _, first, _, second = struct.unpack('<IIII', msg_payload)
@@ -1261,11 +1273,6 @@ class DuelState:
                 if len(self.history_stack) > 8:
                     self.history_stack.pop()
 
-                # 出池：如果卡片直接在手牌或盖伏状态发效果（翻开），也会暴露 code
-                pure_code = code & 0x7FFFFFFF
-                if pure_code in self.known_hand_codes[tc]:
-                    self.known_hand_codes[tc].remove(pure_code)
-
             elif msg_type in (71, 72, 73, 75, 76):
                 chain_index, = struct.unpack('<B', msg_payload)
                 chain = self._find_chain_context(chain_index)
@@ -1309,8 +1316,9 @@ class DuelState:
                     raw_code = struct.unpack('<I', stream.read(4))[0]
                     code = raw_code & 0x7FFFFFFF
                     previous = known_draws[draw_index] if draw_index < len(known_draws) else None
-                    if (previous is not None and previous.code == code) or raw_code & 0x80000000:
-                        self.known_hand_codes[p].append(code)
+                    visible = code if raw_code & 0x80000000 else (
+                        previous.code if previous is not None and previous.visibility & (1 << (1 - p)) else 0)
+                    self.public_observation.enter_hand(p, visible)
                     seq = 0
                     while seq in self.field_map[p][Zone.HAND]: seq += 1
                     self.field_map[p][Zone.HAND][seq] = {'code': code, 'pos': 0, 'owner': p, 'counters': 0, 'overlays': [], 'is_equipped': False}
@@ -2160,10 +2168,14 @@ class DuelState:
                     my_cards = (self.p0_deck + self.p0_extra) if player == 0 else (self.p1_deck + self.p1_extra)
                     for c in my_cards: add_valid_code(c)
                         
+                    remembered = self.public_observation.hand_memory[1 - player]
+                    for code in remembered: add_valid_code(code)
+                    visible_counts = {}
                     for p in [0, 1]:
-                        for code in self.known_hand_codes[p]: add_valid_code(code)
                         for loc in [Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA]:
-                            for seq, info in self.field_map[p].get(loc, {}).items():
+                            if loc == Zone.GRAVE and self.public_observation.grave_blocked(player):
+                                continue
+                            for info in self.field_map[p].get(loc, {}).values():
                                 code = info.get('code', 0)
                                 pos = info.get('pos', 0)
                                 is_public = bool(
@@ -2171,7 +2183,11 @@ class DuelState:
                                 )
                                 if p != player and not is_public and loc != Zone.GRAVE:
                                     continue
-                                if code != 0: add_valid_code(code)
+                                if code:
+                                    add_valid_code(code)
+                                    if loc != Zone.EXTRA:
+                                        pure_c = code & 0x7FFFFFFF
+                                        visible_counts[pure_c] = visible_counts.get(pure_c, 0) + 1
 
                     # 3. 常识字典缓存
                     global _META_STAPLES
@@ -2203,16 +2219,8 @@ class DuelState:
                         """保留原常识池优先级，只按已知或公开身份提升权重"""
                         score = 0
                         if c in my_cards: score += 100 # 自己卡组/额外里的卡最重要
-                        for p in [0, 1]:
-                            if c in self.known_hand_codes[p]: score += 50
-                            # 遍历所有区域，如果在场上/墓地/除外区出现过，权重提升
-                            for loc in [Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED]:
-                                for info in self.field_map[p].get(loc, {}).values():
-                                    pos = info.get('pos', 0)
-                                    if p != player and not pos & (0x1 | 0x4 | 0x20) and loc != Zone.GRAVE:
-                                        continue
-                                    pure_c = info.get('code', 0) & 0x7FFFFFFF
-                                    if pure_c == c: score += 50
+                        if remembered.get(c, 0) > 0: score += 50
+                        score += 50 * visible_counts.get(c, 0)
                         if c in _META_STAPLES: score += 10 # 泛用手坑保底分
                         return score
 
@@ -2488,7 +2496,7 @@ class DuelState:
         snap.history_stack = self.history_stack.copy()
         snap.transition_history = self.transition_recorder.snapshot()
         validate_transition_history(snap.transition_history)
-        snap.known_hand_codes = {0: self.known_hand_codes[0].copy(), 1: self.known_hand_codes[1].copy()}
+        snap.opponent_hand_memory = self.public_observation.hand_snapshot()
         snap.public_hints, snap.known_deck_cards, snap.public_state_flags = self.public_observation.snapshot()
         snap.prompt_context = self._snapshot_prompt_context()
         return snap
@@ -2539,6 +2547,8 @@ class DuelState:
                     reconciled_zone[sequence] = merged
 
                 self.field_map[player][zone] = reconciled_zone
+                if zone == Zone.HAND and queried_count is not None:
+                    self.public_observation.set_hand_size(player, queried_count)
                 self._chain_target_queried_zones.add((player, zone))
                 self._chain_target_dirty_zones.discard((player, zone))
                 if self._reload_counts and queried_count is not None:

@@ -332,3 +332,4 @@ class GameSnapshot:
     prompt_context: tuple = ()
     known_deck_cards: tuple = ()
     public_state_flags: tuple = (True, True, False, False, False, True)
+    opponent_hand_memory: tuple = ((), ())

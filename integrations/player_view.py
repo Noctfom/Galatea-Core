@@ -312,11 +312,9 @@ def visible_core_message(message, perspective):
     if kind == 120:
         return bytes(raw) if raw[1] == perspective else None
     if kind == 31:
-        from core_message_protocol import parse_confirm_cards
+        from core_message_protocol import parse_confirm_cards, confirm_visibility_mask
         reveal = parse_confirm_cards(raw[1:])
-        cards = reveal['cards']
-        hand_reveal = cards and all(card['location'] == 2 for card in cards)
-        return bytes(raw) if reveal['player'] == perspective or hand_reveal else None
+        return bytes(raw) if confirm_visibility_mask(reveal) & (1 << perspective) else None
     if kind in (30, 38):
         return bytes(raw)
     if kind in (3, 4, 81, 160, 163, 164):
@@ -371,6 +369,7 @@ class PlayerViewAdapter:
         brain._reload_counts = {actor: {zone: (counts[actor][0] if zone == 1 else
             counts[actor][1] if zone == 64 else 0) for zone in ZONES} for actor in (0, 1)}
         brain.public_observation.deck_counts = [d0, d1]
+        brain.public_observation.hand_sizes = [0, 0]
         brain.public_observation.remaining_composition_known = False
         # The conservative host profile cannot prove complete hint delivery.
         brain.public_observation.complete = False
@@ -491,6 +490,8 @@ class PlayerViewAdapter:
             self.brain._reload_counts[actor][zone] = sum(row is not None for row in rows)
             if zone == 1:
                 self.brain.public_observation.deck_counts[actor] = len(rows)
+            elif zone == 2:
+                self.brain.public_observation.set_hand_size(actor, self.brain._reload_counts[actor][zone])
             self._refreshed.add((actor, zone))
             if zone not in (1, 64):
                 # 仅完整区域查询证明序号已校准，不能用单卡增量刷新解除整个区域的未知状态
@@ -570,9 +571,7 @@ class PlayerViewAdapter:
                                 if key in self._cards:
                                     fields = {'controller': actor, 'location': 16, 'sequence': index, 'position': position}
                                     self._cards[key] = ViewCard(q.QUERY_POSITION if position else 0, True, fields)
-                    if (any(len(cards) > 256 for zones in self.brain.field_map.values() for cards in zones.values())
-                            or any(len(codes) > 1024 for codes in self.brain.known_hand_codes.values())
-                            or len(self.brain.recently_confirmed) > 1024):
+                    if any(len(cards) > 256 for zones in self.brain.field_map.values() for cards in zones.values()):
                         raise SessionProtocolError('player-view state capacity exceeded')
                     self._refreshed.clear()
                     self.event_count += 1

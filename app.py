@@ -294,7 +294,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.17.4"  # 当前本地版本号
+LOCAL_VERSION = "3.17.5"  # 当前本地版本号
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度

@@ -53,7 +53,7 @@ from game_constants import LocationInfo, Position, Zone
 from semantic_lookup import register_static_semantic_runtime_catalog
 from public_observation import (
     PUBLIC_INPUT_SPECS, MAX_PUBLIC_HINTS, DECK_POSITION_CAPACITY,
-    CURRENT_CONTEXT_INPUT_SPECS, CURRENT_CONTEXT_CAPACITY,
+    CURRENT_CONTEXT_INPUT_SPECS, CURRENT_CONTEXT_CAPACITY, HAND_MEMORY_KIND,
 )
 from public_hint_semantics import resolve_public_hint
 
@@ -963,6 +963,10 @@ class GalateaEncoder:
                    code=int(hint.get('code', 0)), location=(role, 0, 0, 0),
                    offset=int(hint.get('prompt_type', 0)),
                    subtype=int(hint.get('subtype', 0)), value=int(hint.get('value', 0)))
+        # 位置与序号均保留为零，记牌不能替代实际询问或当前连锁事实
+        hand = getattr(snapshot, 'opponent_hand_memory', ((), ()))[1 - player_id]
+        for code, lower_bound in hand[:CURRENT_CONTEXT_CAPACITY - index]:
+            append(HAND_MEMORY_KIND, code=code, subtype=1 if lower_bound else 2, value=lower_bound)
         return {name: torch.from_numpy(value).unsqueeze(0) for name, value in arrays.items()}
 
     def encode(self, snapshot: GameSnapshot, player_id: int) -> dict:
@@ -1028,85 +1032,35 @@ class GalateaEncoder:
         # ==========================================
         # 1. 处理场上/手牌/墓地实体 
         # ==========================================
-        op_known = []
-        if hasattr(snapshot, 'known_hand_codes'):
-            op_known = snapshot.known_hand_codes[1 - player_id].copy()
-            hidden_capacity = 0
-            for e in snapshot.entities:
-                if e.owner != player_id:
-                    if e.location == Zone.HAND: hidden_capacity += 1
-                    elif e.location in [Zone.MZONE, Zone.SZONE] and not bool(e.is_public):
-                        hidden_capacity += 1
-                        
-            while len(op_known) > hidden_capacity and len(op_known) > 0:
-                op_known.pop(0)
-
         for i, e in enumerate(snapshot.entities[:MAX_CARDS]):
             card_zones[i] = self._encode_zone_category(e.location)
             card_positions[i] = self._encode_position_category(e.position)
             is_visible = self._is_entity_visible_to_player(e, player_id)
             if e.location == Zone.GRAVE and snapshot.public_state_flags[3 + player_id]:
                 is_visible = False
-            has_public_state = is_visible
-            is_tracked_by_memory = False
-            visible_code = e.code
-
-            if not is_visible and len(op_known) > 0:
-                if e.location == Zone.HAND or (e.location in [Zone.MZONE, Zone.SZONE] and not is_visible):
-                    visible_code = op_known.pop(0)
-                    is_visible = True
-                    is_tracked_by_memory = True
-
             if is_visible:
-                card_indices[i] = self._encode_card_code(visible_code)
+                card_indices[i] = self._encode_card_code(e.code)
                 pos_x, pos_y = self._get_coords(player_id, e.owner, e.location, e.sequence)
 
-                if has_public_state:
-                    visible_type = e.type_mask
-                    visible_race = e.race
-                    visible_attr = e.attribute
-                    visible_level = e.level
-                    visible_rank = e.rank
-                    visible_link_rating = e.link_rating
-                    visible_lscale = e.lscale
-                    visible_rscale = e.rscale
-                    visible_link_marker = e.link_marker
-                    visible_current_atk = e.current_atk
-                    visible_current_def = e.current_def
-                    visible_base_atk = e.base_atk
-                    visible_base_def = e.base_def
-                    visible_overlay_count = e.overlay_count
-                    visible_counter_count = e.counter_count
-                    visible_is_equipped = e.is_equipped
-                    visible_setcodes = e.setcodes
-                    mask = getattr(e, 'used_effect_mask', 0)
-                else:
-                    # 记牌只恢复已知身份；隐藏后的 Core 动态状态不得随查询泄漏
-                    from card_reader import card_db
-                    printed = card_db.get_full_stats(visible_code)
-                    visible_type = printed[0]
-                    visible_race = printed[1]
-                    visible_attr = printed[2]
-                    visible_level = printed[3]
-                    visible_lscale = printed[4]
-                    visible_rscale = printed[5]
-                    visible_link_marker = printed[6]
-                    visible_rank = printed[7]
-                    visible_link_rating = (
-                        printed[3] if visible_type & 0x4000000 else 0
-                    )
-                    if visible_link_rating:
-                        visible_level = 0
-                    visible_current_atk = printed[8]
-                    visible_current_def = printed[9]
-                    visible_base_atk = printed[8]
-                    visible_base_def = printed[9]
-                    visible_overlay_count = 0
-                    visible_counter_count = 0
-                    visible_is_equipped = False
-                    visible_setcodes = printed[10]
-                    mask = 0
-                
+                visible_type = e.type_mask
+                visible_race = e.race
+                visible_attr = e.attribute
+                visible_level = e.level
+                visible_rank = e.rank
+                visible_link_rating = e.link_rating
+                visible_lscale = e.lscale
+                visible_rscale = e.rscale
+                visible_link_marker = e.link_marker
+                visible_current_atk = e.current_atk
+                visible_current_def = e.current_def
+                visible_base_atk = e.base_atk
+                visible_base_def = e.base_def
+                visible_overlay_count = e.overlay_count
+                visible_counter_count = e.counter_count
+                visible_is_equipped = e.is_equipped
+                visible_setcodes = e.setcodes
+                mask = getattr(e, 'used_effect_mask', 0)
+
                 used_eff_0 = 1.0 if (mask & (1 << 0)) else 0.0
                 used_eff_1 = 1.0 if (mask & (1 << 1)) else 0.0
                 used_eff_2 = 1.0 if (mask & (1 << 2)) else 0.0
@@ -1122,7 +1076,7 @@ class GalateaEncoder:
                     visible_base_atk / 4000.0, visible_base_def / 4000.0,
                     pos_x, pos_y, visible_level / 12.0,
                     visible_lscale / 13.0, visible_rscale / 13.0,
-                    1.0 if e.is_public else (0.5 if is_tracked_by_memory else 0.0),
+                    1.0 if e.is_public else 0.0,
                     min(visible_overlay_count / 5.0, 1.0),
                     min(visible_counter_count / 10.0, 1.0),
                     1.0 if visible_is_equipped else 0.0,
@@ -1138,64 +1092,61 @@ class GalateaEncoder:
                 raw_sc = visible_setcodes if isinstance(visible_setcodes, (list, tuple)) else [visible_setcodes]
                 card_setcodes[i] = [(s % 4096) for s in (list(raw_sc) + [0]*4)[:4]]
                 masks[i] = True
-                overlay_code = (
-                    getattr(e, 'top_overlay_code', 0) if has_public_state else 0
-                )
+                overlay_code = getattr(e, 'top_overlay_code', 0)
                 card_overlay_indices[i] = (
                     self._encode_card_code(overlay_code)
                     if overlay_code
                     else self.card_vocabulary.padding_id
                 )
 
-                if has_public_state:
-                    current_code = int(getattr(e, 'current_code', 0) or 0)
-                    if current_code and current_code != int(e.code):
-                        card_alias_indices[i] = self._encode_card_code(current_code)
+                current_code = int(getattr(e, 'current_code', 0) or 0)
+                if current_code and current_code != int(e.code):
+                    card_alias_indices[i] = self._encode_card_code(current_code)
 
-                    for slot, overlay_code in enumerate(
-                        list(getattr(e, 'overlay_codes', []))[1:1 + CARD_ADDITIONAL_OVERLAY_SLOTS]
-                    ):
-                        card_overlay_rest_indices[i, slot] = self._encode_card_code(
-                            overlay_code
-                        )
-
-                    reason = int(getattr(e, 'reason', 0) or 0) & 0xFFFFFFFF
-                    card_reason_bytes[i] = [
-                        (reason >> (byte_index * 8)) & 0xFF
-                        for byte_index in range(CARD_REASON_BYTES)
-                    ]
-                    card_status_bits[i] = [
-                        int(bool(getattr(e, 'is_disabled', False))),
-                        int(bool(getattr(e, 'properly_summoned', False))),
-                        int(bool(getattr(e, 'is_forbidden', False))),
-                    ]
-                    original_owner = int(getattr(e, 'original_owner', -1))
-                    if original_owner in (0, 1):
-                        card_owner_roles[i] = 1 if original_owner == player_id else 2
-
-                    relations = zip(
-                        list(getattr(e, 'relation_indices', [])),
-                        list(getattr(e, 'relation_types', [])),
+                for slot, overlay_code in enumerate(
+                    list(getattr(e, 'overlay_codes', []))[1:1 + CARD_ADDITIONAL_OVERLAY_SLOTS]
+                ):
+                    card_overlay_rest_indices[i, slot] = self._encode_card_code(
+                        overlay_code
                     )
-                    for slot, (target_index, relation_type) in enumerate(relations):
-                        if slot >= CARD_RELATION_SLOTS:
-                            break
-                        if 0 <= int(target_index) < MAX_CARDS:
-                            card_relation_indices[i, slot] = int(target_index)
-                            card_relation_types[i, slot] = int(relation_type)
 
-                    for slot, (counter_type, counter_count) in enumerate(
-                        list(getattr(e, 'counter_items', []))[:CARD_COUNTER_SLOTS]
-                    ):
-                        counter_type = int(counter_type) & 0xFFFF
-                        card_counter_type_bytes[i, slot] = [
-                            (counter_type >> (byte_index * 8)) & 0xFF
-                            for byte_index in range(CARD_COUNTER_TYPE_BYTES)
-                        ]
-                        card_counter_values[i, slot] = min(
-                            max(float(counter_count) / 10.0, 0.0),
-                            25.0,
-                        )
+                reason = int(getattr(e, 'reason', 0) or 0) & 0xFFFFFFFF
+                card_reason_bytes[i] = [
+                    (reason >> (byte_index * 8)) & 0xFF
+                    for byte_index in range(CARD_REASON_BYTES)
+                ]
+                card_status_bits[i] = [
+                    int(bool(getattr(e, 'is_disabled', False))),
+                    int(bool(getattr(e, 'properly_summoned', False))),
+                    int(bool(getattr(e, 'is_forbidden', False))),
+                ]
+                original_owner = int(getattr(e, 'original_owner', -1))
+                if original_owner in (0, 1):
+                    card_owner_roles[i] = 1 if original_owner == player_id else 2
+
+                relations = zip(
+                    list(getattr(e, 'relation_indices', [])),
+                    list(getattr(e, 'relation_types', [])),
+                )
+                for slot, (target_index, relation_type) in enumerate(relations):
+                    if slot >= CARD_RELATION_SLOTS:
+                        break
+                    if 0 <= int(target_index) < MAX_CARDS:
+                        card_relation_indices[i, slot] = int(target_index)
+                        card_relation_types[i, slot] = int(relation_type)
+
+                for slot, (counter_type, counter_count) in enumerate(
+                    list(getattr(e, 'counter_items', []))[:CARD_COUNTER_SLOTS]
+                ):
+                    counter_type = int(counter_type) & 0xFFFF
+                    card_counter_type_bytes[i, slot] = [
+                        (counter_type >> (byte_index * 8)) & 0xFF
+                        for byte_index in range(CARD_COUNTER_TYPE_BYTES)
+                    ]
+                    card_counter_values[i, slot] = min(
+                        max(float(counter_count) / 10.0, 0.0),
+                        25.0,
+                    )
 
             else:
                 if e.location == Zone.HAND:

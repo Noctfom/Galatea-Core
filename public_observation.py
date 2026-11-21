@@ -1,5 +1,6 @@
 # 本文件维护 Core 公开提示、已知卡组位置及快照恢复所需状态，不推测额外效果或奖励
 
+from collections import Counter
 from dataclasses import dataclass, replace
 
 from game_constants import LocationInfo, Position, Zone
@@ -15,6 +16,9 @@ PUBLIC_OBSERVATION_FORMAT_VERSION = 1
 CURRENT_CONTEXT_CAPACITY = 256
 CURRENT_CONTEXT_CHAIN_SLOTS = 12
 CURRENT_CONTEXT_FORMAT_VERSION = 1
+# 仅用作当前上下文的内部事实类型，不是 Core 线包编号
+HAND_MEMORY_KIND = 201
+HAND_MEMORY_CAPACITY = 64
 CARD_QUESTION = 38723936
 _CONTIGUOUS_ZONES = {Zone.DECK, Zone.HAND, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA}
 
@@ -102,12 +106,69 @@ class PublicObservationState:
         """初始化单局缓存；未知卡组数量不能被解释为零张"""
         self.deck_counts = list(deck_counts)
         self.deck_cards = [{}, {}]
+        # 每侧只保存其对手能证明的无位置手牌事实，零下界表示见过但不确定仍在手中
+        self.hand_memory = [{}, {}]
+        self.hand_sizes = [None, None]
         self.card_hints = {}
         self.player_hints = [{}, {}]
         self.reversed = False
         self.reversal_known = True
         self.complete = True
         self.remaining_composition_known = all(count is not None for count in deck_counts)
+
+    def _trim_hand_memory(self, holder):
+        memory = self.hand_memory[holder]
+        if len(memory) > HAND_MEMORY_CAPACITY:
+            # 先保留下界为正的身份，同级按卡密选择，不依赖实体遍历或手牌序号
+            keep = sorted(memory, key=lambda code: (memory[code] == 0, code))[:HAND_MEMORY_CAPACITY]
+            self.hand_memory[holder] = {code: memory[code] for code in keep}
+
+    def confirm_hand(self, holder, codes):
+        """同一次展示只能证明同时在手的最低份数，重复展示不能凭空增加副本"""
+        memory = self.hand_memory[holder]
+        for code, count in Counter(code for code in codes if code).items():
+            memory[code] = max(memory.get(code, 0), count)
+        self._trim_hand_memory(holder)
+
+    def enter_hand(self, holder, code=0):
+        if self.hand_sizes[holder] is not None:
+            self.hand_sizes[holder] += 1
+        if code:
+            memory = self.hand_memory[holder]
+            memory[code] = memory.get(code, 0) + 1
+            self._trim_hand_memory(holder)
+
+    def leave_hand(self, holder, visible_code=0):
+        memory = self.hand_memory[holder]
+        if visible_code:
+            if memory.get(visible_code, 0) > 1:
+                memory[visible_code] -= 1
+            else:
+                memory.pop(visible_code, None)
+        else:
+            for code in memory:
+                memory[code] = max(0, memory[code] - 1)
+        if self.hand_sizes[holder] is not None:
+            self.hand_sizes[holder] = max(0, self.hand_sizes[holder] - 1)
+            if self.hand_sizes[holder] == 0:
+                memory.clear()
+
+    def set_hand_size(self, holder, size):
+        """用公开手数校准漏报的减少，不据此推断是哪一张离手"""
+        previous = self.hand_sizes[holder]
+        self.hand_sizes[holder] = size
+        memory = self.hand_memory[holder]
+        if size == 0:
+            memory.clear()
+        elif memory:
+            missing = max(0, (previous or 0) - size, sum(memory.values()) - size)
+            if missing:
+                for code in memory:
+                    memory[code] = max(0, memory[code] - missing)
+
+    def hand_snapshot(self):
+        return tuple(tuple(sorted(memory.items(), key=lambda row: (row[1] == 0, row[0])))
+                     for memory in self.hand_memory)
 
     def card_hint(self, raw, kind, value, turn):
         """更新最新数值提示或说明引用；撤销只删除一份引用"""
@@ -271,7 +332,7 @@ class PublicObservationState:
                     for desc, hint in descriptions.items()
                 }
 
-    def set_deck_card(self, player, sequence, raw_code):
+    def set_deck_card(self, player, sequence, raw_code, visibility=3):
         """登记合法公开位置；未知身份清除旧事实，高位只表示表侧"""
         if player not in (0, 1):
             raise ValueError("invalid deck-top player")
@@ -282,7 +343,13 @@ class PublicObservationState:
             raise ValueError("public deck position is outside the logical deck")
         code = raw_code & 0x7FFFFFFF
         if code:
-            self.deck_cards[player][sequence] = KnownDeckCard(player, sequence, code, bool(raw_code & 0x80000000))
+            previous = self.deck_cards[player].get(sequence)
+            faceup = bool(raw_code & 0x80000000)
+            if previous is not None and previous.code == code:
+                if visibility != 3:
+                    faceup = previous.faceup
+                visibility |= previous.visibility
+            self.deck_cards[player][sequence] = KnownDeckCard(player, sequence, code, faceup, visibility)
         else:
             self.deck_cards[player].pop(sequence, None)
 
@@ -324,16 +391,17 @@ class PublicObservationState:
         self.deck_cards[player] = {seq: card for seq, card in self.deck_cards[player].items() if seq < size - count}
         return known
 
-    def move_deck_card(self, old_raw, new_raw, code, public):
+    def move_deck_card(self, old_raw, new_raw, code, public, *, visibility=3):
         """跟随单卡移动更新位置，只有已公开身份能进入位置记牌"""
         old_p, old_z, old_s, _ = LocationInfo.decode(old_raw)
         new_p, new_z, new_s, _ = LocationInfo.decode(new_raw)
         known = None
         if old_p in (0, 1) and old_z == Zone.DECK:
             known = self.deck_cards[old_p].pop(old_s, None)
-            if known is not None and code and known.code != code:
+            if public and known is not None and code and known.code != code:
+                if known.visibility == visibility == 3:
+                    self.complete = False
                 known = None
-                self.complete = False
             self.deck_cards[old_p] = {
                 seq - int(seq > old_s): replace(card, sequence=seq - int(seq > old_s))
                 for seq, card in self.deck_cards[old_p].items()
@@ -352,7 +420,7 @@ class PublicObservationState:
                 raise ValueError("deck exceeds fixed Core sequence capacity")
             if public or known is not None:
                 visible_code = code if public else known.code
-                self.set_deck_card(new_p, new_s, visible_code)
+                self.set_deck_card(new_p, new_s, visible_code, visibility if public else known.visibility)
         return known
 
     def snapshot(self):
@@ -382,6 +450,11 @@ def public_observation_descriptor():
         "hint_semantics": "exact_slot_or_explicit_parent_code_context",
         "lifetime": "core_notifications_and_client_instance_lifecycle",
         "reward_changes": False,
+        "opponent_hand_memory": {"kind": HAND_MEMORY_KIND, "capacity": HAND_MEMORY_CAPACITY,
+                                 "identity": "seat_visible_unordered_hand_lower_bounds",
+                                 "subtypes": ["1_certain", "2_previously_seen_unconfirmed"],
+                                 "layout": "no_location_global_group_after_prompt_and_chain",
+                                 "overflow": "certain_first_then_card_code_omit_tail"},
         "current_context": {
             "format_version": CURRENT_CONTEXT_FORMAT_VERSION,
             "capacity": CURRENT_CONTEXT_CAPACITY,

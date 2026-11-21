@@ -79,7 +79,7 @@ class ObservationProtocolMismatchError(ValueError):
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 15
+PROTOCOL_SCHEMA_REVISION = 16
 
 
 def _schema_descriptor(card_vocabulary):
@@ -460,9 +460,17 @@ def _protocol_descriptor_hash(descriptor):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _revision_15_descriptor(card_vocabulary):
+    """重建无独立手牌记忆事实的旧观测描述"""
+    descriptor = _schema_descriptor(card_vocabulary)
+    descriptor['schema_revision'] = 15
+    descriptor['public_observation'].pop('opponent_hand_memory')
+    return descriptor
+
+
 def _revision_14_schema_hash(card_vocabulary):
     """仅重建已知的108输入合同，其他结构差异仍会使旧哈希校验失败"""
-    descriptor = _schema_descriptor(card_vocabulary)
+    descriptor = _revision_15_descriptor(card_vocabulary)
     descriptor["schema_revision"] = 14
     public = dict(descriptor["public_observation"])
     public.pop("current_context", None)
@@ -474,20 +482,23 @@ def _revision_14_schema_hash(card_vocabulary):
 
 
 def observation_protocol_update(container, *, card_vocabulary=None):
-    """识别唯一允许接续的旧观测合同，保留源身份而不改写文件"""
+    """仅允许已知旧合同接续，保留来源身份而不改写文件"""
     vocabulary = card_vocabulary or get_default_card_vocabulary()
-    if (container.get("model_protocol_version") != MODEL_PROTOCOL_VERSION
-            or container.get("protocol_schema_revision") != 14
-            or container.get("protocol_schema_hash") != _revision_14_schema_hash(vocabulary)):
+    source = container.get('protocol_schema_revision')
+    if container.get('model_protocol_version') != MODEL_PROTOCOL_VERSION or source not in (14, 15):
+        return None
+    previous = (_revision_14_schema_hash(vocabulary) if source == 14 else
+                _protocol_descriptor_hash(_revision_15_descriptor(vocabulary)))
+    if container.get('protocol_schema_hash') != previous:
         return None
     return {
-        "source_protocol_schema_revision": 14,
+        "source_protocol_schema_revision": source,
         "source_protocol_schema_hash": container["protocol_schema_hash"],
         "runtime_protocol_schema_revision": PROTOCOL_SCHEMA_REVISION,
         "runtime_protocol_schema_hash": _protocol_descriptor_hash(_schema_descriptor(vocabulary)),
-        "status": "current_context_input_extension",
+        "status": "current_context_input_extension" if source == 14 else "position_free_public_hand_memory",
         "weights_preserved": True,
-        "message": "保留全部已有权重，补充当前询问与连锁观测；接续使用新采集样本，旧ONNX需从PTH重导出",
+        "message": "保留已有权重，接续使用无位置公开手牌记忆和当前上下文；旧ONNX需从PTH重导出",
     }
 
 
@@ -578,7 +589,7 @@ def validate_protocol_metadata(
     observation_update = observation_protocol_update(container, card_vocabulary=vocabulary)
     if observation_update and not allow_observation_updates:
         raise ObservationProtocolMismatchError(
-            f"{label} 使用旧观测合同 revision 14，当前为 {PROTOCOL_SCHEMA_REVISION}；"
+            f"{label} 使用旧观测合同 revision {observation_update['source_protocol_schema_revision']}，当前为 {PROTOCOL_SCHEMA_REVISION}；"
             "PTH可保留权重接续，ONNX须从对应PTH重新导出，精确轨迹须由完整原始捕获重新生成"
         )
     for key in (
