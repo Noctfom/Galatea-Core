@@ -294,7 +294,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.17.6"  # 当前本地版本号
+LOCAL_VERSION = "3.17.8"  # 当前本地版本号
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -2189,8 +2189,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
         if benchmark_results:
             st.markdown("#### 📈 " + _("竞技场基准结果", "Arena benchmark results"))
             st.caption(_(
-                "只有使用同一个计划文件、相同策略和相同温度的结果才适合直接横向比较；模型哈希用于确认比较对象未被同名文件替换。",
-                "Only results sharing the same plan, policy, and temperature are directly comparable; model hashes identify replaced files with the same name.",
+                "比较模型表现时，请对齐赛程、策略、温度、重试版本和候选版本。模型哈希可用于区分同名权重。",
+                "Compare models on the same schedule, policy, temperature, retry version and candidate version. Model hashes distinguish checkpoints with the same name.",
             ))
             benchmark_rows = []
             for result in benchmark_results:
@@ -2200,11 +2200,11 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                 policy_mode = inference_meta.get("policy_mode", "greedy")
                 policy_temperature = inference_meta.get("temperature")
                 if policy_mode == "training":
-                    policy_label = "Training T=1.0"
+                    policy_label = _("训练采样 T=1.0", "Training T=1.0")
                 elif policy_mode == "deployment":
-                    policy_label = f"Deployment T={policy_temperature:g}"
+                    policy_label = _("部署采样", "Deployment") + f" T={policy_temperature:g}"
                 else:
-                    policy_label = "Greedy"
+                    policy_label = _("贪心", "Greedy")
                 interval = summary.get("p0_win_rate_95ci", [0.0, 0.0])
                 benchmark_rows.append({
                     _("时间", "Time"): result.get("created_at", ""),
@@ -2215,6 +2215,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                     "P1": models_meta.get("p1", {}).get("name", ""),
                     "P1 SHA": str(models_meta.get("p1", {}).get("sha256", "rule"))[:12],
                     _("策略", "Policy"): policy_label,
+                    _("重试版本", "Retry version"): inference_meta.get("loop_policy", _("未记录", "Unrecorded")),
+                    _("候选版本", "Candidate version"): inference_meta.get("candidate_proposal", _("未记录", "Unrecorded")),
                     _("比分", "Score"): f"{summary.get('p0_wins', 0)}-{summary.get('p1_wins', 0)}",
                     _("P0 胜率", "P0 win rate"): f"{summary.get('p0_win_rate', 0.0):.1%}",
                     "95% CI": f"{interval[0]:.1%}～{interval[1]:.1%}",

@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from core_trajectory import (_iter_records, _json_bytes, canonical_response, decode_response,
-                             encode_response, file_sha256, observation_sha256)
+                             encode_response, file_sha256, observation_sha256, physical_opening_identity)
 from deck_trajectory import DECK_PROFILE_STATIC_OBSERVATION_KEYS
 from protocol_schema import get_current_protocol_metadata
 from selection_protocol import MATERIAL_PROPOSAL_REVISION
@@ -69,7 +69,8 @@ def source_info(path):
     for record, _ in _iter_records(path):
         if record['kind'] == 'header':
             header = record
-            digest = hashlib.sha256(_json_bytes({'reset': header['reset'], 'assets': header.get('assets')}))
+            digest = hashlib.sha256(physical_opening_identity(header))
+            opening_id = digest.hexdigest()
         elif record['kind'] in ('chunk', 'response', 'automatic_response'):
             value = ({'kind': 'chunk', 'hex': record['hex']} if record['kind'] == 'chunk' else
                      {'kind': 'response', 'actor': record['actor'],
@@ -87,7 +88,7 @@ def source_info(path):
             'duel_id': digest.hexdigest(), 'trace_id': header['trace_id'],
             'assets': header.get('assets'),
             'decks': header['decks'],
-            'opening_id': hashlib.sha256(_json_bytes({'reset': header['reset'], 'assets': header.get('assets')})).hexdigest(),
+            'opening_id': opening_id,
             'deck_ids': sorted({deck_identity(deck) for deck in header['decks'].values()}),
             'participants': _participants(canonical_header),
             'evaluation_only': session.get('purpose') == 'imitation_evaluation'}

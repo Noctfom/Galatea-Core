@@ -79,7 +79,7 @@ class ObservationProtocolMismatchError(ValueError):
 
 
 MODEL_PROTOCOL_VERSION = 4
-PROTOCOL_SCHEMA_REVISION = 16
+PROTOCOL_SCHEMA_REVISION = 17
 
 
 def _schema_descriptor(card_vocabulary):
@@ -460,9 +460,17 @@ def _protocol_descriptor_hash(descriptor):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _revision_16_descriptor(card_vocabulary):
+    """重建尚未按接收方投影选卡询问的观测描述"""
+    descriptor = _schema_descriptor(card_vocabulary)
+    descriptor['schema_revision'] = 16
+    descriptor['public_observation'].pop('selection_candidates')
+    return descriptor
+
+
 def _revision_15_descriptor(card_vocabulary):
     """重建无独立手牌记忆事实的旧观测描述"""
-    descriptor = _schema_descriptor(card_vocabulary)
+    descriptor = _revision_16_descriptor(card_vocabulary)
     descriptor['schema_revision'] = 15
     descriptor['public_observation'].pop('opponent_hand_memory')
     return descriptor
@@ -485,10 +493,14 @@ def observation_protocol_update(container, *, card_vocabulary=None):
     """仅允许已知旧合同接续，保留来源身份而不改写文件"""
     vocabulary = card_vocabulary or get_default_card_vocabulary()
     source = container.get('protocol_schema_revision')
-    if container.get('model_protocol_version') != MODEL_PROTOCOL_VERSION or source not in (14, 15):
+    if (container.get('model_protocol_version') != MODEL_PROTOCOL_VERSION
+            or type(source) is not int or source not in (14, 15, 16)):
         return None
-    previous = (_revision_14_schema_hash(vocabulary) if source == 14 else
-                _protocol_descriptor_hash(_revision_15_descriptor(vocabulary)))
+    if source == 14:
+        previous = _revision_14_schema_hash(vocabulary)
+    else:
+        describe = _revision_15_descriptor if source == 15 else _revision_16_descriptor
+        previous = _protocol_descriptor_hash(describe(vocabulary))
     if container.get('protocol_schema_hash') != previous:
         return None
     return {
@@ -496,9 +508,10 @@ def observation_protocol_update(container, *, card_vocabulary=None):
         "source_protocol_schema_hash": container["protocol_schema_hash"],
         "runtime_protocol_schema_revision": PROTOCOL_SCHEMA_REVISION,
         "runtime_protocol_schema_hash": _protocol_descriptor_hash(_schema_descriptor(vocabulary)),
-        "status": "current_context_input_extension" if source == 14 else "position_free_public_hand_memory",
+        "status": {14: "current_context_input_extension", 15: "position_free_public_hand_memory",
+                   16: "receiver_visible_selection_candidates"}[source],
         "weights_preserved": True,
-        "message": "保留已有权重，接续使用无位置公开手牌记忆和当前上下文；旧ONNX需从PTH重导出",
+        "message": "已有权重可接续使用，新的选卡观测按接收方生成，旧ONNX需从对应PTH重导出",
     }
 
 

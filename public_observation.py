@@ -450,6 +450,11 @@ def public_observation_descriptor():
         "hint_semantics": "exact_slot_or_explicit_parent_code_context",
         "lifetime": "core_notifications_and_client_instance_lifecycle",
         "reward_changes": False,
+        "selection_candidates": {
+            "private_prompt_types": [15, 20, 26],
+            "identity": "receiver_prompt_and_independently_visible_current_location",
+            "response": "actor_only_with_public_consequences_recorded_separately",
+        },
         "opponent_hand_memory": {"kind": HAND_MEMORY_KIND, "capacity": HAND_MEMORY_CAPACITY,
                                  "identity": "seat_visible_unordered_hand_lower_bounds",
                                  "subtypes": ["1_certain", "2_previously_seen_unconfirmed"],

@@ -4,6 +4,18 @@
 
 ---
 
+## [v3.17.8] - 2026-11-22
+
+- PPO counts repetitions from the learner's view of the board and prompt. Concealed substitutions and reordering preserve the count. A change to visible resources, card state or chain progress starts a new count. Repeated cancellations and deselections incur a 0.005 penalty from the fifth visit, and other repeated actions from the tenth
+- All three Arena modes and the model in a controlled WindBot duel retain independent P0 and P1 retry paths. Five completed returns to the same branch trigger a leaf-first retry. New benchmarks record `leaf_first_v2` and the candidate proposal version. Existing results retain the version information they contain
+- The release uses V4 observation revision 17 and checkpoint format 3. Compatible 3.17.7 PTH checkpoints support direct continuation, and ONNX artifacts matching the current resources remain compatible
+
+## [v3.17.7] - 2026-11-22
+
+- Fixed exposure of opposing hidden identities through Type 15/20/26 candidates. Atomic actions, combinations, signatures and history now use the acting seat's evidence. Both seats can observe the public consequences. See [selection prompts from the receiver's perspective](public_observations_en.md#3177-selection-prompts-from-the-receivers-perspective)
+- Observation revision 17 retains the V4 network, 116 inputs and Checkpoint Format 3. Known revision 14–16 PTH checkpoints can resume. Re-export older static ONNX models from the matching PTH
+- Complete raw captures can be re-encoded when all other assets match. Rebuilt traces retain the original opening and duel identities for canonical replay and imitation data preparation
+
 ## [v3.17.6] - 2026-11-21
 
 - Fixed repeated Type 23 sum responses and legal at-least sums discarded by an incorrect count minimum. A legal zero-card tribute is distinct from cancel. Pass 1 uses physical material indices; both the 5,000 proposals and the 120 model slots reserve representatives by optional cardinality. See [selection rules and limits](special_handling_en.md)

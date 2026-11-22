@@ -15,6 +15,7 @@ from selection_protocol import (
     CANCEL_RESPONSE,
     SELECTION_RESPONSE_MSGS,
     parse_selection_prompt,
+    project_selection_payload,
     validate_parsed_selection_response,
     validate_selection_response,
 )
@@ -652,7 +653,8 @@ def _macro_equivalence_key(card, brain, actor, *prompt_values):
 
 def _material_options(msg_type, payload, brain, limit, preferences, index_preferences, trigger):
     """分张数生成规范的完整响应，只让不同且合法的组合占用预算"""
-    prompt = parse_selection_prompt(msg_type, payload)
+    visible = project_selection_payload(msg_type, payload, getattr(brain, 'selection_candidate_code', None))
+    prompt = parse_selection_prompt(msg_type, visible)
     is_sum = msg_type == MSG_SELECT_SUM
     exact = is_sum and prompt['mode'] == 0
     tribute = msg_type == MSG_SELECT_TRIBUTE

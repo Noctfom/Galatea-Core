@@ -9,6 +9,7 @@ import traceback
 import json
 import os
 from copy import copy, deepcopy
+from functools import cache
 from game_constants import LocationInfo, Position, Zone, Phases
 from collections import defaultdict
 from card_reader import card_db
@@ -45,6 +46,7 @@ from protocol_v3_audit import (
     record_protocol_message,
 )
 from effect_slot_binding import resolve_runtime_effect_slot
+from selection_protocol import PRIVATE_CARD_SELECTION_MSGS, project_selection_payload
 from public_observation import PublicObservationState, location_key
 from event_history import (
     TransitionEventRecorder,
@@ -461,6 +463,7 @@ class DuelState:
         self.p1_extra = self.p1_initial_extra.copy()
         
         # 初始化基础状态
+        self.loop_public_progress = 0
         self.turn = 0
         self.phase = 0
         self.my_lp = 8000
@@ -490,6 +493,7 @@ class DuelState:
 
     def reset(self):
         """重置动态对局状态，并从稳定初始画像恢复剩余卡组"""
+        self.loop_public_progress = 0
         self.turn = 0
         self.phase = 0
         self.my_lp = 8000
@@ -576,6 +580,7 @@ class DuelState:
         self._transition_prompt_type = 0
         self._transition_prompt_payload = b''
         self._transition_prompt_actions = ()
+        self._selection_extra_codes = {}
         self._hint_notifications = {0: [], 1: []}
 
     def _update_prompt_context(self, msg_type, payload):
@@ -657,6 +662,78 @@ class DuelState:
         if controller not in (0, 1):
             return None
         return self.field_map[controller].get(location, {}).get(sequence)
+
+    def selection_candidate_code(self, viewer, msg_type, raw_location, wire_code):
+        """按询问接收者的证据取候选身份，暗手牌的无位置记忆不参与定位"""
+        controller, zone, sequence, position = LocationInfo.decode(raw_location)
+        if viewer not in (0, 1) or controller not in (0, 1):
+            return 0
+        if zone == Zone.GRAVE and self.public_observation.grave_blocked(viewer):
+            return 0
+        if controller == viewer:
+            return int(wire_code) & 0x7fffffff
+        if zone == Zone.DECK:
+            known = self.public_observation.deck_cards[controller].get(sequence)
+            return known.code if known and known.visibility & (1 << viewer) else 0
+        if zone == Zone.EXTRA and (controller, sequence) in self._selection_extra_codes:
+            return 0 if position & Position.FACEDOWN else self._selection_extra_codes[controller, sequence]
+        base_zone = zone & ~Zone.OVERLAY
+        if base_zone not in (Zone.MZONE, Zone.SZONE, Zone.GRAVE, Zone.REMOVED, Zone.EXTRA):
+            return 0
+        if (controller, base_zone) in self._chain_target_dirty_zones:
+            return 0
+        entry = self.field_map[controller].get(base_zone, {}).get(sequence)
+        if not entry:
+            return 0
+        if base_zone != Zone.GRAVE and not (entry.get('pos', 0) & Position.FACEUP):
+            return 0
+        if zone & Zone.OVERLAY:
+            # 只有附着于可见宿主且有明确层号的素材才能按公开查询恢复
+            materials = entry.get('overlay_codes', ())
+            if msg_type == 20 or base_zone != Zone.MZONE or position >= len(materials):
+                return 0
+            return int(materials[position]) & 0x7fffffff
+        if base_zone != Zone.GRAVE and position & Position.FACEDOWN:
+            return 0
+        return int(entry.get('code', 0)) & 0x7fffffff
+
+    def refresh_selection_extra(self, query_card, *, reuse=False):
+        """只校准本次询问涉及的对手额外区候选，额外库存不占用场面实体槽"""
+        if self._transition_prompt_type not in PRIVATE_CARD_SELECTION_MSGS:
+            return
+        for action in self._transition_prompt_actions:
+            if action.target_location_raw < 0:
+                continue
+            controller, zone, sequence, position = LocationInfo.decode(action.target_location_raw)
+            if (controller != 1 - self.decision_player or zone != Zone.EXTRA or position & Position.FACEDOWN):
+                continue
+            if reuse and (controller, sequence) in self._selection_extra_codes:
+                continue
+            row = query_card(controller, zone, sequence) or {}
+            faceup = row.get('pos', row.get('position', 0)) & Position.FACEUP
+            self._selection_extra_codes[controller, sequence] = int(row.get('code', 0)) & 0x7fffffff if faceup else 0
+
+    @staticmethod
+    def _project_selection_action(action, viewer, msg_type, resolve_code):
+        """用已校准的场面更新动作副本，原始回复和目标索引保持可提交"""
+        if (action.target_location_raw >= 0 and
+                action.operation_id in (ActionOperation.SELECT, ActionOperation.UNSELECT)):
+            code = resolve_code(viewer, msg_type, action.target_location_raw, action.code)
+            if code != action.code:
+                action.code = code
+                if msg_type == 20:
+                    action.desc_str = f"Tribute {code} (value={action.context_value})"
+                else:
+                    verb = "Unselect" if action.operation_id == ActionOperation.UNSELECT else "Select"
+                    action.desc_str = f"{verb} {code}"
+        elif action.code:
+            action.code = 0
+        if action.macro_target_locations or action.macro_target_codes is not None:
+            original_codes = action.macro_target_codes or ()
+            action.macro_target_codes = [
+                resolve_code(viewer, msg_type, location, original_codes[i] if i < len(original_codes) else 0)
+                for i, location in enumerate(action.macro_target_locations or ())
+            ]
 
     @staticmethod
     def _initial_chain_context(*, known=True):
@@ -924,7 +1001,8 @@ class DuelState:
         try:
             raw = canonical_response(bytes(response) if isinstance(response, memoryview) else response)
             validate_selection_response(msg_type, payload, raw)
-            prompt = parse_selection_prompt(msg_type, payload)
+            visible_payload = project_selection_payload(msg_type, payload, self.selection_candidate_code)
+            prompt = parse_selection_prompt(msg_type, visible_payload)
         except (TypeError, ValueError, OverflowError, struct.error):
             return None
         if raw[:4] == CANCEL_RESPONSE:
@@ -1006,6 +1084,9 @@ class DuelState:
         if self.transition_recorder.has_pending_boundary:
             self.transition_recorder.finalize(self._transition_state_digest())
         resolved_action = self._resolve_transition_action(msg_type, response, action)
+        if msg_type in PRIVATE_CARD_SELECTION_MSGS:
+            resolved_action = copy(resolved_action)
+            self._project_selection_action(resolved_action, actor, msg_type, self.selection_candidate_code)
         source_location = int(getattr(resolved_action, 'target_location_raw', -1))
         target_locations = list(
             getattr(resolved_action, 'macro_target_locations', None) or ()
@@ -1045,6 +1126,8 @@ class DuelState:
                     _protocol_coverage_category(msg_type),
                 )
             stream = io.BytesIO(msg_payload)
+            if msg_type != 1:
+                self._selection_extra_codes.clear()
             self._update_prompt_context(msg_type, msg_payload)
             
             # --- 状态维护 ---
@@ -1150,6 +1233,7 @@ class DuelState:
                             self._reload_counts[player][zone] = max(0, self._reload_counts[player][zone] + delta)
 
                 if (old_c, old_l) != (new_c, new_l):
+                    self.loop_public_progress += 1
                     if old_l == Zone.HAND and old_c in (0, 1):
                         self.public_observation.leave_hand(old_c, visible_code if audience & (1 << (1 - old_c)) else 0)
                     if new_l == Zone.HAND and new_c in (0, 1):
@@ -1160,6 +1244,8 @@ class DuelState:
                     host_l = old_l & ~0x80
                     if old_c in [0, 1] and host_l != 0 and old_s in self.field_map[old_c][host_l]:
                         host = self.field_map[old_c][host_l][old_s]
+                        # 素材层已移动，等待公开查询重建候选所用的层号和身份
+                        host.pop('overlay_codes', None)
                         if 'overlays' in host and len(host['overlays']) > old_pos:
                             host['overlays'].pop(old_pos) # 拔除指定层的素材
                 elif old_c in [0, 1] and old_l != 0 and old_s in self.field_map[old_c][old_l]:
@@ -1170,6 +1256,7 @@ class DuelState:
                     host_l = new_l & ~0x80
                     if new_c in [0, 1] and host_l != 0 and new_s in self.field_map[new_c][host_l]:
                         host = self.field_map[new_c][host_l][new_s]
+                        host.pop('overlay_codes', None)
                         if 'overlays' not in host: host['overlays'] = []
                         host['overlays'].insert(new_pos, pure_code) # new_pos 被 C++ 挪用成了素材排序号
                 elif new_c in [0, 1] and new_l != 0:
@@ -1200,6 +1287,8 @@ class DuelState:
 
             elif msg_type == 53: # POS_CHANGE
                 code, c, l, s, prev, new_pos = struct.unpack('<IBBBB B', stream.read(9))
+                if prev != new_pos and l in (Zone.MZONE, Zone.SZONE):
+                    self.loop_public_progress += 1
                 if s in self.field_map[c][l]: self.field_map[c][l][s]['pos'] = new_pos
                 pure_code = code & 0x7FFFFFFF
                 for target in self._iter_chain_targets():
@@ -1215,7 +1304,9 @@ class DuelState:
                 self._chain_target_dirty_zones.update((location_key(first)[:2], location_key(second)[:2]))
 
             elif msg_type == 56: # FIELD_DISABLED
-                self.disabled_field_mask = struct.unpack('<I', stream.read(4))[0]
+                mask = struct.unpack('<I', stream.read(4))[0]
+                self.loop_public_progress += int(mask != self.disabled_field_mask)
+                self.disabled_field_mask = mask
 
             elif msg_type == 70: # MSG_CHAINING (严格匹配 C++ 的 16 字节)
                 code = struct.unpack('<I', stream.read(4))[0]
@@ -1251,6 +1342,7 @@ class DuelState:
                     'ct': ct,
                     **self._initial_chain_context(),
                 })
+                self.loop_public_progress += 1
                 if self.audit_enabled:
                     record_protocol_chain(
                         code=code,
@@ -1305,6 +1397,7 @@ class DuelState:
                 p = struct.unpack('<B', stream.read(1))[0]
                 count = struct.unpack('<B', stream.read(1))[0]
                 if count:
+                    self.loop_public_progress += 1
                     # 抽卡不逐张发送 MOVE，旧卡组位置不能继续绑定后来补入的卡
                     self._invalidate_chain_target_zone(p, Zone.DECK)
                 hand_start = self._reload_counts.get(p, {}).get(Zone.HAND, len(self.field_map[p][Zone.HAND]))
@@ -1332,6 +1425,7 @@ class DuelState:
             elif msg_type in [91, 92, 94, 100]: # 伤害 / 回复 / LP直接更新 / 支付LP
                 # [录像修复 A] 加上 '<' 强制对齐，并监听 91 和 92！
                 p, val = struct.unpack('<BI', stream.read(5))
+                previous_lp = self.my_lp if p == 0 else self.op_lp
                 if p == 0:
                     if msg_type == 91: self.my_lp = max(0, self.my_lp - val)
                     elif msg_type == 92: self.my_lp += val
@@ -1342,15 +1436,18 @@ class DuelState:
                     elif msg_type == 92: self.op_lp += val
                     elif msg_type == 100: self.op_lp = max(0, self.op_lp - val)
                     else: self.op_lp = val
+                self.loop_public_progress += int(previous_lp != (self.my_lp if p == 0 else self.op_lp))
 
             # [新增] 指示物雷达 (101: 加, 102: 减)
             elif msg_type == 101: 
                 ctype, c, l, s, count = struct.unpack('<HBBBH', stream.read(7))
+                self.loop_public_progress += int(count > 0)
                 if c in [0,1] and s in self.field_map[c].get(l, {}):
                     self.field_map[c][l][s]['counters'] = self.field_map[c][l][s].get('counters', 0) + count
 
             elif msg_type == 102: 
                 ctype, c, l, s, count = struct.unpack('<HBBBH', stream.read(7))
+                self.loop_public_progress += int(count > 0)
                 if c in [0,1] and s in self.field_map[c].get(l, {}):
                     self.field_map[c][l][s]['counters'] = max(0, self.field_map[c][l][s].get('counters', 0) - count)
                     
@@ -1398,7 +1495,13 @@ class DuelState:
                         for seq in self.field_map[p][loc]:
                             self.field_map[p][loc][seq]['used_effect_mask'] = 0
 
-            elif msg_type == 41: self.phase = struct.unpack('<H', stream.read(2))[0]
+            elif msg_type == 41:
+                phase = struct.unpack('<H', stream.read(2))[0]
+                self.loop_public_progress += int(phase != self.phase)
+                self.phase = phase
+            elif msg_type in (61, 63, 65, 110):
+                # 召唤成功或实际攻击宣言是双方可见的进展，即使下次询问时场面相同
+                self.loop_public_progress += 1
 
             # 决策边界先登记，普通 Core 消息则归入当前转移事件
             if msg_type == 1:
@@ -1461,6 +1564,8 @@ class DuelState:
         """
         self.current_valid_actions = []
         stream.seek(0)
+        if msg_type in PRIVATE_CARD_SELECTION_MSGS:
+            stream = io.BytesIO(project_selection_payload(msg_type, stream.read(), self.selection_candidate_code))
         
         try:
             # 1. MSG_SELECT_IDLECMD (11)
@@ -2272,6 +2377,8 @@ class DuelState:
         if env is not None:
             self.sync_active_field(env)
             self._refresh_chain_target_identities()
+            if self._transition_prompt_type in PRIVATE_CARD_SELECTION_MSGS:
+                self.refresh_selection_extra(env.query_card_state, reuse=True)
 
         # 查询校准可能补齐仅由 Core query 暴露的变化，必须在其后结算事件
         if self.transition_recorder.has_pending_boundary:
@@ -2440,6 +2547,9 @@ class DuelState:
         # --- [核心步骤] 匹配 Action 指针 ---
         # 把 Action 里的 "Loc数值" 翻译成 "实体列表第几项"
         final_actions = []
+        # 同一快照中多个组合或撤选动作会重复引用同一物理素材
+        selection_code = (cache(self.selection_candidate_code)
+                          if self._transition_prompt_type in PRIVATE_CARD_SELECTION_MSGS else None)
         for act in self.current_valid_actions:
             # 浅拷贝保留完整动作协议字段，再单独复制可变列表
             new_act = copy(act)
@@ -2452,6 +2562,9 @@ class DuelState:
             ):
                 value = getattr(act, list_field, None)
                 setattr(new_act, list_field, list(value) if value is not None else None)
+
+            if selection_code is not None and new_act.action_type == self._transition_prompt_type:
+                self._project_selection_action(new_act, self.decision_player, new_act.action_type, selection_code)
             
             # 2. 单目标指针映射 (绝对不能删！防止 GPU 越界 NaN 的核心)
             if new_act.target_entity_idx >= 0 and new_act.index != -1:
@@ -2479,6 +2592,7 @@ class DuelState:
         snap = GameSnapshot(
             global_data=global_feat,
             entities=entities,
+            loop_public_progress=self.loop_public_progress,
             valid_actions=final_actions,
             p0_deck_codes=self.p0_deck.copy(),
             p0_extra_codes=self.p0_extra.copy(),

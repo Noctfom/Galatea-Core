@@ -594,8 +594,8 @@ currently encodable choices have been tried. Repeated “special summon → mate
 therefore tries another material-layer choice before abandoning the summon entry.
 
 First cancellations and progressing Select/Unselect sequences are not failures by themselves; the
-engine must actually return to the same prompt. Board, LP, card-state or public-hint changes reset
-the records. Raw prompts, parent branches and response identities are retained, then remapped to
+engine must actually return to the same prompt. Each seat keeps its own path while its opponent acts. Concealed card reordering preserves that path. Visible changes to resources, cards or chain state start a fresh count on the seat's next decision.
+The visible prompt, its purpose, parent branches and response identities are retained, then remapped to
 current indices after macro-pool reordering. No answers are inserted. Engine Retry remains a hard
 rejection; exhausted soft restrictions retain the least-visited legal choice. This orders attempts
 in the actual duel without rewinding Core, simulating futures or adding queries/model forwards.
@@ -608,7 +608,7 @@ All modes share the same encoder, masks, macro pool, and response packer and nev
 “Training distribution” describes the base T=1 sampler. Once protection triggers, sampling uses the
 remaining choices, so a protected Arena sequence is not an exact main-training action replay.
 Controlled WindBot duels share this guard on the native model side, without controlling WindBot.
-Main training, rewards and imitation optimizers remain unchanged.
+PPO uses the same visible-board comparison. Within the same board and candidate menu, the fifth and subsequent visits to the same cancel or deselect action incur a 0.005 penalty. For other actions the penalty starts on the tenth visit. All legal candidates still participate in policy sampling.
 
 Deck-source syntax is `weighted`, `physical:<pool>`, `virtual:<pool>`, or
 `deck:<physical-pool>/<deck-name>`. P1 also accepts `same_range` and `same_deck`.
@@ -620,8 +620,7 @@ play. Results include model hashes, per-game outcomes, abort rate, seat splits, 
 temperature, and a 95% Wilson
 interval for P0 win rate. Plans are under `arena_benchmarks/plans/` and results under
 `arena_benchmarks/results/`; changed deck contents invalidate an old plan.
-New results also record `loop_policy=leaf_first_v1` and threshold5. Older results lack these fields;
-keep retry policies separate when comparing. The seed fixes the
+New results record `loop_policy=leaf_first_v2`, a threshold of five and the candidate proposal version. When comparing results, distinguish v2, v1 and files that predate the retry-policy field. The seed fixes the
 schedule and framework RNG sources, but different hardware or inference backends may still have
 low-level numerical nondeterminism.
 

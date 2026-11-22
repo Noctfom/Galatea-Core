@@ -124,6 +124,32 @@ def runtime_asset_identity(env):
     }
 
 
+def physical_opening_identity(header):
+    """原始捕获与重编码轨迹使用同一发牌身份，避免同局重复或跨训练评测集"""
+    assets = header.get('assets')
+    origin = header.get('ingress') or {}
+    if not isinstance(origin, dict):
+        raise ValueError('invalid trajectory origin')
+    rebuild = origin.get('observation_rebuild')
+    if rebuild is not None:
+        if (header.get('source') != 'link' or origin.get('kind') != 'link' or not isinstance(rebuild, dict)
+                or not isinstance(assets, dict) or not isinstance(assets.get('protocol'), dict)):
+            raise ValueError('invalid raw capture observation rebuild record')
+        protocol = dict(assets['protocol'])
+        source_revision = rebuild.get('source_protocol_schema_revision')
+        runtime_revision = protocol.get('protocol_schema_revision')
+        if (type(source_revision) is not int or type(runtime_revision) is not int
+                or not 0 < source_revision < runtime_revision
+                or len(_decode_hex(rebuild.get('source_protocol_schema_hash'), 32)) != 32):
+            raise ValueError('invalid source observation identity in rebuilt capture')
+        for key in ('protocol_schema_revision', 'protocol_schema_hash'):
+            if rebuild.get('runtime_' + key) != protocol.get(key) or key not in protocol:
+                raise ValueError('rebuilt capture observation identity disagrees with trajectory')
+            protocol[key] = rebuild['source_' + key]
+        assets = dict(assets, protocol=protocol)
+    return _json_bytes({'reset': header['reset'], 'assets': assets})
+
+
 def encode_response(response):
     """显式区分整数与字节响应，禁止对象反序列化和超过 Core 边界的数据"""
     if isinstance(response, numbers.Integral) and not isinstance(response, bool):

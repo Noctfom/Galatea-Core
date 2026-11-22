@@ -8,10 +8,12 @@ import numpy as np
 import torch
 import struct
 import traceback
+from dataclasses import dataclass, field
 import torch.nn.functional as F
 
 import rule_bot
 from action_candidates import (
+    DecisionVisits,
     MACRO_ACTION_MSGS,
     MODEL_CANDIDATE_PROPOSAL,
     MODEL_ACTION_MSGS,
@@ -20,6 +22,7 @@ from action_candidates import (
 )
 from galatea_env import GalateaEnv
 from gamestate import MessageParser, DuelState
+from selection_protocol import project_selection_payload
 from core_message_protocol import CORE_MESSAGE_PROTOCOL, is_empty_chain_prompt, decision_player_from_message
 from ai_bot import AiBot
 from feature_encoder import MAX_CARDS, MAX_ACTIONS
@@ -45,7 +48,7 @@ from arena_benchmark import (
 
 
 ARENA_LOOP_SOFT_BAN_THRESHOLD = 5
-ARENA_LOOP_POLICY = 'leaf_first_v1'
+ARENA_LOOP_POLICY = 'leaf_first_v2'
 ARENA_POLICY_GREEDY = "greedy"
 ARENA_POLICY_TRAINING = "training"
 ARENA_POLICY_DEPLOYMENT = "deployment"
@@ -58,19 +61,13 @@ MIN_ARENA_TEMPERATURE = 0.05
 MAX_ARENA_TEMPERATURE = 5.0
 
 
-def _freeze_arena_state(value):
-    """冻结已有公开快照，不追加引擎查询或把历史步号当成场面进展"""
-    if value is None or isinstance(value, (str, int, float, bytes)):
-        return value
-    if value is None or isinstance(value, (str, int, float, bytes)):
-        return value
-    if isinstance(value, dict):
-        return tuple((key, _freeze_arena_state(item)) for key, item in sorted(value.items()))
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_arena_state(item) for item in value)
-    if hasattr(value, '__dict__'):
-        return _freeze_arena_state(vars(value))
-    return value
+@dataclass
+class _ArenaRetrySeat:
+    """同一座位在当前可见场面已尝试的分支"""
+    path: list = field(default_factory=list)
+    cycles: dict = field(default_factory=dict)
+    soft_bans: dict = field(default_factory=dict)
+    current: tuple = ()
 
 
 class ArenaBranchRetry:
@@ -83,60 +80,36 @@ class ArenaBranchRetry:
         self.bans = bans if bans is not None else {}
         self.retry_bans = retry_bans if retry_bans is not None else {}
         self.threshold = threshold
-        self._world = None
-        self._paths = {}
-        self._cycles = {}
-        self._soft_bans = {}
-        self._current = {}
+        self.visits = DecisionVisits()
+        self._seats = {}
 
     @staticmethod
     def metadata():
         """标明部署防循环策略，旧基准结果仍保留原策略身份"""
         return {'loop_policy': ARENA_LOOP_POLICY, 'loop_repeat_threshold': ARENA_LOOP_SOFT_BAN_THRESHOLD}
 
-    @staticmethod
-    def _world_key(snapshot):
-        global_data = {key: value for key, value in vars(snapshot.global_data).items()
-                       if key not in ('to_play', 'decision_player')}
-        return (_freeze_arena_state(global_data), _freeze_arena_state(snapshot.entities),
-                _freeze_arena_state(snapshot.chain_stack), _freeze_arena_state(snapshot.history_stack),
-                _freeze_arena_state(getattr(snapshot, 'public_hints', ())),
-                _freeze_arena_state(getattr(snapshot, 'known_deck_cards', ())),
-                _freeze_arena_state(getattr(snapshot, 'public_state_flags', ())))
-
-    @staticmethod
-    def _action_key(action):
-        """显式响应的身份不依赖宏池临时序号，普通动作保留原始索引"""
-        explicit = bool(action.decision_bytes) or action.decision_value is not None
-        return _freeze_arena_state({key: value for key, value in vars(action).items()
-            if key != 'desc_str' and not (explicit and key == 'index')})
-
-    def _publish_bans(self, state_key, snapshot, scope):
-        blocked = self._soft_bans.get(scope, set())
+    def _publish_bans(self, state_key, blocked):
         if not blocked:
             self.bans.pop(state_key, None)
             return
-        indices = {index for index, action in enumerate(snapshot.valid_actions[:MAX_ACTIONS])
-                   if self._action_key(action) in blocked}
+        indices = {index for index, token in enumerate(state_key.actions[:MAX_ACTIONS]) if token in blocked}
         if indices:
             self.bans[state_key] = indices
         else:
             self.bans.pop(state_key, None)
 
-    def enter(self, state_key, snapshot, *, payload=None, engine_retry=False):
+    def enter(self, state_key, snapshot=None, *, payload=None, engine_retry=False):
         """只把被引擎接受后回到相同候选状态的路径记为闭合回退"""
-        world = self._world_key(snapshot)
-        if world != self._world:
-            self._paths.clear()
-            self._cycles.clear()
-            self._soft_bans.clear()
-            self._current.clear()
-            self.bans.clear()
-            self._world = world
-        player = snapshot.global_data.to_play
-        path = self._paths.setdefault(player, [])
-        # 原始提示保留完整引擎候选，宏池重排或抽样变化不能把取消回退伪装成新状态
-        base = state_key if payload is None else (state_key[0], player, bytes(payload))
+        player = state_key.player
+        if self.visits.enter(state_key):
+            self._seats[player] = _ArenaRetrySeat()
+            for old_key in tuple(self.bans):
+                if old_key.player == player:
+                    del self.bans[old_key]
+        seat = self._seats[player]
+        path = seat.path
+        # 生产入口提供行动方所见的完整询问，宏池重排时仍能识别同一分支
+        base = state_key.menu if payload is None else (state_key.msg_type, state_key.prompt, bytes(payload))
         changes = []
         if engine_retry:
             # 引擎拒绝仍由原硬禁用处理，不能消耗部署软重试额度
@@ -148,17 +121,17 @@ class ArenaBranchRetry:
                 # 连续效果可以合法重复同一选择提示，只有取消/撤选证据或返回主菜单才计回退
                 returned = base[0] in (10, 11) or any(node['backtrack'] for node in path[position:])
                 signature = (path[position]['scope'], path[position]['token'])
-                if signature not in self._cycles and len(self._cycles) >= self.MAX_CYCLES:
-                    self._cycles.clear()
-                count = self._cycles.get(signature, 0) + 1 if returned else 0
+                if signature not in seat.cycles and len(seat.cycles) >= self.MAX_CYCLES:
+                    seat.cycles.clear()
+                count = seat.cycles.get(signature, 0) + 1 if returned else 0
                 if returned:
-                    self._cycles[signature] = count
+                    seat.cycles[signature] = count
                 if count >= self.threshold:
-                    self._cycles[signature] = 0
+                    seat.cycles[signature] = 0
                     # 最深节点的当前候选耗尽后才向父入口传播，不修改首次正常取消
                     for depth in range(len(path) - 1, position - 1, -1):
                         node = path[depth]
-                        banned = self._soft_bans.setdefault(node['scope'], set())
+                        banned = seat.soft_bans.setdefault(node['scope'], set())
                         banned.add(node['token'])
                         self.bans[node['key']] = {index for index, token in enumerate(node['tokens']) if token in banned}
                         changes.append({'msg_type': node['key'][0], 'action_index': node['action'],
@@ -171,28 +144,30 @@ class ArenaBranchRetry:
         if len(path) >= self.MAX_PATH:
             path.clear()
         scope = (base, tuple((node['base'], node['token']) for node in path))
-        self._current[player] = (base, scope)
-        self._publish_bans(state_key, snapshot, scope)
+        seat.current = (base, scope)
+        self._publish_bans(state_key, seat.soft_bans.get(scope))
         return changes
 
     def record(self, state_key, snapshot, selected, logits, retry_bans=()):
         """记住实际可编码的候选与已提交动作，不建立模拟分支或恢复引擎"""
         count = min(len(snapshot.valid_actions), logits.numel())
         allowed = (torch.isfinite(logits[:count]) & (logits[:count] > -64000.0)).nonzero().flatten().tolist()
-        path = self._paths.setdefault(snapshot.global_data.to_play, [])
-        base, scope = self._current[snapshot.global_data.to_play]
-        tokens = tuple(self._action_key(action) for action in snapshot.valid_actions[:count])
-        path.append({'key': state_key, 'base': base, 'scope': scope, 'action': selected,
+        seat = self._seats[state_key.player]
+        base, scope = seat.current
+        tokens = state_key.actions[:count]
+        self.visits.record(state_key, selected)
+        seat.path.append({'key': state_key, 'base': base, 'scope': scope, 'action': selected,
             'token': tokens[selected], 'tokens': tokens,
             'available': {tokens[index] for index in allowed if index not in retry_bans},
             'backtrack': snapshot.valid_actions[selected].operation_id in
                 (ActionOperation.CANCEL, ActionOperation.UNSELECT, ActionOperation.NO),
             'description': snapshot.valid_actions[selected].desc_str})
 
-    def release_current(self, state_key, snapshot):
+    def release_current(self, state_key, snapshot=None):
         """所有可编码候选都已尝试时恢复软选择，硬拒绝仍由引擎Retry名单约束"""
-        _, scope = self._current[snapshot.global_data.to_play]
-        self._soft_bans.pop(scope, None)
+        seat = self._seats[state_key.player]
+        _, scope = seat.current
+        seat.soft_bans.pop(scope, None)
         self.bans.pop(state_key, None)
 
 
@@ -309,12 +284,12 @@ def select_arena_action_index(
     return selected_index, ignored_exhaustive_loop_bans
 
 
-def describe_arena_loop_state(snapshot, msg_type, state_key, loop_tracker):
+def describe_arena_loop_state(snapshot, msg_type, counts):
     """生成防循环软禁用耗尽时的候选与重复次数摘要"""
     details = []
     for index, action in enumerate(snapshot.valid_actions):
         description = action.desc_str or f"Type={action.action_type}"
-        count = loop_tracker.get((state_key, index), 0)
+        count = counts.get(index, 0)
         details.append(f"[{index}] {description}×{count}")
     return f"MsgType={msg_type} | " + "; ".join(details[:12])
 
@@ -650,7 +625,6 @@ class ModelArena:
         action_history = []
 
         # 合法死锁断路器
-        loop_tracker = {}
         retry_bans_for_state = {}
         loop_bans_for_state = {}
         branch_retry = ArenaBranchRetry(loop_bans_for_state, retry_bans_for_state)
@@ -744,9 +718,7 @@ class ModelArena:
                 consecutive_retries = 0
                 current_step_ignore_list.clear()
                 if msg_type in [40, 41]:
-                    loop_tracker.clear()
                     retry_bans_for_state.clear()
-                    loop_bans_for_state.clear()
             elif msg_type in INTERACTION_MSGS:
                 if consecutive_retries == 0:
                     current_step_ignore_list.clear()
@@ -875,8 +847,9 @@ class ModelArena:
                             raise RuntimeError(f"model received no valid actions for message {msg_type}")
 
                         current_state_key = build_action_state_key(snap, msg_type)
-                        report_arena_branch_retry(branch_retry.enter(current_state_key, snap,
-                            payload=msg[1:], engine_retry=engine_retry))
+                        report_arena_branch_retry(branch_retry.enter(current_state_key,
+                            payload=project_selection_payload(msg_type, msg[1:], brain.selection_candidate_code),
+                            engine_retry=engine_retry))
                         if current_state_key != last_model_state_key:
                             last_model_state_key = current_state_key
                             current_step_ignore_list.clear()
@@ -911,13 +884,7 @@ class ModelArena:
                                 valid_logits,
                                 retry_bans_for_state.get(current_state_key, set()),
                                 loop_bans_for_state.get(current_state_key, set()),
-                                loop_counts={
-                                    index: loop_tracker.get(
-                                        (current_state_key, index),
-                                        0,
-                                    )
-                                    for index in range(valid_count)
-                                },
+                                loop_counts=branch_retry.visits.counts_for(current_state_key),
                                 policy_mode=self.policy_mode,
                                 temperature=(
                                     self.policy_temperature
@@ -927,7 +894,7 @@ class ModelArena:
                                 generator=policy_generator,
                             )
                             if ignored_loop_bans:
-                                branch_retry.release_current(current_state_key, snap)
+                                branch_retry.release_current(current_state_key)
                                 fallback_action = snap.valid_actions[sel_idx]
                                 fallback_description = (
                                     fallback_action.desc_str
@@ -937,11 +904,9 @@ class ModelArena:
                                     "⚠️ [Arena] 防循环软禁用已覆盖全部候选，"
                                     "本次改选重复次数最低的合法候选\n"
                                     f"   ↳ 本次选择: [{sel_idx}] {fallback_description}\n"
-                                    f"   ↳ {describe_arena_loop_state(snap, msg_type, current_state_key, loop_tracker)}"
+                                    f"   ↳ {describe_arena_loop_state(snap, msg_type, branch_retry.visits.counts_for(current_state_key))}"
                                 )
 
-                        loop_key = (current_state_key, sel_idx)
-                        loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
                         branch_retry.record(current_state_key, snap, sel_idx, valid_logits,
                             retry_bans_for_state.get(current_state_key, ()))
 

@@ -244,9 +244,13 @@ capture.finish(winner=winner, reason=reason, core_terminal=real_msg_win_seen)
 完整服务端/本地桥接可使用 `visibility='full_core'`，额外传入：`reset`（实际 Core seed
 或完整 seed_sequence、双座位实际注入列表、LP/起手/抽牌/规则位、initial_position）、
 `decks`（双方稳定 Main/Extra，Side可留在元数据但不进入单局 Encoder）、`assets`
-（在真正采集环境调用 `runtime_asset_identity(env)` 的原始结果）。不能在导入时以当前
-本地摘要替代历史摘要。只有资产完全一致、原始块逐字节相同、响应/玩家/终局顺序一致，
-再经独立规范重放，才可能通过动作标签门禁。单方捕获仅诊断，不补齐隐藏数据。
+（在采集环境调用 `runtime_asset_identity(env)` 的原始结果）。转换会逐字节核对内核输出，
+逐条核对行动方、响应及真实终局。单方捕获只能用于诊断。
+
+3.17.7 支持从已知观测修订 14、15、16 的完整原始捕获重新编码。内核、卡库、已载入的
+Lua 与卡片数据、精确词表及语义资源必须与录制时匹配。新轨迹在 `ingress.observation_rebuild`
+记录源和目标观测身份，并与原始捕获共用开局和对局标识。已编码的规范轨迹及 BC 缓存
+仍按各自的观测身份核验。评测来源在重编码后仍用于评测。
 
 `player_ids` 是来源服务命名空间内稳定匿名ID，不是昵称、座位、模型UUID的手工改名。
 YRP可用 `--p0-player-id/--p1-player-id` 追加来源标识；Link导入不覆写原捕获身份。

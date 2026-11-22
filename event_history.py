@@ -16,6 +16,7 @@ from data_types import (
 )
 from game_constants import Zone
 from core_message_protocol import parse_card_hint
+from selection_protocol import PRIVATE_CARD_SELECTION_MSGS
 
 
 TRANSITION_EVENT_FORMAT_VERSION = 2
@@ -193,6 +194,9 @@ class TransitionEventRecorder:
             getattr(action, "summon_method_id", SummonMethod.NONE)
         )
         actor_mask = 1 << actor
+        if prompt_type in PRIVATE_CARD_SELECTION_MSGS:
+            # 私发的点选结果只交给响应者，后续双方可见的公告独立进入事件和场面
+            source_visibility_mask = target_visibility_mask = actor_mask
         intent_visibility = (
             ALL_PLAYERS_VISIBILITY_MASK
             if operation_id in _PUBLIC_INTENT_OPERATIONS
@@ -308,7 +312,8 @@ class TransitionEventRecorder:
             pending.result_flags |= int(TransitionResultFlag.CHAIN_DISABLED)
 
         # 召唤与连锁消息会公开来源卡；只在编号确实匹配时提升可见性
-        if msg_type in _PUBLIC_SOURCE_MESSAGES and len(payload) >= 4:
+        if (msg_type in _PUBLIC_SOURCE_MESSAGES and len(payload) >= 4
+                and pending.prompt_type not in PRIVATE_CARD_SELECTION_MSGS):
             revealed_code = int.from_bytes(payload[:4], "little") & 0x7FFFFFFF
             if revealed_code and (
                 pending.source_code == 0 or pending.source_code == revealed_code
@@ -430,6 +435,9 @@ def mask_transition_event_for_player(event, player_id):
             summon_method_id=int(SummonMethod.NONE),
             effect_slot=-1,
         )
+        if event.prompt_type in PRIVATE_CARD_SELECTION_MSGS:
+            private_flags = TransitionResultFlag.CANCELLED | TransitionResultFlag.SELECTION_FINISHED
+            updates['result_flags'] = event.result_flags & ~int(private_flags)
     if not (event.source_visibility_mask & player_mask):
         updates.update(source_code=0, source_location_raw=-1)
     if not (event.target_visibility_mask & player_mask):

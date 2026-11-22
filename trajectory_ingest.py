@@ -224,6 +224,28 @@ def _offline_candidate_snapshot(interpreter, env, msg, rng):
 prepare_canonical_decision_snapshot = _offline_candidate_snapshot
 
 
+def _capture_observation_rebuild(recorded, current):
+    """完整原始捕获只允许观测修订变化，其他原生和模型资产逐项相等"""
+    if recorded == current:
+        return None
+    from protocol_schema import observation_protocol_update
+    old = recorded.get('protocol')
+    active = current['protocol']
+    identity_fields = ('protocol_schema_revision', 'protocol_schema_hash')
+    differences = sorted(key for key in recorded.keys() | current.keys()
+                         if key != 'protocol' and recorded.get(key) != current.get(key))
+    if isinstance(old, dict):
+        differences.extend('protocol.' + key for key in sorted(old.keys() | active.keys())
+                           if key not in identity_fields and old.get(key) != active.get(key))
+    if differences:
+        raise ValueError('original Link capture assets differ: ' + ', '.join(differences))
+    update = observation_protocol_update(old) if isinstance(old, dict) else None
+    if (not update or recorded.keys() != current.keys() or old.keys() != active.keys()
+            or any(active[key] != update['runtime_' + key] for key in identity_fields)):
+        raise ValueError('original Link capture assets have an unknown observation contract')
+    return {prefix + key: update[prefix + key] for prefix in ('source_', 'runtime_') for key in identity_fields}
+
+
 def _convert(reset, decks, origin, output_root, *, link_source=None, responses=None,
              expected_assets=None, timeout_seconds=300, _expert_sink=None, _verify_replay=True):
     """用唯一解释器驱动公开 Core，逐条提交原响应并写出可独立重放的规范轨迹"""
@@ -243,8 +265,10 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
     try:
         env = GalateaEnv()
         assets = runtime_asset_identity(env)
-        if expected_assets is not None and expected_assets != assets:
-            raise ValueError('original Link Core/script/CDB/protocol assets do not match local assets')
+        if link_source is not None and expected_assets is not None:
+            rebuild = _capture_observation_rebuild(expected_assets, assets)
+            if rebuild:
+                origin = dict(origin, observation_rebuild=rebuild)
         raw = reset_core_from_metadata(env, reset)
         header = {'source': origin['kind'], 'visibility': 'omniscient_local_core',
                   'core_message_protocol': CORE_MESSAGE_PROTOCOL, 'framework_version': framework_version(),
@@ -402,7 +426,8 @@ def import_link_capture(path, output_root=DEFAULT_INGEST_ROOT, *, timeout_second
     with _freeze_source(path) as frozen:
         report = inspect_link_capture(frozen)
         header, footer = report['header'], report['footer']
-        if header['visibility'] != 'full_core' or footer['truncated'] or footer['errors']:
+        if (header['visibility'] != 'full_core' or not footer['core_terminal']
+                or footer['truncated'] or footer['errors']):
             return {**report, 'converted': False, 'limitations': ['partial_or_invalid_link_capture']}
         frozen.seek(0)
         digest = hashlib.sha256()

@@ -56,6 +56,7 @@ from public_observation import (
     CURRENT_CONTEXT_INPUT_SPECS, CURRENT_CONTEXT_CAPACITY, HAND_MEMORY_KIND,
 )
 from public_hint_semantics import resolve_public_hint
+from selection_protocol import PRIVATE_CARD_SELECTION_MSGS
 
 # --- 配置参数 ---
 MAX_CARDS = 120
@@ -68,6 +69,25 @@ HIDDEN_OPPONENT_ZONES = {
     Zone.REMOVED,
     Zone.EXTRA,
 }
+
+
+def entity_identity_visible(entity, player_id, grave_blocked=False):
+    """场面编码与查重共用持有方、公开表示和墓地查看限制"""
+    if grave_blocked and entity.location == Zone.GRAVE:
+        return False
+    return entity.owner == player_id or entity.location not in HIDDEN_OPPONENT_ZONES or bool(entity.is_public)
+
+
+def visible_chain_target(target, player_id):
+    """按接收方投影公告位置、当前追踪状态与已知卡名"""
+    tracked = bool(target.get('tracked', False))
+    visible = bool(int(target.get('visibility_mask', 0)) & (1 << player_id))
+    return (
+        int(target.get('announcement_location', -1)),
+        int(target.get('current_location', -1)) if tracked else -1,
+        tracked, visible, int(target.get('code', 0)) if visible else 0,
+    )
+
 
 class GalateaEncoder:
     def __init__(self, vocab_size=None, card_vocabulary=None):
@@ -663,14 +683,7 @@ class GalateaEncoder:
             dtype=np.uint8,
         )
 
-    @staticmethod
-    def _is_entity_visible_to_player(entity, player_id):
-        if entity.owner == player_id:
-            return True
-
-        if entity.location in HIDDEN_OPPONENT_ZONES:
-            return bool(entity.is_public)
-        return True
+    _is_entity_visible_to_player = staticmethod(entity_identity_visible)
     
     def _get_coords(self, player_id, owner, location, sequence):
         """将一维的 location 和 sequence 转换为二维平面坐标 (X, Y)"""
@@ -706,6 +719,9 @@ class GalateaEncoder:
 
     def encode_actions(self, valid_actions, snapshot, player_id):
         """把合法动作编码为动作协议 V2 的固定形状张量"""
+        actor = getattr(getattr(snapshot, 'global_data', None), 'decision_player', -1)
+        if actor in (0, 1) and actor != player_id:
+            valid_actions = [act for act in valid_actions if act.action_type not in PRIVATE_CARD_SELECTION_MSGS]
         max_materials = ACTION_TARGET_SLOTS
         act_card_idxs, act_types, act_descs, act_effect_slots, masks = [], [], [], [], []
         act_races, act_attrs, act_codes, act_places = [], [], [], []
@@ -921,19 +937,16 @@ class GalateaEncoder:
         def append_targets(targets, chain):
             """公告位置保持不变，当前位置只在实例仍可追踪时给出"""
             for target_index, target in enumerate(targets):
-                raw = int(target.get('announcement_location', -1))
+                raw, current, tracked, visible, code = visible_chain_target(target, player_id)
                 if raw < 0:
                     announcement = (0, 0, 0, 0)
                 else:
                     owner, zone, sequence, position = LocationInfo.decode(raw)
                     role = 1 if owner == player_id else 2 if owner in (0, 1) else 0
                     announcement = (role, zone, sequence, position)
-                tracked = bool(target.get('tracked', False))
-                current = int(target.get('current_location', -1)) if tracked else -1
-                visible = bool(int(target.get('visibility_mask', 0)) & viewer_mask)
                 append(
                     83, chain,
-                    code=int(target.get('code', 0)) if visible else 0,
+                    code=code,
                     location=self._encode_public_location(current, player_id),
                     offset=target_index,
                     subtype=int(tracked) | (int(visible) << 1),
@@ -1035,9 +1048,7 @@ class GalateaEncoder:
         for i, e in enumerate(snapshot.entities[:MAX_CARDS]):
             card_zones[i] = self._encode_zone_category(e.location)
             card_positions[i] = self._encode_position_category(e.position)
-            is_visible = self._is_entity_visible_to_player(e, player_id)
-            if e.location == Zone.GRAVE and snapshot.public_state_flags[3 + player_id]:
-                is_visible = False
+            is_visible = self._is_entity_visible_to_player(e, player_id, snapshot.public_state_flags[3 + player_id])
             if is_visible:
                 card_indices[i] = self._encode_card_code(e.code)
                 pos_x, pos_y = self._get_coords(player_id, e.owner, e.location, e.sequence)

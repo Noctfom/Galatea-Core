@@ -10,7 +10,7 @@ from pathlib import Path
 
 from core_trajectory import (
     _iter_records, _json_bytes, _replay_core_trajectory_source, canonical_response,
-    decode_response, inspect_core_trajectory,
+    decode_response, inspect_core_trajectory, physical_opening_identity,
 )
 from trajectory_ingest import _freeze_source, validate_player_ids
 
@@ -107,7 +107,7 @@ def _inspect_dataset_source(frozen, *, _on_decision=None):
     participants = _participants(header)
     seat_counts = Counter()
     deck_ids = sorted({deck_identity(deck) for deck in header['decks'].values()})
-    duel_digest = hashlib.sha256(_json_bytes({'reset': header['reset'], 'assets': header.get('assets')}))
+    duel_digest = hashlib.sha256(physical_opening_identity(header))
     frozen.seek(0)
     for record, _ in _iter_records(frozen):
         if record['kind'] == 'response':

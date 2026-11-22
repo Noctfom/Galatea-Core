@@ -28,15 +28,20 @@ def normalize_benchmark_inference(inference=None):
         raise ValueError("竞技场基准推理策略必须是对象")
     policy_mode = inference.get("policy_mode")
     temperature = inference.get("temperature")
-    retry_policy = {}
+    policy_metadata = {}
     if 'loop_policy' in inference or 'loop_repeat_threshold' in inference:
-        if (inference.get('loop_policy') != 'leaf_first_v1'
+        if (inference.get('loop_policy') not in ('leaf_first_v1', 'leaf_first_v2')
                 or type(inference.get('loop_repeat_threshold')) is not int
                 or inference['loop_repeat_threshold'] != 5):
             raise ValueError('竞技场防循环策略或阈值无效')
-        retry_policy = {'loop_policy': inference['loop_policy'], 'loop_repeat_threshold': 5}
+        policy_metadata.update(loop_policy=inference['loop_policy'], loop_repeat_threshold=5)
+    proposal = inference.get('candidate_proposal')
+    if proposal is not None:
+        if not isinstance(proposal, str) or not proposal.strip():
+            raise ValueError('竞技场候选生成版本无效')
+        policy_metadata['candidate_proposal'] = proposal
     if policy_mode == "greedy" and temperature is None:
-        return {"policy_mode": policy_mode, "temperature": None, **retry_policy}
+        return {"policy_mode": policy_mode, "temperature": None, **policy_metadata}
     if (
         policy_mode == "training"
         and isinstance(temperature, (int, float))
@@ -44,7 +49,7 @@ def normalize_benchmark_inference(inference=None):
         and math.isfinite(temperature)
         and float(temperature) == 1.0
     ):
-        return {"policy_mode": policy_mode, "temperature": 1.0, **retry_policy}
+        return {"policy_mode": policy_mode, "temperature": 1.0, **policy_metadata}
     if (
         policy_mode == "deployment"
         and isinstance(temperature, (int, float))
@@ -52,7 +57,7 @@ def normalize_benchmark_inference(inference=None):
         and math.isfinite(temperature)
         and 0.05 <= float(temperature) <= 5.0
     ):
-        return {"policy_mode": policy_mode, "temperature": float(temperature), **retry_policy}
+        return {"policy_mode": policy_mode, "temperature": float(temperature), **policy_metadata}
     raise ValueError("竞技场基准推理策略或温度无效")
 
 

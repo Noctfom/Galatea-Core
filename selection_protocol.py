@@ -9,6 +9,42 @@ CORE_RESPONSE_BUFFER_SIZE = 512
 CANCEL_RESPONSE = b"\xff\xff\xff\xff"
 SELECTION_RESPONSE_MSGS = frozenset({15, 20, 23, 26})
 MATERIAL_PROPOSAL_REVISION = 2
+PRIVATE_CARD_SELECTION_MSGS = frozenset({15, 20, 26})
+
+
+def project_selection_payload(msg_type, payload, resolve_code=None):
+    """保留接收者可见的候选身份以及原始索引、顺序和应答参数"""
+    if msg_type not in PRIVATE_CARD_SELECTION_MSGS:
+        return payload
+    raw = bytes(payload)
+    group_count = 2 if msg_type == 26 else 1
+    offset = 5 if msg_type == 26 else 4
+    projected = None
+    for _ in range(group_count):
+        if offset >= len(raw):
+            raise SelectionProtocolError("missing selection candidate count")
+        count = raw[offset]
+        offset += 1
+        end = offset + 8 * count
+        if end > len(raw):
+            raise SelectionProtocolError("truncated selection candidate list")
+        for index in range(offset, end, 8):
+            code, location = struct.unpack_from('<II', raw, index)
+            # 解放询问的高字节是解放值，不能把它当作表示形式或叠放层号
+            if msg_type == 20:
+                location &= 0x00ffffff
+            if resolve_code is None:
+                visible = code if (location & 0xff) == raw[0] else 0
+            else:
+                visible = resolve_code(raw[0], msg_type, location, code)
+            if visible != code:
+                if projected is None:
+                    projected = bytearray(raw)
+                struct.pack_into('<I', projected, index, visible)
+        offset = end
+    if offset != len(raw):
+        raise SelectionProtocolError("unexpected bytes after selection candidates")
+    return raw if projected is None else bytes(projected)
 
 
 class SelectionProtocolError(ValueError):

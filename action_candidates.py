@@ -1,12 +1,13 @@
 # 构建训练与竞技场共用的复杂宏动作候选池
 
 import struct
+from typing import NamedTuple
 
 import numpy as np
 
 import rule_bot
 from data_types import ActionOperation, GameAction
-from feature_encoder import MAX_ACTIONS
+from feature_encoder import MAX_ACTIONS, entity_identity_visible, visible_chain_target
 from game_constants import LocationInfo
 from selection_protocol import CANCEL_RESPONSE, MATERIAL_PROPOSAL_REVISION, parse_selection_prompt
 
@@ -17,15 +18,6 @@ MODEL_ACTION_MSGS = frozenset(
 )
 MIN_MACRO_OPTION_WEIGHT = 1e-4
 MODEL_CANDIDATE_PROPOSAL = f"model_pass1_v{MATERIAL_PROPOSAL_REVISION}"
-
-
-def _freeze_action_value(value):
-    """把动作与上下文中的嵌套容器转换为可哈希元组，供循环状态键稳定比较"""
-    if isinstance(value, dict):
-        return tuple((key, _freeze_action_value(item)) for key, item in sorted(value.items()))
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_action_value(item) for item in value)
-    return value
 
 
 def _read_macro_constraints(msg_type, msg_payload):
@@ -66,75 +58,124 @@ def _read_macro_constraints(msg_type, msg_payload):
     return constraints
 
 
+class ActionStateKey(NamedTuple):
+    """单局内同一座位的可见场面、询问用途和有序候选"""
+    msg_type: int
+    player: int
+    world: tuple
+    prompt: tuple
+    actions: tuple
+
+    @property
+    def menu(self):
+        return self.msg_type, self.prompt, self.actions
+
+
+class DecisionVisits:
+    """双方独立累计当前可见场面下各询问与候选的实际访问次数"""
+
+    def __init__(self):
+        self._worlds = {}
+        self._visits = {}
+
+    def enter(self, key):
+        if self._worlds.get(key.player) == key.world:
+            return False
+        self._worlds[key.player] = key.world
+        self._visits[key.player] = {}
+        return True
+
+    def counts_for(self, key):
+        return self._visits[key.player].get(key.menu, {})
+
+    def record(self, key, index):
+        counts = self._visits[key.player].setdefault(key.menu, {})
+        counts[index] = counts.get(index, 0) + 1
+        return counts[index]
+
+
+# 只取规则公开或持有者可见的标量，查询内部标志与未解析的位置引用不参与查重
+_ENTITY_PROPERTIES = (
+    'code', 'is_public', 'current_atk', 'current_def', 'base_atk', 'base_def',
+    'type_mask', 'race', 'attribute', 'level', 'rank', 'link_rating', 'link_marker', 'lscale',
+    'rscale', 'original_owner', 'reason', 'is_equipped', 'is_disabled', 'is_forbidden',
+    'properly_summoned', 'used_effect_mask', 'counter_count', 'overlay_count',
+)
+_CHAIN_PROPERTIES = (
+    'ct', 'code', 'desc', 'effect_slot', 'hc', 'hl', 'hs', 'hp', 'c', 'l', 's',
+    'status_known', 'confirmed', 'solving', 'solved', 'activation_negated', 'effect_disabled', 'targets_known',
+)
+_GLOBAL_PROPERTIES = (
+    'turn_count', 'phase_id', 'turn_player', 'starting_player', 'p0_turn_count', 'p1_turn_count',
+    'my_lp', 'op_lp', 'my_hand_len', 'op_hand_len', 'my_deck_len', 'op_deck_len',
+    'my_grave_len', 'op_grave_len', 'my_removed_len', 'op_removed_len',
+    'my_extra_len', 'op_extra_len', 'disabled_field_mask',
+)
+
+
+def _visible_entity_key(entity, player, grave_blocked):
+    slot = (entity.owner, entity.location, entity.sequence, entity.position)
+    if not entity_identity_visible(entity, player, grave_blocked):
+        return slot
+    props = vars(entity)
+    setcodes = props.get('setcodes', ())
+    setcodes = tuple(setcodes) if isinstance(setcodes, (list, tuple)) else (setcodes,)
+    return (slot, props.get('current_code') or entity.code, props.get('top_overlay_code') or 0,
+            tuple(map(props.get, _ENTITY_PROPERTIES)),
+            setcodes, tuple(props.get('overlay_codes') or ()),
+            tuple(tuple(pair) for pair in props.get('counter_items', ())),
+            tuple(zip(props.get('relation_types', ()), props.get('relation_indices', ()))))
+
+
+def _visible_world_key(snapshot, player):
+    """只使用决策时已有的场面事实，菜单切换与事件流水号不代表对局推进"""
+    viewer = 1 << player
+    flags = getattr(snapshot, 'public_state_flags', ())
+    grave_blocked = bool(flags and flags[3 + player])
+    entities = tuple(_visible_entity_key(entity, player, grave_blocked) for entity in snapshot.entities)
+    chains = tuple((tuple(map(item.get, _CHAIN_PROPERTIES)),
+                    tuple(visible_chain_target(target, player) for target in item.get('targets', ())))
+                   for item in snapshot.chain_stack)
+    hints = tuple((hint.player, hint.location, hint.kind, hint.value, hint.count, hint.turn)
+                  for hint in getattr(snapshot, 'public_hints', ()) if hint.visibility & viewer)
+    known_deck = tuple((card.player, card.sequence, card.code, card.faceup)
+                       for card in getattr(snapshot, 'known_deck_cards', ()) if card.visibility & viewer)
+    hand = getattr(snapshot, 'opponent_hand_memory', ((), ()))[1 - player]
+    return (getattr(snapshot, 'loop_public_progress', 0),
+            tuple(map(vars(snapshot.global_data).get, _GLOBAL_PROPERTIES)), entities, chains,
+            int(getattr(snapshot, 'resolving_chain_index', 0)),
+            tuple((item.get('code', 0), item.get('effect_slot', -1)) for item in snapshot.history_stack[:8]),
+            hints, known_deck, tuple(hand), tuple(flags[:3]) + (grave_blocked,) + tuple(flags[5:]))
+
+
+def _action_token(action):
+    """按已投影的协议动作识别候选，显式应答可跨宏池临时序号重排"""
+    explicit = bool(action.decision_bytes) or action.decision_value is not None
+    return (action.action_type, None if explicit else action.index, action.target_entity_idx,
+            action.desc_id, action.effect_slot, action.code, bytes(action.decision_bytes or b''),
+            action.decision_value, action.operation_id, action.summon_method_id, action.response_value,
+            action.target_location_raw, action.selection_min, action.selection_max, action.selection_count,
+            action.finishable, action.cancelable, action.context_value, action.prompt_flags,
+            action.prompt_value, action.prompt_value2, tuple(action.macro_targets or ()),
+            tuple(action.macro_places or ()), tuple(action.macro_target_codes or ()),
+            tuple(tuple(value) if isinstance(value, list) else value for value in (action.macro_target_values or ())),
+            tuple(action.macro_target_locations or ()))
+
+
 def build_action_state_key(snapshot, msg_type):
-    """构造包含场面与完整候选身份的状态键，供训练和竞技场识别真实循环"""
-    global_signature = tuple(vars(snapshot.global_data).values())
-    entity_signature = tuple(
-        (
-            entity.code,
-            entity.owner,
-            entity.location,
-            entity.sequence,
-            entity.position,
-            entity.current_atk,
-            entity.current_def,
-            entity.counter_count,
-            entity.overlay_count,
-            entity.is_equipped,
-            entity.used_effect_mask,
-        )
-        for entity in snapshot.entities
-    )
-    action_signature = tuple(
-        (
-            action.action_type,
-            action.index,
-            action.target_entity_idx,
-            action.desc_str,
-            action.desc_id,
-            getattr(action, "code", 0),
-            bytes(getattr(action, "decision_bytes", b"")),
-            getattr(action, "decision_value", None),
-            getattr(action, "operation_id", 0),
-            getattr(action, "response_value", None),
-            getattr(action, "target_location_raw", -1),
-            getattr(action, "selection_min", 0),
-            getattr(action, "selection_max", 0),
-            getattr(action, "selection_count", 0),
-            bool(getattr(action, "finishable", False)),
-            bool(getattr(action, "cancelable", False)),
-            getattr(action, "context_value", 0),
-            getattr(action, "prompt_flags", 0),
-            getattr(action, "prompt_value", 0),
-            getattr(action, "prompt_value2", 0),
-            _freeze_action_value(getattr(action, "macro_targets", None) or ()),
-            _freeze_action_value(getattr(action, "macro_places", None) or ()),
-            _freeze_action_value(getattr(action, "macro_target_codes", None) or ()),
-            _freeze_action_value(getattr(action, "macro_target_values", None) or ()),
-            _freeze_action_value(getattr(action, "macro_target_locations", None) or ()),
-        )
-        for action in snapshot.valid_actions
-    )
-    chain_signature = tuple(
-        _freeze_action_value(item)
-        for item in snapshot.chain_stack
-    )
-    history_signature = tuple(
-        _freeze_action_value(item)
-        for item in snapshot.history_stack[-8:]
-    )
-    return (
-        int(msg_type),
-        global_signature,
-        entity_signature,
-        action_signature,
-        chain_signature,
-        history_signature,
-        # 场面相同但询问用途或处理链变化时，不应被判为同一无进展循环
-        int(getattr(snapshot, 'resolving_chain_index', 0)),
-        _freeze_action_value(getattr(snapshot, 'recent_chain_targets', ())),
-        _freeze_action_value(getattr(snapshot, 'prompt_context', ())),
-    )
+    """从实际行动座位构造查重键，不读取对手暗牌身份或复制模型张量"""
+    player = getattr(snapshot.global_data, 'decision_player', -1)
+    if player not in (0, 1):
+        player = snapshot.global_data.to_play
+    if player not in (0, 1):
+        raise ValueError('动作查重需要确定 P0 或 P1 决策座位')
+    viewer = 1 << player
+    hints = tuple((hint.get('kind', 2), hint.get('subtype', 0), hint.get('wire_player', -1),
+                   hint.get('value', 0), hint.get('code', 0), hint.get('chain', 0), hint.get('prompt_type', 0))
+                  for hint in getattr(snapshot, 'prompt_context', ()) if hint.get('visibility_mask', 0) & viewer)
+    targets = tuple(visible_chain_target(target, player) for target in getattr(snapshot, 'recent_chain_targets', ()))
+    return ActionStateKey(int(msg_type), player, _visible_world_key(snapshot, player),
+                          (hints, targets), tuple(_action_token(action) for action in snapshot.valid_actions))
 
 
 def _as_probabilities(action_probabilities):

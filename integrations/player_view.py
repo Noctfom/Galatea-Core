@@ -12,6 +12,7 @@ import struct
 import core_query as q
 from core_message_protocol import CORE_MESSAGE_PROTOCOL, decision_player_from_message, is_empty_chain_prompt
 from integrations.duel_session import SessionGate, SessionProtocolError
+from selection_protocol import SelectionProtocolError, project_selection_payload
 
 PLAYER_VIEW_FORMAT_VERSION = 1
 MAX_PACKET_BYTES = 65535
@@ -262,20 +263,10 @@ def visible_core_message(message, perspective):
     if kind in DECISIONS:
         if decision_player_from_message(kind, raw[1:]) != perspective:
             return None
-        groups = []
-        if kind in (15, 20):
-            groups.append((raw[5], 6, 8))
-        elif kind == 26:
-            count = raw[6]
-            groups.append((count, 7, 8))
-            offset = 7 + count * 8
-            groups.append((raw[offset], offset + 1, 8))
-        for count, offset, stride in groups:
-            for index in range(count):
-                entry = offset + index * stride
-                if raw[entry + 4] != perspective:
-                    raw[entry:entry + 4] = b'\0' * 4
-        return bytes(raw)
+        try:
+            return bytes((kind,)) + project_selection_payload(kind, bytes(raw[1:]))
+        except SelectionProtocolError as error:
+            raise SessionProtocolError(str(error)) from error
     if kind == 2:
         from core_message_protocol import parse_hint, hint_visibility_mask
         try:
@@ -500,6 +491,12 @@ class PlayerViewAdapter:
                 self.brain._refresh_chain_target_identities()
         elif zone in (4, 8):
             self.brain._reload_counts[actor][zone] = len(new_zone)
+        if zone == 64:
+            self.brain.refresh_selection_extra(self._cached_selection_card)
+
+    def _cached_selection_card(self, actor, zone, sequence):
+        card = self._cards.get((actor, zone, sequence))
+        return card.fields if card is not None and not card.masked else None
 
     def _invalidate_instances(self, kind, payload):
         zones = set()
@@ -576,6 +573,7 @@ class PlayerViewAdapter:
                     self._refreshed.clear()
                     self.event_count += 1
                     if kind in DECISIONS:
+                        self.brain.refresh_selection_extra(self._cached_selection_card)
                         self.gate.request(self.perspective, kind)
                         self._pending_payload = visible[1:]
                     if kind == 5:

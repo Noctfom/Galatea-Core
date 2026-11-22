@@ -12,6 +12,7 @@ from integrations.duel_session import (
 )
 from integrations.windbot.bridge import DECISIONS, YGOProPeer, prompt_actor, visible_message
 from integrations.windbot.runtime import ROOT, executor_catalog, executable_sha256, launch_bot, load_deck
+from selection_protocol import project_selection_payload
 
 
 def prepare_model_decision_snapshot(interpreter, env, message, rng, bot, actor):
@@ -83,7 +84,6 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         raise ValueError('a WindBot deck override applies only to a single external opponent')
     policy_mode, temperature = resolve_arena_policy(policy_mode, temperature)
     retry_policy = ArenaBranchRetry()
-    loop_counts = {}
     catalog = executor_catalog()
     if executor not in catalog or (opponent_executor and opponent_executor not in catalog):
         raise ValueError('unknown executor; use --inspect to list exact upstream names')
@@ -237,15 +237,15 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                             with torch.no_grad():
                                 logits, _, _ = bot.net(observation)
                             state_key = build_action_state_key(snapshot, kind)
-                            report_arena_branch_retry(retry_policy.enter(state_key, snapshot, payload=message[1:]))
+                            visible_prompt = project_selection_payload(kind, message[1:], interpreter.brain.selection_candidate_code)
+                            report_arena_branch_retry(retry_policy.enter(state_key, payload=visible_prompt))
                             count = min(len(snapshot.valid_actions), logits.shape[-1])
                             selected, exhausted = select_arena_action_index(logits[0, :count], set(),
                                 retry_policy.bans.get(state_key, set()),
-                                loop_counts={index: loop_counts.get((state_key, index), 0) for index in range(count)},
+                                loop_counts=retry_policy.visits.counts_for(state_key),
                                 policy_mode=policy_mode, temperature=temperature)
                             if exhausted:
-                                retry_policy.release_current(state_key, snapshot)
-                            loop_counts[state_key, selected] = loop_counts.get((state_key, selected), 0) + 1
+                                retry_policy.release_current(state_key)
                             retry_policy.record(state_key, snapshot, selected, logits[0, :count])
                             if logger:
                                 probabilities = torch.softmax(logits[0] / (temperature or 1.0), dim=-1).cpu()

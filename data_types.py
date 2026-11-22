@@ -333,3 +333,5 @@ class GameSnapshot:
     known_deck_cards: tuple = ()
     public_state_flags: tuple = (True, True, False, False, False, True)
     opponent_hand_memory: tuple = ((), ())
+    # 仅供局内查重，记录两个决策点之间已经发生的公开进展
+    loop_public_progress: int = 0

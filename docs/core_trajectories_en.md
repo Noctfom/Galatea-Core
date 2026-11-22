@@ -258,9 +258,15 @@ capture.finish(winner=winner, reason=reason, core_terminal=real_msg_win_seen)
 Full server/local-bridge captures use `visibility='full_core'`, plus `reset` (actual seed/seed_sequence,
 injection order, LP/hand/draw/rules/initial_position), stable `decks` for both seats and original
 `assets=runtime_asset_identity(env)` from the capture environment. Side metadata never enters the
-single-duel Encoder. Import cannot substitute local hashes for missing historical hashes. Full
-asset parity, byte-exact original output, response/actor/terminal alignment and independent replay
-are prerequisites; partial views stay diagnostic without invented hidden data.
+single-duel Encoder. Conversion checks the original Core output byte for byte, each responding seat
+and response, and the terminal outcome. Single-seat captures support diagnostic use only.
+
+In 3.17.7 a complete raw capture from a recognized observation revision 14, 15 or 16 can be
+encoded again. The Core, card database, loaded Lua and card data, exact vocabulary and semantic
+assets must match the recording. The new trajectory records the source and target observation
+identities in `ingress.observation_rebuild` and shares the original opening and duel identifiers.
+Encoded canonical trajectories and BC caches are checked against their own observation identities.
+Captures from an evaluation keep their evaluation-only designation.
 
 Stable anonymized `player_ids` include the source-service namespace, not nicknames or seats. YRP may
 receive `--p0-player-id/--p1-player-id`; Link import cannot overwrite captured identities. This does

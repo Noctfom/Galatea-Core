@@ -1,6 +1,16 @@
 # Public observations, prompts and chain context
 
-> The current observation revision is 16; historical sections retain their original contracts and measurements
+> The current observation revision is 17. Historical sections describe each feature at its introduction
+
+## 3.17.7 Selection prompts from the receiver's perspective
+
+One seat receives and answers Type 15 card selection, Type 20 tribute and Type 26 select/unselect. That seat can use its own card identities supplied by the prompt. For opposing candidates, the encoder uses a separately visible board entry, an accessible graveyard, a still-tracked revealed deck position or a known material layer on a visible Xyz monster. Hidden hands and sets retain their physical response indices with unknown identity. Hand memory continues to describe the hand as a whole
+
+Atomic scoring, combination scoring and action signatures use the same visible identities. Tribute values still determine legality. The same projection covers previously selected cards, unselect and finish. The other seat observes subsequent public moves, chains and target announcements. A face-up card alone does not reveal whether the acting seat selected it
+
+Revision 17 retains the 116 model inputs. Compatible PTH checkpoints from revisions 14, 15 and 16 can resume, including the optimizer and counters on ordinary PPO continuation. Use **Resource Sync → ONNX check/update** with the matching PTH to re-export static ONNX models. Encoded trajectories and imitation caches retain their original observation contract
+
+A complete raw `.link.jsonl.gz` capture can generate a revision 17 trajectory when the Core binary, card database, loaded card data and Lua scripts, exact vocabulary and semantic identities match the recording. The importer checks the original messages, seats, submitted responses and terminal result, and encodes each decision afresh. The new trace records both observation revisions and keeps the physical duel and opening identities of the original. Single-view, truncated and evaluation-only captures retain their original scope
 
 ## 3.17.5 Position-free opponent hand memory
 

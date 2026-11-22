@@ -22,6 +22,7 @@ from gamestate import MessageParser, DuelState
 from core_message_protocol import is_empty_chain_prompt, decision_player_from_message
 from ai_bot import AiBot
 from action_candidates import (
+    DecisionVisits,
     MACRO_ACTION_MSGS,
     MODEL_ACTION_MSGS,
     build_action_state_key,
@@ -111,7 +112,7 @@ def get_repeated_action_penalty(action, repeat_count):
 
 
 def build_training_loop_key(state_key, action_index):
-    """压缩完整状态键用于局内计数，避免长期保留大型场面元组"""
+    """为既有诊断工具返回进程内的紧凑指纹"""
     return hash(state_key), int(action_index)
 
 
@@ -935,7 +936,7 @@ def worker_process(
             last_interaction_msg = None
             last_act_time = time.monotonic()
 
-            loop_tracker = {}
+            loop_visits = DecisionVisits()
 
             while True:
                 resp = None  # ✅ 每次循环强制清空上一回合的残骸，防止变量逃逸
@@ -1398,14 +1399,12 @@ def worker_process(
                                 # 现有实测单方极值远低于该阈值，只约束异常长连锁或单回合死锁。
                                 step_reward -= 0.0005
 
-                            # 2. 完整状态查重：保留整局访问计数，识别 A→B→A 的取消往返
-                            current_state_key = build_action_state_key(current_snap, msg_type)
-                            loop_key = build_training_loop_key(current_state_key, sel_idx)
-                            loop_tracker[loop_key] = loop_tracker.get(loop_key, 0) + 1
-                            step_reward += get_repeated_action_penalty(
-                                chosen,
-                                loop_tracker[loop_key],
-                            )
+                            # 只为写入本局 PPO 的座位计算重复惩罚，同场面内保留跨菜单访问次数
+                            if is_training_agent:
+                                current_state_key = build_action_state_key(current_snap, msg_type)
+                                loop_visits.enter(current_state_key)
+                                repeats = loop_visits.record(current_state_key, sel_idx)
+                                step_reward += get_repeated_action_penalty(chosen, repeats)
 
                             # --- 动作翻译 ---
                             resp = b''#如果数据包返回b''，说明 ai没有操作
