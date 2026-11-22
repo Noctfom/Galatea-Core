@@ -8,12 +8,7 @@ import rule_bot
 from data_types import ActionOperation, GameAction
 from feature_encoder import MAX_ACTIONS
 from game_constants import LocationInfo
-from selection_protocol import (
-    CANCEL_RESPONSE,
-    SELECTION_RESPONSE_MSGS,
-    is_selection_response_valid,
-    parse_selection_prompt,
-)
+from selection_protocol import CANCEL_RESPONSE, MATERIAL_PROPOSAL_REVISION, parse_selection_prompt
 
 
 MACRO_ACTION_MSGS = frozenset({15, 18, 20, 21, 22, 23, 24, 25, 140, 141})
@@ -21,6 +16,7 @@ MODEL_ACTION_MSGS = frozenset(
     {10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 140, 141, 142, 143}
 )
 MIN_MACRO_OPTION_WEIGHT = 1e-4
+MODEL_CANDIDATE_PROPOSAL = f"model_pass1_v{MATERIAL_PROPOSAL_REVISION}"
 
 
 def _freeze_action_value(value):
@@ -148,6 +144,41 @@ def _as_probabilities(action_probabilities):
     return np.asarray(action_probabilities, dtype=np.float64).reshape(-1)
 
 
+def _reduce_macro_options(scored, slots, rng, cover_sizes):
+    """保留协议出口及不同有效张数，剩余位置仍按策略倾向无放回抽取"""
+    if len(scored) <= slots:
+        return [option for option, _ in scored]
+    cancel = [i for i, (option, _) in enumerate(scored) if option.get('bytes') == CANCEL_RESPONSE]
+    chosen = cancel[:1]
+    remaining = [i for i, (option, _) in enumerate(scored) if option.get('bytes') != CANCEL_RESPONSE]
+    slots -= len(chosen)
+
+    def draw(indices, count, weights):
+        weights = np.asarray(weights, dtype=np.float64)
+        total = weights.sum()
+        p = weights / total if np.isfinite(total) and total > 0 else np.full(len(indices), 1.0 / len(indices))
+        return [indices[int(i)] for i in rng.choice(len(indices), size=count, replace=False, p=p)]
+
+    by_size = {}
+    if cover_sizes and slots:
+        for i in remaining:
+            # 同一询问必选张数固定，按响应总张数分组等价于按可选素材张数分组
+            by_size.setdefault(scored[i][0]['bytes'][0], []).append(i)
+    if len(by_size) > 1:
+        sizes = list(by_size)
+        if len(sizes) > slots:
+            sizes = draw(sizes, slots, [max(scored[i][1] for i in by_size[size]) for size in sizes])
+        for size in sizes:
+            group = by_size[size]
+            chosen.extend(group if len(group) == 1 else draw(group, 1, [scored[i][1] for i in group]))
+        taken = set(chosen)
+        remaining = [i for i in remaining if i not in taken]
+        slots -= len(sizes)
+    if slots:
+        chosen.extend(draw(remaining, slots, [scored[i][1] for i in remaining]))
+    return [scored[i][0] for i in chosen]
+
+
 def build_macro_action_pool(
     msg_type,
     msg_payload,
@@ -165,6 +196,8 @@ def build_macro_action_pool(
     """
     if msg_type not in MACRO_ACTION_MSGS:
         raise ValueError(f"message type {msg_type} is not a macro action prompt")
+    if max_actions < 1 or option_limit < 1:
+        raise ValueError("宏动作生成预算和动作槽数必须为正数")
 
     probabilities = _as_probabilities(action_probabilities)
     base_actions = list(base_actions)
@@ -176,6 +209,8 @@ def build_macro_action_pool(
 
     for action_index, action in enumerate(base_actions):
         probability = float(probabilities[action_index]) if action_index < len(probabilities) else 0.0
+        if not np.isfinite(probability) or probability < 0:
+            probability = 0.0
 
         code = getattr(action, "code", 0)
         if code:
@@ -200,35 +235,23 @@ def build_macro_action_pool(
         brain,
         limit=option_limit,
         pref_weights=code_preferences,
+        index_preferences=index_probabilities if msg_type in rule_bot.MATERIAL_SELECTION_MSGS else None,
     )
-    if msg_type in SELECTION_RESPONSE_MSGS:
-        valid_options = [
-            option for option in options
-            if is_selection_response_valid(
-                msg_type,
-                msg_payload,
-                option.get("bytes", b""),
-            )
-        ]
-        invalid_count = len(options) - len(valid_options)
-        if invalid_count:
-            print(
-                f"⚠️ [选择协议] Type {msg_type} 过滤了 "
-                f"{invalid_count} 个不满足 Core 约束的宏动作"
-            )
-        options = valid_options
     if not options:
         return []
 
     scored_options = []
     for option in options:
         response = bytes(option.get("bytes", b""))
-        response_value = option.get("value")
         # 给每个合法组合保留最低探索权重，避免低分选项被永久排除
         score = MIN_MACRO_OPTION_WEIGHT
 
         if response == CANCEL_RESPONSE:
             score += 0.05
+        elif msg_type in rule_bot.MATERIAL_SELECTION_MSGS:
+            # 原询问索引能区分同名素材和叠放层，必选占位不作为可选素材重复计分
+            start = 1 + (macro_constraints['prompt_value'] if msg_type == 23 else 0)
+            score += sum(index_probabilities[index] for index in response[start:])
         elif option.get("places"):
             score += sum(
                 index_probabilities[place]
@@ -259,37 +282,8 @@ def build_macro_action_pool(
 
         scored_options.append((option, score))
 
-    if len(scored_options) > max_actions:
-        # 取消属于协议出口，固定保留；其余候选再按模型权重无放回采样
-        pinned_options = [
-            item for item in scored_options
-            if bytes(item[0].get("bytes", b"")) == CANCEL_RESPONSE
-        ][:1]
-        sampled_options = [
-            item for item in scored_options
-            if bytes(item[0].get("bytes", b"")) != CANCEL_RESPONSE
-        ]
-        sample_count = max(0, max_actions - len(pinned_options))
-        weights = np.asarray([score for _, score in sampled_options], dtype=np.float64)
-        weight_sum = weights.sum()
-        if weight_sum <= 0 or not np.isfinite(weight_sum):
-            weights = np.full(len(sampled_options), 1.0 / len(sampled_options))
-        else:
-            weights /= weight_sum
-
-        chooser = rng if rng is not None else np.random
-        selected_indices = chooser.choice(
-            len(sampled_options),
-            size=sample_count,
-            replace=False,
-            p=weights,
-        )
-        selected_options = [option for option, _ in pinned_options]
-        selected_options.extend(
-            sampled_options[int(index)][0] for index in selected_indices
-        )
-    else:
-        selected_options = [option for option, _ in scored_options]
+    selected_options = _reduce_macro_options(scored_options, max_actions, rng if rng is not None else np.random,
+                                            msg_type in rule_bot.MATERIAL_SELECTION_MSGS)
 
     macro_actions = []
     for pool_index, option in enumerate(selected_options):

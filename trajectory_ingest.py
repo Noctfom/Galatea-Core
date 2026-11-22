@@ -228,6 +228,7 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
              expected_assets=None, timeout_seconds=300, _expert_sink=None, _verify_replay=True):
     """用唯一解释器驱动公开 Core，逐条提交原响应并写出可独立重放的规范轨迹"""
     import numpy as np
+    from selection_protocol import MATERIAL_PROPOSAL_REVISION
     from feature_encoder import GalateaEncoder
     from galatea_env import GalateaEnv, get_callback_environment
     from gamestate import DuelState
@@ -247,7 +248,8 @@ def _convert(reset, decks, origin, output_root, *, link_source=None, responses=N
         raw = reset_core_from_metadata(env, reset)
         header = {'source': origin['kind'], 'visibility': 'omniscient_local_core',
                   'core_message_protocol': CORE_MESSAGE_PROTOCOL, 'framework_version': framework_version(),
-                  'assets': assets, 'reset': reset, 'decks': decks, 'ingress': origin}
+                  'assets': assets, 'reset': reset, 'decks': decks, 'ingress': origin,
+                  'offline_material_proposal_revision': MATERIAL_PROPOSAL_REVISION}
         if 'response_label_adapters' in origin:
             header['response_label_adapters'] = deepcopy(origin['response_label_adapters'])
         writer = CoreTrajectoryWriter(header, output_root)

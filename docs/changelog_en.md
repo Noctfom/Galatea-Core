@@ -4,6 +4,11 @@
 
 ---
 
+## [v3.17.6] - 2026-11-21
+
+- Fixed repeated Type 23 sum responses and legal at-least sums discarded by an incorrect count minimum. A legal zero-card tribute is distinct from cancel. Pass 1 uses physical material indices; both the 5,000 proposals and the 120 model slots reserve representatives by optional cardinality. See [selection rules and limits](special_handling_en.md)
+- A prompt is parsed once for generation and only validated complete material responses count against its budget. Model Protocol 4, observation revision 16, Checkpoint 3, rewards and network are unchanged. Resume an existing compatible PTH; a 3.17.5-compatible ONNX does not need re-export. Canonical replays use their recorded pool; newly prepared raw captures use the revised pool without injecting the teacher response
+
 ## [v3.17.5] - 2026-11-20
 
 - Replaced slot-based guesses with [position-free opponent hand memory](public_observations_en.md#3175-position-free-opponent-hand-memory). Each viewer distinguishes guaranteed copy counts from historical sightings; hidden hands and sets do not inherit identities, stats or effects

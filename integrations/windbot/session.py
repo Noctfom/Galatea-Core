@@ -49,6 +49,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     not PPO samples; independent replay does not imply all labels are usable.
     """
     from ai_bot import AiBot
+    from action_candidates import MODEL_CANDIDATE_PROPOSAL
     from core_trajectory import CoreTrajectoryInterpreter, runtime_asset_identity
     from galatea_env import GalateaEnv, get_callback_environment
     from gamestate import DuelState
@@ -135,7 +136,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         'deck_paths': {str(actor): str(path) for actor, path in deck_paths.items()},
         'native_deck_source': native_deck_source, 'replay_path': None,
         'native_policy': {'policy_mode': policy_mode, 'temperature': temperature,
-                          'candidate_proposal': 'model_pass1_v1',
+                          'candidate_proposal': MODEL_CANDIDATE_PROPOSAL,
                           **ArenaBranchRetry.metadata()} if model else None}
     try:
         print('🏟️ [WindBot/对局] 初始化本局 Core 与脚本；此阶段运行实际对局。')
@@ -179,7 +180,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                     decks['1']['main'], decks['1']['extra'],
                     p0_name=Path(deck_paths[0]).stem, p1_name=Path(deck_paths[1]).stem)
                 policy = {'policy_mode': policy_mode, 'temperature': temperature,
-                          'candidate_proposal': 'model_pass1_v1' if model else None, **ArenaBranchRetry.metadata()}
+                          'candidate_proposal': MODEL_CANDIDATE_PROPOSAL if model else None, **ArenaBranchRetry.metadata()}
                 replay_models = {seat: {'kind': info['kind']} for seat, info in participants.items()}
                 if model:
                     replay_models[str(native_actor)].update(bot.model_metadata)

@@ -2,12 +2,13 @@
 
 import io
 import struct
-from functools import lru_cache
+from math import gcd
 
 
 CORE_RESPONSE_BUFFER_SIZE = 512
 CANCEL_RESPONSE = b"\xff\xff\xff\xff"
 SELECTION_RESPONSE_MSGS = frozenset({15, 20, 23, 26})
+MATERIAL_PROPOSAL_REVISION = 2
 
 
 class SelectionProtocolError(ValueError):
@@ -155,32 +156,32 @@ def _sum_options(raw_value):
 
 
 def _matches_exact_sum(raw_values, target):
-    """逐分支复现 Core 的精确求和及最小素材边界。"""
-    @lru_cache(maxsize=None)
-    def check(index, remaining, previous_minimum):
-        """按 playerop.cpp 的 select_sum_check1 顺序验证一个赋值分支。"""
-        if remaining == 0 or index == len(raw_values):
+    """原生精确判定要求非空、每张实际贡献为正且总和恰好等于目标"""
+    if not raw_values or target <= 0:
+        return False
+    base, deltas = 0, []
+    for raw in raw_values:
+        low, high = raw & 0xffff, raw >> 16
+        if not (low or high):
             return False
-
-        options = _sum_options(raw_values[index])
-        if index == len(raw_values) - 1:
-            return any(
-                remaining == option
-                and remaining + previous_minimum > option
-                for option in options
-            )
-
-        return any(
-            remaining > option
-            and check(
-                index + 1,
-                remaining - option,
-                min(option, previous_minimum),
-            )
-            for option in options
-        )
-
-    return check(0, target, 0xFFFF)
+        base += min(low, high) if low and high else low or high
+        if low and high and low != high:
+            deltas.append(abs(high - low))
+    needed = target - base
+    if not 0 <= needed <= sum(deltas):
+        return False
+    if needed == 0:
+        return True
+    # 约掉公共倍数，既排除奇偶等不可达目标，也缩小位集
+    divisor = gcd(*deltas)
+    if needed % divisor:
+        return False
+    needed //= divisor
+    mask = (1 << (needed + 1)) - 1
+    possible = 1
+    for delta in deltas:
+        possible |= (possible << (delta // divisor)) & mask
+    return bool(possible >> needed)
 
 
 def _matches_at_least_sum(raw_values, target):
@@ -194,10 +195,14 @@ def _matches_at_least_sum(raw_values, target):
 
 def validate_selection_response(msg_type, msg_payload, response):
     """严格验证响应；成功时返回原始字节，失败时抛出协议错误。"""
+    return validate_parsed_selection_response(msg_type, parse_selection_prompt(msg_type, msg_payload), response)
+
+
+def validate_parsed_selection_response(msg_type, prompt, response):
+    """同一询问可复用已解析约束，每个实际响应仍按原生边界独立校验"""
     if isinstance(response, int):
         response = int(response).to_bytes(4, byteorder='little', signed=True)
     response = bytes(response)
-    prompt = parse_selection_prompt(msg_type, msg_payload)
 
     if _is_cancel_response(response):
         if msg_type == 23:

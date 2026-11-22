@@ -16,6 +16,7 @@ from core_trajectory import (_iter_records, _json_bytes, canonical_response, dec
                              encode_response, file_sha256, observation_sha256)
 from deck_trajectory import DECK_PROFILE_STATIC_OBSERVATION_KEYS
 from protocol_schema import get_current_protocol_metadata
+from selection_protocol import MATERIAL_PROPOSAL_REVISION
 from trajectory_dataset import _participants, deck_identity, open_verified_demonstrations
 
 CACHE_FORMAT_VERSION = 1
@@ -56,6 +57,7 @@ def data_identity(root='.'):
         digest.update(content)
     return {'protocol': get_current_protocol_metadata(),
             'event_decoder_revision': EXPERT_EVENT_DECODER_REVISION,
+            'material_proposal_revision': MATERIAL_PROPOSAL_REVISION,
             'core_sha256': file_sha256(root / ('ocgcore.dll' if platform.system() == 'Windows' else 'ocgcore.so')),
             'cdb_sha256': file_sha256(root / 'cards.cdb'), 'scripts_sha256': digest.hexdigest()}
 

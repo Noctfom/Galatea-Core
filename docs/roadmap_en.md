@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.17.3. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.17.6. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 ## Collection scheduling and runtime visibility
 
@@ -16,6 +16,11 @@
 See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en.md) for the frozen scope, implementation order, and acceptance gates.
 
 ## Remaining Main-Framework Cognition
+
+- [x] 3.17.4–3.17.6: external response events, legitimate semantic condition zero, position-free public hand memory and [distinct material responses with cardinality coverage](special_handling_en.md)
+- [ ] Prioritize receiver-view projection for Types 15/20/26: atomic actions, macro candidates, action signatures and completed events must respect each receiver's evidence. Verify exact replay separately from compatible PTH continuation
+- [ ] Evaluate strength on fixed opponents, held-out deck families, paired deals and swapped seats at matched decision budgets. Candidate coverage is not a strength metric
+- [ ] Define candidate sets, observable labels, censoring and leakage tests for hidden cards, opponent responses and deck style. Evaluate before conditioning the policy or opponent FiLM on a learned representation
 
 - [x] Bind complete runtime `desc` values to code-semantic slots through Lua Effect object identity; never infer slots from description low bits, and safely fall back for dynamic or ambiguous scripts
 - [x] Complete structured auxiliary heads and a continuous goal-planning latent from verifiable immediate, multi-horizon future, and terminal posteriors; do not use hand-authored tactics or present attention/latent dimensions as explanations

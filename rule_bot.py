@@ -8,12 +8,14 @@ import struct
 import io
 import random
 import itertools
-from game_constants import LocationInfo
+from game_constants import LocationInfo, Zone
 from card_reader import card_db
 from core_message_protocol import CoreMessageProtocolError, parse_chain_prompt
 from selection_protocol import (
     CANCEL_RESPONSE,
     SELECTION_RESPONSE_MSGS,
+    parse_selection_prompt,
+    validate_parsed_selection_response,
     validate_selection_response,
 )
 
@@ -38,6 +40,7 @@ MSG_ANNOUNCE_RACE = 140
 MSG_ANNOUNCE_ATTRIB = 141
 MSG_ANNOUNCE_CARD = 142
 MSG_ANNOUNCE_NUMBER = 143
+MATERIAL_SELECTION_MSGS = frozenset((MSG_SELECT_CARD, MSG_SELECT_TRIBUTE, MSG_SELECT_SUM))
 
 # --- 常量定义 ---
 POS_FACEUP_ATTACK = 0x1
@@ -613,11 +616,12 @@ def get_rule_decision(player_id, msg_type, msg, gamestate, ignore_actions=None):
     return decision
 
 
-def _macro_equivalence_key(card, brain, *prompt_values):
+def _macro_equivalence_key(card, brain, actor, *prompt_values):
     """仅合并公开状态与提示参数完全等价的隐藏区同名副本"""
     controller, location, sequence, position = LocationInfo.decode(card['loc'])
     # 场、墓地与除外区中的卡片个体可能保留不同关系或正规出场状态，禁止折叠
-    if location in (0x04, 0x08, 0x10, 0x20):
+    if (location not in (Zone.HAND, Zone.DECK, Zone.EXTRA)
+            or controller != actor or not card['code']):
         return ('INSTANCE', card.get('idx', card.get('index', sequence)))
 
     state_signature = ()
@@ -637,6 +641,7 @@ def _macro_equivalence_key(card, brain, *prompt_values):
         )
     return (
         'EQUIVALENT_HIDDEN',
+        controller,
         int(card.get('code', 0)),
         location,
         position,
@@ -645,7 +650,175 @@ def _macro_equivalence_key(card, brain, *prompt_values):
     )
 
 
-def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=None):
+def _material_options(msg_type, payload, brain, limit, preferences, index_preferences, trigger):
+    """分张数生成规范的完整响应，只让不同且合法的组合占用预算"""
+    prompt = parse_selection_prompt(msg_type, payload)
+    is_sum = msg_type == MSG_SELECT_SUM
+    exact = is_sum and prompt['mode'] == 0
+    tribute = msg_type == MSG_SELECT_TRIBUTE
+    required = prompt.get('mandatory', ())
+    target = prompt['target'] if is_sum else prompt['minimum'] if tribute else 0
+
+    def material(row, index):
+        raw = row.get('sum_value', row.get('release_value', 0))
+        low, high = raw & 0xffff, raw >> 16
+        smallest = min(low, high) if high else low
+        if exact and not smallest:
+            smallest = max(low, high)
+        return {'idx': index, 'code': row['code'], 'value': raw,
+                'loc': LocationInfo.encode(row['controller'], row['location'], row['sequence'], row.get('position', 0)),
+                'lo': smallest, 'hi': max(low, high)}
+
+    fixed = [material(row, i) for i, row in enumerate(required)]
+    cards = [material(row, i) for i, row in enumerate(prompt['candidates'])]
+    if exact:
+        if any(not c['hi'] for c in fixed):
+            return []
+        cards = [c for c in cards if c['hi']]
+    cards.sort(key=lambda c: (index_preferences[c['idx']] if index_preferences is not None
+                              else preferences.get(c['code'], 0)), reverse=True)
+    grouped = {}
+    for c in cards:
+        key = _macro_equivalence_key(c, brain, prompt['player'], c['value'])
+        grouped.setdefault(key, []).append(c)
+    groups = list(grouped.values())
+    n = len(groups)
+    suffix = [0] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        suffix[i] = suffix[i + 1] + len(groups[i])
+    maximum = min(suffix[0], 255 - len(fixed))
+    if not is_sum or exact:
+        maximum = min(maximum, prompt['maximum'])
+    # 精确凑数的每张素材必须贡献正值，超过目标值的张数不可能有解
+    if exact:
+        maximum = min(maximum, target - len(fixed))
+    minimum = prompt['minimum'] if exact or msg_type == MSG_SELECT_CARD else 0
+    if tribute and target:
+        minimum = 1
+    fixed_lo = sum(c['lo'] for c in fixed)
+    fixed_hi = sum(c['hi'] for c in fixed)
+    fixed_min = min((c['lo'] for c in fixed), default=0xffff)
+    # 每个后缀按指定张数可能获得的上下界，只用于排除数学上无解的分支
+    bounds = []
+    if is_sum or tribute:
+        for i in range(n + 1):
+            tail = [c for group in groups[i:] for c in group]
+            lows = sorted(c['lo'] for c in tail)
+            highs = sorted((c['hi'] for c in tail), reverse=True)
+            bounds.append((list(itertools.accumulate(lows, initial=0)), list(itertools.accumulate(highs, initial=0))))
+
+    # 大精确和询问可在数值上下界内仍完全无解，用后缀位集排除这些分支
+    # 随包内核目标为低16位；按大小稀疏保留后缀表，超出该范围仍走完整的原生校验
+    checkpoints = {}
+    residual = 0
+    if exact and len(cards) >= 12 and 0 <= maximum and target <= 0xffff:
+        residual = 1 << target
+        for c in fixed:
+            residual = (residual >> c['lo']) | (residual >> c['hi'])
+        if not residual:
+            return []
+        mask = (1 << (target + 1)) - 1
+        ways = [1] + [0] * maximum
+        table_bytes = (maximum + 1) * (40 + 4 * (target // 30 + 1))
+        table_count = max(1, (8 * 1024**2) // table_bytes)
+        stride = max(1, (n + table_count - 1) // table_count)
+        processed = 0
+        for i in range(n - 1, -1, -1):
+            for c in groups[i]:
+                processed += 1
+                for k in range(min(processed, maximum), 0, -1):
+                    prior = ways[k - 1]
+                    ways[k] |= ((prior << c['lo']) | (prior << c['hi'])) & mask
+            if i % stride == 0:
+                checkpoints[i] = tuple(ways)
+
+    def solutions(size):
+        path = []
+
+        def search(i, need, lo, hi, smallest, debt):
+            if need > suffix[i]:
+                return
+            if checkpoints and (not debt or (i in checkpoints and not (checkpoints[i][need] & debt))):
+                return
+            if bounds:
+                lower, upper = bounds[i]
+                if hi + upper[need] < target:
+                    return
+                if exact and lo + lower[need] > target:
+                    return
+                if is_sum and not exact and (fixed or path or need):
+                    # 去掉最小值后仍不低于目标时必非法；未知的最小值只取安全上界
+                    if lo + lower[need] - smallest >= target:
+                        return
+                    if need and not (fixed or path) and lower[need] - lower[1] >= target:
+                        return
+            if need == 0:
+                if checkpoints and not (debt & 1):
+                    return
+                chosen = sorted(path, key=lambda c: c['idx']) if is_sum else list(path)
+                response = bytes([len(fixed) + size]) + bytes(len(fixed)) + bytes(c['idx'] for c in chosen)
+                try:
+                    validate_parsed_selection_response(msg_type, prompt, response)
+                except ValueError:
+                    return
+                all_cards = fixed + chosen
+                yield {'bytes': response, 'locs': [c['loc'] for c in all_cards],
+                       'codes': [c['code'] for c in all_cards], 'values': [c['value'] for c in all_cards]}
+                return
+            group = groups[i]
+            first = group[0]
+            for take in range(min(need, len(group)), max(0, need - suffix[i + 1]) - 1, -1):
+                next_debt = debt
+                if take:
+                    path.extend(group[:take])
+                    if checkpoints:
+                        for _ in range(take):
+                            next_debt = (next_debt >> first['lo']) | (next_debt >> first['hi'])
+                yield from search(i + 1, need - take, lo + take * first['lo'], hi + take * first['hi'],
+                                  min(smallest, first['lo']) if take else smallest, next_debt)
+                if take:
+                    del path[-take:]
+
+        yield from search(0, size, fixed_lo, fixed_hi, fixed_min, residual)
+
+    buckets = []
+    capped = False
+    for size in range(minimum, maximum + 1):
+        source = solutions(size)
+        first = next(source, None)
+        if first is not None:
+            buckets.append((first, source))
+    if len(buckets) > limit:
+        # 极小的自定义预算连每种张数一项也放不下，优先保留代表项单卡倾向更高的张数
+        def first_score(bucket):
+            option = bucket[0]
+            if index_preferences is not None:
+                return sum(index_preferences[i] for i in option['bytes'][1 + len(fixed):])
+            return sum(preferences.get(code, 0) for code in option['codes'][len(fixed):])
+        buckets.sort(key=first_score, reverse=True)
+        buckets = buckets[:limit]
+        capped = True
+    # 对小池维持按张数及偏好顺序；预算紧张时先为每个有效张数留一个位置
+    remaining = limit - len(buckets)
+    rows = []
+    for first, source in buckets:
+        rows.append(first)
+        if capped:
+            continue
+        for row in source:
+            if remaining == 0:
+                capped = True
+                break
+            rows.append(row)
+            remaining -= 1
+    if capped:
+        print(f"📡 [RuleBot] Type {msg_type} 不同合法组合超过 {limit}，按可选张数保留代表 | {trigger}")
+    if prompt['cancelable']:
+        rows.append({'bytes': CANCEL_RESPONSE, 'locs': [], 'codes': [], 'values': []})
+    return rows
+
+
+def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=None, *, index_preferences=None):
     """
     [AI 参谋部] 后台穷举合法素材组合，打包成“套餐”供 AI 挑选
     返回格式: [{'bytes': b'\x01...', 'locs': [loc_raw1, loc_raw2]}, ...]
@@ -660,266 +833,14 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         trigger_card = f"【{card_db.get_card_name(brain.chain_stack[-1]['code'])}】"
     elif brain and brain.history_stack:
         trigger_card = f"【{card_db.get_card_name(brain.history_stack[0]['code'])}】"
-    
+
+    if msg_type in MATERIAL_SELECTION_MSGS:
+        if limit < 1:
+            raise ValueError("素材组合生成预算必须为正数")
+        return _material_options(msg_type, msg_payload, brain, limit, pref_weights, index_preferences, trigger_card)
+
     try:
-        # 1. 普通选卡 / 祭品：两种消息的第八字节语义和合法性条件不同
-        if msg_type in [MSG_SELECT_CARD, MSG_SELECT_TRIBUTE]:
-            stream.read(1) # P
-            cancelable = struct.unpack('<B', stream.read(1))[0]
-            min_c = struct.unpack('<B', stream.read(1))[0]
-            max_c = struct.unpack('<B', stream.read(1))[0]
-            count = struct.unpack('<B', stream.read(1))[0]
-            
-            cards = []
-            for i in range(count):
-                code = struct.unpack('<I', stream.read(4))[0] 
-                c = struct.unpack('<B', stream.read(1))[0]
-                l = struct.unpack('<B', stream.read(1))[0]
-                s = struct.unpack('<B', stream.read(1))[0]
-                extra_value = struct.unpack('<B', stream.read(1))[0]
-                release_param = extra_value if msg_type == MSG_SELECT_TRIBUTE else 0
-                position = extra_value if msg_type == MSG_SELECT_CARD else 0
-                loc_raw = LocationInfo.encode(c, l, s, position)
-                cards.append({
-                    'idx': i,
-                    'loc': loc_raw,
-                    'code': code,
-                    'release_param': release_param,
-                })
-            
-            # 保持网络意志：权重越高的卡片在 DFS 穷举时越先被组合
-            cards.sort(key=lambda x: pref_weights.get(x['code'], 0.0), reverse=True)
-
-            real_max = min(max_c, count)
-            if msg_type == MSG_SELECT_CARD:
-                candidate_sizes = range(min_c, real_max + 1)
-            else:
-                # Core 对祭品要求“选中张数不超过 max，release_param 总和不少于 min”
-                candidate_sizes = range(1, real_max + 1)
-
-            groups = {}
-            for card in cards:
-                key = _macro_equivalence_key(
-                    card,
-                    brain,
-                    card['release_param'],
-                )
-                groups.setdefault(key, []).append(card)
-            group_lists = list(groups.values())
-
-            all_combos = []
-            limit_reached = False
-
-            def collect_group_combinations(group_index, needed, current_combo):
-                """按等价卡组递归生成一个规范组合，避免重复副本挤占候选池"""
-                nonlocal limit_reached
-                if limit_reached:
-                    return
-                if needed == 0:
-                    if (
-                        msg_type != MSG_SELECT_TRIBUTE
-                        or sum(card['release_param'] for card in current_combo) >= min_c
-                    ):
-                        all_combos.append(tuple(current_combo))
-                        limit_reached = len(all_combos) >= limit
-                    return
-                if group_index >= len(group_lists):
-                    return
-                group = group_lists[group_index]
-                max_take = min(needed, len(group))
-                for take in range(max_take, -1, -1):
-                    collect_group_combinations(
-                        group_index + 1,
-                        needed - take,
-                        current_combo + group[:take],
-                    )
-                    if limit_reached:
-                        return
-
-            for size in candidate_sizes:
-                collect_group_combinations(0, size, [])
-                if limit_reached:
-                    break
-
-            if limit_reached:
-                sample_names = [card_db.get_card_name(card['code']) for card in cards[:4]]
-                print(f"📡 [RuleBot 截断雷达] Type {msg_type} (选卡/祭品) 组合达到 {limit}，安全截断。")
-                print(f"   -> 🎯 发动源头: {trigger_card}")
-                print(f"   -> 📊 候选={len(cards)}，min={min_c}，max={real_max}")
-                print(f"   -> 🃏 候选样本: {sample_names}...")
-
-            # 打包组合给 Worker
-            for combo in all_combos:
-                resp_buf = bytearray([len(combo)])
-                locs = []
-                codes = []
-                values = []
-                for cd in combo:
-                    resp_buf.append(cd['idx'])
-                    locs.append(cd['loc'])
-                    codes.append(cd['code'])
-                    values.append(cd['release_param'] if msg_type == MSG_SELECT_TRIBUTE else 0)
-                options.append({
-                    'bytes': bytes(resp_buf),
-                    'locs': locs,
-                    'codes': codes,
-                    'values': values,
-                })
-
-            if cancelable:
-                options.append({
-                    'bytes': struct.pack('<i', -1),
-                    'locs': [],
-                    'codes': [],
-                    'values': [],
-                })
-                
-        # 2. 星级凑数求和 (同调, 仪式, 以及械刀等特殊SumEqual卡)
-        elif msg_type == MSG_SELECT_SUM:
-            mode = struct.unpack('<B', stream.read(1))[0]
-            stream.read(1) # P
-            total_acc = struct.unpack('<I', stream.read(4))[0]
-            min_c = struct.unpack('<B', stream.read(1))[0]
-            max_c = struct.unpack('<B', stream.read(1))[0]
-            must_count = struct.unpack('<B', stream.read(1))[0]
-            
-            must_vals = []
-            must_locs = []
-            must_codes = []
-            for _ in range(must_count):
-                must_codes.append(struct.unpack('<I', stream.read(4))[0])
-                c = struct.unpack('<B', stream.read(1))[0]
-                l = struct.unpack('<B', stream.read(1))[0]
-                s = struct.unpack('<B', stream.read(1))[0]
-                must_locs.append(LocationInfo.encode(c, l, s, 0))
-                v = struct.unpack('<I', stream.read(4))[0]
-                must_vals.append(v)
-            
-            count = struct.unpack('<B', stream.read(1))[0]
-            
-            candidates = []
-            for i in range(count):
-                code = struct.unpack('<I', stream.read(4))[0]
-                c = struct.unpack('<B', stream.read(1))[0]
-                l = struct.unpack('<B', stream.read(1))[0]
-                s = struct.unpack('<B', stream.read(1))[0]
-                val = struct.unpack('<I', stream.read(4))[0]
-                candidates.append({'index': i, 'val': val, 'code': code, 'loc': LocationInfo.encode(c, l, s, 0)})
-            
-            # 保持网络意志预筛选
-            candidates.sort(key=lambda x: pref_weights.get(x['code'], 0.0), reverse=True)
-            
-            groups = {}
-            for cd in candidates:
-                key = _macro_equivalence_key(cd, brain, cd['val'])
-                if key not in groups: groups[key] = []
-                groups[key].append(cd)
-                
-            group_lists = list(groups.values())
-            valid_solutions = []
-            # SumGreater 的包内 max 会被 Core 写成 min，但第二阶段不以它限制张数
-            real_max = max_c if mode == 0 and max_c > 0 else count
-            
-            # 原版双重星级动态解包校验算法
-            def check_sum(vals, current_idx, current_sum, current_min):
-                """按 Core 的精确求和或 SumGreater 边界判断完整素材组"""
-                if mode != 0:
-                    if not vals:
-                        return total_acc <= 0
-                    minimums = []
-                    maximums = []
-                    for raw_value in vals:
-                        value1 = raw_value & 0xffff
-                        value2 = raw_value >> 16
-                        choices = [value1]
-                        if value2:
-                            choices.append(value2)
-                        minimums.append(min(choices))
-                        maximums.append(max(choices))
-                    return (
-                        sum(maximums) >= total_acc
-                        and sum(minimums) - min(minimums) < total_acc
-                    )
-                if current_idx == len(vals):
-                    return current_sum == total_acc
-                
-                v = vals[current_idx]
-                v1 = v & 0xffff
-                v2 = v >> 16
-                
-                n_min1 = min(current_min, v1) if current_min != -1 else v1
-                if check_sum(vals, current_idx + 1, current_sum + v1, n_min1): return True
-                
-                if v2 > 0 and v2 != v1:
-                    n_min2 = min(current_min, v2) if current_min != -1 else v2
-                    if check_sum(vals, current_idx + 1, current_sum + v2, n_min2): return True
-                return False
-
-            # 定义局部异常用于瞬间震碎星级递归堆栈
-            class LimitUnwindException(Exception): pass
-
-            def backtrack(group_idx, k, path):
-                # 核心修复：星级池满 5000，瞬间强力熔断
-                if len(valid_solutions) >= limit: 
-                    sample_names = [card_db.get_card_name(cd['code']) for cd in candidates[:4]]
-                    print(f"📡 [RuleBot 截断雷达] Type 23 (凑星/分值计算) 组合超 {limit}，触发全栈强力熔断成功。")
-                    print(f"   -> 🎯 发动源头: {trigger_card}")
-                    print(f"   -> 📊 目标总值: {total_acc}, 必选={len(must_vals)}张, 候选池: {len(candidates)} 张")
-                    print(f"   -> 🃏 候选样本: {sample_names}...")
-                    raise LimitUnwindException()
-                
-                if k >= min_c:
-                    combined_vals = must_vals + [x['val'] for x in path]
-                    if check_sum(combined_vals, 0, 0, -1):
-                        valid_solutions.append(list(path))
-                        
-                if k == real_max or group_idx >= len(group_lists): return
-                
-                group = group_lists[group_idx]
-                max_pick = min(len(group), real_max - k)
-                
-                for i in range(max_pick, -1, -1):
-                    backtrack(group_idx + 1, k + i, path + group[:i])
-            
-            # 安全包裹执行
-            try:
-                backtrack(0, 0, [])
-            except LimitUnwindException:
-                pass 
-            
-            # [针对性暴露] 全息 RPN 崩溃诊断雷达
-            # 如果全面穷举完之后，没有触及 5000 次熔断，且 valid_solutions 完完全全为空，说明规则陷入不可解死锁
-            if not valid_solutions:
-                sample_names = [card_db.get_card_name(cd['code']) for cd in candidates[:6]]
-                print("❌ [RuleBot 崩溃雷达] Type 23 (凑星/分值计算) DFS 穷举后完全无解！")
-                print(f"   -> 🎯 罪魁祸首(发动源头卡片): {trigger_card}")
-                print(f"   -> 📊 需求总值(total_acc): {total_acc} | 判定模式(Mode): {mode}")
-                print(f"   -> 🔒 强制必选星级(must_vals): {must_vals}")
-                print(f"   -> 🃏 备选卡片池总数: {len(candidates)} 张")
-                print(f"   -> 📝 备选池样本卡名: {sample_names}")
-                print(f"   -> 🔍 备选池对应的所有 RPN 分值明细: {[c['val'] for c in candidates]}")
-
-            for sol in valid_solutions:
-                sol_sorted = sorted(sol, key=lambda x: x['index'])
-                resp_buf = bytearray([must_count + len(sol_sorted)])
-                for _ in range(must_count): resp_buf.append(0)
-                locs = list(must_locs)
-                codes = list(must_codes)
-                values = list(must_vals)
-                for cd in sol_sorted:
-                    resp_buf.append(cd['index'])
-                    locs.append(cd['loc'])
-                    codes.append(cd['code'])
-                    values.append(cd['val'])
-                options.append({
-                    'bytes': bytes(resp_buf),
-                    'locs': locs,
-                    'codes': codes,
-                    'values': values,
-                })
-
-        # 3. 移除指示物大一统解析
-        elif msg_type == MSG_SELECT_COUNTER:
+        if msg_type == MSG_SELECT_COUNTER:
             stream.read(1) # Player
             stream.read(2) # Type
             qty = struct.unpack('<H', stream.read(2))[0]
@@ -1082,22 +1003,4 @@ def get_macro_options(msg_type, msg_payload, brain, limit=5000, pref_weights=Non
         import traceback
         traceback.print_exc()
 
-    if msg_type in SELECTION_RESPONSE_MSGS:
-        options = [
-            option for option in options
-            if _is_valid_selection_option(msg_type, msg_payload, option)
-        ]
     return options
-
-
-def _is_valid_selection_option(msg_type, msg_payload, option):
-    """只让能够通过 Core 原生约束的完整选择响应进入候选池"""
-    try:
-        validate_selection_response(
-            msg_type,
-            msg_payload,
-            option.get('bytes', b''),
-        )
-        return True
-    except (TypeError, ValueError, OverflowError):
-        return False

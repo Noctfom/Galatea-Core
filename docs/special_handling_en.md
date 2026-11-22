@@ -210,6 +210,10 @@ Starting in 3.8.1, Types 20 and 23 expose each candidate's release/dual value to
 
 Starting in 3.8.2, same-code cards on the field, in the Graveyard, and in banishment are no longer folded by code because proper-summon status, reason, and public relations can differ. Hidden/reset-zone copies use one equivalent representative only when prompt values and known state match. Core candidate indices are unchanged; the existing 5,000-option bound and weighted reduction still control pool size.
 
+Since 3.17.6, Types 15/20/23 produce complete responses by optional material count. Each sum combination appears once. Mandatory placeholders do not contribute Pass 1 preference. At-least sums use the value bound, not the packet's min/max as count limits; exact sums still enforce their count range and alternative values. Known equivalent copies on the acting side may be folded; opposing candidates, unidentified cards and overlay materials stay separate
+
+The generator retains up to 5,000 distinct legal material combinations plus a legal cancel. Each feasible cardinality gets a representative before the remaining generation budget follows Pass 1 preferences. The 120 model slots retain cancel and a representative per cardinality before weighted sampling without replacement. If even the number of cardinalities exceeds the available slots, distinct cardinalities are sampled using their best candidate weights. This covers **counts when capacity permits**, not every individual combination. Choosing zero cards is not cancellation; Type 26 does not use this procedure
+
 ### Type 26: Native Sequential Decisions
 
 Type 26 is not converted into static terminal packages. Arbitrary Lua `special_check` logic exists only inside Core, so one packet cannot reliably enumerate every terminal set; using RuleBot search would change the learning actor and may miss legal paths.

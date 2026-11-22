@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import rule_bot
 from action_candidates import (
     MACRO_ACTION_MSGS,
+    MODEL_CANDIDATE_PROPOSAL,
     MODEL_ACTION_MSGS,
     build_action_state_key,
     build_macro_action_pool,
@@ -464,6 +465,7 @@ class ModelArena:
         return {
             "policy_mode": policy_mode,
             "temperature": policy_temperature,
+            "candidate_proposal": MODEL_CANDIDATE_PROPOSAL,
             **ArenaBranchRetry.metadata(),
         }
 
