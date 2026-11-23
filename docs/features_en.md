@@ -181,7 +181,7 @@ Test trained models in battle.
 **Config**:
 - P0 Model: Attacking AI model
 - P1 Model: Opponent (select "None" for RuleBot)
-- Arena Mode: Normal samples immediately per game; Benchmark creates a reusable fixed schedule and alternates physical seats
+- Normal Arena samples each game. New benchmark schedules shuffle two deck orders per deal and swap the participants while they keep their orders. An odd game count leaves a final unpaired game. Previously saved schedules use their original orders
 - P0 Deck: Current weighted ranges, one physical pool, one virtual pool, or one exact deck
 - P1 Deck: The same four independent modes, plus Follow P0 Range and Use Exact P0 Deck
 - Decision Policy: Greedy Argmax, training-distribution sampling at T=1.0, or adjustable deployment-temperature sampling
@@ -189,6 +189,20 @@ Test trained models in battle.
 - Thought Frequency: Save AI decision record every N games
 
 Normal Arena preserves the existing default: P0 samples a range under current global weights and P1 independently samples inside P0's resolved range. Benchmark mode saves plans and results; use the same plan, policy, and temperature for a direct cross-model comparison.
+
+#### Paired WindBot strength benchmark
+
+Read the executor and checkpoint lists in the Arena and open **Paired WindBot strength benchmark**. Choose the checkpoints and mirror executors. Each checkpoint plays twice per deal and executor, once per seat. The model plays greedily. WindBot makes its own randomized decisions.
+
+```bash
+python main.py windbot --benchmark --model models/galatea_iter_1300.pth --compare-model models/galatea_iter_1500.pth --benchmark-executor Blue-Eyes --benchmark-executor Albaz --games-per-seat 8 --seed 73
+```
+
+Each run under `arena_benchmarks/windbot/` contains `plan.json`, raw game captures and `summary.json`. Use `--benchmark-plan PATH` to replay the deals with new checkpoints. The Core and replay receive the injected order. Model inputs follow the acting player's visibility.
+
+Win rates include terminal wins, draws and losses. Truncations and aborts have separate counts. A paired difference requires both seats to finish for both models. The 95% bootstrap interval resamples whole deals within each executor. Sparse or constant strata can yield a wider bounded interval.
+
+An intervention starts when five closed returns accumulate at an entry. The single-leaf count tracks interventions where the same deepest action occurred only once in that window. A changed choice counts a decision where the soft restriction changed the legal greedy first choice. One intervention can change more than one choice. Rates per thousand use the model's decisions.
 
 ##### 🛠️ Rules Self-Check (Stress Test)
 
@@ -615,8 +629,8 @@ Deck-source syntax is `weighted`, `physical:<pool>`, `virtual:<pool>`, or
 `same_range` follows P0's resolved physical/virtual range and draws independently;
 `same_deck` copies the exact deck.
 
-Benchmark mode saves the per-game decks and hashes, duel seeds, and alternating-seat plan before
-play. Results include model hashes, per-game outcomes, abort rate, seat splits, inference policy and
+New benchmarks freeze both builds, hashes, deck orders and Core seed for each pair. Players keep their orders when swapping seats. An odd game count leaves one unpaired game at the end.
+Results include model hashes, per-game outcomes, abort rate, seat splits, inference policy and
 temperature, and a 95% Wilson
 interval for P0 win rate. Plans are under `arena_benchmarks/plans/` and results under
 `arena_benchmarks/results/`; changed deck contents invalidate an old plan.
@@ -894,7 +908,7 @@ Read/refresh local executor and compatible-model lists, then select entries from
 
 V4 opponents have independent greedy, training-style sampling (default T=1.0) and adjustable-temperature deployment controls, affecting only native model decisions. Terminal conversion and independent replay each initialize another Core, normally producing three script preloads per game with verification enabled. Disable immediate checks to retain captures and convert later; see [initialization/verification cost](../integrations/windbot/README.md#初始化次数与校验开销).
 
-Executors use their paired builds, not random training-pool decks. P0 starts; Bot seats can be swapped. Core seeds do not control WindBot randomness, so this is not a fixed Arena benchmark. Ordinary features need no component installation; missing dependencies fail only on activation. See [module build/CLI/provenance and MIT licensing](../integrations/windbot/README.md).
+Executors use their assigned builds. P0 starts and the Bot can take either seat. To compare checkpoints on the same openings, use the [paired WindBot benchmark](#paired-windbot-strength-benchmark). WindBot's own randomized choices can vary between games. See the [optional module's build instructions, CLI, provenance and MIT licensing](../integrations/windbot/README.md).
 
 ## Next Steps
 

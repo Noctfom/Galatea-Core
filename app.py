@@ -294,7 +294,7 @@ def render_arena_deck_source(prefix, catalog, allow_follow=False):
 # ==========================================
 # 🚀 全局版本控制与智能探测器
 # ==========================================
-LOCAL_VERSION = "3.17.8"  # 当前本地版本号
+LOCAL_VERSION = "3.17.9"  # 当前本地版本号
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/Noctfom/Galatea-Core/main/version.txt"
 
 @st.cache_data(ttl=10800, show_spinner=False) # 缓存 3 小时，绝不拖慢用户启动速度
@@ -2043,8 +2043,8 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
 
         with st.expander(_("🧩 WindBot 可选受控对局", "🧩 Optional WindBot Controlled Duels")):
             st.info(_(
-                "独立 BO1 会话，不加入 PPO 或联盟。由当前公开 Core 驱动，完整捕获用于重放校验；P0 固定先手，可交换 WindBot 座位。Core 种子不控制 WindBot 自身随机数，因此不是固定竞技场基准。",
-                "Independent BO1 sessions, outside PPO and the league. The current public Core drives faithful captures. P0 goes first; WindBot seats can be swapped. Core seeds do not control WindBot randomness, so this is not a fixed Arena benchmark.",
+                "独立 BO1 对局按种子洗牌，P0 先手。完整捕获保存实际牌序。比较多个模型时可使用下方的固定发牌评测。",
+                "Independent BO1 games shuffle decks by seed. P0 goes first. Captures preserve the injected orders. Use the paired benchmark below to compare checkpoints.",
             ))
             wb_runtime = st.text_input(_("WindBot运行文件（空为自动）", "WindBot Runtime (blank for automatic)"),
                 value="", key="wb_runtime",
@@ -2184,6 +2184,74 @@ elif menu == _("⚔️ 启动与监控中枢", "⚔️ Control & Logs"):
                         st.success(_(f"受控会话启动，PID {process.pid}；日志在系统日志，原始捕获在轨迹入口中管理。",
                             f"Controlled session started, PID {process.pid}; manage logs and captures in Storage and Logs."))
                         st.rerun()
+
+        with st.expander(_("WindBot 固定发牌棋力评测", "Paired WindBot strength benchmark")):
+            wb_bench_root = Path("arena_benchmarks/windbot")
+            wb_plans = sorted(wb_bench_root.glob("*/plan.json"), reverse=True)
+            wb_plan = st.selectbox(_("发牌表", "Deal schedule"), [None, *wb_plans],
+                format_func=lambda p: p.parent.name if p else _("生成新表", "Create a schedule"), key="wb_bench_plan")
+            wb_checks = st.multiselect(_("参评检查点", "Checkpoints"), wb_model_options, format_func=os.path.basename,
+                help=_("所有模型以贪心策略打同一赛程，可选择两个或更多模型查看配对胜率差。",
+                       "Every checkpoint plays greedily on the same schedule. Select two or more to compare paired win rates."))
+            wb_opponents, wb_groups, wb_opening_seed = [], 8, None
+            if not wb_plan:
+                wb_opponents = st.multiselect(_("镜像执行器", "Mirror executors"), wb_executors, key="wb_bench_executors")
+                wb_groups = st.number_input(_("每个执行器的发牌组数", "Deals per executor"), 1, 1000, 8,
+                    help=_("一组含两份独立洗好的牌序。模型携带同一副起手分别先攻、后攻，各打一局。",
+                           "Each deal freezes two independent deck orders. The model plays its hand once in each seat."))
+                wb_opening_seed = st.number_input(_("发牌表种子（留空随机）", "Schedule seed (blank for random)"),
+                    min_value=0, max_value=4294967295, value=None, step=1)
+            if not wb_model_options:
+                st.caption(_("请先在上方受控对局中读取执行器与 V4 模型列表。", "Read the executor and V4 model lists above first."))
+            if st.button(_("启动配对评测", "Start paired benchmark"), key="wb_bench_start",
+                    disabled=not wb_checks or not (wb_plan or wb_opponents)):
+                if is_running or st.session_state.get('wb_inspected_runtime') != wb_runtime or not wb_inspection.get('runtime_ready'):
+                    st.error(_("请确认当前任务已结束，并刷新 WindBot 运行环境。", "Finish the active task and refresh the WindBot runtime."))
+                else:
+                    cmd = [sys.executable, "main.py", "windbot", "--benchmark", "--model", wb_checks[0]]
+                    for path in wb_checks[1:]:
+                        cmd.extend(["--compare-model", path])
+                    if wb_runtime.strip():
+                        cmd.extend(["--runtime", wb_runtime.strip()])
+                    if wb_plan:
+                        cmd.extend(["--benchmark-plan", str(wb_plan)])
+                    else:
+                        cmd.extend(["--games-per-seat", str(wb_groups)])
+                        for executor in wb_opponents:
+                            cmd.extend(["--benchmark-executor", executor])
+                        if wb_opening_seed is not None:
+                            cmd.extend(["--seed", str(wb_opening_seed)])
+                    launch_managed_task(cmd)
+                    st.rerun()
+            wb_reports = sorted(wb_bench_root.glob("*/summary.json"), reverse=True)
+            if wb_reports:
+                selected = st.selectbox(_("评测结果", "Benchmark result"), wb_reports,
+                    format_func=lambda p: p.parent.name, key="wb_bench_result")
+                try:
+                    from arena_benchmark import load_windbot_summary
+                    summary = load_windbot_summary(selected)
+                    rows = []
+                    for model in summary['models']:
+                        for label, item in [(_('全部', 'All'), model), *model['by_executor'].items(),
+                                *((f'P{s}', v) for s, v in model['by_seat'].items())]:
+                            rows.append({_('模型', 'Model'): model['model']['name'], _('范围', 'Scope'): label,
+                                _('胜', 'Wins'): item['win'], _('平', 'Draws'): item['draw'], _('负', 'Losses'): item['loss'],
+                                _('截断', 'Truncated'): item['truncated'], _('异常', 'Aborts'): item['aborted'],
+                                _('有效局胜率', 'Win rate'): f"{item['win_rate']:.1%}" if item['completed'] else '—',
+                                _('模型决策', 'Model decisions'): item['audit'].get('model_decisions', 0),
+                                _('回退干预', 'Interventions'): item['audit'].get('interventions', 0),
+                                _('末端仅试一次', 'Leaf tried once'): item['audit'].get('single_leaf_interventions', 0),
+                                _('实际改选次数', 'Greedy choice changes'): item['audit'].get('greedy_choices_changed', 0),
+                                _('每千次决策的干预', 'Interventions per 1,000 decisions'): item['interventions_per_1000'],
+                                _('每千次贪心决策的改选', 'Changes per 1,000 greedy decisions'): item['greedy_changes_per_1000']})
+                    st.dataframe(rows, hide_index=True, **REPLAY_DATAFRAME_WIDTH)
+                    for diff in summary['comparisons']:
+                        interval = diff['paired_bootstrap95'] or diff['bounded95']
+                        if interval:
+                            st.caption(_(f"{diff['candidate']['name']} 相对 {diff['baseline']['name']}：{100*diff['difference']:+.1f} 个百分点，95% 区间 [{100*interval[0]:+.1f}, {100*interval[1]:+.1f}]，共 {diff['matched_deals']} 组完整发牌。",
+                                f"{diff['candidate']['name']} vs {diff['baseline']['name']}: {100*diff['difference']:+.1f} pp, 95% interval [{100*interval[0]:+.1f}, {100*interval[1]:+.1f}], {diff['matched_deals']} matched deals."))
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    st.warning(_(f"评测结果读取失败：{error}", f"Cannot read benchmark result: {error}"))
 
         benchmark_results = load_benchmark_results(limit=100)
         if benchmark_results:

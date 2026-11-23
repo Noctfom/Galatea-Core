@@ -476,6 +476,7 @@ def evaluate_imitation(dataset_path, checkpoint, output, *, baseline=None, split
                         policy_mode='training', temperature=0.8, timeout=600, record_replay=False, record_evaluations=None):
     """Explicit fixed-configuration BO1 comparison, never automatic online learning."""
     from checkpoint_utils import inspect_training_checkpoint
+    from arena_benchmark import make_paired_deal
     from integrations.windbot.runtime import executor_catalog, load_deck
     from integrations.windbot.session import run_controlled_duel
     record_evaluations = bool(record_replay) if record_evaluations is None else bool(record_evaluations)
@@ -524,7 +525,7 @@ def evaluate_imitation(dataset_path, checkpoint, output, *, baseline=None, split
     root = Path(output).resolve()
     if (root / 'evaluation_plan.json').exists():
         raise FileExistsError('evaluation plan already exists; choose a new output directory')
-    rows = []
+    rows, deals = [], []
     for i, ((name, deck_id), deck) in enumerate(sorted(cases.items())):
         deck_path = root / 'decks' / f'{deck_id}.ydk'
         if not deck_path.exists():
@@ -534,10 +535,13 @@ def evaluate_imitation(dataset_path, checkpoint, output, *, baseline=None, split
                     stream.write(marker + '\n' + ''.join(f'{code}\n' for code in deck.get(part, [])))
         if deck_identity(load_deck(deck_path)) != deck_id:
             raise ValueError('frozen evaluation build changed')
-        rows.extend({'executor': name, 'seed': seed + i * games_per_seat + game, 'model_seat': seat,
-                     'deck_file': str(deck_path), 'deck_sha256': file_sha256(deck_path)}
-                    for game in range(games_per_seat) for seat in (0, 1))
-    write_json(root / 'evaluation_plan.json', {'format_version': 1, 'split': split, 'rows': rows,
+        deck_hash = file_sha256(deck_path)
+        for game in range(games_per_seat):
+            core_seed = seed + i * games_per_seat + game
+            deals.append(make_paired_deal(deck, deck, core_seed))
+            rows.extend({'executor': name, 'seed': core_seed, 'model_seat': seat, 'deal_index': len(deals)-1,
+                         'deck_file': str(deck_path), 'deck_sha256': deck_hash} for seat in (0, 1))
+    write_json(root / 'evaluation_plan.json', {'format_version': 2, 'split': split, 'rows': rows, 'deals': deals,
         'models': model_metadata, 'model_paths': models, 'policy_mode': policy_mode, 'temperature': temperature,
         'dataset_sha256': file_sha256(dataset_path), 'dataset_path': str(Path(dataset_path).resolve()),
         'seed': seed, 'randomized_seed': randomized_seed, 'bot_randomness_controlled': False,
@@ -553,7 +557,7 @@ def evaluate_imitation(dataset_path, checkpoint, output, *, baseline=None, split
                 runtime=runtime, mono=mono, seed=row['seed'], timeout=timeout,
                 policy_mode=policy_mode, temperature=temperature, verify=False,
                 native_deck=row['deck_file'], capture_root=str(root / 'captures'), log_root=str(root / 'bot_logs'),
-                windbot_deck=row['deck_file'],
+                windbot_deck=row['deck_file'], deal=deals[row['deal_index']],
                 record_replay=record_replay, record_evaluations=record_evaluations,
                 replay_root=str(root / 'replays' / role), game_index=index + 1,
                 session_purpose='imitation_evaluation')

@@ -41,6 +41,7 @@ from protocol_v3_audit import (
 )
 from arena_benchmark import (
     build_benchmark_plan,
+    ordered_core_decks,
     load_benchmark_plan,
     save_benchmark_plan,
     save_benchmark_result,
@@ -66,6 +67,7 @@ class _ArenaRetrySeat:
     """同一座位在当前可见场面已尝试的分支"""
     path: list = field(default_factory=list)
     cycles: dict = field(default_factory=dict)
+    leaf_returns: dict = field(default_factory=dict)
     soft_bans: dict = field(default_factory=dict)
     current: tuple = ()
 
@@ -76,12 +78,15 @@ class ArenaBranchRetry:
     MAX_PATH = 256
     MAX_CYCLES = 1024
 
-    def __init__(self, bans=None, retry_bans=None, threshold=ARENA_LOOP_SOFT_BAN_THRESHOLD):
+    def __init__(self, bans=None, retry_bans=None, threshold=ARENA_LOOP_SOFT_BAN_THRESHOLD, *, audit=False):
         self.bans = bans if bans is not None else {}
         self.retry_bans = retry_bans if retry_bans is not None else {}
         self.threshold = threshold
         self.visits = DecisionVisits()
         self._seats = {}
+        self.audit = {str(side): dict(model_decisions=0, greedy_decisions=0, closed_returns=0,
+            interventions=0, single_leaf_interventions=0, greedy_choices_changed=0)
+            for side in (0, 1)} if audit else {}
 
     @staticmethod
     def metadata():
@@ -123,10 +128,21 @@ class ArenaBranchRetry:
                 signature = (path[position]['scope'], path[position]['token'])
                 if signature not in seat.cycles and len(seat.cycles) >= self.MAX_CYCLES:
                     seat.cycles.clear()
+                    seat.leaf_returns.clear()
                 count = seat.cycles.get(signature, 0) + 1 if returned else 0
                 if returned:
                     seat.cycles[signature] = count
+                    if self.audit:
+                        stats = self.audit[str(player)]
+                        stats['closed_returns'] += 1
+                        leaf = (path[-1]['scope'], path[-1]['token'])
+                        leaf_counts = seat.leaf_returns.setdefault(signature, {})
+                        leaf_counts[leaf] = leaf_counts.get(leaf, 0) + 1
                 if count >= self.threshold:
+                    if self.audit:
+                        stats['interventions'] += 1
+                        stats['single_leaf_interventions'] += int(leaf_counts[leaf] == 1)
+                        del seat.leaf_returns[signature]
                     seat.cycles[signature] = 0
                     # 最深节点的当前候选耗尽后才向父入口传播，不修改首次正常取消
                     for depth in range(len(path) - 1, position - 1, -1):
@@ -148,12 +164,23 @@ class ArenaBranchRetry:
         self._publish_bans(state_key, seat.soft_bans.get(scope))
         return changes
 
-    def record(self, state_key, snapshot, selected, logits, retry_bans=()):
+    def record(self, state_key, snapshot, selected, logits, retry_bans=(), *, policy_mode=None,
+               soft_exhausted=False):
         """记住实际可编码的候选与已提交动作，不建立模拟分支或恢复引擎"""
         count = min(len(snapshot.valid_actions), logits.numel())
         allowed = (torch.isfinite(logits[:count]) & (logits[:count] > -64000.0)).nonzero().flatten().tolist()
         seat = self._seats[state_key.player]
         base, scope = seat.current
+        if self.audit:
+            stats = self.audit[str(state_key.player)]
+            stats['model_decisions'] += 1
+            if policy_mode == ARENA_POLICY_GREEDY:
+                stats['greedy_decisions'] += 1
+                if self.bans.get(state_key) or soft_exhausted:
+                    # 比较相同 logits 在只应用硬拒绝时的首选，不消耗随机数或再次运行网络
+                    candidates = [i for i in allowed if i not in retry_bans]
+                    first = candidates[int(logits[candidates].argmax().item())]
+                    stats['greedy_choices_changed'] += int(selected != first)
         tokens = state_key.actions[:count]
         self.visits.record(state_key, selected)
         seat.path.append({'key': state_key, 'base': base, 'scope': scope, 'action': selected,
@@ -483,12 +510,12 @@ class ModelArena:
         }
 
     def run_duel(
-        self, game_idx=1, deck_pair=None, duel_seed=None, swap_model_seats=False,
+        self, game_idx=1, deck_pair=None, duel_seed=None, swap_model_seats=False, deal=None,
     ):
         """保持对局返回契约，并在中断时关闭可选流式记录器"""
         self._trajectory_writer = None
         try:
-            return self._run_duel(game_idx, deck_pair, duel_seed, swap_model_seats)
+            return self._run_duel(game_idx, deck_pair, duel_seed, swap_model_seats, deal)
         finally:
             writer = self._trajectory_writer
             if writer is not None:
@@ -501,6 +528,7 @@ class ModelArena:
         deck_pair=None,
         duel_seed=None,
         swap_model_seats=False,
+        deal=None,
     ):
         """
         返回: (winner_index, reason_code, model_fallback_count)
@@ -561,7 +589,12 @@ class ModelArena:
             d1, d2 = d1_pick.deck, d2_pick.deck
             if duel_seed is not None:
                 random.seed(int(duel_seed))
-            raw_data = self.env.reset(d1, d2, seed=duel_seed)
+            core_decks = (d1, d2)
+            if deal is not None:
+                logical_decks = {str(i): vars(pick.deck) for i, pick in enumerate((logical_pair.p0, logical_pair.p1))}
+                ordered = ordered_core_decks(deal, logical_decks)
+                core_decks = ordered[::-1] if swap_model_seats else ordered
+            raw_data = self.env.reset(*core_decks, seed=duel_seed)
             if not raw_data:
                 return finish_result(-1, -3, 0)
 
@@ -627,7 +660,9 @@ class ModelArena:
         # 合法死锁断路器
         retry_bans_for_state = {}
         loop_bans_for_state = {}
-        branch_retry = ArenaBranchRetry(loop_bans_for_state, retry_bans_for_state)
+        branch_retry = ArenaBranchRetry(loop_bans_for_state, retry_bans_for_state, audit=deal is not None)
+        if branch_retry.audit:
+            self.last_duel_metadata['retry_audit'] = branch_retry.audit
         
         # 结果通知不进入决策链；Type 132 猜拳提示仍由 RuleBot 回复
         STATE_CHANGE_MSGS = {40, 41, 50, 53, 54, 55, 56, 60, 61, 62, 70, 90, 91, 92, 94}
@@ -908,7 +943,8 @@ class ModelArena:
                                 )
 
                         branch_retry.record(current_state_key, snap, sel_idx, valid_logits,
-                            retry_bans_for_state.get(current_state_key, ()))
+                            retry_bans_for_state.get(current_state_key, ()), policy_mode=self.policy_mode,
+                            soft_exhausted=ignored_loop_bans)
 
                         if self.logger.is_active:
                             if evaluate:
@@ -1159,6 +1195,8 @@ class ModelArena:
                     deck_pair=benchmark_pairs[i],
                     duel_seed=schedule["duel_seed"],
                     swap_model_seats=schedule["swap_model_seats"],
+                    **({'deal': benchmark_plan['deals'][schedule['deal_index']]}
+                       if benchmark_plan.get('benchmark_plan_schema_version') == 2 else {}),
                 )
             else:
                 schedule = None
@@ -1179,6 +1217,8 @@ class ModelArena:
 
             if schedule is not None:
                 game_result = dict(schedule)
+                if 'retry_audit' in self.last_duel_metadata:
+                    game_result['retry_audit'] = self.last_duel_metadata['retry_audit']
                 game_result.update({
                     "winner": int(w),
                     "engine_winner": int(

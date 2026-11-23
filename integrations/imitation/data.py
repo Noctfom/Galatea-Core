@@ -91,7 +91,7 @@ def source_info(path):
             'opening_id': opening_id,
             'deck_ids': sorted({deck_identity(deck) for deck in header['decks'].values()}),
             'participants': _participants(canonical_header),
-            'evaluation_only': session.get('purpose') == 'imitation_evaluation'}
+            'evaluation_only': session.get('purpose') in ('imitation_evaluation', 'arena_evaluation')}
 
 
 def _load_arrays(path):

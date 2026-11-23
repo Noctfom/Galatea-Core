@@ -1,6 +1,6 @@
 # 🗺️ Development Roadmap
 
-> Applies to v3.17.8. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
+> Applies to v3.17.9. Checked items have landed; unchecked items are TODOs. Full V4 deployment does not mean deck-building/BO3 or long-run acceptance is complete.
 
 ## Collection scheduling and runtime visibility
 
@@ -20,7 +20,8 @@ See the [V4 Protocol Implementation Specification](protocol_v4_implementation_en
 - [x] 3.17.4–3.17.6: external response events, legitimate semantic condition zero, position-free public hand memory and [distinct material responses with cardinality coverage](special_handling_en.md)
 - [x] 3.17.7 applies the [receiver's view for Types 15/20/26](public_observations_en.md#3177-selection-prompts-from-the-receivers-perspective) to atomic actions, combinations, action signatures and completed events. Revision 16 PTH checkpoints can resume
 - [x] 3.17.8 tracks PPO repetitions and Arena backtracking from each acting seat's visible state. Each seat retains its own counts across alternating decisions
-- [ ] Evaluate strength on fixed opponents, held-out deck families, paired deals and swapped seats at matched decision budgets. Candidate coverage is not a strength metric
+- [x] 3.17.9 freezes both deck orders, swaps seats across checkpoints, normalizes retry interventions and changed choices by model decisions, and reports results by executor and seat
+- [ ] Expand the roster with documented training-family holdouts and more independent deals to measure small strength changes and cross-family generalization
 - [ ] Define candidate sets, observable labels, censoring and leakage tests for hidden cards, opponent responses and deck style. Evaluate before conditioning the policy or opponent FiLM on a learned representation
 
 - [x] Bind complete runtime `desc` values to code-semantic slots through Lua Effect object identity; never infer slots from description low bits, and safely fall back for dynamic or ambiguous scripts

@@ -507,6 +507,12 @@ def main():
     expert_parser.add_argument('--report', default=None, help='新建只读样本审查报告 JSON，不覆盖现有文件')
 
     external_parser = subparsers.add_parser('windbot', help='可选受控 BO1 对局/完整采集，不加入 PPO 或联盟')
+    external_parser.add_argument('--benchmark', action='store_true', help='固定双方实际牌序，贪心换座比较模型')
+    external_parser.add_argument('--compare-model', action='append', default=[], help='在同一发牌表上追加一个对照 PTH，可重复')
+    external_parser.add_argument('--benchmark-executor', action='append', default=[], help='配对评测的镜像执行器，可重复')
+    external_parser.add_argument('--games-per-seat', type=int, default=8, help='每个执行器的独立发牌组数，每组换座两局')
+    external_parser.add_argument('--benchmark-plan', help='复用已保存的 WindBot 配对 plan.json')
+    external_parser.add_argument('--benchmark-root', default='./arena_benchmarks/windbot', help='配对结果目录')
     external_parser.add_argument('--inspect', action='store_true', help='自动检查当前平台源码和运行依赖，不启动Bot/Core')
     external_parser.add_argument('--executor', default='Blue-Eyes', help='上游执行器名称，--inspect 可列出')
     external_parser.add_argument('--opponent-executor', default=None, help='指定后运行两个 WindBot；默认另一侧为原生 RuleBot/模型')
@@ -527,7 +533,7 @@ def main():
     external_parser.add_argument('--record-replay', action='store_true', help='额外保存双方决策和 Core 事件的全息录像；原始捕获始终保留')
     external_parser.add_argument('--replay-root', default='./ai_thoughts', help='可选全息录像输出目录')
     external_parser.add_argument('--record-evaluations', action='store_true', help='全息录像补充原生模型侧逐状态预测；WindBot 不产生模型概率')
-    external_parser.add_argument('--policy-mode', choices=('greedy', 'training', 'deployment'), default='training',
+    external_parser.add_argument('--policy-mode', choices=('greedy', 'training', 'deployment'),
         help='仅控制原生 V4 模型：greedy取最高Logit，training固定T=1，deployment使用指定温度；不控制WindBot')
     external_parser.add_argument('--temperature', type=float, default=0.8,
         help='仅deployment生效，范围0.05～5.0；training固定1.0，greedy不使用温度')
@@ -894,6 +900,21 @@ def main():
             if args.inspect:
                 print(json.dumps(inspect_runtime(args.runtime, args.mono), ensure_ascii=False, indent=2))
                 return
+            if args.benchmark:
+                if (not args.model or args.opponent_executor or args.native_deck or args.native_deck_source
+                        or args.verify or args.record_replay or args.record_evaluations or args.policy_mode not in (None, 'greedy')):
+                    parser.error('配对评测需要模型与执行器镜像，每局自动保存原始捕获')
+                if args.benchmark_plan and (args.benchmark_executor or args.seed is not None):
+                    parser.error('复用发牌表时，执行器和种子由表内记录提供')
+                from arena_benchmark import run_windbot_benchmark
+                path = run_windbot_benchmark([args.model, *args.compare_model],
+                    executors=args.benchmark_executor or [args.executor], games_per_seat=args.games_per_seat,
+                    seed=args.seed, plan_path=args.benchmark_plan, root=args.benchmark_root,
+                    runtime=args.runtime, mono=args.mono, timeout=args.timeout, max_decisions=args.max_decisions)
+                print(f'配对棋力评测完成 {path}')
+                return
+            if args.compare_model or args.benchmark_executor or args.benchmark_plan:
+                parser.error('配对评测参数需要 --benchmark')
             if not 1 <= args.games <= 100:
                 parser.error('受控局数必须为1～100')
             from integrations.duel_session import resolve_core_seed
@@ -909,7 +930,7 @@ def main():
                     native_deck_source=args.native_deck_source, deck_dir=args.deck_dir, seed=args.seed + game,
                     timeout=args.timeout, response_timeout=args.response_timeout,
                     max_decisions=args.max_decisions, capture_root=args.capture_root,
-                    verify=args.verify, policy_mode=args.policy_mode, temperature=args.temperature,
+                    verify=args.verify, policy_mode=args.policy_mode or 'training', temperature=args.temperature,
                     record_replay=args.record_replay, record_evaluations=args.record_evaluations,
                     game_index=game + 1, replay_root=args.replay_root)
                 # Keep a concise result; the canonical conversion report contains

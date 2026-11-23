@@ -170,7 +170,7 @@ python main.py windbot --executor Blue-Eyes --model models/your_v4_model.pth --p
 
 WebUI 入口在竞技场的“WindBot 可选受控对局”。点击读取/刷新后，执行器与当前兼容 V4 PTH 通过下拉列表选择；切换另一侧类型立即显示对应控件，不再等待表单提交。缺少构筑的执行器不进入列表，旧协议/资产不匹配模型列入诊断说明，不伪装为可用模型。模型最终仍由原生严格加载器验证。
 
-WebUI和CLI默认随机Core开局，各局使用起始种子加局数偏移；实际值记入日志与捕获。
+WebUI 和 CLI 默认随机选择起始种子。每局按种子分别洗双方主卡组和额外卡组，完整捕获保存真实注入顺序。跨模型比较可在竞技场使用[固定发牌评测](../../docs/features.md#windbot-固定发牌棋力评测)。
 取消“随机Core开局”或传入 `--seed 73` 可固定序列。该种子不控制WindBot自身随机性。
 同样的随机/固定选项也用于独立模仿采集和评测，数据划分种子与Core开局独立。
 
@@ -229,7 +229,7 @@ WindBot封包与可见性过滤复用该Core模块，字节行为不变，也不
 预编译程序保留上游.NET Framework 4.8目标与固定源码提交；文件身份见运行包清单，
 不能仅凭版本名判断程序是否相同。普通运行只使用预编译文件与上述运行依赖。
 
-受控局的 P0 固定先手，交换座位不会更改这一规则。种子只控制 Core，不控制上游 Bot 的时间初始化随机数，因此该入口不等于固定竞技基准。原生模型目前使用CPU，宏候选自3.16.8使用模型Pass1先验；专家离线池仍使用均匀先验。可选全息录像不提供WindBot置信度，也不把显示用响应解码当作学习标签。
+受控局的 P0 固定先手。配对评测把同一逻辑参赛者及其牌序一起换座，WindBot 自身随机决策仍可能产生不同的后续对局。原生模型使用 CPU，宏候选采用模型 Pass1 先验。专家离线池使用均匀先验。全息录像记录实际应答及原生模型的预测。
 
 普通 `--verify` 和旧质量清单仍按严格整局门禁运行。独立 `imitate collect` 在原生实际对局中
 直接准备样本；`imitate prepare` 对旧完整Link只重建一次并同步产样，不重复调用Core。
@@ -354,7 +354,7 @@ RuleBot/WindBot both-seat games, Blue-Eyes/Albaz mirrors, exact raw/observation 
 policies and abnormal cleanup. Linux also passes central-inference single-Worker collection and PPO
 weight updates. This is a local bridge check, not public Link, every executor/distribution/architecture,
 cloud-GPU long training, human clients or BO3 acceptance. Prebuilt files retain the upstream framework
-target/source; manifests identify their bytes. P0 always starts; seeds do not control Bot randomness.
+target/source; manifests identify their bytes. P0 always starts. The benchmark freezes both injected orders and swaps seats. WindBot retains its own random choices. See the [paired benchmark](../../docs/features_en.md#paired-windbot-strength-benchmark).
 Native CPU models use model Pass1 proposals from3.16.8; offline experts retain uniform canonical pools. Complete
 YRP evidence remains pending.
 Those Linux results used the earlier platform-specific build. The new shared-file packaging and build

@@ -4,6 +4,11 @@
 
 ---
 
+## [v3.17.9] - 2026-11-23
+
+- New Arena plans save two independently shuffled deck orders per deal and swap seats. Legacy plans retain their original file order. Controlled WindBot sessions shuffle by seed and record the injected orders for exact replay
+- Paired WindBot evaluation runs multiple greedy checkpoints against the same mirror builds. Results include outcomes, truncations, aborts, paired differences, retry interventions and actual changes to the greedy choice. See [Arena features](features_en.md#paired-windbot-strength-benchmark)
+
 ## [v3.17.8] - 2026-11-22
 
 - PPO counts repetitions from the learner's view of the board and prompt. Concealed substitutions and reordering preserve the count. A change to visible resources, card state or chain progress starts a new count. Repeated cancellations and deselections incur a 0.005 penalty from the fifth visit, and other repeated actions from the tenth

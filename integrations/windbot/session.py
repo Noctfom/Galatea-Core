@@ -41,7 +41,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         log_root='./system_logs/windbot', verify=False, policy_mode='training', temperature=0.8,
         native_deck_source=None, deck_dir='./decks', record_replay=False,
         record_evaluations=False, game_index=1, replay_root='./ai_thoughts',
-        expert_sink=None, session_purpose='controlled', windbot_deck=None):
+        expert_sink=None, session_purpose='controlled', windbot_deck=None, deal=None):
     """Drive one public Core and optional external clients, with exact full capture.
 
     External packets and masked query refreshes are derived transports, not raw
@@ -50,6 +50,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     not PPO samples; independent replay does not imply all labels are usable.
     """
     from ai_bot import AiBot
+    from arena_benchmark import make_paired_deal, ordered_core_decks, deal_digest
     from action_candidates import MODEL_CANDIDATE_PROPOSAL
     from core_trajectory import CoreTrajectoryInterpreter, runtime_asset_identity
     from galatea_env import GalateaEnv, get_callback_environment
@@ -63,7 +64,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     from action_candidates import MODEL_ACTION_MSGS, build_action_state_key
 
     timeout = finite_timeout(timeout)
-    if session_purpose not in ('controlled', 'imitation_collection', 'imitation_evaluation'):
+    if session_purpose not in ('controlled', 'imitation_collection', 'imitation_evaluation', 'arena_evaluation'):
         raise ValueError('unsupported controlled-session purpose')
     if expert_sink is not None and session_purpose != 'imitation_collection':
         raise ValueError('expert collection must be an explicitly separate workflow')
@@ -83,7 +84,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     if windbot_deck and opponent_executor:
         raise ValueError('a WindBot deck override applies only to a single external opponent')
     policy_mode, temperature = resolve_arena_policy(policy_mode, temperature)
-    retry_policy = ArenaBranchRetry()
+    retry_policy = ArenaBranchRetry(audit=bool(model))
     catalog = executor_catalog()
     if executor not in catalog or (opponent_executor and opponent_executor not in catalog):
         raise ValueError('unknown executor; use --inspect to list exact upstream names')
@@ -105,6 +106,11 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
         deck_paths[actor] = (windbot_deck or catalog[bot_names[actor]]['deck_file'] if actor in bot_names
                             else native_deck or catalog[executor]['deck_file'])
     decks = {str(actor): load_deck(deck_paths[actor]) for actor in (0, 1)}
+    logical = {'0': decks[str(1 - windbot_seat)], '1': decks[str(windbot_seat)]}
+    if deal is None:
+        deal = make_paired_deal(logical['0'], logical['1'], seed)
+    ordered = ordered_core_decks(deal, logical)
+    native_decks = ordered if windbot_seat == 1 else ordered[::-1]
     for actor in bot_names:
         deck_hash = hashlib.sha256(json.dumps(decks[str(actor)], sort_keys=True).encode()).hexdigest()
         identity = f'windbot:{executable_hash}:{bot_names[actor]}'
@@ -132,6 +138,7 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
     rng = np.random.default_rng(seed)
     result = {'session_contract_version': 1, 'session_id': gate.session_id, 'participants': participants,
         'seed': seed, 'starting_player': 0, 'decisions': 0, 'winner': None, 'reason': None,
+        'deal_sha256': deal_digest(deal), 'retry_audit': retry_policy.audit,
         'core_terminal': False, 'error': None, 'bot_logs': {}, 'capture_path': None,
         'deck_paths': {str(actor): str(path) for actor, path in deck_paths.items()},
         'native_deck_source': native_deck_source, 'replay_path': None,
@@ -148,8 +155,6 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                           for code in deck[part] if code not in core_env._GLOBAL_CARD_CACHE})
         if missing:
             raise ValueError(f'executor deck contains cards absent from CDB: {missing[:20]}')
-        from types import SimpleNamespace
-        native_decks = [SimpleNamespace(**decks[str(actor)]) for actor in (0, 1)]
         with ExitStack() as stack:
             for actor in sorted(bot_names):
                 peer = YGOProPeer(actor, response_timeout)
@@ -162,6 +167,10 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                 peer.accept(decks[str(actor)])
             raw = env.reset(*native_decks, seed=seed)
             reset = {**deepcopy(env.last_reset_metadata), 'initial_position': 0}
+            actual = reset['players']
+            if (reset['seed'] != seed or actual[str(1-windbot_seat)] != deal['0']
+                    or actual[str(windbot_seat)] != deal['1']):
+                raise ValueError('内核实际注入牌序与指定开局不一致')
             capture = LinkCaptureWriter(visibility='full_core', reset=reset, decks=decks,
                 assets=runtime_asset_identity(env), root=capture_root,
                 player_ids={seat: value['identity'] for seat, value in participants.items()},
@@ -246,7 +255,8 @@ def run_controlled_duel(*, executor, runtime=None, mono=None, opponent_executor=
                                 policy_mode=policy_mode, temperature=temperature)
                             if exhausted:
                                 retry_policy.release_current(state_key)
-                            retry_policy.record(state_key, snapshot, selected, logits[0, :count])
+                            retry_policy.record(state_key, snapshot, selected, logits[0, :count],
+                                policy_mode=policy_mode, soft_exhausted=exhausted)
                             if logger:
                                 probabilities = torch.softmax(logits[0] / (temperature or 1.0), dim=-1).cpu()
                             response = bot._pack_response(snapshot.valid_actions[selected], kind, message[1:])
